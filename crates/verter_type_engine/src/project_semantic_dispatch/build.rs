@@ -5790,6 +5790,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             })
             .collect();
+        // A file's namespace merges into its own interface of the name, so
+        // that interface's declarer folds the namespace in already.
+        let interface_declarers: rustc_hash::FxHashSet<(&str, &str)> = file_scope_entries
+            .iter()
+            .filter(|entry| {
+                entry.origin
+                    == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
+            })
+            .map(|entry| (entry.artifact_key.canonical.as_ref(), entry.symbol.as_ref()))
+            .collect();
         let mut ordered: Vec<OrderedCandidate> =
             Vec::with_capacity(augmenter_set.entries.len() + file_scope_entries.len());
         for (idx, augmenter) in augmenter_set.entries.iter().enumerate() {
@@ -6167,12 +6177,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .unwrap_or_else(|| entry.artifact_key.clone());
                     if entry.origin
                         == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
-                        && population_hit.entries.iter().any(|other| {
-                            other.origin
-                                == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
-                                && other.artifact_key.canonical == entry.artifact_key.canonical
-                                && other.symbol.as_ref() == entry.symbol.as_ref()
-                        })
+                        && interface_declarers.contains(&(
+                            entry.artifact_key.canonical.as_ref(),
+                            entry.symbol.as_ref(),
+                        ))
                     {
                         continue;
                     }

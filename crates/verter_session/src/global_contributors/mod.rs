@@ -61,17 +61,61 @@ pub struct FileContributionRecord {
 }
 
 /// Immutable snapshot complete at membership epoch `S` / revision `E`.
+///
+/// Each symbol's contributors are ONE immutable ordered population. A
+/// lookup is a view over it (symbol spaces, overlay population, `noLib`),
+/// materialized at most once per snapshot and then shared: every later
+/// demand for the same view — one per declaring base of a merged global —
+/// receives the same `Arc`, so demands copy nothing per contributor.
 #[derive(Debug, Clone)]
 pub struct GlobalContributorPopulation {
     pub program_snapshot: u64,
     pub revision: u64,
     by_symbol: Arc<FxHashMap<SymbolKey, Arc<[ContributorEntry]>>>,
+    views: Arc<DashMap<ViewKey, SymbolContributors, rustc_hash::FxBuildHasher>>,
+    #[cfg(any(test, feature = "semantic-observe"))]
+    materialized_view_entries: Arc<AtomicU64>,
+}
+
+/// One view of one symbol's population. The view is a pure function of the
+/// immutable snapshot, so it needs no validation of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ViewKey {
+    target_tag: u8,
+    target_text: Arc<str>,
+    name: Arc<str>,
+    spaces: u8,
+    overlay: Option<Hash16>,
+    allow_automatic_libs: bool,
 }
 
 impl GlobalContributorPopulation {
+    fn new(
+        program_snapshot: u64,
+        revision: u64,
+        by_symbol: Arc<FxHashMap<SymbolKey, Arc<[ContributorEntry]>>>,
+    ) -> Self {
+        Self {
+            program_snapshot,
+            revision,
+            by_symbol,
+            views: Arc::new(DashMap::with_hasher(rustc_hash::FxBuildHasher)),
+            #[cfg(any(test, feature = "semantic-observe"))]
+            materialized_view_entries: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_symbol.is_empty()
+    }
+
+    /// Contributor entries copied into lookup views of this snapshot.
+    /// A view a demand repeats is shared, never re-copied.
+    #[cfg(any(test, feature = "semantic-observe"))]
+    #[must_use]
+    pub fn materialized_view_entry_count(&self) -> u64 {
+        self.materialized_view_entries.load(Ordering::Relaxed)
     }
 
     /// Contributors for `target` + `decl_name` in type and namespace
@@ -146,15 +190,56 @@ impl GlobalContributorPopulation {
         allow_automatic_libs: bool,
         spaces: &[SymbolSpace],
     ) -> SymbolContributors {
-        let mut matched: Vec<ContributorEntry> = Vec::new();
+        let (target_tag, target_text) = target_parts(target);
+        let view_key = ViewKey {
+            target_tag,
+            target_text,
+            name: Arc::from(decl_name),
+            spaces: spaces
+                .iter()
+                .fold(0u8, |mask, space| mask | (1u8 << space.tag())),
+            overlay: overlay_discriminator,
+            allow_automatic_libs,
+        };
+        if let Some(view) = self.views.get(&view_key) {
+            return view.clone();
+        }
+        let mut populations: smallvec::SmallVec<[&Arc<[ContributorEntry]>; 3]> =
+            smallvec::SmallVec::new();
         for space in spaces {
-            let key = SymbolKey::from_target(target, decl_name, *space);
+            let key = SymbolKey {
+                target_tag,
+                target_text: Arc::clone(&view_key.target_text),
+                name: Arc::clone(&view_key.name),
+                space: *space,
+            };
             if let Some(all) = self.by_symbol.get(&key) {
-                matched.extend(all.iter().cloned());
+                populations.push(all);
             }
         }
-        let overlay_canonicals = overlay_replacements(&matched, overlay_discriminator);
-        matched.retain(|entry| {
+        // A name nobody declares is answered without a view: absent names
+        // are unbounded, and the empty answer is a constant.
+        if populations.is_empty() {
+            return SymbolContributors::empty();
+        }
+        let view = self.materialize_view(&populations, overlay_discriminator, allow_automatic_libs);
+        self.views.entry(view_key).or_insert(view).clone()
+    }
+
+    /// The view of `populations` (each already in contributor order) that a
+    /// lookup with these filters observes. A single population the filters
+    /// leave whole is shared as is.
+    fn materialize_view(
+        &self,
+        populations: &[&Arc<[ContributorEntry]>],
+        overlay_discriminator: Option<Hash16>,
+        allow_automatic_libs: bool,
+    ) -> SymbolContributors {
+        let overlay_canonicals = overlay_replacements(
+            populations.iter().flat_map(|population| population.iter()),
+            overlay_discriminator,
+        );
+        let keep = |entry: &ContributorEntry| {
             if !entry.matches_overlay(overlay_discriminator) {
                 return false;
             }
@@ -168,10 +253,27 @@ impl GlobalContributorPopulation {
                 return false;
             }
             true
-        });
+        };
+        if let [population] = populations {
+            if population.iter().all(keep) {
+                return SymbolContributors {
+                    entries: Arc::clone(population),
+                    fingerprint: fingerprint_of(population),
+                };
+            }
+        }
+        let mut matched: Vec<ContributorEntry> = populations
+            .iter()
+            .flat_map(|population| population.iter())
+            .filter(|entry| keep(entry))
+            .cloned()
+            .collect();
         if matched.is_empty() {
             return SymbolContributors::empty();
         }
+        #[cfg(any(test, feature = "semantic-observe"))]
+        self.materialized_view_entries
+            .fetch_add(matched.len() as u64, Ordering::Relaxed);
         sort_contributor_entries(&mut matched);
         let fingerprint = fingerprint_of(&matched);
         SymbolContributors {
@@ -181,15 +283,14 @@ impl GlobalContributorPopulation {
     }
 }
 
-fn overlay_replacements(
-    entries: &[ContributorEntry],
+fn overlay_replacements<'a>(
+    entries: impl Iterator<Item = &'a ContributorEntry>,
     overlay_discriminator: Option<Hash16>,
 ) -> FxHashSet<Arc<str>> {
     let Some(discriminator) = overlay_discriminator else {
         return FxHashSet::default();
     };
     entries
-        .iter()
         .filter(|entry| {
             !entry.artifact_key.is_base() && entry.artifact_key.parse_env_hash == discriminator
         })
@@ -215,6 +316,15 @@ fn compare_contributors(a: &ContributorEntry, b: &ContributorEntry) -> std::cmp:
         .then_with(|| a.space.tag().cmp(&b.space.tag()))
 }
 
+fn target_parts(target: &AugmentationTargetKind) -> (u8, Arc<str>) {
+    match target {
+        AugmentationTargetKind::ExternalSpecifier(spec) => (0, Arc::from(spec.as_ref())),
+        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => (1, Arc::clone(canon)),
+        AugmentationTargetKind::WildcardAmbient(pat) => (2, Arc::from(pat.as_ref())),
+        AugmentationTargetKind::GlobalAugmentation => (3, Arc::from(GLOBAL_AUGMENTATION_TAG)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SymbolKey {
     target_tag: u8,
@@ -224,21 +334,6 @@ struct SymbolKey {
 }
 
 impl SymbolKey {
-    fn from_target(target: &AugmentationTargetKind, name: &str, space: SymbolSpace) -> Self {
-        let (target_tag, target_text) = match target {
-            AugmentationTargetKind::ExternalSpecifier(spec) => (0, Arc::from(spec.as_ref())),
-            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => (1, Arc::clone(canon)),
-            AugmentationTargetKind::WildcardAmbient(pat) => (2, Arc::from(pat.as_ref())),
-            AugmentationTargetKind::GlobalAugmentation => (3, Arc::from(GLOBAL_AUGMENTATION_TAG)),
-        };
-        Self {
-            target_tag,
-            target_text,
-            name: Arc::from(name),
-            space,
-        }
-    }
-
     fn from_fact(fact: &GlobalContributionFact) -> Option<Self> {
         let (target_tag, target_text) = match fact.origin {
             ContributorOrigin::DeclareGlobal
@@ -353,11 +448,11 @@ impl GlobalContributorIndex {
         Self {
             records: DashMap::new(),
             grouped: parking_lot::Mutex::new(GroupedState::new()),
-            snapshot: parking_lot::RwLock::new(Arc::new(GlobalContributorPopulation {
-                program_snapshot: 0,
-                revision: 0,
-                by_symbol: Arc::new(FxHashMap::default()),
-            })),
+            snapshot: parking_lot::RwLock::new(Arc::new(GlobalContributorPopulation::new(
+                0,
+                0,
+                Arc::new(FxHashMap::default()),
+            ))),
             publish: parking_lot::Mutex::new(()),
             mutate: parking_lot::Mutex::new(()),
             revision: AtomicU64::new(0),
@@ -493,11 +588,11 @@ impl GlobalContributorIndex {
         self.records.clear();
         self.pending_overlay_ambient.lock().clear();
         self.grouped.lock().clear();
-        *self.snapshot.write() = Arc::new(GlobalContributorPopulation {
-            program_snapshot: 0,
-            revision: 0,
-            by_symbol: Arc::new(FxHashMap::default()),
-        });
+        *self.snapshot.write() = Arc::new(GlobalContributorPopulation::new(
+            0,
+            0,
+            Arc::new(FxHashMap::default()),
+        ));
         self.revision.store(0, Ordering::Release);
         *self.ingested_snapshot_revision.lock() = None;
         #[cfg(test)]
@@ -549,11 +644,9 @@ impl GlobalContributorIndex {
             next
         };
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
-        *self.snapshot.write() = Arc::new(GlobalContributorPopulation {
-            program_snapshot: pinned,
-            revision,
-            by_symbol,
-        });
+        *self.snapshot.write() = Arc::new(GlobalContributorPopulation::new(
+            pinned, revision, by_symbol,
+        ));
         true
     }
 }
