@@ -1,0 +1,38 @@
+{
+  "name": "unknown-metric",
+  "description": "A planted manifest for the evidence-run self-tests.",
+  "tier": "quick",
+  "scenarios": [
+    "baseline-empty"
+  ],
+  "settings": [
+    "strict"
+  ],
+  "arms": [
+    "verter",
+    "tsc-api",
+    "verter-counted"
+  ],
+  "modes": [
+    "cold"
+  ],
+  "threads": [
+    "default"
+  ],
+  "repeat": 2,
+  "warmup": 0,
+  "warmRepeats": 1,
+  "noise": "docs/contributing/semantic-benchmark.md#verdicts",
+  "requiredCells": [
+    {
+      "scenario": "baseline-empty",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": [
+        "checkMs"
+      ]
+    }
+  ]
+}
