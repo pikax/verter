@@ -629,6 +629,10 @@ impl std::error::Error for ReconcileErr {}
 /// Slots a drained registry keeps as backing capacity. Retirement shrinks the map
 /// back to this floor once churn has left it mostly empty, so a burst of distinct
 /// sources does not pin its peak allocation for the rest of the session.
+///
+/// The floor, not a fresh registry's zero capacity, is the drained baseline: a
+/// session that keeps opening and closing one source at a time reuses the retained
+/// slots instead of reallocating the map on every first entrant.
 const SOURCE_GATE_SLOT_FLOOR: usize = 16;
 
 /// The per-source membership gates, each owned by its participants.
@@ -698,16 +702,17 @@ impl SourceGates {
     }
 
     /// One participant leaves `source`'s gate; the last one retires it.
+    ///
+    /// Every participant owns exactly one count on its source's live slot, so a
+    /// missing slot or a different gate means the accounting is broken. That is
+    /// checked in every build: decrementing another gate's count would let a
+    /// second live gate into the source.
     fn leave(&self, source: &str, gate: &Arc<AsyncMutex<()>>) {
         let mut slots = self.slots.lock();
-        let Some(slot) = slots.get_mut(source) else {
-            verter_debug_assert!(
-                false,
-                "a participant left a gate the registry does not hold"
-            );
-            return;
-        };
-        verter_debug_assert!(
+        let slot = slots
+            .get_mut(source)
+            .expect("a participant left a gate the registry does not hold");
+        assert!(
             Arc::ptr_eq(&slot.gate, gate),
             "a participant left a gate that is not the source's live gate"
         );
