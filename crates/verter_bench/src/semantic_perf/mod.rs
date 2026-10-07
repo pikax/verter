@@ -35,6 +35,7 @@ pub mod disk;
 #[cfg(feature = "semantic-observe")]
 pub mod dispatch_profile;
 pub mod process_stats;
+pub mod session;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -317,7 +318,7 @@ impl<'a> Sink<'a> {
         .map_err(|err| JobError(format!("publish the {phase} phase marker: {err}")))
     }
 
-    fn record(&self, result: &JobResult) -> Result<(), JobError> {
+    fn record<T: Serialize>(&self, result: &T) -> Result<(), JobError> {
         let text = serde_json::to_string_pretty(result).expect("a record serialises");
         Self::replace(self.out, &text)
             .map_err(|err| JobError(format!("write {}: {err}", self.out.display())))
@@ -325,10 +326,10 @@ impl<'a> Sink<'a> {
 }
 
 /// An empty engine, ready: the workspace and the host.
-fn start_engine(job: &Job) -> (Arc<MemoryWorkspace>, Arc<VerterHost>) {
+fn start_engine(observability: bool) -> (Arc<MemoryWorkspace>, Arc<VerterHost>) {
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
     let access: Arc<dyn WorkspaceAccess> = workspace.clone();
-    let config = if job.observability {
+    let config = if observability {
         HostConfig {
             audit_enabled: true,
             audit_timing_capture: true,
@@ -343,15 +344,18 @@ fn start_engine(job: &Job) -> (Arc<MemoryWorkspace>, Arc<VerterHost>) {
     (workspace, Arc::new(VerterHost::new(config, access)))
 }
 
-/// Open the project on the engine; returns the scenario's canonical id.
-fn open_project(
-    job: &Job,
+/// Configure the project from the tsconfig in `dir` and add the library
+/// through `lib_mode`.
+fn configure_project(
+    dir: &Path,
+    tsconfig: &str,
+    lib: &str,
+    lib_mode: LibMode,
     workspace: &MemoryWorkspace,
     host: &VerterHost,
-) -> Result<String, JobError> {
-    let tsconfig = read(&job.dir, &job.tsconfig)?;
-    let lib = read(&job.dir, &job.lib)?;
-    let scenario = read(&job.dir, &job.scenario)?;
+) -> Result<(), JobError> {
+    let tsconfig = read(dir, tsconfig)?;
+    let lib_text = read(dir, lib)?;
     let tsconfig_path = format!("{PROJECT_ROOT}/tsconfig.json");
     workspace.inject_file(tsconfig_path.clone(), Arc::from(tsconfig.as_str()));
     let mut project = verter_workspace::ide_project_config(
@@ -361,40 +365,68 @@ fn open_project(
     );
     project.compiler_options = verter_workspace::load_compiler_options(workspace, &tsconfig_path);
     host.configure_projects(vec![project]);
-    match job.lib_mode {
+    match lib_mode {
         LibMode::Ambient => workspace
             .register_ambient_lib(AmbientLibSpec {
                 project_id: None,
-                canonical_id: Arc::from(job.lib.as_str()),
-                source: Arc::from(lib.as_str()),
+                canonical_id: Arc::from(lib),
+                source: Arc::from(lib_text.as_str()),
             })
             .map_err(|err| JobError(format!("register the library: {err}")))?,
         LibMode::RootFile => {
-            let lib_id = format!("{PROJECT_ROOT}/{}", job.lib);
+            let lib_id = format!("{PROJECT_ROOT}/{lib}");
             let language = verter_session::LanguageRegistry::global()
                 .classify_static(&lib_id)
                 .static_resolution();
-            let _update = host
-                .upsert(UpsertRequest {
-                    canonical_id: Some(lib_id.clone()),
-                    input_id: lib_id,
-                    source: Arc::from(lib.as_str()),
-                    file_language: language,
-                    aliases: Vec::new(),
-                })
-                .map_err(|err| JobError(format!("upsert the library: {err:?}")))?;
+            upsert(host, lib_id, &lib_text, language)
+                .map_err(|err| JobError(format!("upsert the library: {err}")))?;
         }
     }
-    let scenario_id = format!("{PROJECT_ROOT}/{}", job.scenario);
+    Ok(())
+}
+
+/// Upsert one file's text into the host.
+fn upsert(
+    host: &VerterHost,
+    canonical_id: String,
+    text: &str,
+    file_language: FileLanguage,
+) -> Result<(), String> {
     let _update = host
         .upsert(UpsertRequest {
-            canonical_id: Some(scenario_id.clone()),
-            input_id: scenario_id.clone(),
-            source: Arc::from(scenario.as_str()),
-            file_language: FileLanguage::script_ts(),
+            canonical_id: Some(canonical_id.clone()),
+            input_id: canonical_id,
+            source: Arc::from(text),
+            file_language,
             aliases: Vec::new(),
         })
-        .map_err(|err| JobError(format!("upsert the scenario: {err:?}")))?;
+        .map_err(|err| format!("{err:?}"))?;
+    Ok(())
+}
+
+/// Open the project on the engine; returns the scenario's canonical id.
+fn open_project(
+    job: &Job,
+    workspace: &MemoryWorkspace,
+    host: &VerterHost,
+) -> Result<String, JobError> {
+    configure_project(
+        &job.dir,
+        &job.tsconfig,
+        &job.lib,
+        job.lib_mode,
+        workspace,
+        host,
+    )?;
+    let scenario = read(&job.dir, &job.scenario)?;
+    let scenario_id = format!("{PROJECT_ROOT}/{}", job.scenario);
+    upsert(
+        host,
+        scenario_id.clone(),
+        &scenario,
+        FileLanguage::script_ts(),
+    )
+    .map_err(|err| JobError(format!("upsert the scenario: {err}")))?;
     Ok(scenario_id)
 }
 
@@ -587,7 +619,7 @@ pub fn run_job(
 
     sink.phase("engine-start")?;
     let start = Instant::now();
-    let (workspace, host) = start_engine(job);
+    let (workspace, host) = start_engine(job.observability);
     let engine_start = micros(start);
 
     sink.phase("setup")?;

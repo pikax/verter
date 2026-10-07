@@ -15,8 +15,8 @@ use verter_language::carrier_grammar::{
     CarrierGrammarFingerprint, GrammarAuthorityNamespaceId,
 };
 use verter_language::registered_source_authority::{
-    FileIncarnation, RegisteredSourceAuthority, RegisteredSourceSnapshot,
-    RegisteredSourceSnapshotId, SourceAuthorityNamespaceId, SourceGeneration,
+    RegisteredSourceAuthority, RegisteredSourceSnapshot, RegisteredSourceSnapshotId,
+    SourceAuthorityNamespaceId,
 };
 use verter_language::{FrameworkAdapterId, LanguageId, ParseKey};
 
@@ -537,20 +537,27 @@ impl HostInstanceId {
     }
 }
 
+/// One host's revision of one source: the host and the scheduler source
+/// version (node object + generation) that committed it.
+///
+/// The version is always the committing host's own scheduler fact, on every
+/// ingress — an ingested envelope's owner-minted registration identity lives
+/// in another numbering space and never enters this token. A removed or
+/// reset file's successor restarts its generation sequence, so the node
+/// object is what keeps a successor from repeating a retired revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostSourceRevisionToken {
     pub host_instance: HostInstanceId,
-    pub file_incarnation: FileIncarnation,
-    pub source_generation: SourceGeneration,
+    pub source_version: verter_scheduler::node::SourceVersion,
 }
 
 impl HostSourceRevisionToken {
     pub fn public_token(self) -> String {
         let mut digest = Sha256::new();
-        digest.update(b"verter.host-source-revision.v2\0");
+        digest.update(b"verter.host-source-revision.v3\0");
         digest.update(self.host_instance.get().to_le_bytes());
-        digest.update(self.file_incarnation.get().to_le_bytes());
-        digest.update(self.source_generation.get().to_le_bytes());
+        digest.update(self.source_version.incarnation.to_le_bytes());
+        digest.update(self.source_version.generation.to_le_bytes());
         base64url_32(digest.finalize().into())
     }
 }

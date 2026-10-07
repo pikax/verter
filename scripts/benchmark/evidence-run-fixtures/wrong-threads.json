@@ -1,0 +1,38 @@
+{
+  "name": "wrong-threads",
+  "description": "A planted manifest for the evidence-run self-tests.",
+  "tier": "quick",
+  "scenarios": [
+    "baseline-empty"
+  ],
+  "settings": [
+    "strict"
+  ],
+  "arms": [
+    "verter",
+    "tsc-cli-1"
+  ],
+  "modes": [
+    "cold"
+  ],
+  "threads": [
+    "default",
+    1
+  ],
+  "repeat": 2,
+  "warmup": 0,
+  "warmRepeats": 1,
+  "noise": "docs/contributing/semantic-benchmark.md#verdicts",
+  "requiredCells": [
+    {
+      "scenario": "baseline-empty",
+      "setting": "strict",
+      "arm": "tsc-cli-1",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": [
+        "wallMs"
+      ]
+    }
+  ]
+}

@@ -1650,8 +1650,14 @@ impl Scheduler {
             node.file_language.clone(),
             content,
             generation,
+            incarnation,
         ) {
-            Ok(snap) => Arc::new(snap),
+            // The committing node object is the scheduler's fact, never the
+            // executor's.
+            Ok(snap) => Arc::new(SourceSnapshot {
+                incarnation,
+                ..snap
+            }),
             Err(e) => {
                 // Preserve the executor's typed failure discriminant:
                 // a known-but-unsupported framework language surfaces
@@ -1757,7 +1763,10 @@ impl Scheduler {
         let source = node.current_source()?;
 
         let snapshot = match executor.execute_analysis(&node.canonical_id, &source, generation) {
-            Ok(snap) => Arc::new(snap),
+            Ok(snap) => Arc::new(AnalysisSnapshot {
+                incarnation,
+                ..snap
+            }),
             Err(e) => {
                 let stranded = Self::terminalize_failure(
                     &dag,

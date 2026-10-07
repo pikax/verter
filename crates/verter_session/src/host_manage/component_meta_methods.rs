@@ -800,7 +800,7 @@ impl VerterHost {
                     // Overlay artifact read — no scheduler node
                     // generation to attest (and the persist is
                     // declined above regardless).
-                    source_generation: None,
+                    source_version: None,
                 };
                 self.compute_template_analysis_if_missing(
                     canonical,
@@ -2539,7 +2539,7 @@ impl VerterHost {
                 // this caller, the persist declines (an entry
                 // without a rail cannot be validated by the
                 // scheduler-backed readers).
-                source_generation: None,
+                source_version: None,
             };
             self.compute_template_analysis_if_missing(canonical, &mut snapshot, template_inputs);
         }

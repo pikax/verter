@@ -6,7 +6,7 @@ use verter_session as host;
 
 use crate::types::*;
 
-use super::offset::mandatory_utf16_offset;
+use super::offset::{mandatory_utf16_offset, mandatory_utf16_offset_with, OffsetIndex};
 use super::string_helpers::{
     host_module_reference_analyzability_to_string, host_module_reference_semantics_to_string,
     host_module_reference_syntax_to_string,
@@ -148,6 +148,15 @@ pub fn host_diagnostic_to_ffi(
     diagnostic: &host::HostDiagnostic,
     source: Option<&str>,
 ) -> FfiDiagnostic {
+    project_diagnostic(diagnostic, |byte_offset| {
+        mandatory_utf16_offset(byte_offset, source)
+    })
+}
+
+fn project_diagnostic(
+    diagnostic: &host::HostDiagnostic,
+    to_utf16: impl Fn(u32) -> u32,
+) -> FfiDiagnostic {
     FfiDiagnostic {
         severity: match diagnostic.severity {
             host::HostSeverity::Error => "error".to_string(),
@@ -156,20 +165,33 @@ pub fn host_diagnostic_to_ffi(
         },
         code: diagnostic.code.clone(),
         message: diagnostic.message.clone(),
-        span_start: mandatory_utf16_offset(diagnostic.span.start, source),
-        span_end: mandatory_utf16_offset(diagnostic.span.end, source),
+        span_start: to_utf16(diagnostic.span.start),
+        span_end: to_utf16(diagnostic.span.end),
     }
 }
 
+/// Converts a diagnostics batch, UTF-16-mapped spans included.
+///
+/// The batch shares one [`OffsetIndex`] over `source`, built only when
+/// there is a span to convert, so `k` diagnostics visit the source once
+/// rather than once per span. The index lives for this call only. Each span
+/// maps exactly as [`host_diagnostic_to_ffi`] maps it.
 pub fn host_diagnostics_to_ffi(
     input: &host::DiagnosticsSnapshot,
     source: Option<&str>,
 ) -> FfiDiagnosticsSnapshot {
+    let index = source
+        .filter(|_| !input.diagnostics.is_empty())
+        .map(OffsetIndex::new);
     FfiDiagnosticsSnapshot {
         diagnostics: input
             .diagnostics
             .iter()
-            .map(|d| host_diagnostic_to_ffi(d, source))
+            .map(|d| {
+                project_diagnostic(d, |byte_offset| {
+                    mandatory_utf16_offset_with(byte_offset, index.as_ref())
+                })
+            })
             .collect(),
         has_errors: input.has_errors,
     }
