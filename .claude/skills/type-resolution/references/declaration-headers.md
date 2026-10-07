@@ -53,3 +53,33 @@ semantic `ScriptShallowIndex` joins those routes with declaration headers, and
 semantic `decl_dependencies` owns structural dependency names. These layers
 perform no type evaluation and expose no resolved-element carrier. Query-time
 finite types are governed by the shared semantic-dispatch contract above.
+
+## Member header key index
+
+`TypeDeclHeader.member_headers` and `ValueDeclHeader.object_member_headers`
+are `MemberHeaderList`s (`verter_session_query::declarations::header_index`):
+the members in exact source order plus a key → position index. The index is
+required state, built by the shallow header walk and retained with the
+header; `MemberHeaderList::get(key)` reads a member without scanning.
+
+Key identity is the authored key's exact equality, as before the index:
+`1` and `0x1` are the same numeric key, but `1` and `"1"` stay distinct
+keys (a non-integer number such as `1.5` becomes its string spelling), and
+symbol keys (`[sym]`, `[Symbol.iterator]`) are computed keys compared by their
+exact typed child.
+
+Order rules, unchanged by the index:
+
+- interface members, type-literal members (descending intersection and
+  parenthesized arms) and merged contributors are first-wins: a repeated
+  key keeps its first header and position;
+- an object literal is last-wins: a repeated key takes its last header at
+  its last position (`{ a, b, a }` is `b, a`);
+- object-literal and class-static headers merge across contributors
+  first-wins.
+
+Each offered member costs at most two index operations, so a wide header
+costs linear key work. The `key_probes()` work counter is optional
+observation, compiled only under `cfg(any(test, feature = "test-support",
+feature = "semantic-observe"))`; its inventory row is
+`crates/verter_semantic/observe-inventory/SKR-P-HEADERS.md`.
