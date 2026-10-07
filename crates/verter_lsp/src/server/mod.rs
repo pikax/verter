@@ -1148,6 +1148,19 @@ impl VerterLanguageServer {
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
         let provider_sync_states = Arc::new(DashMap::new());
+        // The provider-surface store reads what the serving provider holds from
+        // the provider's own delivery ledger, so a recorded surface the engine
+        // has not (or no longer) received is never served as current.
+        if let Some(sync) = &project_sync {
+            documents
+                .provider_surfaces()
+                .bind_delivery_witness(Arc::new(
+                    crate::provider_sync::ProviderSyncDeliveryWitness::new(
+                        sync.clone(),
+                        Arc::clone(&provider_sync_states),
+                    ),
+                ));
+        }
         let decl_overlay_owner = Arc::new(DeclOverlayOwner::default());
         let pending_snapshot_provider_sync = Arc::new(DashSet::new());
         // The live editor-membership publisher. Managed tsgo still opens its own

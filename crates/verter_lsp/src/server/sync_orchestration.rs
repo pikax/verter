@@ -2405,7 +2405,31 @@ impl VerterLanguageServer {
 
     /// Capture the immutable provider-surface snapshot an interactive
     /// provider-backed query for `uri` must be built from — the request-scoped
-    /// capture half of the fail-closed request-snapshot discipline.
+    /// capture half of the fail-closed request-snapshot discipline. `None`
+    /// whenever [`Self::classify_provider_request_surface`] reports the
+    /// surface unavailable.
+    pub(super) fn capture_provider_request_surface(
+        &self,
+        uri: &Uri,
+    ) -> Option<Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>> {
+        match self.classify_provider_request_surface(uri) {
+            Ok(snapshot) => Some(snapshot),
+            Err(unavailable) => {
+                #[cfg(feature = "semantic-observe")]
+                tracing::debug!(
+                    uri = uri.as_str(),
+                    ?unavailable,
+                    "provider request surface unavailable"
+                );
+                #[cfg(not(feature = "semantic-observe"))]
+                let _ = unavailable;
+                None
+            }
+        }
+    }
+
+    /// The provider surface a foreground request for `uri` may decode a
+    /// provider answer through, or the typed reason it has none.
     ///
     /// ONE point resolves everything: canonical id → projection kind → the
     /// surface's provider path → the store's CURRENT generation-stamped
@@ -2414,23 +2438,43 @@ impl VerterLanguageServer {
     /// recorded from the SAME sync), so no interleaving `did_change`/`did_close`
     /// can tear the tuple the way the former independent live reads could.
     ///
-    /// Fail-closed gates (any miss ⇒ `None`, never a partial/torn context):
-    /// - no recorded CURRENT surface at the resolved provider path;
-    /// - a surface whose kind does not match the document's projection
-    ///   (`CarrierIde` for a carrier, `Shadow` for a self-file rune module);
-    /// - a surface recorded for a DIFFERENT source canonical;
+    /// Fail-closed gates (any miss ⇒ `Err`, never a partial/torn context):
+    /// - no recorded CURRENT surface at the resolved provider path, a surface
+    ///   whose kind does not match the document's projection (`CarrierIde` for
+    ///   a carrier, `Shadow` for a self-file rune module), or one recorded for
+    ///   a DIFFERENT source canonical ([`ProviderSurfaceUnavailable::NotRecorded`]);
+    /// - an owned carrier surface the committed membership receipt does not
+    ///   attest ([`ProviderSurfaceUnavailable::OwnershipExcluded`]);
     /// - an open-document source that no longer byte-matches the captured
-    ///   carrier source (an edit landed after the last successful sync — the
-    ///   provider still holds the old surface, so a fresh mapper/content pair
-    ///   would be torn, not merely stale).
-    pub(super) fn capture_provider_request_surface(
+    ///   carrier source ([`ProviderSurfaceUnavailable::SourceMoved`]);
+    /// - a recorded surface the serving provider does not hold — a record that
+    ///   ran ahead of its delivery, a delivery that ran ahead of its record, a
+    ///   lagging or restarted engine ([`ProviderSurfaceUnavailable::Delivery`]).
+    ///   Mapping through it would map the host's offsets into provider text
+    ///   the engine never evaluated.
+    ///
+    /// [`ProviderSurfaceUnavailable::NotRecorded`]: crate::provider_sync::ProviderSurfaceUnavailable::NotRecorded
+    /// [`ProviderSurfaceUnavailable::OwnershipExcluded`]: crate::provider_sync::ProviderSurfaceUnavailable::OwnershipExcluded
+    /// [`ProviderSurfaceUnavailable::SourceMoved`]: crate::provider_sync::ProviderSurfaceUnavailable::SourceMoved
+    /// [`ProviderSurfaceUnavailable::Delivery`]: crate::provider_sync::ProviderSurfaceUnavailable::Delivery
+    pub(super) fn classify_provider_request_surface(
         &self,
         uri: &Uri,
-    ) -> Option<Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>> {
-        let canonical_id = self.documents.get_canonical_id(uri)?;
+    ) -> std::result::Result<
+        Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
+        crate::provider_sync::ProviderSurfaceUnavailable,
+    > {
+        use crate::provider_sync::ProviderSurfaceUnavailable;
+        let canonical_id = self
+            .documents
+            .get_canonical_id(uri)
+            .ok_or(ProviderSurfaceUnavailable::NotRecorded)?;
         self.documents.host().ensure_loaded(&canonical_id);
 
-        let projection = self.documents.get_projection(uri)?;
+        let projection = self
+            .documents
+            .get_projection(uri)
+            .ok_or(ProviderSurfaceUnavailable::NotRecorded)?;
         let store = self.documents.provider_surfaces();
         let snapshot = match projection {
             crate::documents::provider_projection::DocumentProviderProjection::CarrierIde {
@@ -2440,23 +2484,28 @@ impl VerterLanguageServer {
                 // IDE path. The committed-path read is a KEY lookup only — the
                 // snapshot it resolves to is the sole content/mapper authority,
                 // and the source/canonical gates below reject a stale key.
-                let provider_path = self.active_ide_path_for_uri(uri)?;
-                let snapshot = store.current_snapshot(&provider_path)?;
-                let snapshot = (snapshot.kind
-                    == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde)
-                    .then_some(snapshot)?;
+                let snapshot = self
+                    .active_ide_path_for_uri(uri)
+                    .and_then(|provider_path| store.current_snapshot(&provider_path))
+                    .filter(|snapshot| {
+                        snapshot.kind
+                            == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
+                    })
+                    .ok_or(ProviderSurfaceUnavailable::NotRecorded)?;
                 // Committed-surface gate: for an OWNED carrier the current IDE
                 // surface MUST be the receipt-attested committed one — a surface
                 // recorded for a publish that FAILED / never committed (a newer
                 // content/map than the last successful commit) is refused, so
                 // provider offsets are never mapped through uncommitted content. An
                 // UNRESOLVED editor-liveness carrier needs no stamp.
-                let committed = self.provider_sync_state_for_source(&canonical_id)?;
+                let committed = self
+                    .provider_sync_state_for_source(&canonical_id)
+                    .ok_or(ProviderSurfaceUnavailable::NotRecorded)?;
                 if !committed.authorizes_carrier_ide_capture(
                     snapshot.stamp.content_hash.to_hash16(),
                     snapshot.stamp.map_hash,
                 ) {
-                    return None;
+                    return Err(ProviderSurfaceUnavailable::OwnershipExcluded);
                 }
                 snapshot
             }
@@ -2465,16 +2514,25 @@ impl VerterLanguageServer {
             } => {
                 // Self-file rune module: the provider buffer is served from the
                 // module's OWN canonical path.
-                let snapshot = store.current_snapshot(&canonical_id)?;
-                (snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::Shadow)
-                    .then_some(snapshot)?
+                store
+                    .current_snapshot(&canonical_id)
+                    .filter(|snapshot| {
+                        snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::Shadow
+                    })
+                    .ok_or(ProviderSurfaceUnavailable::NotRecorded)?
             }
         };
         if snapshot.source_canonical.as_ref() != canonical_id.as_str() {
-            return None;
+            return Err(ProviderSurfaceUnavailable::NotRecorded);
         }
-        self.request_surface_matches_live_source(uri, &snapshot)
-            .then_some(snapshot)
+        if !self.request_surface_matches_live_source(uri, &snapshot) {
+            return Err(ProviderSurfaceUnavailable::SourceMoved);
+        }
+        let delivery = store.delivery_of(&snapshot);
+        if !delivery.is_servable() {
+            return Err(ProviderSurfaceUnavailable::Delivery(delivery));
+        }
+        Ok(snapshot)
     }
 
     /// THE source-identity fence for a RETAINED IDE compile response.

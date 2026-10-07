@@ -253,6 +253,115 @@ pub struct ProviderSurfacePayload {
     /// release call for an early-return path to skip, no way to release twice,
     /// and a shared payload is charged ONCE rather than once per generation.
     _retention: RetentionCharge,
+    /// Whether the serving provider has ever acknowledged THESE bytes — the
+    /// recorded-and-delivered half of the surface. See [`DeliveryCell`].
+    delivery: DeliveryCell,
+}
+
+/// The delivery acknowledgement a payload carries: whether the serving
+/// provider's own evidence has ever shown it holding exactly these bytes, and
+/// through which delivery model.
+///
+/// Set only from serving-side evidence observed by
+/// [`ProviderSurfaceStore::delivery_of`] — the engine's per-incarnation
+/// application receipt, or the gateway's committed membership publication —
+/// never from the record itself. It is monotonic (unset → acknowledged) and
+/// lives on the payload, so an identical re-record, which shares the payload,
+/// keeps it, while a reopen or a content change, which builds a new payload,
+/// starts unacknowledged. The acknowledgement alone never makes a surface
+/// servable: currency against the serving incarnation is re-read on every
+/// verdict. It only tells a surface that was never delivered (a record that ran
+/// ahead of its delivery) from one whose delivery was lost or overtaken.
+///
+/// One byte inline in the payload: an acknowledgement adds no allocation to a
+/// record.
+#[derive(Default)]
+struct DeliveryCell(std::sync::atomic::AtomicU8);
+
+impl DeliveryCell {
+    const UNACKNOWLEDGED: u8 = 0;
+    const APPLIED: u8 = 1;
+    const PUBLISHED: u8 = 2;
+
+    fn acknowledged(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) != Self::UNACKNOWLEDGED
+    }
+
+    fn acknowledge(&self, model: u8) {
+        let _ = self.0.compare_exchange(
+            Self::UNACKNOWLEDGED,
+            model,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+}
+
+/// What the serving provider can prove it holds for one recorded surface —
+/// the answer a [`ProviderDeliveryWitness`] reads from the provider's own
+/// ledger, locally and without a provider round trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServingDelivery {
+    /// The serving engine incarnation accepted exactly these bytes for the
+    /// surface's path (its application receipt).
+    Applied(Arc<str>),
+    /// The serving engine incarnation holds no bytes for the path: never
+    /// delivered, or lost to an engine restart, an ownership exclusion or a
+    /// failed delivery.
+    NotApplied,
+    /// The engine reads the surface through the carrier membership
+    /// publication, and the committed publication attests exactly this
+    /// surface.
+    Published,
+    /// The engine reads the surface through the carrier membership
+    /// publication, and no committed publication attests this surface.
+    Unpublished,
+    /// The engine keeps no application ledger the store could consult.
+    Uncertified,
+}
+
+/// The serving provider's delivery ledger, as the store consults it. Bound
+/// once per server by [`ProviderSurfaceStore::bind_delivery_witness`]; every
+/// call is a local ledger read — it never issues a provider request.
+pub trait ProviderDeliveryWitness: Send + Sync {
+    /// What the serving provider holds for `surface`'s provider path.
+    fn serving_delivery(&self, surface: &ProviderSurfaceSnapshot) -> ServingDelivery;
+}
+
+/// The typed delivery state of one recorded surface: whether the bytes the
+/// store records are the bytes the serving provider evaluates.
+///
+/// Only [`Self::Delivered`] and [`Self::Unwitnessed`] may serve a provider
+/// answer. Every other state is a signal of its own — never a diagnostics
+/// outcome — and a foreground request meets it by repairing the requested
+/// file's surface before dispatch, or by answering without the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceDelivery {
+    /// Recorded and delivered: the serving provider holds exactly these bytes.
+    Delivered,
+    /// Recorded, but the serving provider has never acknowledged these bytes:
+    /// the record ran ahead of its delivery, or the delivery never happened.
+    AwaitingDelivery,
+    /// The bytes were acknowledged once, but the serving engine now holds
+    /// different bytes at the path: a newer delivery ran ahead of its record,
+    /// or the engine fell behind.
+    EngineDiverged,
+    /// The bytes were acknowledged once, but the serving provider no longer
+    /// holds them: an engine restart, an ownership exclusion or a failed
+    /// delivery.
+    DeliveryLost,
+    /// No serving-side ledger exists to consult (no provider is bound, or it
+    /// cannot certify application): the record is the only evidence there is.
+    Unwitnessed,
+}
+
+impl SurfaceDelivery {
+    /// Whether a provider answer may be decoded through a surface in this
+    /// state.
+    #[must_use]
+    pub const fn is_servable(self) -> bool {
+        matches!(self, Self::Delivered | Self::Unwitnessed)
+    }
 }
 
 impl ProviderSurfacePayload {
@@ -576,6 +685,9 @@ struct StoreInner {
     /// no aggregate headroom" is unrepresentable; its `Default` is the ONE
     /// process-local account, never a private per-store quota.
     account: StoreAccount,
+    /// The serving provider's delivery ledger, bound once the server has a
+    /// provider. Read outside every store lock.
+    witness: RwLock<Option<Arc<dyn ProviderDeliveryWitness>>>,
 }
 
 impl ProviderSurfaceStore {
@@ -859,6 +971,7 @@ impl ProviderSurfaceStore {
             source_hash,
             map_hash,
             _retention: retention,
+            delivery: DeliveryCell::default(),
         }
     }
 
@@ -1102,6 +1215,13 @@ impl ProviderSurfaceStore {
     /// content or owner changed and changed back during the request fails the
     /// bracket even though it ends where it began. An identical re-record keeps
     /// both epochs and passes.
+    ///
+    /// The bracket also requires the surface to be DELIVERED
+    /// ([`Self::delivery_of`]): the serving provider must still hold exactly
+    /// the captured bytes. Equal epochs alone cannot say so — a record can run
+    /// ahead of its delivery, a delivery can run ahead of its record, and an
+    /// engine can restart — and an answer decoded through bytes the engine did
+    /// not evaluate maps newer host offsets into older provider text.
     #[must_use]
     pub fn captured_surface_is_current(&self, captured: &ProviderSurfaceSnapshot) -> bool {
         self.current_snapshot(&captured.stamp.provider_path)
@@ -1111,6 +1231,55 @@ impl ProviderSurfaceStore {
                     && current.stamp.owner_epoch == captured.stamp.owner_epoch
                     && current.project_owner == captured.project_owner
             })
+            && self.delivery_of(captured).is_servable()
+    }
+
+    /// Bind the serving provider's delivery ledger. Called once, by the server
+    /// that owns the provider; a store with no bound witness answers
+    /// [`SurfaceDelivery::Unwitnessed`].
+    pub fn bind_delivery_witness(&self, witness: Arc<dyn ProviderDeliveryWitness>) {
+        *self.inner.witness.write() = Some(witness);
+    }
+
+    /// The typed delivery state of `surface`: whether the serving provider
+    /// holds exactly the bytes it records.
+    ///
+    /// Reads the bound witness — a local ledger read, never a provider round
+    /// trip — outside every store lock. Serving-side proof of these exact bytes
+    /// acknowledges the payload ([`DeliveryCell`]); the acknowledgement then
+    /// tells a surface whose delivery was lost or overtaken from one that was
+    /// never delivered, but it never vouches for currency on its own: every
+    /// verdict re-reads what the serving incarnation holds now.
+    #[must_use]
+    pub fn delivery_of(&self, surface: &ProviderSurfaceSnapshot) -> SurfaceDelivery {
+        let Some(witness) = self.inner.witness.read().clone() else {
+            return SurfaceDelivery::Unwitnessed;
+        };
+        let cell = &surface.payload.delivery;
+        let unproven = |acknowledged: bool, lost: SurfaceDelivery| {
+            if acknowledged {
+                lost
+            } else {
+                SurfaceDelivery::AwaitingDelivery
+            }
+        };
+        match witness.serving_delivery(surface) {
+            ServingDelivery::Applied(bytes) if str_eq(&bytes, &surface.provider_content) => {
+                cell.acknowledge(DeliveryCell::APPLIED);
+                SurfaceDelivery::Delivered
+            }
+            ServingDelivery::Published => {
+                cell.acknowledge(DeliveryCell::PUBLISHED);
+                SurfaceDelivery::Delivered
+            }
+            ServingDelivery::Applied(_) => {
+                unproven(cell.acknowledged(), SurfaceDelivery::EngineDiverged)
+            }
+            ServingDelivery::NotApplied | ServingDelivery::Unpublished => {
+                unproven(cell.acknowledged(), SurfaceDelivery::DeliveryLost)
+            }
+            ServingDelivery::Uncertified => SurfaceDelivery::Unwitnessed,
+        }
     }
 
     /// The owning configured project (tsconfig URI) of `provider_path`'s CURRENT

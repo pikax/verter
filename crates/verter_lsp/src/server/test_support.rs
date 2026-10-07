@@ -117,6 +117,22 @@ impl VerterLanguageServer {
             });
     }
 
+    /// Stamp the open carrier's committed provider state with its CURRENT IDE
+    /// surface's identity, as a committed publication of that surface does —
+    /// without delivering anything to the engine.
+    pub(crate) fn test_commit_current_ide_surface(&self, uri: &tower_lsp_server::ls_types::Uri) {
+        let current = self.test_current_ide_surface(uri);
+        let canonical = crate::documents::uri_to_canonical_id(uri);
+        let mut committed = self
+            .provider_sync_states
+            .get_mut(&canonical)
+            .expect("the open carrier has committed provider state");
+        committed.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierIdeSurface {
+            content_hash: current.stamp.content_hash.to_hash16(),
+            map_hash: current.stamp.map_hash,
+        });
+    }
+
     /// Publish the installed workspace's current snapshot again with freshly
     /// built LSP views: a root publication that changes no input a request
     /// answers from.

@@ -736,6 +736,13 @@ mod inner {
             self.state.lock().unwrap().applied.clear();
         }
 
+        /// Model a delivery of `content` under `path` that reached the engine
+        /// through another writer, before any surface describing it was
+        /// recorded: the engine now holds those bytes.
+        pub fn accept_unrecorded_delivery(&self, path: &str, content: &str) {
+            self.accept_applied(path, content);
+        }
+
         /// Get all recorded calls.
         pub fn calls(&self) -> Vec<MockCall> {
             self.state.lock().unwrap().calls.clone()

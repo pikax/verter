@@ -2577,3 +2577,152 @@ fn warm_capture_neither_visits_nor_pins_unrelated_tracked_paths() {
         &unrelated[7],
     ));
 }
+
+/// A provider delivery ledger a test drives directly: what the serving
+/// provider holds per provider path, and how many times the store read it.
+#[derive(Default)]
+struct ScriptedLedger {
+    serving: parking_lot::Mutex<std::collections::HashMap<String, ServingDelivery>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedLedger {
+    fn serve(&self, path: &str, delivery: ServingDelivery) {
+        self.serving.lock().insert(path.to_string(), delivery);
+    }
+
+    fn apply(&self, path: &str, bytes: &str) {
+        self.serve(path, ServingDelivery::Applied(Arc::from(bytes)));
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ProviderDeliveryWitness for ScriptedLedger {
+    fn serving_delivery(&self, surface: &ProviderSurfaceSnapshot) -> ServingDelivery {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.serving
+            .lock()
+            .get(surface.stamp.provider_path.as_ref())
+            .cloned()
+            .unwrap_or(ServingDelivery::NotApplied)
+    }
+}
+
+fn witnessed_store() -> (ProviderSurfaceStore, Arc<ScriptedLedger>) {
+    let store = ProviderSurfaceStore::new();
+    let ledger = Arc::new(ScriptedLedger::default());
+    store.bind_delivery_witness(Arc::clone(&ledger) as Arc<dyn ProviderDeliveryWitness>);
+    (store, ledger)
+}
+
+/// A recorded surface is servable only while the serving provider holds
+/// exactly its bytes, whichever of the record and the delivery lands first.
+///
+/// - record before delivery: the newly recorded bytes are not the engine's
+///   until it acknowledges them — the bracket refuses them, then holds;
+/// - delivery before record: the engine already evaluates newer bytes while
+///   the store still records the older surface — the bracket refuses the
+///   older surface, and the record of the newer one is servable at once;
+/// - an engine restart loses an acknowledged surface, and a re-delivery of the
+///   same bytes restores it;
+/// - a surface no engine ever held is awaiting delivery, never current.
+#[test]
+fn the_bracket_holds_only_while_the_serving_provider_holds_the_recorded_bytes() {
+    let carrier = "carrier\n";
+
+    // Record before delivery.
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    let b = store.record(record_surface("API B\n", carrier));
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::AwaitingDelivery);
+    assert!(!store.captured_surface_is_current(&b));
+    ledger.apply(VPATH, "API B\n");
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::Delivered);
+    assert!(store.captured_surface_is_current(&b));
+
+    // Delivery before record.
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert!(store.captured_surface_is_current(&a));
+    ledger.apply(VPATH, "API B\n");
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::EngineDiverged);
+    assert!(!store.captured_surface_is_current(&a));
+    let b = store.record(record_surface("API B\n", carrier));
+    assert!(store.captured_surface_is_current(&b));
+
+    // Engine restart, then a re-delivery of the same bytes.
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert!(store.captured_surface_is_current(&a));
+    ledger.serve(VPATH, ServingDelivery::NotApplied);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::DeliveryLost);
+    assert!(!store.captured_surface_is_current(&a));
+    ledger.apply(VPATH, "API A\n");
+    assert!(store.captured_surface_is_current(&a));
+
+    // Never delivered.
+    let (store, _ledger) = witnessed_store();
+    let a = store.record(record_surface("API A\n", carrier));
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::AwaitingDelivery);
+    assert!(!store.captured_surface_is_current(&a));
+}
+
+/// The membership-only topology attests a surface through its committed
+/// publication, not a delivered buffer; a publication that stops attesting an
+/// acknowledged surface has lost it, while one that never attested it is
+/// still awaiting delivery. A provider that keeps no ledger, and a store with
+/// no provider bound, leave the record as the only evidence.
+#[test]
+fn membership_and_unwitnessed_delivery_states_are_typed() {
+    let carrier = "carrier\n";
+    let (store, ledger) = witnessed_store();
+    let a = store.record(record_surface("API A\n", carrier));
+    ledger.serve(VPATH, ServingDelivery::Unpublished);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::AwaitingDelivery);
+    ledger.serve(VPATH, ServingDelivery::Published);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    ledger.serve(VPATH, ServingDelivery::Unpublished);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::DeliveryLost);
+    assert!(!store.captured_surface_is_current(&a));
+
+    ledger.serve(VPATH, ServingDelivery::Uncertified);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Unwitnessed);
+    assert!(store.captured_surface_is_current(&a));
+
+    let unbound = ProviderSurfaceStore::new();
+    let a = unbound.record(record_surface("API A\n", carrier));
+    assert_eq!(unbound.delivery_of(&a), SurfaceDelivery::Unwitnessed);
+    assert!(unbound.captured_surface_is_current(&a));
+}
+
+/// The acknowledgement rides the shared payload: an identical re-record
+/// inherits it without the store reading the provider's ledger, so a re-record
+/// during a request leaves the request's surface delivered, and a later loss
+/// is reported as a loss rather than as a surface that was never delivered.
+/// Recording never reads the ledger at all — acknowledgement costs no provider
+/// interaction on the record path.
+#[test]
+fn an_identical_re_record_inherits_the_acknowledgement_without_a_ledger_read() {
+    let carrier = "carrier\n";
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert_eq!(ledger.reads(), 0, "recording reads no delivery ledger");
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    assert_eq!(ledger.reads(), 1, "one verdict, one ledger read");
+
+    let again = store.record(record_surface("API A\n", carrier));
+    assert!(Arc::ptr_eq(&a.payload, &again.payload));
+    assert_eq!(ledger.reads(), 1, "an identical re-record reads no ledger");
+    assert!(store.captured_surface_is_current(&a));
+
+    ledger.serve(VPATH, ServingDelivery::NotApplied);
+    assert_eq!(store.delivery_of(&again), SurfaceDelivery::DeliveryLost);
+}

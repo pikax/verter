@@ -92,6 +92,40 @@ impl Handles {
         );
     }
 
+    /// The bytes the serving engine holds at the carrier's IDE path.
+    pub(super) fn engine_bytes(&self, ide_path: &str) -> Option<Arc<str>> {
+        match crate::TypeProvider::applied_content(self.provider.as_ref(), ide_path) {
+            verter_type_runtime::traits::AppliedContent::Applied(bytes) => Some(bytes),
+            verter_type_runtime::traits::AppliedContent::NotApplied
+            | verter_type_runtime::traits::AppliedContent::Uncertified => None,
+        }
+    }
+
+    /// The typed delivery state of the carrier's current IDE surface.
+    pub(super) fn surface_delivery(&self) -> crate::provider_surface_store::SurfaceDelivery {
+        self.server
+            .documents
+            .provider_surfaces()
+            .delivery_of(&self.current_surface())
+    }
+
+    /// Record and commit a surface with drifted bytes at the IDE path — every
+    /// Verter-side half of a publication — before the engine received them.
+    pub(super) fn record_and_commit_undelivered_drift(&self) {
+        self.record_drifted_surface();
+        self.server.test_commit_current_ide_surface(&self.uri);
+    }
+
+    /// Hand the engine drifted bytes at the IDE path through another writer,
+    /// without recording a surface for them.
+    pub(super) fn deliver_unrecorded_drift(&self) {
+        let current = self.current_surface();
+        self.provider.accept_unrecorded_delivery(
+            &current.stamp.provider_path,
+            &format!("{}\n// drifted", current.provider_content),
+        );
+    }
+
     /// Publish the workspace root again over the unchanged snapshot.
     pub(super) fn republish_equivalent_root(&self) {
         self.server.test_republish_equivalent_root();

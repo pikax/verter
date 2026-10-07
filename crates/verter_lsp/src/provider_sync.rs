@@ -1480,6 +1480,98 @@ pub fn open_unresolved_carrier_commit(
     }
 }
 
+/// Why a foreground request found no provider surface it may decode an answer
+/// through. Each reason is its own signal: an engine restart, an ownership
+/// exclusion and a failed or overtaken delivery are never read off the
+/// diagnostics pipeline, and none of them is content churn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSurfaceUnavailable {
+    /// No current surface of the document's projection is recorded for it.
+    NotRecorded,
+    /// The committed membership publication does not attest the recorded
+    /// surface: the carrier's owner binding moved, or its publication never
+    /// committed.
+    OwnershipExcluded,
+    /// The open document moved past the recorded surface.
+    SourceMoved,
+    /// The recorded surface is not the one the serving provider holds.
+    Delivery(crate::provider_surface_store::SurfaceDelivery),
+}
+
+/// The serving provider's delivery ledger, as the provider-surface store reads
+/// it: the active engine's per-incarnation application receipt for a buffer it
+/// holds, or — for the membership-only topology, whose engine reads carrier
+/// companions from the publication rather than from a delivered buffer — the
+/// committed publication that attests the surface.
+///
+/// Every answer is a local read of state this process already owns; none
+/// issues a provider request.
+pub struct ProviderSyncDeliveryWitness {
+    sync: crate::type_provider::project_sync::ProjectSync,
+    provider_sync_states: std::sync::Arc<DashMap<String, ProviderSyncState>>,
+}
+
+impl ProviderSyncDeliveryWitness {
+    pub fn new(
+        sync: crate::type_provider::project_sync::ProjectSync,
+        provider_sync_states: std::sync::Arc<DashMap<String, ProviderSyncState>>,
+    ) -> Self {
+        Self {
+            sync,
+            provider_sync_states,
+        }
+    }
+
+    /// Whether the committed publication of `surface`'s carrier attests it: the
+    /// path is one of the carrier's live committed companions, and an IDE
+    /// surface is the receipt-stamped one.
+    fn publication_attests(
+        &self,
+        surface: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+    ) -> bool {
+        let path = surface.stamp.provider_path.as_ref();
+        self.provider_sync_states
+            .get(surface.source_canonical.as_ref())
+            .is_some_and(|committed| {
+                ALL_PATH_KINDS.into_iter().any(|kind| {
+                    committed.path_for_kind(kind) == Some(path)
+                        && committed.background_loaded_for_kind(kind)
+                }) && (surface.kind
+                    != crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
+                    || committed.authorizes_carrier_ide_capture(
+                        surface.stamp.content_hash.to_hash16(),
+                        surface.stamp.map_hash,
+                    ))
+            })
+    }
+}
+
+impl crate::provider_surface_store::ProviderDeliveryWitness for ProviderSyncDeliveryWitness {
+    fn serving_delivery(
+        &self,
+        surface: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+    ) -> crate::provider_surface_store::ServingDelivery {
+        use crate::provider_surface_store::{ProviderSurfaceKind, ServingDelivery};
+        use verter_type_runtime::traits::AppliedContent;
+        let membership_companion = matches!(
+            surface.kind,
+            ProviderSurfaceKind::CarrierIde | ProviderSurfaceKind::CarrierApi
+        ) && self.sync.carrier_companion_open_suppressed();
+        if membership_companion {
+            return if self.publication_attests(surface) {
+                ServingDelivery::Published
+            } else {
+                ServingDelivery::Unpublished
+            };
+        }
+        match self.sync.serving_content(&surface.stamp.provider_path) {
+            AppliedContent::Applied(bytes) => ServingDelivery::Applied(bytes),
+            AppliedContent::NotApplied => ServingDelivery::NotApplied,
+            AppliedContent::Uncertified => ServingDelivery::Uncertified,
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "provider_sync_tests.rs"]
 mod tests;

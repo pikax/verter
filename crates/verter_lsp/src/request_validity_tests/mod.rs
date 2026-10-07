@@ -872,6 +872,13 @@ async fn assert_steady(route: Route) {
         route.provider_queries_per_request(),
         "{route:?}: one provider dispatch per provider query of an unmoved request"
     );
+    // Proving the surface delivered reads the provider's own ledger: an
+    // unmoved request re-delivers nothing.
+    let writes = fixture.provider.file_sync_calls();
+    assert!(
+        writes.is_empty(),
+        "{route:?}: an unmoved request makes no provider file write, got {writes:?}"
+    );
     for barrier in BARRIERS {
         assert!(
             fixture.barriers.arrivals(barrier) >= 1,

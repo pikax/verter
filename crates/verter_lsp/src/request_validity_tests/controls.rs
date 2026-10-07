@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use super::super::test_support::RequestBarrier;
 use super::movement::{edited_app, shifted_app, Handles};
 use super::{reference_answer, Fixture, Outcome, Route, APP, BARRIERS};
+use crate::provider_surface_store::SurfaceDelivery;
 
 /// One way a request's inputs change underneath it.
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +41,16 @@ pub(super) enum Control {
     /// The IDE surface moves to different bytes and back to the original
     /// bytes during one request.
     ProviderSurfaceAbaDuringRequest,
+    /// A surface with different bytes is recorded and its publication
+    /// committed before any engine received them: the record runs ahead of its
+    /// delivery.
+    RecordBeforeDelivery,
+    /// The engine receives different bytes before any surface describing them
+    /// is recorded: the delivery runs ahead of its record.
+    DeliverBeforeRecord,
+    /// The engine restarts and holds none of the recorded surface: the
+    /// provider lags behind the store.
+    LaggingProvider,
 }
 
 macro_rules! control_rows {
@@ -97,14 +108,30 @@ macro_rules! control_rows {
             async fn provider_surface_a_b_a_never_maps_the_intermediate_surface() {
                 assert_control($route, Control::ProviderSurfaceAbaDuringRequest).await;
             }
+
+            #[tokio::test(flavor = "multi_thread")]
+            async fn a_record_ahead_of_its_delivery_never_decodes_an_answer() {
+                assert_control($route, Control::RecordBeforeDelivery).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            async fn a_delivery_ahead_of_its_record_never_decodes_an_answer() {
+                assert_control($route, Control::DeliverBeforeRecord).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            async fn a_lagging_provider_is_repaired_or_unavailable_never_mismapped() {
+                assert_control($route, Control::LaggingProvider).await;
+            }
         }
     };
 }
 pub(super) use control_rows;
 
 /// For each provider dispatch of one request, in order: whether the answer it
-/// returned was produced after the control moved state.
-type DispatchLedger = Arc<Mutex<Vec<bool>>>;
+/// returned was produced after the control moved state, and the bytes the
+/// engine held at the IDE path when it produced it.
+type DispatchLedger = Arc<Mutex<Vec<(bool, Option<Arc<str>>)>>>;
 
 impl Control {
     /// The barriers this control moves state at. A provider-side event can
@@ -141,6 +168,44 @@ impl Control {
                 handles.record_drifted_surface();
                 handles.record_current_surface(None);
             }
+            Control::RecordBeforeDelivery => handles.record_and_commit_undelivered_drift(),
+            Control::DeliverBeforeRecord => handles.deliver_unrecorded_drift(),
+            Control::LaggingProvider => handles.provider.forget_applied_content(),
+        }
+    }
+
+    /// The delivery states the carrier's current IDE surface may end the
+    /// request in. A control that never touches what the engine holds leaves
+    /// the surface delivered: whatever the route answered, a lost or delayed
+    /// provider answer is not a surface the engine stopped holding.
+    fn final_delivery(self) -> Option<&'static [SurfaceDelivery]> {
+        match self {
+            Control::DelayedProviderDelivery
+            | Control::FailedProviderDelivery
+            | Control::ProviderRestart => Some(&[SurfaceDelivery::Delivered]),
+            // Repaired before dispatch, or still awaiting the delivery the
+            // record ran ahead of.
+            Control::RecordBeforeDelivery => Some(&[
+                SurfaceDelivery::Delivered,
+                SurfaceDelivery::AwaitingDelivery,
+            ]),
+            // Repaired before dispatch, or the engine still holds the bytes
+            // that were never recorded.
+            Control::DeliverBeforeRecord => {
+                Some(&[SurfaceDelivery::Delivered, SurfaceDelivery::EngineDiverged])
+            }
+            // Repaired before dispatch, or the recorded surface is reported
+            // lost.
+            Control::LaggingProvider => {
+                Some(&[SurfaceDelivery::Delivered, SurfaceDelivery::DeliveryLost])
+            }
+            Control::SameVersionContentReplacement
+            | Control::CloseReopenIdenticalBytes
+            | Control::WorkspaceReplacementRepeatedGeneration
+            | Control::ProjectOwnerLoss
+            | Control::MapOnlyChange
+            | Control::SourceOnlyOffsetShift
+            | Control::ProviderSurfaceAbaDuringRequest => None,
         }
     }
 
@@ -201,6 +266,15 @@ impl Control {
                 Control::SameVersionContentReplacement | Control::SourceOnlyOffsetShift,
                 Outcome::Answered(_),
             ) => fresh,
+            // The surface and the engine disagreed: only an answer decoded
+            // through bytes the engine holds — after the requested surface was
+            // repaired before dispatch — may answer, and it is the unmoved one.
+            (
+                Control::RecordBeforeDelivery
+                | Control::DeliverBeforeRecord
+                | Control::LaggingProvider,
+                Outcome::Answered(answer),
+            ) => unmoved(answer),
             (_, Outcome::Empty | Outcome::ContentModified | Outcome::Refused(_)) => true,
         }
     }
@@ -221,13 +295,20 @@ pub(super) async fn assert_control(route: Route, control: Control) {
         // The provider produces its answer when it is queried, before the
         // dispatch barrier runs, so a dispatch is fresh exactly when the move
         // preceded its barrier arrival.
+        let ide_path = handles.current_surface().stamp.provider_path.to_string();
         let record_dispatch = {
             let ledger = Arc::clone(&ledger);
             let moved = Arc::clone(&moved);
-            move || ledger.lock().push(moved.load(Ordering::SeqCst))
+            let handles = handles.clone();
+            move |fresh: Option<bool>| {
+                let fresh = fresh.unwrap_or_else(|| moved.load(Ordering::SeqCst));
+                ledger.lock().push((fresh, handles.engine_bytes(&ide_path)));
+            }
         };
+        let moved_at_dispatch = Arc::clone(&moved);
         let act = {
             let moved = Arc::clone(&moved);
+            let handles = handles.clone();
             move || {
                 control.act(&handles);
                 moved.store(true, Ordering::SeqCst);
@@ -237,10 +318,14 @@ pub(super) async fn assert_control(route: Route, control: Control) {
             fixture.barriers.arm(
                 barrier,
                 Arc::new(move |arrival| {
-                    record_dispatch();
+                    // Fresh is read before the move; the engine's bytes after
+                    // it, since the engine evaluates the query once this
+                    // barrier returns.
+                    let fresh = moved_at_dispatch.load(Ordering::SeqCst);
                     if arrival == 0 {
                         act();
                     }
+                    record_dispatch(Some(fresh));
                     Box::pin(async {})
                 }),
             );
@@ -257,7 +342,7 @@ pub(super) async fn assert_control(route: Route, control: Control) {
             fixture.barriers.arm(
                 RequestBarrier::ProviderDispatch,
                 Arc::new(move |_| {
-                    record_dispatch();
+                    record_dispatch(None);
                     Box::pin(async {})
                 }),
             );
@@ -268,11 +353,35 @@ pub(super) async fn assert_control(route: Route, control: Control) {
             "{route:?}/{control:?}: the request never reached {barrier:?}, so the control did not run"
         );
         let ledger = ledger.lock().clone();
-        let fresh = ledger.last().copied().unwrap_or(false);
+        let fresh = ledger.last().is_some_and(|(fresh, _)| *fresh);
+        let freshness: Vec<bool> = ledger.iter().map(|(fresh, _)| *fresh).collect();
         assert!(
             control.admits(route, barrier, &outcome, &reference, fresh),
             "{route:?}/{control:?} at {barrier:?}: {outcome:?} is not the defined outcome \
-             (unmoved answer {reference:?}; per dispatch, answered after the move: {ledger:?})"
+             (unmoved answer {reference:?}; per dispatch, answered after the move: {freshness:?})"
         );
+        // Whatever the control, an answer is decoded only through bytes the
+        // engine held when it produced it: the surface the answer settled
+        // through is the store's current one, since nothing moves after the
+        // control's one move.
+        if matches!(outcome, Outcome::Answered(_)) {
+            let settled = handles.current_surface();
+            let evaluated = ledger.last().and_then(|(_, bytes)| bytes.clone());
+            assert!(
+                evaluated.as_deref() == Some(&*settled.provider_content),
+                "{route:?}/{control:?} at {barrier:?}: the answer was decoded through a surface \
+                 the engine did not evaluate (engine held {} bytes, settled surface {} bytes)",
+                evaluated.as_ref().map_or(0, |bytes| bytes.len()),
+                settled.provider_content.len()
+            );
+        }
+        if let Some(states) = control.final_delivery() {
+            let delivery = handles.surface_delivery();
+            assert!(
+                states.contains(&delivery),
+                "{route:?}/{control:?} at {barrier:?}: the surface ended {delivery:?}, \
+                 expected one of {states:?}"
+            );
+        }
     }
 }
