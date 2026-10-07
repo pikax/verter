@@ -231,13 +231,14 @@ fn pick_consumer_materialises_only_selected_member_not_others() {
     // We read the audit record produced by the cold-resolver run
     // through `get_component_meta_with_resolution`, which stamps a
     // `request_id` and finalises a `RequestAuditRecord` into the
-    // host's audit store. Reading via `take_audit_record` gives us
+    // host's audit store. Reading via `take_record` gives us
     // the per-request materialiser footprint.
     let (_audit_analysis, resolution) = host
         .get_component_meta_with_resolution("/owner.vue")
         .expect("audit-enabled host must produce a resolution");
     let record = host
-        .take_audit_record(resolution.request_id)
+        .host_audit_runtime()
+        .take_record(resolution.request_id)
         .expect("audit record must be present for the resolution's request_id");
 
     let payload = record

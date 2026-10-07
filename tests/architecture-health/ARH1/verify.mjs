@@ -1656,7 +1656,10 @@ function validateSurface(contracts, errors) {
           detail: `${hotspot.path}: fn ${row.item}`,
         });
       }
-      if (row.kind === "field" && !new RegExp(`pub ${row.item}\\s*:`).test(text)) {
+      // A field narrowed to pub(crate) is still the declared item: the
+      // pending `pub` form and the executed `pub(crate)` form both bind it.
+      const fieldVisibility = row.to === "pub(crate)" ? String.raw`pub(?:\(crate\))?` : "pub";
+      if (row.kind === "field" && !new RegExp(`${fieldVisibility} ${row.item}\\s*:`).test(text)) {
         errors.push({
           caseId,
           code: "surface-item-missing",

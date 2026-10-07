@@ -961,12 +961,14 @@ function validateCharacterization(products, predecessors, errors) {
         detail: "ARH1-CUT-2 items are not exactly the ARH1 field narrowing population",
       });
     }
+    // The characterized field stays a declared scheduler field across its
+    // narrowing: `pub` before the narrowing heir lands, `pub(crate)` after.
     for (const item of items) {
-      if (!new RegExp(`pub\\s+${item}\\s*:`).test(schedulerText)) {
+      if (!new RegExp(`pub(?:\\(crate\\))?\\s+${item}\\s*:`).test(schedulerText)) {
         errors.push({
           caseId,
           code: "route-surface-not-live",
-          detail: `${item} is not a live pub field of ${schedulerRel}; the surface must be characterized before narrowing`,
+          detail: `${item} is not a live pub or narrowed pub(crate) field of ${schedulerRel}; the surface must be characterized before narrowing`,
         });
       }
     }

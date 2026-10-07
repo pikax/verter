@@ -82,7 +82,7 @@ pub struct ResolvedComponentMetaState {
     /// `get_component_meta_with_resolution`. Non-zero. Consumers (the
     /// `AuditedRequest` harness and NAPI/WASM/LSP wrappers) use this
     /// to retrieve the matching `RequestAuditRecord` via
-    /// `VerterHost::take_audit_record(resolution.request_id)`.
+    /// `HostAuditRuntime::take_record(resolution.request_id)`.
     ///
     /// Zero is reserved for "not populated" — emitted by internal
     /// tests / FFI fixtures that do not stamp a real request id.

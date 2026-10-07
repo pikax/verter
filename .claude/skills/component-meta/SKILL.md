@@ -26,7 +26,7 @@ Component-meta consumers should always go through an audited entry-point so the 
 | --------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `get_component_meta_with_audit(canonical_id)`       | Audited `getComponentMeta`. Drives the cold/warm cache flow and publishes a record.    |
 | `get_component_meta_with_resolution(canonical_id)`  | Same producer used by the test harness; returns `(analysis, resolution, record)`.      |
-| `take_audit_record(request_id)`                     | Drain a published record by id.                                                        |
+| `host_audit_runtime().take_record(request_id)`      | Drain a published record by id from the host's one records store.                      |
 
 Sibling audited entry-points (`resolve_type_with_audit`, `compile_with_audit`, `analyze_with_audit`, `audit_workspace_op`, `lsp_audit_begin`, `audit_mcp_tool_call`) follow the same pattern when the component-meta layer is driven from another surface (LSP, MCP, bundler, workspace ops).
 

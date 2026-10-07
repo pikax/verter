@@ -104,8 +104,8 @@ pub(crate) use origin_graph::build_origin_graph;
 // §10a.0.A). The re-export re-points at the new home so the
 // `crate::meta_resolve::*` public surface stays intact for callers.
 pub(crate) use crate::host_manage::component_meta_request_impl::{
-    next_component_meta_audit_request_id, request_source_performed_compute,
-    should_skip_imported_registry_seed_refresh, trace_request_source,
+    request_source_performed_compute, should_skip_imported_registry_seed_refresh,
+    trace_request_source,
 };
 pub use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedJsdocBlock,

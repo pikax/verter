@@ -897,7 +897,7 @@ impl VerterLanguageServer {
     /// is returned as a JSON value (matching the `RequestAuditRecord`
     /// schema in `audit.generated.ts`). Returns `Ok(None)` when the
     /// record was never inserted (capture disabled) or already drained
-    /// by an earlier consumer (e.g. `host.take_audit_record`).
+    /// by an earlier consumer (e.g. `host.host_audit_runtime().take_record`).
     ///
     /// This handler does NOT mutate audit state — it consults the
     /// records store via a non-draining iterator and clones the
