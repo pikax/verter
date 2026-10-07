@@ -145,6 +145,8 @@
         "crates/verter_session/src/framework/self_file.rs",
         "crates/verter_session/src/host_compile_audit.rs",
         "crates/verter_session/src/host_manage/analysis_io.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/vue_exec/mod.rs",
+        "crates/verter_validation_probe/src/corpus/mod.rs",
         "crates/verter_semantic_source/src/rune_ambient.rs",
         "crates/verter_tsc/src/checker.rs"
       ],

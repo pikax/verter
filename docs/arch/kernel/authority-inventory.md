@@ -44,7 +44,7 @@ data and runs its negative controls. This node ships no validator.
 | -------- | ----------- | ----------- | ------------------------------- |
 | `CarrierProfileId` | absent; carried by `FileLanguage::Framework { adapter_id, language_id }` | replaced | VID0 → VID0T (`VID0T-AC1`) |
 | `FrameworkProfileId` | absent; carried by `FrameworkAdapterId(Arc<str>)` and the open proto `framework_adapter_id` string | replaced | VID0 → VID0T (`VID0T-AC1`) |
-| `ProjectProfileId` | absent; carried by the LSP `ProjectRegistry` and `IdeProjectConfig` | replaced | VID0 → VID0T (`VID0T-AC1`) |
+| `ProjectProfileId` | absent; carried by the LSP `ProjectRegistry` | replaced | VID0 → VID0T (`VID0T-AC1`) |
 | `CatalogSnapshot` | absent; split over `LanguageRegistry`, `CarrierGrammarAuthority`, `ImmutableCapabilityCatalog`, `FrameworkAdapterRegistry` and two generated TS mirrors | replaced | CAT0 → CPF1 (`CPF1-AC2`) |
 | `DemandPlan` | absent; selection is one framework per file by extension, plus the process-wide `--frameworks` admission | replaced | DEM0 → COX0 (`COX0-AC2`) |
 | `TypeInfoRequest` | an alias: `pub use graph::TypeInfoGraphRequest as TypeInfoRequest` | amended | TIF0 → TIF1 (`TIF1-AC2`) |
