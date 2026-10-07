@@ -336,7 +336,8 @@ impl Eq for ImportedChildContractFreshnessKey {}
 #[derive(Clone)]
 struct ChildPublicContractSnapshot {
     contract: verter_session::framework::ComponentContractAvailability,
-    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
+    publication_witness:
+        Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
     host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
     freshness: ImportedChildContractFreshnessKey,
 }
@@ -364,13 +365,17 @@ struct BarrelComponentRouteSnapshot {
     identity: AuthoredBarrelComponentRouteIdentity,
     terminal_canonical_id: String,
     contract: verter_session::framework::ComponentContractAvailability,
-    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
+    publication_witness:
+        Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
     terminal_host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
     freshness: ImportedChildContractFreshnessKey,
 }
 
 #[cfg(test)]
 type ChildContractAfterProjectionHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+type ChildReadHook = Box<dyn FnMut() + Send + 'static>;
 
 /// The Verter language server implementation.
 ///
@@ -505,6 +510,10 @@ pub struct ServerCore {
     #[cfg(test)]
     child_contract_after_projection_hook:
         parking_lot::Mutex<Option<ChildContractAfterProjectionHook>>,
+    /// Runs after each read of an imported child and before the read is
+    /// proven to describe one child revision.
+    #[cfg(test)]
+    child_read_hook: parking_lot::Mutex<Option<ChildReadHook>>,
     /// Project-level coalescing singleflight for `resync_open_files`. Background
     /// init fires a full close+reopen sweep of every open file up to twice per
     /// pass, and a superseded init generation can fire it concurrently with the
@@ -1188,6 +1197,8 @@ impl VerterLanguageServer {
             child_public_contract_projection_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             child_contract_after_projection_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            child_read_hook: parking_lot::Mutex::new(None),
             resync_coordinator: Arc::new(crate::resync_singleflight::ResyncCoordinator::new()),
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),

@@ -214,3 +214,46 @@ async fn cancellation_after_an_engine_write_releases_pins_and_the_write_still_se
     );
     assert_eq!(fixture.dispatches(route), 1);
 }
+
+/// The current-file repair a request runs before its provider query carries
+/// the request's own deadline: every provider write the repair issues is bounded
+/// by the instant the request is bounded by, so a write queued behind a stalled
+/// engine expires with the request instead of applying after the client gave
+/// up, even though the repair runs on its own task.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_repair_writes_under_the_request_deadline() {
+    let budget = std::time::Duration::from_secs(60);
+    let mut host_config = verter_session::HostConfig::default();
+    host_config.lsp_method_timeouts.request_deadlines.hover = budget;
+    let route = Route::Hover;
+    let fixture = Fixture::with_host_config(host_config).await;
+    let armed = route.arm(&fixture).await;
+    let handles = Handles::of(&fixture);
+    let ide_path = fixture
+        .server()
+        .active_ide_path_for_uri(&fixture.uri)
+        .expect("the carrier has a provider path");
+
+    // A client edit the provider has not received: the request's repair
+    // writes it.
+    handles.edit(2, &super::movement::edited_app());
+    let earlier_writes = fixture.provider.write_deadlines(&ide_path).len();
+    let asked_at = tokio::time::Instant::now();
+    let _ = route.ask(&fixture, &armed).await;
+    let answered_at = tokio::time::Instant::now();
+
+    let repair_writes = fixture.provider.write_deadlines(&ide_path)[earlier_writes..].to_vec();
+    assert!(
+        !repair_writes.is_empty(),
+        "the request repaired the edited carrier before its query"
+    );
+    for deadline in repair_writes {
+        let at = deadline.expect("a request repair write carries the request deadline");
+        assert!(
+            at >= asked_at + budget && at <= answered_at + budget,
+            "the repair write is bounded by the deadline the request opened with its \
+             budget, not another bound ({:?} after the request was asked; budget {budget:?})",
+            at.saturating_duration_since(asked_at)
+        );
+    }
+}

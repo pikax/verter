@@ -131,7 +131,8 @@ impl VerterLanguageServer {
     /// Resolve the merge-time mapping context for a FOREIGN carrier IDE
     /// location from the pinned set `captured`
     /// ([`Self::capture_foreign_carrier_ide_set`]), fail-closed: an uncaptured
-    /// path, a no-longer-honored surface, or a drifted foreign open document
+    /// path, a surface whose content, map, incarnation or owner moved (even back),
+    /// or a drifted foreign open document
     /// drops the location. Closed imported carriers use their captured
     /// source/map generation and remain navigable.
     pub(super) fn foreign_ide_context(

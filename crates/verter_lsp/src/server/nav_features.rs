@@ -1560,23 +1560,28 @@ pub(super) async fn handle_completion_resolve(
                         // query: the provider answers against it, so its
                         // enrichment and edits are accepted only while it is
                         // still current, and any returned edit is translated
-                        // through it — never through a later replacement.
-                        let captured =
+                        // through it — never through a later replacement. A path
+                        // with no consistent surface (retired, unsynced, or no
+                        // longer matching its open source) has nothing to bracket
+                        // the provider's answer with, so the provider is not asked.
+                        let Some((carrier_uri, snapshot)) =
                             super::nav_features_completion_resolve::capture_resolve_surface(
                                 server,
                                 provider_path,
-                            );
+                            )
+                        else {
+                            return Err(tower_lsp_server::jsonrpc::Error::new(
+                                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                            ));
+                        };
                         if let Ok(Some(resolve_result)) =
                             tp.resolve_completion(provider_path, resolve_data).await
                         {
-                            if let Some((carrier_uri, snapshot)) = captured.as_ref() {
-                                if !server
-                                    .provider_request_surface_still_valid(carrier_uri, snapshot)
-                                {
-                                    return Err(tower_lsp_server::jsonrpc::Error::new(
-                                        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                                    ));
-                                }
+                            if !server.provider_request_surface_still_valid(&carrier_uri, &snapshot)
+                            {
+                                return Err(tower_lsp_server::jsonrpc::Error::new(
+                                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                                ));
                             }
                             // Lazy `completionItem/resolve` enrichment: fold the
                             // provider's resolved detail (signature) and
@@ -1638,7 +1643,7 @@ pub(super) async fn handle_completion_resolve(
                                 let resolved = resolve_provider_auto_import_edits(
                                     server,
                                     provider_path,
-                                    captured.as_ref().map(|(_, snapshot)| &**snapshot),
+                                    Some(&snapshot),
                                     &provider_edits,
                                 )
                                 .map_err(|reason| {

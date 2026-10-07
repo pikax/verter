@@ -10,7 +10,9 @@
 //!   (a failed decode bracket drops that provider contribution) and still hold
 //!   at settlement (the request keeps every surface it decoded through), and
 //!   every imported source a native contribution was read from is still at
-//!   the host revision it was read at;
+//!   the host revision it was read at, and every published child contract it
+//!   was read through still validates against the producer read sets it was
+//!   derived from;
 //! - applicability: the admitted revision and authority still describe what
 //!   the client holds when the answer is delivered — the disposition below;
 //! - publication freshness: whether background diagnostics are current. That
@@ -26,6 +28,7 @@ use tower_lsp_server::ls_types::Uri;
 use super::{DocumentRegistry, DocumentSnapshotIdentity};
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
 use verter_session::carrier_publication_store::HostSourceRevisionToken;
+use verter_session::framework::api_projector::ComponentApiProjectionWitness;
 
 /// Every foreground LSP route whose answer is settled against a request
 /// snapshot.
@@ -44,6 +47,9 @@ pub(crate) enum ForegroundRoute {
     CodeAction,
     InlayHint,
     SemanticTokens,
+    /// `$/verter/getBindingTypes`: the provider quick-info of every script
+    /// binding of the requested document.
+    BindingTypes,
 }
 
 /// The contract a route's answer carries to the client.
@@ -51,7 +57,7 @@ pub(crate) enum ForegroundRoute {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResponseClass {
     /// Describes the admitted revision (hover, signature help, inlay hints,
-    /// highlights, semantic tokens). It stays coherent across background
+    /// highlights, semantic tokens, binding types). It stays coherent across background
     /// churn that changes no input.
     Informational,
     /// Locations into the admitted revision; each foreign location is decoded
@@ -70,7 +76,8 @@ impl ForegroundRoute {
             | Self::SignatureHelp
             | Self::DocumentHighlight
             | Self::InlayHint
-            | Self::SemanticTokens => ResponseClass::Informational,
+            | Self::SemanticTokens
+            | Self::BindingTypes => ResponseClass::Informational,
             Self::Definition | Self::TypeDefinition | Self::References => ResponseClass::Navigation,
             Self::PrepareRename
             | Self::Rename
@@ -91,8 +98,9 @@ enum Superseded {
     /// A provider surface an answer was decoded through changed content, map,
     /// incarnation or owner — possibly changing back — before settlement.
     ProviderSurface,
-    /// An imported source a native contribution was read from was re-registered
-    /// before settlement.
+    /// An imported source a native contribution was read from was re-registered,
+    /// or a published child contract it was read through no longer validates
+    /// against its producer read sets, before settlement.
     Dependency,
 }
 
@@ -148,6 +156,12 @@ pub(crate) struct ForegroundRequest {
     /// provider answer it is delivered beside. Two reads of one source at
     /// different revisions cannot both settle.
     dependencies: parking_lot::Mutex<Vec<(Box<str>, HostSourceRevisionToken)>>,
+    /// The producer witness of every published child contract a native
+    /// contribution of this request was read from. The witness carries the
+    /// contract's complete read sets, so a change to anything the contract
+    /// was derived from — an imported props type included — supersedes the
+    /// answer even when no source the request read directly moved.
+    contract_publications: parking_lot::Mutex<Vec<Arc<ComponentApiProjectionWitness>>>,
 }
 
 impl ForegroundRequest {
@@ -167,6 +181,7 @@ impl ForegroundRequest {
             authority: documents.host().workspace_read().published_root(),
             decoded_surfaces: parking_lot::Mutex::new(Vec::new()),
             dependencies: parking_lot::Mutex::new(Vec::new()),
+            contract_publications: parking_lot::Mutex::new(Vec::new()),
         })
     }
 
@@ -212,11 +227,24 @@ impl ForegroundRequest {
         });
     }
 
+    /// Record that the current task's foreground request read a native
+    /// contribution from the published child contract `witness` vouches for.
+    /// A no-op outside a foreground request.
+    pub(crate) fn bracket_contract_publication(witness: &Arc<ComponentApiProjectionWitness>) {
+        let _ = ACTIVE_REQUEST.try_with(|request| {
+            let mut publications = request.contract_publications.lock();
+            if !publications.iter().any(|known| Arc::ptr_eq(known, witness)) {
+                publications.push(Arc::clone(witness));
+            }
+        });
+    }
+
     /// The single disposition of a computed answer. The answer — an empty one
     /// included — is delivered exactly when the requested revision, its project
-    /// authority, every provider surface an answer was decoded through and every
-    /// imported source a native contribution was read from are still the
-    /// admitted ones; the diagnostics generation is never consulted.
+    /// authority, every provider surface an answer was decoded through, every
+    /// imported source a native contribution was read from and every published
+    /// child contract it was read through are still the admitted ones; the
+    /// diagnostics generation is never consulted.
     pub(crate) fn settle<T>(
         &self,
         documents: &DocumentRegistry,
@@ -272,6 +300,12 @@ impl ForegroundRequest {
                 .all(|(canonical_id, revision)| {
                     host.registered_source_revision_token(canonical_id) == Some(*revision)
                 });
+        let dependencies_are_current = dependencies_are_current
+            && self
+                .contract_publications
+                .lock()
+                .iter()
+                .all(|witness| witness.is_current(&host));
         (!dependencies_are_current).then_some(Superseded::Dependency)
     }
 }

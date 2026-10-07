@@ -6190,6 +6190,82 @@ async fn svelte_component_attribute_fallback_never_leaks_vue_directives() {
     drop(service);
 }
 
+/// A completion read through a published child contract settles only while
+/// that contract still validates against everything it was derived from. An
+/// imported props type that changes before settlement — neither the parent nor
+/// the child source moving — supersedes the answer instead of delivering the
+/// contract's superseded props beside a provider answer on the new basis.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_contract_completion_rejects_an_answer_whose_imported_props_type_moved() {
+    let types_source = "export interface TypedChildProps { beforeProp: string }\n";
+    let child_source = "<script setup lang=\"ts\">\nimport type { TypedChildProps } from './typed-child-props'\ndefineProps<TypedChildProps>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport TypedChild from './TypedChild.vue'\n</script>\n<template>\n  <TypedChild  />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/typed-child-props.ts", "typescript", types_source),
+        ("src/TypedChild.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let types_uri = workspace_uri(&workspace_id, "src/typed-child-props.ts");
+    settle_child_contracts(server, &uri, &workspace_id, &["src/TypedChild.vue"]).await;
+    let cursor = parent_source.find("<TypedChild ").unwrap() + "<TypedChild ".len();
+    let position = LineIndex::new_utf16(parent_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    let unmoved = completion_labels(
+        server
+            .completion(completion_params(&uri, position, None))
+            .await
+            .expect("an unmoved completion succeeds"),
+    );
+    assert!(
+        unmoved.contains(&"before-prop".to_string()),
+        "the published child contract answers the completion: {unmoved:?}"
+    );
+
+    let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let server = server.clone();
+        let types_uri = types_uri.clone();
+        let moved = Arc::clone(&moved);
+        server.request_barriers().clear();
+        server.request_barriers().arm(
+            super::test_support::RequestBarrier::Settlement,
+            Arc::new(move |arrival| {
+                if arrival == 0 {
+                    assert!(
+                        server
+                            .documents
+                            .did_change(
+                                &types_uri,
+                                2,
+                                "export interface TypedChildProps { afterProp: string }\n",
+                            )
+                            .changed
+                    );
+                    moved.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Box::pin(async {})
+            }),
+        );
+    }
+    let raced = server
+        .completion(completion_params(&uri, position, None))
+        .await;
+    server.request_barriers().clear();
+    assert!(moved.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a completion read through a contract whose imported props type moved before \
+         settlement answers ContentModified: {raced:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_stable_completions_do_not_cancel_each_other() {
     let child_source =
@@ -12800,6 +12876,114 @@ async fn child_contract_hover_rejects_an_answer_whose_child_moved_before_settlem
     assert!(
         current.contains("afterProp") && !current.contains("beforeProp"),
         "a new request answers from the edited child: {current}"
+    );
+}
+
+/// The reads one request makes of an imported child — its analysis, then its
+/// source or registered structure — describe ONE child revision. An edit that
+/// lands between those reads never yields the old analysis interpreted through
+/// the edited child: the read is taken again at the edited revision, and a child
+/// that moves across every read refuses the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_reads_split_by_an_edit_never_mix_two_child_revisions() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let child_source = "<script setup lang=\"ts\">\ndefineProps<{ beforeProp: string }>()\n</script>\n<template><div /></template>\n";
+    let edited_child = "<script setup lang=\"ts\">\ndefineProps<{ afterProp: string }>()\n</script>\n<template><div /></template>\n";
+    let app_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n\n<template>\n  <MyComp before-prop=\"literal\" />\n</template>\n";
+    let child_uri = open_test_vue(server, "/workspace/src/MyComp.vue", child_source);
+    let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+    let position = Position {
+        line: 5,
+        character: 3,
+    };
+    let unmoved = hover_text(
+        server
+            .hover(hover_params(&app_uri, position))
+            .await
+            .expect("an unmoved hover succeeds"),
+    );
+    assert!(
+        unmoved.contains("beforeProp"),
+        "the child answers the hover: {unmoved}"
+    );
+
+    // One edit between the child reads: the answer, if any, describes the
+    // edited child alone.
+    let edits = Arc::new(AtomicUsize::new(0));
+    {
+        let server = server.clone();
+        let child_uri = child_uri.clone();
+        let edits = Arc::clone(&edits);
+        server
+            .clone()
+            .set_child_read_hook_for_test(Some(Box::new(move || {
+                if edits.fetch_add(1, Ordering::SeqCst) == 0 {
+                    assert!(
+                        server
+                            .documents
+                            .did_change(&child_uri, 2, edited_child)
+                            .changed
+                    );
+                }
+            })));
+    }
+    let split_once = server.hover(hover_params(&app_uri, position)).await;
+    server.set_child_read_hook_for_test(None);
+    assert!(
+        edits.load(Ordering::SeqCst) >= 1,
+        "the edit landed between child reads"
+    );
+    match &split_once {
+        Ok(hover) => {
+            let text = hover_text(hover.clone());
+            assert!(
+                text.contains("afterProp") && !text.contains("beforeProp"),
+                "an answer read across an edit describes only the edited child: {text}"
+            );
+        }
+        Err(error) => assert_eq!(
+            error.code,
+            tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+            "a request whose child moved is refused, never failed otherwise"
+        ),
+    }
+
+    // The child moves across every read: the request is refused.
+    let edits = Arc::new(AtomicUsize::new(0));
+    {
+        let server = server.clone();
+        let child_uri = child_uri.clone();
+        let edits = Arc::clone(&edits);
+        server
+            .clone()
+            .set_child_read_hook_for_test(Some(Box::new(move || {
+                let edit = edits.fetch_add(1, Ordering::SeqCst);
+                let text = if edit.is_multiple_of(2) {
+                    child_source
+                } else {
+                    edited_child
+                };
+                assert!(
+                    server
+                        .documents
+                        .did_change(&child_uri, 3 + edit as i32, text)
+                        .changed
+                );
+            })));
+    }
+    let always_split = server.hover(hover_params(&app_uri, position)).await;
+    server.set_child_read_hook_for_test(None);
+    assert!(edits.load(Ordering::SeqCst) >= 2);
+    assert!(
+        matches!(&always_split, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a child that moves across every read refuses the answer: {always_split:?}"
     );
 }
 
@@ -24670,7 +24854,8 @@ async fn completion_resolve_requires_an_open_document_for_provider_envelopes() {
         "/workspace/App.vue",
         "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>",
     );
-    let item = tsserver_resolve_envelope_item("tsserver", "/workspace/App.vue.tsx", "computed");
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let item = tsserver_resolve_envelope_item("tsserver", &ctx.tsx_path, "computed");
     server.completion_resolve(item.clone()).await.unwrap();
     assert!(provider
         .calls()
@@ -24721,26 +24906,32 @@ async fn completion_resolve_dispatches_neutral_envelope_to_provider() {
         data: Some(serde_json::json!({ "exportName": "computed" })),
         offset: 0,
     };
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(
+        server,
+        "/workspace/App.vue",
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>",
+    );
+    let ctx = synced_type_provider_context(server, &uri).await;
     provider.set_resolve_completion(
-        "/workspace/App.vue.tsx",
+        &ctx.tsx_path,
         resolve_key,
         Some(CompletionResolveResult {
             additional_text_edits: vec![],
             ..Default::default()
         }),
     );
-    let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
-    let server = service.inner();
-    install_test_resolver(server);
 
-    let item = tsserver_resolve_envelope_item("tsserver", "/workspace/App.vue.tsx", "computed");
+    let item = tsserver_resolve_envelope_item("tsserver", &ctx.tsx_path, "computed");
     let _ = super::nav_features::handle_completion_resolve(server, item).await;
 
     assert!(
         provider.calls().iter().any(|c| matches!(
             c,
-            MockCall::ResolveCompletion { path, .. } if path == "/workspace/App.vue.tsx"
+            MockCall::ResolveCompletion { path, .. } if *path == ctx.tsx_path
         )),
         "the neutral verter_resolve envelope must dispatch to the provider's resolve_completion \
          (the old code gated on data.tsgo and never reached tsserver)"
@@ -24820,17 +25011,23 @@ async fn completion_resolve_envelope_resolves_for_both_provider_kinds() {
     ] {
         let provider = Arc::new(MockTypeProvider::new());
         provider.set_provider_id(kind);
-        provider.set_resolve_completion(
-            "/workspace/App.vue.tsx",
-            resolve_key.clone(),
-            Some(CompletionResolveResult::default()),
-        );
         let type_provider: Arc<dyn TypeProvider> = provider.clone();
         let service = make_hover_test_service(type_provider);
         let server = service.inner();
         install_test_resolver(server);
+        let uri = open_test_vue(
+            server,
+            "/workspace/App.vue",
+            "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>",
+        );
+        let ctx = synced_type_provider_context(server, &uri).await;
+        provider.set_resolve_completion(
+            &ctx.tsx_path,
+            resolve_key.clone(),
+            Some(CompletionResolveResult::default()),
+        );
 
-        let item = build_item(kind, "/workspace/App.vue.tsx", "computed");
+        let item = build_item(kind, &ctx.tsx_path, "computed");
         let _ = super::nav_features::handle_completion_resolve(server, item).await;
 
         // Resolve was reached AND the dispatched key is exactly the one this
@@ -24866,8 +25063,18 @@ async fn completion_resolve_applies_detail_and_documentation() {
         label: "computed".to_string(),
         data: serde_json::json!({ "exportName": "computed" }),
     };
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(
+        server,
+        "/workspace/App.vue",
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>",
+    );
+    let ctx = synced_type_provider_context(server, &uri).await;
     provider.set_resolve_completion(
-        "/workspace/App.vue.tsx",
+        &ctx.tsx_path,
         resolve_key,
         Some(CompletionResolveResult {
             additional_text_edits: vec![],
@@ -24876,12 +25083,8 @@ async fn completion_resolve_applies_detail_and_documentation() {
             ..Default::default()
         }),
     );
-    let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
-    let server = service.inner();
-    install_test_resolver(server);
 
-    let item = tsgo_resolve_envelope_item("tsgo", "/workspace/App.vue.tsx", "computed");
+    let item = tsgo_resolve_envelope_item("tsgo", &ctx.tsx_path, "computed");
     let resolved = super::nav_features::handle_completion_resolve(server, item)
         .await
         .expect("resolve returns the enriched item");
@@ -24897,6 +25100,82 @@ async fn completion_resolve_applies_detail_and_documentation() {
         }
         other => panic!("expected markdown documentation, got {other:?}"),
     }
+}
+
+/// A provider resolve answer is accepted only through a surface captured for
+/// the open carrier before the query. An open carrier whose surface was never
+/// synced, or whose source moved past the recorded surface, has nothing to
+/// bracket the answer with: the resolve is refused without asking the provider,
+/// so detail-only enrichment computed against an unknown surface never lands on
+/// the item.
+#[tokio::test]
+async fn completion_resolve_refuses_provider_enrichment_without_a_current_surface() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsgo");
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let source =
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>";
+    let uri = open_test_vue(server, "/workspace/App.vue", source);
+    let arm = |path: &str| {
+        provider.set_resolve_completion(
+            path,
+            crate::type_provider::protocol::CompletionResolveData::Lsp {
+                label: "computed".to_string(),
+                data: serde_json::json!({ "exportName": "computed" }),
+            },
+            Some(CompletionResolveResult {
+                detail: Some("(alias) const computed: …".to_string()),
+                ..Default::default()
+            }),
+        );
+    };
+    let assert_refused = |result: Result<CompletionItem>, case: &str| {
+        assert!(
+            matches!(&result, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+            "{case}: the resolve is refused, got {result:?}"
+        );
+        assert!(
+            !provider
+                .calls()
+                .iter()
+                .any(|call| matches!(call, MockCall::ResolveCompletion { .. })),
+            "{case}: the provider is never asked without a surface to bracket its answer"
+        );
+    };
+
+    // Open, but no surface was ever recorded for its provider path.
+    let tsx_path = server
+        .target_ide_path_for_uri(&uri)
+        .expect("the open carrier has a provider path");
+    arm(&tsx_path);
+    provider.clear_calls();
+    assert_refused(
+        server
+            .completion_resolve(tsgo_resolve_envelope_item("tsgo", &tsx_path, "computed"))
+            .await,
+        "unsynced surface",
+    );
+
+    // Synced, then edited past the recorded surface without a resync.
+    let ctx = synced_type_provider_context(server, &uri).await;
+    arm(&ctx.tsx_path);
+    let _ = server
+        .documents
+        .did_change(&uri, 2, &source.replace("count = 1", "count = 22"));
+    provider.clear_calls();
+    assert_refused(
+        server
+            .completion_resolve(tsgo_resolve_envelope_item(
+                "tsgo",
+                &ctx.tsx_path,
+                "computed",
+            ))
+            .await,
+        "stale surface",
+    );
 }
 
 /// Open-before-ownership: `did_open` on a `.svelte.ts` rune module makes
@@ -34302,6 +34581,149 @@ async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances
         "a foreign location must be DROPPED when the foreign surface advanced \
          mid-request — mapping through the merge-time surface would be wrong, \
          got {locations:?}"
+    );
+}
+
+/// Record `content` as the child's current IDE surface over the child's source,
+/// keeping the pinned surface's map.
+fn record_foreign_child_surface(
+    store: &crate::provider_surface_store::ProviderSurfaceStore,
+    pinned: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+    child_canonical: &str,
+    content: &str,
+) {
+    store.record(
+        crate::provider_surface_store::RecordSurface::carrier_legacy(
+            crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+            pinned.stamp.provider_path.to_string(),
+            child_canonical.to_string(),
+            Arc::from(content),
+            pinned.source_map.as_ref().map(|map| (**map).clone()),
+            Arc::from(REQUEST_SURFACE_APP),
+        ),
+    );
+}
+
+fn foreign_definition_params(parent_uri: &Uri, position: Position) -> GotoDefinitionParams {
+    GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: parent_uri.clone(),
+            },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    }
+}
+
+/// A FOREIGN carrier surface that moves to different bytes and back while the
+/// provider holds the query ends byte- and map-identical to the pinned one, but
+/// the provider may have answered against the intermediate surface: the foreign
+/// location is dropped, never mapped through the pinned map.
+#[tokio::test(flavor = "multi_thread")]
+async fn definition_drops_foreign_carrier_location_when_foreign_surface_moves_and_returns() {
+    let (service, provider, parent_uri, position, child_ide_path, child_canonical) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+    let parent_ctx = synced_type_provider_context(server, &parent_uri).await;
+    let store = server.documents.provider_surfaces().clone();
+    let synced = store
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    // The surface the request pins is the one the round trip below returns to,
+    // byte- and map-identical.
+    record_foreign_child_surface(&store, &synced, &child_canonical, &synced.provider_content);
+    let pinned = store
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let unmoved = server
+        .goto_definition(foreign_definition_params(&parent_uri, position))
+        .await
+        .expect("an unmoved definition succeeds");
+    assert!(
+        format!("{unmoved:?}").contains("/Child.vue"),
+        "the pinned foreign surface maps the location when nothing moves: {unmoved:?}"
+    );
+    provider.set_on_query(
+        &parent_ctx.tsx_path,
+        Box::new(move || {
+            let drifted = format!("{}\n// drift", pinned.provider_content);
+            record_foreign_child_surface(&store, &pinned, &child_canonical, &drifted);
+            record_foreign_child_surface(
+                &store,
+                &pinned,
+                &child_canonical,
+                &pinned.provider_content,
+            );
+        }),
+    );
+
+    let response = server
+        .goto_definition(foreign_definition_params(&parent_uri, position))
+        .await
+        .expect("definition request should succeed");
+    let locations = match response {
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        None => Vec::new(),
+        other => panic!("unexpected definition response shape: {other:?}"),
+    };
+    assert!(
+        !locations
+            .iter()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue")),
+        "a foreign surface that changed and changed back during the query must not \
+         vouch the provider's location, got {locations:?}"
+    );
+}
+
+/// A FOREIGN carrier surface a definition location was decoded through stays
+/// bracketed until settlement: a change to it after the decode supersedes the
+/// answer rather than deliver a location mapped through a replaced surface.
+#[tokio::test(flavor = "multi_thread")]
+async fn definition_decoded_through_a_foreign_surface_settles_only_while_it_holds() {
+    let (service, _provider, parent_uri, position, child_ide_path, child_canonical) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+    let unmoved = server
+        .goto_definition(foreign_definition_params(&parent_uri, position))
+        .await
+        .expect("an unmoved definition succeeds");
+    assert!(
+        format!("{unmoved:?}").contains("/Child.vue"),
+        "the unmoved definition maps the foreign location: {unmoved:?}"
+    );
+
+    let store = server.documents.provider_surfaces().clone();
+    let pinned = store
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let moved = Arc::clone(&moved);
+        server.request_barriers().clear();
+        server.request_barriers().arm(
+            super::test_support::RequestBarrier::Settlement,
+            Arc::new(move |arrival| {
+                if arrival == 0 {
+                    let drifted = format!("{}\n// drift", pinned.provider_content);
+                    record_foreign_child_surface(&store, &pinned, &child_canonical, &drifted);
+                    moved.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Box::pin(async {})
+            }),
+        );
+    }
+    let raced = server
+        .goto_definition(foreign_definition_params(&parent_uri, position))
+        .await;
+    server.request_barriers().clear();
+    assert!(moved.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a definition decoded through a foreign surface that moved before settlement \
+         answers ContentModified: {raced:?}"
     );
 }
 

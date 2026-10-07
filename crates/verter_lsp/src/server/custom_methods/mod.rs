@@ -669,6 +669,12 @@ impl VerterLanguageServer {
     /// unavailable / produced against a superseded surface — fail closed).
     /// Display-only: the value is the provider's display string verbatim,
     /// never parsed out of rendered hover markdown.
+    ///
+    /// The bindings and the provider surface are read under one foreground
+    /// admission and settled by its disposition, so an edit that commits
+    /// between the bindings read and the surface capture answers
+    /// `ContentModified` instead of mapping one revision's binding spans
+    /// through another revision's surface.
     pub async fn get_binding_types(&self, params: GetAnalysisParams) -> Result<serde_json::Value> {
         let uri = params.uri;
         tracing::debug!("$/verter/getBindingTypes: {uri}");
@@ -677,22 +683,34 @@ impl VerterLanguageServer {
             Ok(u) => u,
             Err(_) => return Ok(serde_json::Value::Object(serde_json::Map::new())),
         };
+        let types = self
+            .answer_foreground(
+                crate::documents::ForegroundRoute::BindingTypes,
+                &parsed_uri,
+                async { Ok(Some(self.binding_types(&parsed_uri).await)) },
+            )
+            .await?;
+        Ok(types.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())))
+    }
 
+    /// The `getBindingTypes` answer for `parsed_uri`, computed inside its
+    /// foreground admission.
+    async fn binding_types(&self, parsed_uri: &Uri) -> serde_json::Value {
         let mut result = serde_json::Map::new();
 
         // Get analysis for the file's bindings
-        let analysis = self.documents.get_analysis(&parsed_uri);
+        let analysis = self.documents.get_analysis(parsed_uri);
         let Some(analysis) = analysis else {
-            return Ok(serde_json::Value::Object(result));
+            return serde_json::Value::Object(result);
         };
 
         // Need type provider and TSX context for type queries
         let Some(tp) = &self.type_provider else {
-            return Ok(serde_json::Value::Object(result));
+            return serde_json::Value::Object(result);
         };
         // The context is built from ONE captured immutable provider surface.
-        let Some(ctx) = self.type_provider_context(&parsed_uri) else {
-            return Ok(serde_json::Value::Object(result));
+        let Some(ctx) = self.type_provider_context(parsed_uri) else {
+            return serde_json::Value::Object(result);
         };
 
         for binding in &analysis.bindings {
@@ -719,7 +737,7 @@ impl VerterLanguageServer {
                 // Post-await validation: a hover produced against a surface that
                 // no longer matches must be DROPPED (fail closed) — the binding
                 // reports `null` rather than a type read off a superseded surface.
-                if !self.provider_context_still_valid(&parsed_uri, &ctx) {
+                if !self.provider_context_still_valid(parsed_uri, &ctx) {
                     tracing::debug!(
                         "getBindingTypes: dropping provider hover — captured surface \
                          no longer valid"
@@ -747,7 +765,7 @@ impl VerterLanguageServer {
             }
         }
 
-        Ok(serde_json::Value::Object(result))
+        serde_json::Value::Object(result)
     }
 
     /// Handle `$/verter/getComponentParents` request.

@@ -196,26 +196,74 @@ impl VerterLanguageServer {
         None
     }
 
+    /// Run `read` — several reads of one imported child — so that every value
+    /// it returns describes ONE host revision of that child, and record that
+    /// revision as the request's dependency evidence.
+    ///
+    /// The revision is sampled on both sides of `read`; equal samples prove no
+    /// re-registration landed between the child reads, so analysis spans are
+    /// never interpreted through another revision's source or geometry. A cold
+    /// child is registered by the read itself, so a moved revision is read once
+    /// more at the revision it settled on. A revision that moves across that
+    /// read too is a concurrent edit: the read yields nothing, and the revision
+    /// it began at is recorded so the request settles `ContentModified` rather
+    /// than answer without the child it asked about.
+    fn read_child_at_one_revision<T>(
+        &self,
+        child_canonical_id: &str,
+        mut read: impl FnMut() -> Option<T>,
+    ) -> Option<T> {
+        let revision = || {
+            self.documents
+                .host()
+                .registered_source_revision_token(child_canonical_id)
+        };
+        let mut began_at = None;
+        for _ in 0..2 {
+            let before = revision();
+            began_at = began_at.or(before);
+            let value = read()?;
+            #[cfg(test)]
+            {
+                let hook = self.child_read_hook.lock().take();
+                if let Some(mut hook) = hook {
+                    hook();
+                    *self.child_read_hook.lock() = Some(hook);
+                }
+            }
+            let after = revision();
+            if before == after {
+                if let Some(at) = after {
+                    crate::documents::ForegroundRequest::bracket_dependency(child_canonical_id, at);
+                }
+                return Some(value);
+            }
+        }
+        if let Some(at) = began_at {
+            crate::documents::ForegroundRequest::bracket_dependency(child_canonical_id, at);
+        }
+        None
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_child_read_hook_for_test(&self, hook: Option<super::ChildReadHook>) {
+        *self.child_read_hook.lock() = hook;
+    }
+
     fn resolved_component_document(
         &self,
         child_canonical_id: &str,
     ) -> Option<ResolvedComponentDocument> {
-        let child_analysis = self
-            .documents
-            .host()
-            .get_analysis(child_canonical_id)
-            .or_else(|| self.ensure_component_ready(child_canonical_id))?;
-        let child_source = self.documents.host().get_source(child_canonical_id)?;
-        if let Some(child_revision) = self
-            .documents
-            .host()
-            .registered_source_revision_token(child_canonical_id)
-        {
-            crate::documents::ForegroundRequest::bracket_dependency(
-                child_canonical_id,
-                child_revision,
-            );
-        }
+        let (child_analysis, child_source) =
+            self.read_child_at_one_revision(child_canonical_id, || {
+                let analysis = self
+                    .documents
+                    .host()
+                    .get_analysis(child_canonical_id)
+                    .or_else(|| self.ensure_component_ready(child_canonical_id))?;
+                let source = self.documents.host().get_source(child_canonical_id)?;
+                Some((analysis, source))
+            })?;
         let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
         let child_uri = crate::uri::path_to_file_uri(child_canonical_id)?;
 
@@ -1109,20 +1157,19 @@ impl VerterLanguageServer {
             component_name,
         )?;
 
-        let analysis = self
-            .documents
-            .host()
-            .get_analysis(&child_canonical_id)
-            .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
-
-        let (child_structure, child_revision) = self
-            .documents
-            .host()
-            .registered_file_structure_snapshot(&child_canonical_id)?;
-        crate::documents::ForegroundRequest::bracket_dependency(
-            &child_canonical_id,
-            child_revision,
-        );
+        let (analysis, child_structure) =
+            self.read_child_at_one_revision(&child_canonical_id, || {
+                let analysis = self
+                    .documents
+                    .host()
+                    .get_analysis(&child_canonical_id)
+                    .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
+                let (structure, _) = self
+                    .documents
+                    .host()
+                    .registered_file_structure_snapshot(&child_canonical_id)?;
+                Some((analysis, structure))
+            })?;
         let child_source = std::sync::Arc::clone(child_structure.source().source_arc());
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
         let blocks = project_carrier_blocks(&child_structure);

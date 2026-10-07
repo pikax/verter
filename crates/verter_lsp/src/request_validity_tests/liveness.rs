@@ -88,7 +88,8 @@ pub(super) async fn assert_live(route: Route, movement: Movement) {
          (provider dispatches: {dispatches})"
     );
     assert_eq!(
-        dispatches, 1,
-        "{route:?}/{movement:?}: exactly one provider dispatch per request"
+        dispatches,
+        route.provider_queries_per_request(),
+        "{route:?}/{movement:?}: exactly one provider dispatch per provider query"
     );
 }

@@ -60,6 +60,7 @@ const RESOLVED_DETAIL: &str = "resolved by the provider";
 const RESOLVED_IMPORT: &str = "import { messageFromProvider } from './provider'\n";
 const CODE_ACTION_TITLE: &str = "Replace the greeting";
 const INLAY_LABEL: &str = ": string";
+const BINDING_TYPE: &str = "const msg: \"hello\" (binding)";
 
 macro_rules! foreground_routes {
     ($(
@@ -160,6 +161,11 @@ foreground_routes! {
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
+    binding_types => BindingTypes {
+        answers_through_diagnostics_republication: DiagnosticsRepublication,
+        answers_through_identical_surface_records: IdenticalSurfaceRecord,
+        answers_through_equivalent_root_publication: EquivalentRootPublication,
+    },
 }
 
 /// How one request ended, reduced to what a schedule may assert on.
@@ -198,11 +204,15 @@ impl Drop for Fixture {
 
 impl Fixture {
     pub(super) async fn new() -> Self {
+        Self::with_host_config(verter_session::HostConfig::default()).await
+    }
+
+    pub(super) async fn with_host_config(host_config: verter_session::HostConfig) -> Self {
         let (temp, service, drain, provider, workspace_id) =
             make_definition_test_server_with_config(
                 &[(APP_PATH, "vue", APP)],
                 crate::TypeProviderKind::Tsgo,
-                verter_session::HostConfig::default(),
+                host_config,
                 false,
             )
             .await;
@@ -292,7 +302,30 @@ impl Route {
             | Route::CompletionResolve
             | Route::CodeAction
             | Route::InlayHint
-            | Route::SemanticTokens => false,
+            | Route::SemanticTokens
+            | Route::BindingTypes => false,
+        }
+    }
+
+    /// Provider queries one unmoved request of this route makes.
+    pub(super) fn provider_queries_per_request(self) -> usize {
+        match self {
+            // One quick-info query per script binding of the fixture: `msg`
+            // and `greet`.
+            Route::BindingTypes => 2,
+            Route::Hover
+            | Route::SignatureHelp
+            | Route::Definition
+            | Route::TypeDefinition
+            | Route::References
+            | Route::DocumentHighlight
+            | Route::PrepareRename
+            | Route::Rename
+            | Route::Completion
+            | Route::CompletionResolve
+            | Route::CodeAction
+            | Route::InlayHint
+            | Route::SemanticTokens => 1,
         }
     }
 
@@ -313,6 +346,7 @@ impl Route {
             Route::CodeAction => matches!(call, MockCall::GetCodeActions { .. }),
             Route::InlayHint => matches!(call, MockCall::GetInlayHints { .. }),
             Route::SemanticTokens => matches!(call, MockCall::GetSemanticTokens { .. }),
+            Route::BindingTypes => matches!(call, MockCall::GetHover { .. }),
         }
     }
 
@@ -540,6 +574,20 @@ impl Route {
                     }],
                 );
             }
+            Route::BindingTypes => {
+                let declaration = fixture.position("msg = 'hello'", 0);
+                provider.set_hover(
+                    &path,
+                    fixture.tsx_offset(&ctx, declaration),
+                    Some(wire::HoverInfo {
+                        contents: BINDING_TYPE.to_string(),
+                        display_signature: Some(
+                            crate::type_provider::mock::test_display_signature(BINDING_TYPE),
+                        ),
+                        ..Default::default()
+                    }),
+                );
+            }
         }
         armed
     }
@@ -737,6 +785,19 @@ impl Route {
                     }
                     _ => None,
                 }),
+            Route::BindingTypes => server
+                .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+                    uri: uri.as_str().to_string(),
+                })
+                .await
+                .map(|types| {
+                    types
+                        .get("msg")
+                        .and_then(|binding| binding.get("displaySignature"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|signature| signature.contains(BINDING_TYPE))
+                        .map(str::to_string)
+                }),
         };
         match reply {
             // Each fixture lives in its own temporary directory; answers from
@@ -808,8 +869,8 @@ async fn assert_steady(route: Route) {
     assert!(!answer.is_empty(), "{route:?}: the answer is nonempty");
     assert_eq!(
         fixture.dispatches(route),
-        1,
-        "{route:?}: one provider dispatch per unmoved request"
+        route.provider_queries_per_request(),
+        "{route:?}: one provider dispatch per provider query of an unmoved request"
     );
     for barrier in BARRIERS {
         assert!(
