@@ -375,3 +375,63 @@ real_provider_test!(
         assert!(!text.to_lowercase().contains(": any"), "import hover should NOT be any, got: {text}");
     }
 );
+
+// ---------------------------------------------------------------------------
+// Concurrent surface publication during a hover
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    hover_answers_through_identical_ide_surface_republication,
+    fixture = "single-project",
+    async fn run(session) {
+        use crate::server::test_support::RequestBarrier;
+
+        let uri = session.open_fixture_file("src/App.vue").await;
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
+            return;
+        }
+        let pos = session.find_position(&uri, "{{ count }}", 3);
+        let unmoved = session
+            .hover_text(&uri, pos)
+            .await
+            .expect("hover on count answers when nothing moves");
+        assert!(
+            unmoved.contains("count") && unmoved.contains("number"),
+            "the unmoved hover names count: number, got: {unmoved}"
+        );
+
+        // Republish the carrier's IDE surface, byte- and map-identical, at
+        // every point the server settles a hover basis.
+        let barriers = session.server().request_barriers();
+        let republications = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for barrier in [RequestBarrier::Capture, RequestBarrier::Settlement] {
+            let server = session.server().clone();
+            let uri = uri.clone();
+            let republications = std::sync::Arc::clone(&republications);
+            barriers.arm(
+                barrier,
+                std::sync::Arc::new(move |_| {
+                    server.test_record_ide_surface(&uri, None, None);
+                    republications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Box::pin(async {})
+                }),
+            );
+        }
+        let moved = session.hover_result(&uri, pos).await;
+        barriers.clear();
+
+        assert!(
+            republications.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the surface must be republished during the request"
+        );
+        let moved = moved
+            .unwrap_or_else(|error| {
+                panic!("an identical surface republication is not a content change: {error:?}")
+            })
+            .expect("hover answers through an identical surface republication");
+        assert_eq!(
+            moved, unmoved,
+            "an identical surface republication leaves the hover unchanged"
+        );
+    }
+);

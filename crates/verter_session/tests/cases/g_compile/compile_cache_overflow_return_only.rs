@@ -225,14 +225,14 @@ fn overflow_skips_scheduler_artifact_commit() {
 /// so a stale artifact left in the map after a generation bump is
 /// invisible to `try_get_artifact` but visible here. The
 /// refusal arm calls
-/// `scheduler.remove_artifact_if_not_newer_than(canonical,
-/// profile_hash, compile_start_generation)`; without this call the
+/// `scheduler.remove_artifact_not_newer_than(compile_start_witness,
+/// profile_hash)`; without this call the
 /// prior successful compile's artifact would survive in
 /// `last_known_good_artifact` indefinitely. The generation gate
 /// preserves a newer artifact when a slow refused compile races
 /// against a fast successful compile at a later generation —
 /// exercised by the dedicated scheduler-level test
-/// `remove_artifact_if_not_newer_than_preserves_newer_generation_artifact`.
+/// `remove_artifact_not_newer_than_preserves_newer_generation_artifact`.
 #[test]
 fn overflow_recompile_evicts_prior_scheduler_artifact() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -278,7 +278,7 @@ fn overflow_recompile_evicts_prior_scheduler_artifact() {
     // `last_known_good_artifact` (visible without that filter). A
     // stale artifact in `last_known_good_artifact` is the
     // discriminator: a refusal arm that does NOT route through
-    // `remove_artifact_if_not_newer_than(...)` leaves the prior
+    // `remove_artifact_not_newer_than(...)` leaves the prior
     // artifact in the scheduler indefinitely; the symmetric call
     // evicts it and both probes return `None`.
     assert!(
@@ -298,7 +298,7 @@ fn overflow_recompile_evicts_prior_scheduler_artifact() {
          `last_known_good_artifact`). A refusal arm that removes only \
          `compile_slots` leaves the prior artifact in the scheduler \
          indefinitely; the symmetric \
-         `scheduler.remove_artifact_if_not_newer_than(...)` call \
+         `scheduler.remove_artifact_not_newer_than(...)` call \
          evicts it."
     );
 }

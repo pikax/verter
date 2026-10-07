@@ -123,6 +123,112 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct Tagged(&'static str);
+
+    impl crate::node::SnapshotData for Tagged {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn analyze(scheduler: &Scheduler, id: &str) -> crate::node::WitnessedSource {
+        scheduler.submit_request(Request {
+            file_id: id.into(),
+            source: None,
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            file_language: None,
+            request_context: None,
+        });
+        scheduler.drive_all();
+        scheduler
+            .try_get_witnessed_source(id)
+            .expect("analysis commits a current source")
+    }
+
+    fn artifact_tag(scheduler: &Scheduler, id: &str, profile_hash: u64) -> Option<&'static str> {
+        scheduler
+            .try_get_last_known_good(id, profile_hash)
+            .and_then(|artifact| artifact.downcast_data::<Tagged>().map(|tagged| tagged.0))
+    }
+
+    #[test]
+    fn delayed_external_publication_cannot_cross_a_retired_incarnation() {
+        const PUBLISHED: u64 = 7;
+        const CLEANED: u64 = 9;
+        for reset in [false, true] {
+            let loader = Arc::new(crate::source_loader::MemorySourceLoader::new());
+            loader.insert("/external.vue".into(), Arc::from("same"));
+            let scheduler = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
+            let stale = analyze(&scheduler, "/external.vue").witness;
+
+            // The delayed publisher captured its witness above and parks
+            // between compute and publication.
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            let publisher = {
+                let scheduler = scheduler.clone();
+                let stale = stale.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                std::thread::spawn(move || {
+                    entered.wait();
+                    release.wait();
+                    let committed =
+                        scheduler.commit_artifact(&stale, PUBLISHED, Arc::new(Tagged("stale")));
+                    let evicted = scheduler.remove_artifact_not_newer_than(&stale, CLEANED);
+                    (committed, evicted)
+                })
+            };
+            entered.wait();
+            if reset {
+                scheduler.reset();
+            } else {
+                scheduler.remove("/external.vue");
+            }
+            // Re-add the same content at the same generation: without the
+            // generation floor the successor reuses the retired generation.
+            scheduler.generation_floors.clear();
+            let current = analyze(&scheduler, "/external.vue");
+            assert_eq!(current.snapshot.source, Arc::from("same"));
+            assert_eq!(current.witness.generation(), stale.generation());
+            assert_ne!(current.witness.incarnation(), stale.incarnation());
+            assert!(scheduler.try_get_source_for_witness(&stale).is_none());
+            assert!(scheduler
+                .try_get_source_for_witness(&current.witness)
+                .is_some());
+            assert!(scheduler.commit_artifact(
+                &current.witness,
+                CLEANED,
+                Arc::new(Tagged("current"))
+            ));
+
+            release.wait();
+            let (committed, evicted) = publisher.join().expect("publisher panicked");
+            assert!(!committed, "a retired incarnation must not publish");
+            assert!(!evicted, "a retired incarnation must not clean up");
+            assert_eq!(artifact_tag(&scheduler, "/external.vue", PUBLISHED), None);
+            assert_eq!(
+                artifact_tag(&scheduler, "/external.vue", CLEANED),
+                Some("current")
+            );
+
+            // The current witness still publishes and cleans up.
+            assert!(scheduler.commit_artifact(
+                &current.witness,
+                PUBLISHED,
+                Arc::new(Tagged("current"))
+            ));
+            assert_eq!(
+                artifact_tag(&scheduler, "/external.vue", PUBLISHED),
+                Some("current")
+            );
+            assert!(scheduler.remove_artifact_not_newer_than(&current.witness, CLEANED));
+            assert_eq!(artifact_tag(&scheduler, "/external.vue", CLEANED), None);
+        }
+    }
+
     #[test]
     fn unknown_removals_do_not_allocate_restart_history() {
         let scheduler = Scheduler::test_new_sync(
