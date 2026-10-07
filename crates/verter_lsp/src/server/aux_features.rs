@@ -187,9 +187,11 @@ pub(super) async fn handle_document_highlight(
 ) -> Result<Option<Vec<DocumentHighlight>>> {
     let uri = &params.text_document_position_params.text_document.uri;
     server
-        .settle_foreground_with_generation_retry(uri, || {
-            handle_document_highlight_attempt(server, &params)
-        })
+        .answer_foreground(
+            crate::documents::ForegroundRoute::DocumentHighlight,
+            uri,
+            handle_document_highlight_attempt(server, &params),
+        )
         .await
 }
 
@@ -359,9 +361,11 @@ pub(super) async fn handle_code_action(
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     server
-        .settle_foreground_with_generation_retry(&params.text_document.uri, || {
-            handle_code_action_attempt(server, &params)
-        })
+        .answer_repaired_foreground(
+            crate::documents::ForegroundRoute::CodeAction,
+            &params.text_document.uri,
+            handle_code_action_attempt(server, &params),
+        )
         .await
 }
 
@@ -768,10 +772,7 @@ pub(super) async fn handle_code_action_with_audit(
         verter_audit::payloads::tags::LspMethodTag::CodeAction,
         target_identity,
         None,
-        async move {
-            server.prepare_foreground(&uri).await?;
-            handle_code_action(server, params).await
-        },
+        async move { handle_code_action(server, params).await },
         |payload, value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
             payload.response_size_bytes =
@@ -786,9 +787,11 @@ pub(super) async fn handle_semantic_tokens_full(
     params: SemanticTokensParams,
 ) -> Result<Option<SemanticTokensResult>> {
     server
-        .settle_foreground_with_generation_retry(&params.text_document.uri, || {
-            handle_semantic_tokens_full_attempt(server, &params)
-        })
+        .answer_foreground(
+            crate::documents::ForegroundRoute::SemanticTokens,
+            &params.text_document.uri,
+            handle_semantic_tokens_full_attempt(server, &params),
+        )
         .await
 }
 
@@ -891,9 +894,11 @@ pub(super) async fn handle_inlay_hint(
     params: InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>> {
     server
-        .settle_foreground_with_generation_retry(&params.text_document.uri, || {
-            handle_inlay_hint_attempt(server, &params)
-        })
+        .answer_foreground(
+            crate::documents::ForegroundRoute::InlayHint,
+            &params.text_document.uri,
+            handle_inlay_hint_attempt(server, &params),
+        )
         .await
 }
 

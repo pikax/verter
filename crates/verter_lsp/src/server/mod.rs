@@ -343,7 +343,8 @@ impl Eq for ImportedChildContractFreshnessKey {}
 #[derive(Clone)]
 struct ChildPublicContractSnapshot {
     contract: verter_session::framework::ComponentContractAvailability,
-    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
+    publication_witness:
+        Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
     host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
     freshness: ImportedChildContractFreshnessKey,
 }
@@ -371,13 +372,17 @@ struct BarrelComponentRouteSnapshot {
     identity: AuthoredBarrelComponentRouteIdentity,
     terminal_canonical_id: String,
     contract: verter_session::framework::ComponentContractAvailability,
-    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
+    publication_witness:
+        Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
     terminal_host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
     freshness: ImportedChildContractFreshnessKey,
 }
 
 #[cfg(test)]
 type ChildContractAfterProjectionHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+type ChildReadHook = Box<dyn FnMut() + Send + 'static>;
 
 /// The Verter language server implementation.
 ///
@@ -512,6 +517,10 @@ pub struct ServerCore {
     #[cfg(test)]
     child_contract_after_projection_hook:
         parking_lot::Mutex<Option<ChildContractAfterProjectionHook>>,
+    /// Runs after each read of an imported child and before the read is
+    /// proven to describe one child revision.
+    #[cfg(test)]
+    child_read_hook: parking_lot::Mutex<Option<ChildReadHook>>,
     /// Project-level coalescing singleflight for `resync_open_files`. Background
     /// init fires a full close+reopen sweep of every open file up to twice per
     /// pass, and a superseded init generation can fire it concurrently with the
@@ -597,18 +606,6 @@ pub struct ServerCore {
     #[cfg(test)]
     completion_snapshot_pauses:
         parking_lot::Mutex<std::collections::VecDeque<CompletionSnapshotPause>>,
-    #[cfg(test)]
-    completion_before_final_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
-    #[cfg(test)]
-    completion_final_snapshot_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
-    /// Runs after every recomputation of the final native completion, while
-    /// the commit fence is still held.
-    #[cfg(test)]
-    completion_final_recompute_hook: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// Runs once a settled request route has observed its basis current, before
-    /// it replies.
-    #[cfg(test)]
-    settlement_observed_hook: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Named points inside a foreground request at which a test moves state.
     #[cfg(test)]
     request_barriers: Arc<test_support::RequestBarriers>,
@@ -690,12 +687,6 @@ fn e2e_provider_only_completions_enabled() -> bool {
         )
 }
 
-/// Recomputations one request spends when only the diagnostics generation of
-/// its document moves (see `settle_with_generation_retry`). Convergence comes
-/// from the background work draining, not from this number; it is only the
-/// ceiling past which sustained churn answers `ContentModified`.
-const GENERATION_ONLY_RECOMPUTE_LIMIT: usize = 8;
-
 impl VerterLanguageServer {
     /// Repair request-answering surfaces before capturing their response basis.
     /// Passive decoration requests keep their existing cache-only policy.
@@ -717,113 +708,138 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Recompute when background settlement advances only the diagnostics
-    /// generation, until one computation settles against an unmoved basis.
-    /// Never reuse a superseded payload or retry an edit/ownership race.
-    async fn settle_foreground_with_generation_retry<T, F>(
+    /// Admit one foreground request: capture its document revision and
+    /// project authority, once, before any of its computation reads them.
+    pub(super) async fn admit_foreground(
         &self,
+        route: crate::documents::ForegroundRoute,
         uri: &Uri,
-        compute: impl FnMut() -> F,
-    ) -> Result<Option<T>>
-    where
-        F: std::future::Future<Output = Result<Option<T>>>,
-    {
-        self.settle_with_generation_retry(uri, false, compute).await
+    ) -> Arc<crate::documents::ForegroundRequest> {
+        let request = crate::documents::ForegroundRequest::admit(&self.documents, route, uri);
+        self.captured_foreground(request).await
     }
 
-    /// [`Self::settle_foreground_with_generation_retry`] for request-answering
-    /// routes: each recomputation repeats the current-file repair BEFORE it
-    /// captures its basis. The background sync that advanced the generation
-    /// can leave the carrier's IDE compile cold; without the repair the
-    /// recomputation's own compile would advance the generation again after
-    /// the capture and fail the retry as stale.
-    async fn settle_request_with_generation_retry<T, F>(
+    /// [`Self::admit_foreground`] for a route whose answer reads source under
+    /// the edit-commit fence. Admission waits for every edit already queued on
+    /// that fence to commit and releases it before any computation, so a
+    /// request sent after an edit is never pinned to the revision that edit
+    /// replaces. An edit that commits after admission still moves the
+    /// admitted revision.
+    async fn admit_foreground_after_edit_commit(
         &self,
+        route: crate::documents::ForegroundRoute,
         uri: &Uri,
-        compute: impl FnMut() -> F,
-    ) -> Result<Option<T>>
-    where
-        F: std::future::Future<Output = Result<Option<T>>>,
-    {
-        self.settle_with_generation_retry(uri, true, compute).await
+    ) -> Arc<crate::documents::ForegroundRequest> {
+        let request = {
+            let _edit_commit = self.did_change_mutex.lock().await;
+            crate::documents::ForegroundRequest::admit(&self.documents, route, uri)
+        };
+        self.captured_foreground(request).await
     }
 
-    /// The diagnostics generation is per file, but it also advances for work
-    /// that changes nothing the client sent: each settled edit of an imported
-    /// file bumps every open importer, and each background resync or compile
-    /// of the file bumps it again. Opening several files back to back
-    /// therefore moves the requested document's generation several times
-    /// while one request is in flight, and a single recomputation can itself
-    /// observe the next move. A generation-only move is not a content change
-    /// and must not answer `ContentModified`: recompute against a fresh basis
-    /// until one computation observes no move. Every move is finite
-    /// background work, so this converges once that work drains; the bound
-    /// only stops a request from chasing unbounded churn. Document edits,
-    /// close/reopen and workspace replacement still fail closed at once.
-    async fn settle_with_generation_retry<T, F>(
+    async fn captured_foreground(
         &self,
-        uri: &Uri,
-        repair_before_retry: bool,
-        mut compute: impl FnMut() -> F,
-    ) -> Result<Option<T>>
-    where
-        F: std::future::Future<Output = Result<Option<T>>>,
-    {
-        let first = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
+        request: Arc<crate::documents::ForegroundRequest>,
+    ) -> Arc<crate::documents::ForegroundRequest> {
         #[cfg(test)]
         self.request_barriers
             .reach(test_support::RequestBarrier::Capture)
             .await;
-        let mut retry = None;
-        let mut recomputations = 0;
-        loop {
-            let response = compute().await?;
-            if !first.document_and_workspace_are_current(&self.documents, uri) {
-                // An edit, close/reopen or workspace replacement since the
-                // request began: a genuine content change.
-                return first.settle(&self.documents, uri, response);
-            }
-            #[cfg(test)]
-            self.request_barriers
-                .reach(test_support::RequestBarrier::Settlement)
-                .await;
-            let settlement = retry.as_ref().unwrap_or(&first);
-            // One observation of the basis decides the reply. Background
-            // settlement can move the generation right after it; that move is
-            // later than this answer, so the basis is not read a second time.
-            if response.is_none() || settlement.is_current(&self.documents, uri) {
-                #[cfg(test)]
-                self.run_settlement_observed_hook();
-                return Ok(response);
-            }
-            if recomputations == GENERATION_ONLY_RECOMPUTE_LIMIT {
-                return Err(tower_lsp_server::jsonrpc::Error::new(
-                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                ));
-            }
-            drop(response);
-            recomputations += 1;
-            tracing::debug!(
-                "settle: recomputing {} after a diagnostics-generation-only move ({recomputations})",
-                uri.as_str()
-            );
-            if repair_before_retry {
-                self.prepare_foreground(uri).await?;
-                if !first.document_and_workspace_are_current(&self.documents, uri) {
-                    return Err(tower_lsp_server::jsonrpc::Error::new(
-                        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                    ));
-                }
-            }
-            retry = Some(crate::documents::ForegroundSettlement::capture(
-                &self.documents,
-                uri,
-            ));
-            #[cfg(test)]
-            self.request_barriers
-                .reach(test_support::RequestBarrier::Capture)
-                .await;
+        request
+    }
+
+    /// Settle `request`'s computed answer through its one disposition.
+    pub(super) async fn settle_foreground<T>(
+        &self,
+        request: &crate::documents::ForegroundRequest,
+        response: Option<T>,
+    ) -> crate::documents::Settled<T> {
+        #[cfg(test)]
+        self.request_barriers
+            .reach(test_support::RequestBarrier::Settlement)
+            .await;
+        request.settle(&self.documents, response)
+    }
+
+    /// Answer one foreground request: admit it, compute its answer once
+    /// against that admission, and settle it. Background work that moves no
+    /// admitted input — a diagnostics-generation advance, an identical surface
+    /// re-record, an equivalent root publication — neither recomputes the
+    /// answer nor costs it; an edit, close/reopen, project-authority
+    /// replacement or a change to a provider surface the answer was decoded
+    /// through answers `ContentModified`.
+    pub(super) fn answer_foreground<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        // Route computations are large state machines: move each to the heap
+        // once, at entry, so no enclosing future or poll frame holds it inline.
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground(route, uri).await;
+            self.answer_admitted(&request, compute).await
         }
+    }
+
+    /// [`Self::answer_foreground`] admitted through
+    /// [`Self::admit_foreground_after_edit_commit`].
+    pub(super) fn answer_foreground_after_edit_commit<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground_after_edit_commit(route, uri).await;
+            self.answer_admitted(&request, compute).await
+        }
+    }
+
+    /// Compute `request`'s answer once against its admission and settle it.
+    async fn answer_admitted<T, F>(
+        &self,
+        request: &Arc<crate::documents::ForegroundRequest>,
+        compute: F,
+    ) -> Result<Option<T>>
+    where
+        F: std::future::Future<Output = Result<Option<T>>>,
+    {
+        let response = request.compute(compute).await?;
+        self.settle_foreground(request, response)
+            .await
+            .into_result()
+    }
+
+    /// [`Self::answer_foreground`] for request-answering routes that repair the
+    /// current file's provider surface first. The repair runs inside the
+    /// admitted request, so an edit that commits while it runs is a revision
+    /// change of that request, never the revision the request answers.
+    pub(super) fn answer_repaired_foreground<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        let compute = Box::pin(compute);
+        self.answer_foreground(route, uri, async move {
+            self.prepare_foreground(uri).await?;
+            compute.await
+        })
     }
 
     /// Select this request's production deadline from the configured budget
@@ -862,76 +878,6 @@ impl VerterLanguageServer {
     #[cfg(test)]
     async fn maybe_pause_completion_after_snapshot(&self) {
         let pause = self.completion_snapshot_pauses.lock().pop_front();
-        if let Some(pause) = pause {
-            pause.arrived.notify_one();
-            pause.release.notified().await;
-        }
-    }
-
-    #[cfg(test)]
-    fn pause_completion_before_final_native(
-        &self,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let arrived = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self.completion_before_final_pause.lock() = Some(CompletionSnapshotPause {
-            arrived: Arc::clone(&arrived),
-            release: Arc::clone(&release),
-        });
-        (arrived, release)
-    }
-
-    #[cfg(test)]
-    async fn maybe_pause_completion_before_final_native(&self) {
-        let pause = self.completion_before_final_pause.lock().take();
-        if let Some(pause) = pause {
-            pause.arrived.notify_one();
-            pause.release.notified().await;
-        }
-    }
-
-    #[cfg(test)]
-    fn pause_final_completion_after_snapshot(
-        &self,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let arrived = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self.completion_final_snapshot_pause.lock() = Some(CompletionSnapshotPause {
-            arrived: Arc::clone(&arrived),
-            release: Arc::clone(&release),
-        });
-        (arrived, release)
-    }
-
-    #[cfg(test)]
-    fn on_final_completion_recompute(&self, hook: impl Fn() + Send + Sync + 'static) {
-        *self.completion_final_recompute_hook.lock() = Some(Arc::new(hook));
-    }
-
-    #[cfg(test)]
-    fn run_final_completion_recompute_hook(&self) {
-        let hook = self.completion_final_recompute_hook.lock().clone();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
-    #[cfg(test)]
-    fn after_settlement_observed(&self, hook: impl Fn() + Send + Sync + 'static) {
-        *self.settlement_observed_hook.lock() = Some(Arc::new(hook));
-    }
-
-    #[cfg(test)]
-    fn run_settlement_observed_hook(&self) {
-        let hook = self.settlement_observed_hook.lock().clone();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
-    #[cfg(test)]
-    async fn maybe_pause_final_completion_after_snapshot(&self) {
-        let pause = self.completion_final_snapshot_pause.lock().take();
         if let Some(pause) = pause {
             pause.arrived.notify_one();
             pause.release.notified().await;
@@ -1318,6 +1264,8 @@ impl VerterLanguageServer {
             child_public_contract_projection_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             child_contract_after_projection_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            child_read_hook: parking_lot::Mutex::new(None),
             resync_coordinator: Arc::new(crate::resync_singleflight::ResyncCoordinator::new()),
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),
@@ -1344,14 +1292,6 @@ impl VerterLanguageServer {
             did_change_mutex: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             completion_snapshot_pauses: parking_lot::Mutex::new(std::collections::VecDeque::new()),
-            #[cfg(test)]
-            completion_before_final_pause: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            completion_final_snapshot_pause: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            completion_final_recompute_hook: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            settlement_observed_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             request_barriers: Arc::default(),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
@@ -1721,26 +1661,23 @@ impl LanguageServer for VerterLanguageServer {
                 }
                 return nav_features::handle_completion_resolve(self, item).await;
             };
-            if is_provider_resolve
-                && crate::documents::ForegroundSettlement::capture(&self.documents, &uri)
-                    .version()
-                    .is_none()
-            {
+            let request = self
+                .admit_foreground(crate::documents::ForegroundRoute::CompletionResolve, &uri)
+                .await;
+            if is_provider_resolve && !request.document_was_open() {
                 return Err(content_modified());
             }
-            // A resolve always answers an item, so every attempt settles a
-            // `Some`; a generation-only move recomputes it like any other
-            // document response.
-            let resolved = self
-                .settle_foreground_with_generation_retry(&uri, || {
-                    let item = item.clone();
-                    async move {
-                        nav_features::handle_completion_resolve(self, item)
-                            .await
-                            .map(Some)
-                    }
-                })
+            // A resolve always answers an item, so it always settles a `Some`.
+            let resolved = request
+                .compute(Box::pin(nav_features::handle_completion_resolve(
+                    self,
+                    item.clone(),
+                )))
                 .await?;
+            let resolved = self
+                .settle_foreground(&request, Some(resolved))
+                .await
+                .into_result()?;
             Ok(resolved.unwrap_or(item))
         })
         .await
@@ -1765,10 +1702,11 @@ impl LanguageServer for VerterLanguageServer {
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
-                self.prepare_foreground(&uri).await?;
-                self.settle_request_with_generation_retry(&uri, || {
-                    nav_features_navigation::handle_goto_type_definition(self, params.clone())
-                })
+                self.answer_repaired_foreground(
+                    crate::documents::ForegroundRoute::TypeDefinition,
+                    &uri,
+                    nav_features_navigation::handle_goto_type_definition(self, params),
+                )
                 .await
             },
         )
@@ -1787,10 +1725,11 @@ impl LanguageServer for VerterLanguageServer {
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
-                self.prepare_foreground(&uri).await?;
-                self.settle_request_with_generation_retry(&uri, || {
-                    rename_prepare::handle_prepare_rename(self, params.clone())
-                })
+                self.answer_repaired_foreground(
+                    crate::documents::ForegroundRoute::PrepareRename,
+                    &uri,
+                    rename_prepare::handle_prepare_rename(self, params),
+                )
                 .await
             },
         )
@@ -1837,10 +1776,11 @@ impl LanguageServer for VerterLanguageServer {
             .uri
             .clone();
         crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.code_action), async {
-            self.prepare_foreground(&uri).await?;
-            self.settle_request_with_generation_retry(&uri, || {
-                aux_features::handle_signature_help(self, params.clone())
-            })
+            self.answer_repaired_foreground(
+                crate::documents::ForegroundRoute::SignatureHelp,
+                &uri,
+                aux_features::handle_signature_help(self, params),
+            )
             .await
         })
         .await

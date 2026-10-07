@@ -68,13 +68,18 @@ pub fn external_ide_context_from_snapshot(
 /// location drops):
 /// - the path was not captured as a `Current` `CarrierIde` surface when the
 ///   request began;
-/// - the captured surface is no longer honored at merge time (a mid-request
-///   re-sync with different content, or a close, invalidates — a
-///   byte-identical same-map re-sync stays honored);
+/// - the captured surface is no longer current at merge time: its content
+///   epoch, incarnation or owner moved — a mid-request re-sync with different
+///   content or map, a close, or a change that changes back all invalidate; a
+///   byte-identical same-map re-record keeps every epoch and stays current;
 /// - when the foreign carrier is OPEN, its live buffer no longer byte-matches
 ///   the captured carrier source. A CLOSED imported carrier stays mappable
 ///   through the coherent captured source/map generation;
 /// - the captured surface has no usable source map.
+///
+/// A surface that yields a context joins the enclosing foreground request's
+/// settlement bracket, so a change after this decode still supersedes the
+/// answer built from it.
 #[must_use]
 pub fn foreign_ide_context_from_captured(
     store: &ProviderSurfaceStore,
@@ -87,7 +92,7 @@ pub fn foreign_ide_context_from_captured(
     if snapshot.kind != ProviderSurfaceKind::CarrierIde {
         return None;
     }
-    if !store.captured_snapshot_still_honored(snapshot) {
+    if !store.captured_surface_is_current(snapshot) {
         return None;
     }
     // An open foreign carrier is governed by its editor buffer and must still
@@ -102,7 +107,9 @@ pub fn foreign_ide_context_from_captured(
             return None;
         }
     }
-    external_ide_context_from_snapshot(snapshot, negotiated_encoding)
+    let context = external_ide_context_from_snapshot(snapshot, negotiated_encoding)?;
+    crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
+    Some(context)
 }
 
 /// Locate the byte range of a child component's prop identifier IN the captured
@@ -244,9 +251,15 @@ pub fn classify_captured_api_surface(
         // Mappable captured surface: build the context from THE CAPTURED snapshot
         // (its own provider/carrier indexes + source map). A snapshot with no source
         // map fails closed.
+        // A vouching surface joins the enclosing foreground request's settlement
+        // bracket: a change to it before settlement — including one that changes
+        // back — supersedes the answer mapped through it.
         Some(CapturedPathState::Current(snapshot)) => {
             match external_ide_context_from_snapshot(snapshot, negotiated_encoding) {
-                Some(ctx) => ApiSurfaceResolution::Vouched(ctx),
+                Some(ctx) => {
+                    crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
+                    ApiSurfaceResolution::Vouched(ctx)
+                }
                 None => ApiSurfaceResolution::VirtualDrop,
             }
         }

@@ -2409,3 +2409,81 @@ fn current_path_resolves_through_concurrent_identical_resyncs() {
          `Current` with byte-identical content at every instant"
     );
 }
+
+/// The foreground surface bracket follows the content epoch, not the bytes: an
+/// identical re-record keeps the captured surface current, while a change that
+/// changes back, a map-only change, a close with an identical reopen, and a
+/// project owner that changes and changes back over identical bytes each fail
+/// it. The byte oracle honors the change-back, the reopen and the owner round
+/// trip, which is why a request settles through the epochs instead.
+#[test]
+fn foreground_bracket_survives_only_identical_re_records() {
+    enum Step {
+        IdenticalReRecord,
+        ChangeAndChangeBack,
+        MapOnlyChange,
+        CloseAndIdenticalReopen,
+        OwnerChangeAndChangeBack,
+    }
+    for step in [
+        Step::IdenticalReRecord,
+        Step::ChangeAndChangeBack,
+        Step::MapOnlyChange,
+        Step::CloseAndIdenticalReopen,
+        Step::OwnerChangeAndChangeBack,
+    ] {
+        let store = ProviderSurfaceStore::new();
+        let carrier = "carrier A\n";
+        let owned = |provider: &str, owner: &str| {
+            let mut surface = record_surface(provider, carrier);
+            surface.project_owner = Some(Arc::from(owner));
+            surface
+        };
+        let captured = store.record(owned("API A\n", "/a/tsconfig.json"));
+        let (bracket_holds, bytes_honored) = match step {
+            Step::IdenticalReRecord => (true, true),
+            Step::ChangeAndChangeBack => (false, true),
+            Step::MapOnlyChange => (false, false),
+            Step::CloseAndIdenticalReopen => (false, true),
+            Step::OwnerChangeAndChangeBack => (false, true),
+        };
+        match step {
+            Step::IdenticalReRecord => {
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+            Step::ChangeAndChangeBack => {
+                store.record(owned("API B\n", "/a/tsconfig.json"));
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+            Step::MapOnlyChange => {
+                let mut surface = owned("API A\n", "/a/tsconfig.json");
+                surface.map_hash = [7u8; 16];
+                store.record(surface);
+            }
+            Step::CloseAndIdenticalReopen => {
+                let _token = store.forget(VPATH);
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+            Step::OwnerChangeAndChangeBack => {
+                store.record(owned("API A\n", "/b/tsconfig.json"));
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+        }
+        let current = store.current_snapshot(VPATH).expect("the path is current");
+        assert_ne!(current.stamp.generation, captured.stamp.generation);
+        assert_eq!(
+            store.captured_surface_is_current(&captured),
+            bracket_holds,
+            "bracket after {:?}",
+            (
+                current.stamp.content_epoch,
+                current.stamp.incarnation,
+                current.stamp.owner_epoch
+            )
+        );
+        assert_eq!(
+            store.captured_snapshot_still_honored(&captured),
+            bytes_honored
+        );
+    }
+}
