@@ -111,12 +111,19 @@ function productionRustFiles() {
   return productionFilesCache;
 }
 
+/** True when `text` contains any of `forms`, ignoring all whitespace so a
+ * rustfmt-wrapped method chain matches the same as a single-line one. */
+function containsCallForm(text, forms) {
+  const squashed = text.replace(/\s+/g, "");
+  return forms.some((form) => squashed.includes(form.replace(/\s+/g, "")));
+}
+
 /** Production files reaching any of `forms` outside comments. */
 export function deriveCallFormPopulation(forms) {
   return productionRustFiles()
     .filter((rel) => {
       const text = stripRustComments(readRel(rel));
-      return forms.some((form) => text.includes(form));
+      return containsCallForm(text, forms);
     })
     .sort();
 }
@@ -309,7 +316,7 @@ function validateCutover(cut, arh1, errors) {
           continue;
         }
         const text = stripRustComments(readRel(consumer));
-        if (!row.callForms.some((form) => text.includes(form))) {
+        if (!containsCallForm(text, row.callForms)) {
           err(errors, caseId, "consumer-bypasses-owner", `${row.id} ${consumer}`);
         }
       }
