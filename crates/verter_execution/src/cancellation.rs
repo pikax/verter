@@ -33,7 +33,38 @@ struct CancellationState {
 #[derive(Debug)]
 struct AggregateOwners {
     ever_registered: AtomicBool,
-    entries: Mutex<Vec<Weak<CancellationOwnerState>>>,
+    entries: Mutex<OwnerEntries>,
+}
+
+/// Registered owners of one aggregate token. An owner that has detached,
+/// dropped or seen its request cancelled is dead for good, so the liveness
+/// probe pops dead owners off the end until it meets a live one: each
+/// registration is examined as dead at most once, and the probe never
+/// rescans the owners that remain.
+#[derive(Debug, Default)]
+struct OwnerEntries {
+    owners: Vec<Weak<CancellationOwnerState>>,
+    /// Owner entries the liveness probe has examined. Tests only.
+    #[cfg(test)]
+    examined: u64,
+}
+
+impl OwnerEntries {
+    /// Whether any registered owner is still live, discarding the dead
+    /// owners met on the way.
+    fn any_live(&mut self) -> bool {
+        while let Some(last) = self.owners.last() {
+            #[cfg(test)]
+            {
+                self.examined += 1;
+            }
+            if last.upgrade().is_some_and(|owner| owner.is_live()) {
+                return true;
+            }
+            self.owners.pop();
+        }
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -74,7 +105,7 @@ impl CancellationToken {
                 cancelled: AtomicBool::new(false),
                 owners: Some(AggregateOwners {
                     ever_registered: AtomicBool::new(false),
-                    entries: Mutex::new(Vec::new()),
+                    entries: Mutex::new(OwnerEntries::default()),
                 }),
             }),
         }
@@ -104,28 +135,11 @@ impl CancellationToken {
         if self.state.cancelled.load(Ordering::Acquire) {
             return None;
         }
-        if owners.ever_registered.load(Ordering::Acquire) {
-            let mut any_live = false;
-            entries.retain(|weak| {
-                let Some(owner) = weak.upgrade() else {
-                    return false;
-                };
-                if owner.active.load(Ordering::Acquire)
-                    && owner
-                        .request
-                        .as_ref()
-                        .is_none_or(|request| !request.is_cancelled())
-                {
-                    any_live = true;
-                }
-                true
-            });
-            if !any_live {
-                self.state.cancelled.store(true, Ordering::Release);
-                return None;
-            }
+        if owners.ever_registered.load(Ordering::Acquire) && !entries.any_live() {
+            self.state.cancelled.store(true, Ordering::Release);
+            return None;
         }
-        entries.push(Arc::downgrade(&state));
+        entries.owners.push(Arc::downgrade(&state));
         owners.ever_registered.store(true, Ordering::Release);
         Some(CancellationOwner { state })
     }
@@ -149,23 +163,7 @@ impl CancellationToken {
             return false;
         }
 
-        let mut entries = owners.entries.lock();
-        let mut any_live = false;
-        entries.retain(|weak| {
-            let Some(owner) = weak.upgrade() else {
-                return false;
-            };
-            if owner.active.load(Ordering::Acquire)
-                && owner
-                    .request
-                    .as_ref()
-                    .is_none_or(|request| !request.is_cancelled())
-            {
-                any_live = true;
-            }
-            true
-        });
-        if any_live {
+        if owners.entries.lock().any_live() {
             return false;
         }
         self.state.cancelled.store(true, Ordering::Release);
@@ -181,6 +179,18 @@ impl CancellationToken {
             .owners
             .as_ref()
             .is_some_and(|owners| owners.ever_registered.load(Ordering::Acquire))
+    }
+}
+
+impl CancellationOwnerState {
+    /// Attached and its request (if any) not cancelled. Once false, never
+    /// true again.
+    fn is_live(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+            && self
+                .request
+                .as_ref()
+                .is_none_or(|request| !request.is_cancelled())
     }
 }
 
@@ -305,6 +315,85 @@ mod tests {
         let late_request = CancellationToken::new();
         assert!(aggregate.register_owner(Some(late_request)).is_none());
         assert!(aggregate.is_cancelled());
+    }
+
+    fn examined(aggregate: &CancellationToken) -> u64 {
+        aggregate
+            .state
+            .owners
+            .as_ref()
+            .expect("aggregate token")
+            .entries
+            .lock()
+            .examined
+    }
+
+    /// Cancelling sibling owners one by one, polling after each, examines
+    /// every registration a bounded number of times: the work grows
+    /// linearly with the sibling count, never with the owners still
+    /// registered.
+    #[test]
+    fn sibling_owner_cancellations_examine_each_owner_a_bounded_number_of_times() {
+        let mut per_sibling = Vec::new();
+        for siblings in [128_u64, 256, 512, 1024] {
+            let aggregate = CancellationToken::aggregate();
+            let requests: Vec<CancellationToken> =
+                (0..siblings).map(|_| CancellationToken::new()).collect();
+            let registrations: Vec<CancellationOwner> = requests
+                .iter()
+                .map(|request| {
+                    aggregate
+                        .register_owner(Some(request.clone()))
+                        .expect("live aggregate accepts owners")
+                })
+                .collect();
+            let before = examined(&aggregate);
+            // Cancel from the oldest registration forward, then from the
+            // newest back: both ends of the owner list are exercised.
+            let half = requests.len() / 2;
+            for request in requests[..half].iter().chain(requests[half..].iter().rev()) {
+                assert!(!aggregate.is_cancelled() || request.is_cancelled());
+                request.cancel();
+            }
+            assert!(aggregate.is_cancelled(), "no live owner remains");
+            let visited = examined(&aggregate) - before;
+            assert!(
+                visited <= 3 * siblings,
+                "{siblings} sibling cancellations examined {visited} owner entries",
+            );
+            per_sibling.push(visited / siblings);
+            drop(registrations);
+        }
+        assert!(
+            per_sibling.windows(2).all(|pair| pair[0] == pair[1]),
+            "per-sibling probe work is independent of the sibling count: {per_sibling:?}",
+        );
+    }
+
+    /// Dropping every registration lets the probe discard each owner, and
+    /// later live owners are still observed.
+    #[test]
+    fn dropped_owners_are_discarded_and_a_live_owner_keeps_the_job() {
+        let aggregate = CancellationToken::aggregate();
+        let survivor_request = CancellationToken::new();
+        let survivor = aggregate
+            .register_owner(Some(survivor_request.clone()))
+            .expect("first owner registers");
+        let transient: Vec<CancellationOwner> = (0..64)
+            .map(|_| aggregate.register_owner(None).expect("owner registers"))
+            .collect();
+        drop(transient);
+        assert!(!aggregate.is_cancelled(), "the first owner is still live");
+        let owners = aggregate.state.owners.as_ref().expect("aggregate token");
+        assert_eq!(
+            owners.entries.lock().owners.len(),
+            1,
+            "only the live owner stays registered",
+        );
+        survivor_request.cancel();
+        assert!(aggregate.is_cancelled());
+        assert!(owners.entries.lock().owners.is_empty());
+        drop(survivor);
     }
 
     #[test]

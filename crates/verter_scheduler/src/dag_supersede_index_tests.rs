@@ -167,9 +167,80 @@ fn index_terminal_keys(dag: &SchedulerDag, c: &str) -> BTreeSet<DepKey> {
         .unwrap_or_default()
 }
 
+fn scan_blocker_refs(dag: &SchedulerDag, c: &str) -> BTreeMap<(Arc<str>, u64), usize> {
+    dag.artifact_blocker_deps
+        .iter()
+        .filter_map(|(key, set)| {
+            let count = set
+                .deps
+                .iter()
+                .chain(set.failed.iter().map(|record| &record.dep_key))
+                .filter(|dep| dep_canonical(dep).is_some_and(|dc| dc.as_ref() == c))
+                .count();
+            (count > 0).then(|| (key.clone(), count))
+        })
+        .collect()
+}
+
+fn index_blocker_refs(dag: &SchedulerDag, c: &str) -> BTreeMap<(Arc<str>, u64), usize> {
+    dag.canonical_index
+        .blocker_dep_refs
+        .get(c)
+        .map(|owners| owners.iter().map(|(k, v)| (k.clone(), *v)).collect())
+        .unwrap_or_default()
+}
+
+fn scan_gated_file_deps(dag: &SchedulerDag, c: &str) -> BTreeSet<DepKey> {
+    dag.dep_edges
+        .gated_deps()
+        .filter(|dep| dep_canonical(dep).is_some_and(|dc| dc.as_ref() == c))
+        .cloned()
+        .collect()
+}
+
+fn index_gated_file_deps(dag: &SchedulerDag, c: &str) -> BTreeSet<DepKey> {
+    dag.dep_edges
+        .indexed_file_deps()
+        .filter(|dep| dep_canonical(dep).is_some_and(|dc| dc.as_ref() == c))
+        .cloned()
+        .collect()
+}
+
+/// Both sides of every dependency edge agree: each node's
+/// `deps_remaining` entry names a waiter the edge store holds, and the
+/// store holds no edge without one.
+fn assert_edges_match_nodes(dag: &SchedulerDag) {
+    let mut node_edges = 0;
+    for (token, node) in &dag.nodes {
+        for dep in node.deps_remaining.keys() {
+            node_edges += 1;
+            assert!(
+                dag.dep_edges.waiters_of(dep).any(|waiter| waiter == *token),
+                "node {token:?} gated on {dep:?} has no linked edge",
+            );
+        }
+    }
+    assert_eq!(
+        dag.dep_edges.edge_count(),
+        node_edges,
+        "edge store holds edges no node records",
+    );
+}
+
 /// Assert every reverse index bucket for `c` equals its full-scan
 /// oracle. This is the central discriminating check.
 fn assert_index_matches_scan(dag: &SchedulerDag, c: &str) {
+    assert_eq!(
+        index_blocker_refs(dag, c),
+        scan_blocker_refs(dag, c),
+        "blocker-reference index diverged from full scan for {c}",
+    );
+    assert_eq!(
+        index_gated_file_deps(dag, c),
+        scan_gated_file_deps(dag, c),
+        "dependency-edge file index diverged from full scan for {c}",
+    );
+    assert_edges_match_nodes(dag);
     assert_eq!(
         index_fw_gens(dag, c),
         scan_fw_gens(dag, c),
@@ -408,10 +479,13 @@ fn reverse_index_matches_scan_across_submit_and_dedup_merge() {
 #[test]
 fn reverse_index_matches_scan_after_removals_and_shutdown() {
     let mut dag = SchedulerDag::new();
-    let files = ["/a.vue", "/b.vue", "/c.vue"];
+    let owners = ["/a.vue", "/b.vue", "/c.vue"];
+    // Dependency canonicals are checked too: blocker references and gated
+    // edges are indexed under the canonical they name.
+    let files = ["/a.vue", "/b.vue", "/c.vue", "/dep.ts", "/other.ts"];
 
-    // Populate all four surfaces across files and generations.
-    for f in files {
+    // Populate every surface across files and generations.
+    for f in owners {
         for gen in 1..=2u64 {
             submit_node(
                 &mut dag,
@@ -419,12 +493,27 @@ fn reverse_index_matches_scan_after_removals_and_shutdown() {
                 WorkKind::Load,
             );
             submit_node(&mut dag, artifact(f, gen, 3), WorkKind::Artifact);
+            // An Analysis gated on a dependency that is never admitted.
+            dag.submit_expect(
+                file_stage(f, gen, FileStageKey::Analysis),
+                WorkKind::Analysis,
+                Priority::Interactive,
+                vec![analysis_dep("/dep.ts", gen), analysis_dep("/other.ts", gen)],
+                None,
+            );
             let (_h, sender) = completion_pair::<RequestResult>();
             let _ = dag.register_request(&canonical(f), gen, TargetStage::Source, sender, None);
             dag.record_artifact_blockers(
                 &canonical(f),
                 gen,
-                PendingBlockerSet::from_deps(BTreeSet::from([analysis_dep("/dep.ts", gen)])),
+                PendingBlockerSet {
+                    deps: BTreeSet::from([analysis_dep("/dep.ts", gen)]),
+                    failed: if f == "/b.vue" {
+                        vec![failed_record(analysis_dep("/other.ts", gen))]
+                    } else {
+                        Vec::new()
+                    },
+                },
             );
             dag.insert_terminal_dep_failure(failed_record(analysis_dep(f, gen)));
         }
@@ -446,6 +535,18 @@ fn reverse_index_matches_scan_after_removals_and_shutdown() {
     let _ = dag.drain_artifact_blockers(&canonical("/a.vue"), 2);
     dag.scrub_terminal_dep_failures_referencing("/b.vue");
     dag.scrub_artifact_blockers_referencing("/dep.ts");
+    assert!(
+        scan_blocker_refs(&dag, "/dep.ts").is_empty(),
+        "the scrub drops every reference to the removed dependency",
+    );
+    assert_eq!(
+        scan_blocker_gens(&dag, "/b.vue"),
+        BTreeSet::from([1, 2]),
+        "an entry that still names another dependency survives the scrub",
+    );
+    // Retiring a dependency's generation releases its never-admitted
+    // edges through the file index.
+    let _ = dag.retire_generations_below(&canonical("/other.ts"), 2);
     for f in files {
         assert_index_matches_scan(&dag, f);
     }
@@ -474,6 +575,8 @@ fn reverse_index_matches_scan_after_removals_and_shutdown() {
     assert!(dag.canonical_index.node_tokens.is_empty());
     assert!(dag.canonical_index.blocker_owner_gens.is_empty());
     assert!(dag.canonical_index.terminal_failure_keys.is_empty());
+    assert!(dag.canonical_index.blocker_dep_refs.is_empty());
+    assert!(dag.dep_edges.is_drained());
 }
 
 /// The node candidate set a supersede iterates is the bumped

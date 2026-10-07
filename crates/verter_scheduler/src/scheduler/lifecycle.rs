@@ -554,12 +554,7 @@ impl Scheduler {
             // Preserve removal's Shutdown cause before the supersede sweep.
             dag.signal_file_shutdown(&canonical);
             let mut stranded = dag.retire_generations_below(&canonical, last_gen.saturating_add(1));
-            let (_, also_stranded) = dag.cancel_matching(|identity| match identity {
-                WorkNodeIdentity::FileStage { canonical, .. }
-                | WorkNodeIdentity::Artifact { canonical, .. } => canonical.as_ref() == id,
-                WorkNodeIdentity::CacheNode { .. } => false,
-            });
-            stranded.extend(also_stranded);
+            stranded.extend(dag.cancel_canonical(id));
             dag.artifact_blocker_deps_remove_owner(id);
             dag.scrub_artifact_blockers_referencing(id);
             dag.scrub_terminal_dep_failures_referencing(id);

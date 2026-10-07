@@ -134,7 +134,7 @@ impl SchedulerDag {
     }
 
     /// Shared fan-out helper for both Source- and Analysis-stage
-    /// failure paths: drains `self.waiters[analysis_dep_key]`,
+    /// failure paths: takes every edge on `analysis_dep_key`,
     /// removes the dep from each waiter's `deps_remaining`, and
     /// records a [`FailedDepRecord`] on the waiter so the
     /// pre-dispatch chokepoint surfaces a typed
@@ -146,18 +146,19 @@ impl SchedulerDag {
         cause: &SchedulerError,
     ) -> Vec<SubmissionToken> {
         let mut stranded = Vec::new();
-        let Some(waiters) = self.waiters.remove(analysis_dep_key) else {
+        let Some(waiters) = self.dep_edges.take(analysis_dep_key) else {
             return stranded;
         };
-        for waiter_tok in waiters {
+        for waiter_tok in waiters.into_values() {
             {
                 let Some(waiter) = self.nodes.get_mut(&waiter_tok) else {
                     continue;
                 };
+                // The edge left the store; its node side goes with it.
+                waiter.deps_remaining.remove(analysis_dep_key);
                 if waiter.cancelled {
                     continue;
                 }
-                waiter.deps_remaining.remove(analysis_dep_key);
                 // Record the failed DepKey on the waiter so the
                 // executor short-circuits with a typed
                 // `DependencyFailed` instead of running the user-side
@@ -260,16 +261,15 @@ impl SchedulerDag {
     /// as an Artifact / FileStage canonical payload). Called from
     /// `Scheduler::remove(canonical)` so a stale terminal-failure
     /// record on a removed file cannot pin a future admission as
-    /// `Failed`. Idempotent.
+    /// `Failed`. Idempotent. Visits only `canonical`'s records through the
+    /// per-canonical index.
     pub fn scrub_terminal_dep_failures_referencing(&mut self, canonical: &str) {
-        self.terminal_dep_failures.retain(|key, _record| match key {
-            DepKey::FileStage { canonical: c, .. } | DepKey::Artifact { canonical: c, .. } => {
-                c.as_ref() != canonical
-            }
-            DepKey::CacheNode { .. } => true,
-        });
-        self.canonical_index
-            .remove_terminal_failures_for_canonical(canonical);
+        for dep_key in self
+            .canonical_index
+            .remove_terminal_failures_for_canonical(canonical)
+        {
+            self.terminal_dep_failures.remove(&dep_key);
+        }
     }
 
     /// Drop the persistent terminal-dep-failure entry for
