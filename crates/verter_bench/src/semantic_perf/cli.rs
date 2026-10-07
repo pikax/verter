@@ -2,13 +2,15 @@
 //!
 //! ```text
 //! semantic_perf_probe run --job <job.json> --out <result.json>
+//! semantic_perf_probe session --job <session.json> --out <result.json>
 //! semantic_perf_probe stats --pid <pid>
 //! semantic_perf_probe identity
 //! ```
 //!
 //! `run` answers one job and writes its record (and a `<out>.phase` marker
 //! naming the phase running); the record file is the
-//! only result channel (stdout carries nothing the harness parses). `stats`
+//! only result channel (stdout carries nothing the harness parses).
+//! `session` runs a session script ([`super::session`]) the same way. `stats`
 //! prints one [`super::process_stats::ProcessStats`] reading of another
 //! process as JSON — the tsc driver reads the tsc API server through it, so
 //! both tools are measured by the same code. `identity` prints what this
@@ -22,6 +24,7 @@ use super::{process_stats, run_job, AllocHooks, Job, Sink};
 
 const USAGE: &str = "usage:
   semantic_perf_probe run --job <job.json> --out <result.json>
+  semantic_perf_probe session --job <session.json> --out <result.json>
   semantic_perf_probe stats --pid <pid>
   semantic_perf_probe identity";
 
@@ -39,6 +42,8 @@ struct Identity {
     tool: &'static str,
     crate_version: &'static str,
     instrumented: bool,
+    /// Whether optional semantic capture (`semantic-observe`) is compiled in.
+    capture_available: bool,
     debug_assertions: bool,
     target_os: &'static str,
     target_arch: &'static str,
@@ -46,6 +51,8 @@ struct Identity {
     native_arch: Option<&'static str>,
     job_schema: u32,
     result_schema: u32,
+    session_job_schema: u32,
+    session_result_schema: u32,
 }
 
 /// Entry point shared by the plain and the instrumented binary.
@@ -77,6 +84,28 @@ pub fn main(alloc: Option<AllocHooks>) -> ExitCode {
                 }
             }
         }
+        Some("session") => {
+            let (Some(job_path), Some(out_path)) = (flag(&args, "--job"), flag(&args, "--out"))
+            else {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            };
+            let job = match super::session::read_job(std::path::Path::new(job_path)) {
+                Ok(job) => job,
+                Err(err) => {
+                    eprintln!("semantic_perf_probe: read the session job {job_path}: {err}");
+                    return ExitCode::from(2);
+                }
+            };
+            let sink = Sink::new(std::path::Path::new(out_path));
+            match super::session::run_session(&job, &sink) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("semantic_perf_probe: {err}");
+                    ExitCode::from(3)
+                }
+            }
+        }
         Some("stats") => {
             let Some(pid) = flag(&args, "--pid").and_then(|pid| pid.parse::<u32>().ok()) else {
                 eprintln!("{USAGE}");
@@ -101,12 +130,15 @@ pub fn main(alloc: Option<AllocHooks>) -> ExitCode {
                 tool: "verter",
                 crate_version: env!("CARGO_PKG_VERSION"),
                 instrumented: alloc.is_some(),
+                capture_available: super::session::capture_available(),
                 debug_assertions: cfg!(debug_assertions),
                 target_os: std::env::consts::OS,
                 target_arch: std::env::consts::ARCH,
                 native_arch: process_stats::native_arch(),
                 job_schema: super::JOB_SCHEMA,
                 result_schema: super::RESULT_SCHEMA,
+                session_job_schema: super::session::SESSION_JOB_SCHEMA,
+                session_result_schema: super::session::SESSION_RESULT_SCHEMA,
             };
             println!(
                 "{}",
