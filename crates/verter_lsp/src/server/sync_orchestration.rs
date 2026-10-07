@@ -3035,35 +3035,11 @@ impl VerterLanguageServer {
 
         let mut vite_opts = self.vite_config_options.lock().await.clone();
         vite_opts.node_path = crate::tsserver::find_node();
-        let args = BackgroundInitArgs {
-            roots,
-            vite_opts,
-            init_lint_opts,
-            my_gen,
-            client: self.client.clone(),
-            type_provider: self.type_provider.clone(),
-            workspace_scanner: Arc::clone(&self.workspace_scanner),
-            init_generation: Arc::clone(&self.init_generation),
-            ownership_generation_fence: Arc::clone(&self.ownership_generation_fence),
-            project_sync: self.project_sync.clone(),
-            documents: Arc::clone(&self.documents),
-            provider_sync_states: Arc::clone(&self.provider_sync_states),
-            pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
-            is_tsgo: matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-            mru_canonical_ids: {
-                // Snapshot the MRU list at spawn time — background_init uses it for drain ordering
-                Arc::new(parking_lot::Mutex::new(
-                    self.mru_canonical_ids.lock().clone(),
-                ))
-            },
-            vfs_workspace: Arc::clone(&self.vfs_workspace),
-            carrier_publish_coordinator: self.carrier_publish_coordinator.clone(),
-            carrier_transaction_coordinator: Arc::clone(&self.carrier_transaction_coordinator),
-            decl_overlay_owner: Arc::clone(&self.decl_overlay_owner),
-            resync_coordinator: Arc::clone(&self.resync_coordinator),
-            import_sync: Arc::clone(&self.import_sync),
-            server: self.clone(),
-        };
+        // The server is the one constructor of the background-init bundle:
+        // every server-owned handle — including the handler activity the
+        // scanner yields behind — is taken from the instance itself, so the
+        // wiring holds by construction.
+        let args = BackgroundInitArgs::from_server(self, roots, vite_opts, init_lint_opts, my_gen);
 
         let ctx = context.to_owned();
         tokio::spawn(async move {

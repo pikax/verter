@@ -205,7 +205,35 @@ impl ComponentMetaHost {
         Ok(())
     }
 
-    /// Access the underlying host.
+    /// Build a component-meta host over a host the caller constructed and
+    /// still holds a shared handle to. The whole host is NOT re-exported
+    /// from the meta host: a caller that needs its own host surface keeps
+    /// its own construction handle, and the meta host consumes the same
+    /// single instance.
+    pub fn new_shared_host(host: Arc<VerterHost>) -> Self {
+        Self {
+            inner: Arc::new(ComponentMetaHostInner {
+                project: crate::meta::MetaProject::from_shared_host(host),
+                generation: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// The project host's language-classification authority: which carrier
+    /// languages and adapters this composition admits. A narrow read that
+    /// replaces whole-host access for admission questions.
+    pub fn language_classifier(&self) -> &crate::framework::HostLanguageClassifier {
+        self.inner.project.host().language_classifier()
+    }
+
+    /// The whole host behind this meta host — the test-support seam ONLY:
+    /// visible to this crate's own test code (the consolidated
+    /// integration-test binary links the crate as a non-test dependency)
+    /// and a COMPILE-ABSENT item in every production build. Production
+    /// callers keep their own construction handle
+    /// (see [`Self::new_shared_host`]); the meta host re-exports no
+    /// whole-host route.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn host(&self) -> &VerterHost {
         self.inner.project.host()
     }
@@ -506,12 +534,16 @@ impl ComponentMetaSession {
     ///   holds a cheap default-filled record so the always-a-record
     ///   contract holds.
     /// - `Err(ComponentMetaHostError)` — a genuine request fault
-    ///   (`AuditNotEnabled` when the host config does not enable
-    ///   `audit_enabled` + `footprint_capture`, or `AuditRecordMissing`
+    ///   (`Host("session is closed")` / `Shutdown` when the session or its
+    ///   project no longer owns a lifetime — checked FIRST, before any
+    ///   capture-config check;
+    ///   `AuditNotEnabled` when the host config does not enable
+    ///   `audit_enabled` + `footprint_capture`; or `AuditRecordMissing`
     ///   when the bounded store evicted the record before retrieval).
-    ///   The carrier carries a cheap default-filled record marked
-    ///   `AuditDisabled` / `FilteredNoop` respectively so a consumer can
-    ///   still read `audit` regardless of outcome.
+    ///   The carrier carries a cheap default-filled record so a consumer
+    ///   can still read `audit` regardless of outcome: `AuditDisabled`
+    ///   whenever host capture is off (including a closed-session refusal
+    ///   on an unaudited host), `FilteredNoop` otherwise.
     pub fn get_component_meta_with_audit(
         &self,
         canonical_or_alias: &str,
@@ -519,8 +551,27 @@ impl ComponentMetaSession {
         Option<crate::meta_resolve::ComponentMetaOutput>,
         ComponentMetaHostError,
     > {
-        let host = self.inner.host();
-        if !host.config.audit_enabled || !host.config.footprint_capture {
+        // Session liveness gates the audited lane FIRST: a closed session
+        // (or a shut-down project) must refuse BEFORE the host-level path
+        // runs — no resolution, no request id, no audit publication may
+        // happen under a session that no longer owns a lifetime. The
+        // refusal carries the cheap default-filled record like every other
+        // pre-capture refusal (nothing was captured because nothing ran),
+        // marked with the HOST's capture state: `AuditDisabled` when the
+        // host config turns capture off, never a label claiming audit ran.
+        let capture_enabled = self.inner.audit_capture_enabled();
+        if let Err(error) = self.inner.check_alive() {
+            let capture_state = if capture_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
+            return verter_audit::AuditedResult::err(
+                ComponentMetaHostError::from(error),
+                cheap_component_meta_record(canonical_or_alias, capture_state),
+            );
+        }
+        if !capture_enabled {
             // No audit record is produced when capture is off — carry
             // the cheap default-filled record marked `AuditDisabled`
             // so the carrier's always-a-record contract still holds.
@@ -543,15 +594,16 @@ impl ComponentMetaSession {
         // resolution published — audited identically to success; the cheap
         // fallback applies only when no record was produced or the bounded
         // store evicted it.
-        let (output, request_id) = match host
-            .get_component_meta_output_with_resolution(canonical_or_alias)
+        let (output, request_id) = match self
+            .inner
+            .component_meta_output_with_resolution(canonical_or_alias)
         {
             Ok((Some(output), request_id)) => (output, request_id),
             Ok((None, request_id)) => {
                 // No analysis behind the request: a non-fault miss rides
                 // `Ok(None)`. Drain the real record when the resolution
                 // published one; otherwise carry the cheap default.
-                let record = host.take_audit_record(request_id).unwrap_or_else(|| {
+                let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
                     cheap_component_meta_record(
                         canonical_or_alias,
                         verter_audit::AuditCaptureState::FilteredNoop,
@@ -566,7 +618,7 @@ impl ComponentMetaSession {
                 // record before materialization failed: drain and return
                 // THAT record (never a fabricated zero-id stand-in, and
                 // never an orphan left in the store).
-                let record = host.take_audit_record(request_id).unwrap_or_else(|| {
+                let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
                     cheap_component_meta_record(
                         canonical_or_alias,
                         verter_audit::AuditCaptureState::FilteredNoop,
@@ -575,7 +627,7 @@ impl ComponentMetaSession {
                 return verter_audit::AuditedResult::err(ComponentMetaHostError::from(err), record);
             }
         };
-        match host.take_audit_record(request_id) {
+        match self.inner.take_audit_record(request_id) {
             Some(record) => verter_audit::AuditedResult::ok(Some(output), record),
             None => verter_audit::AuditedResult::err(
                 ComponentMetaHostError::AuditRecordMissing { request_id },

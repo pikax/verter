@@ -62,6 +62,11 @@ import {
   VUE_EVIDENCE_LOCK,
 } from "../src/paths.mjs";
 
+/** Drive-letter paths are URL protocols (`d:`); child `import()` needs a file URL. */
+function childModuleHref(file) {
+  return JSON.stringify(pathToFileURL(file).href);
+}
+
 const ORACLE_NPM_CACHE = process.env.BF2_ORACLE_NPM_CACHE
   ? path.resolve(process.env.BF2_ORACLE_NPM_CACHE)
   : path.join(HARNESS_ROOT, ".oracle-npm-cache");
@@ -295,7 +300,7 @@ describe("transitive drift is refused BEFORE any compiler invocation (end-to-end
     const script = `
       import { readFileSync } from "node:fs";
       import path from "node:path";
-      const { compileVueFixture } = await import(${JSON.stringify(
+      const { compileVueFixture } = await import(${childModuleHref(
         path.join(HARNESS_ROOT, "src/invoke-vue-oracle.mjs"),
       )});
       const source = readFileSync(path.join(${JSON.stringify(HARNESS_ROOT)}, "fixtures/vue/basic-interpolation.vue"), "utf8");
@@ -469,14 +474,14 @@ describe("production load path REFUSES a drifted or torn realized tree before an
   // line is printed.
 
   const PRIME_SCRIPT = `
-    const { ensureOracleDomain } = await import(${JSON.stringify(
+    const { ensureOracleDomain } = await import(${childModuleHref(
       path.join(HARNESS_ROOT, "src/oracle-install.mjs"),
     )});
     console.log("PRIMED", ensureOracleDomain("vue").realizedClosureSha256);
   `;
 
   const SVELTE_PRIME_SCRIPT = `
-    const { ensureOracleDomain } = await import(${JSON.stringify(
+    const { ensureOracleDomain } = await import(${childModuleHref(
       path.join(HARNESS_ROOT, "src/oracle-install.mjs"),
     )});
     console.log("PRIMED", ensureOracleDomain("svelte").realizedClosureSha256);
@@ -485,7 +490,7 @@ describe("production load path REFUSES a drifted or torn realized tree before an
   const SVELTE_LOAD_SCRIPT = `
     import { readFileSync } from "node:fs";
     import path from "node:path";
-    const { compileSvelteFixture } = await import(${JSON.stringify(
+    const { compileSvelteFixture } = await import(${childModuleHref(
       path.join(HARNESS_ROOT, "src/invoke-svelte-oracle.mjs"),
     )});
     const source = readFileSync(path.join(${JSON.stringify(
@@ -498,7 +503,7 @@ describe("production load path REFUSES a drifted or torn realized tree before an
   const LOAD_SCRIPT = `
     import { readFileSync } from "node:fs";
     import path from "node:path";
-    const { compileVueFixture } = await import(${JSON.stringify(
+    const { compileVueFixture } = await import(${childModuleHref(
       path.join(HARNESS_ROOT, "src/invoke-vue-oracle.mjs"),
     )});
     const source = readFileSync(path.join(${JSON.stringify(

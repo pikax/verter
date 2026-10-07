@@ -10,7 +10,7 @@ description = "Semantic authority for Verter — revision-tracked query engine, 
 publish = false
 
 [features]
-semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
+semantic-observe = ["verter_audit/semantic-observe", "verter_session_query/semantic-observe", "hotpath"]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 # Test-only observability accessors: the flow-slice hash invocation
 # counter behind the hash-then-lower behavioral guard

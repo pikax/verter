@@ -503,7 +503,10 @@
       ],
       "minimalPublicSurface": {
         "retainedFnOwners": {
-          "remove": { "path": "crates/verter_scheduler/src/scheduler/lifecycle.rs", "type": "Scheduler" }
+          "remove": {
+            "path": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
+            "type": "Scheduler"
+          }
         },
         "retainedFns": [
           "resolved_dag_budget",
@@ -779,7 +782,7 @@
           }
         ],
         "crossCrateRetainedVerifiedByConsumers": false,
-        "consumerProofNote": "the importers population above is enforced by the verifier for this hotspot exactly as for every other (both directions, comment mentions never count); the retained-name/assoc-item deep join (crossCrateRetainedVerifiedByConsumers) is scoped to semantic_query because the scheduler retains its whole pub surface (no bulk row) — every pub fn/type/field is individually retained or narrowed"
+        "consumerProofNote": "the importers population above is enforced by the verifier for this hotspot exactly as for every other (both directions, comment mentions never count); the retained-name/assoc-item deep join (crossCrateRetainedVerifiedByConsumers) is scoped to semantic_query because the scheduler retains its whole pub surface (no bulk row) \u2014 every pub fn/type/field is individually retained or narrowed"
       },
       "cohesiveModules": [
         {
@@ -1464,7 +1467,6 @@
           "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
           "crates/verter_session/src/semantic_query_tests/admit_tests.rs",
           "crates/verter_session/src/session_attachment.rs",
-          "crates/verter_session/src/session_runtime.rs",
           "crates/verter_session/src/signature_corpus_tests.rs",
           "crates/verter_session/src/stack_refusal_tests.rs",
           "crates/verter_session/src/store_view_non_current_contract_tests.rs",

@@ -97,7 +97,7 @@ pub(super) async fn handle_prepare_rename(
     server: &VerterLanguageServer,
     params: TextDocumentPositionParams,
 ) -> Result<Option<PrepareRenameResponse>> {
-    let _hg = HandlerGuard::new("prepare_rename");
+    let _hg = HandlerGuard::new(&server.handler_activity, "prepare_rename");
     let uri = &params.text_document.uri;
     let position = &params.position;
 

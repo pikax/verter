@@ -335,22 +335,6 @@ fn ffi_module_reference_to_analysis(
     )
 }
 
-fn default_known_dependency_extensions() -> Vec<String> {
-    vec![
-        "".to_string(),
-        ".ts".to_string(),
-        ".tsx".to_string(),
-        ".js".to_string(),
-        ".jsx".to_string(),
-        ".mts".to_string(),
-        ".mjs".to_string(),
-        ".cts".to_string(),
-        ".cjs".to_string(),
-        ".vue".to_string(),
-        ".svelte".to_string(),
-    ]
-}
-
 // =============================================================================
 // Framework-discriminated host compile request (JS → canonical request)
 // =============================================================================
@@ -886,7 +870,7 @@ impl WasmVerterHost {
             .collect::<Result<Vec<_>, _>>()?;
         let known_ids: Vec<String> = parse_wasm_input(known_ids)?;
         let extensions = if extensions.is_undefined() || extensions.is_null() {
-            default_known_dependency_extensions()
+            self.inner.known_dependency_extensions()
         } else {
             parse_wasm_input::<Vec<String>>(extensions)?
         };
@@ -1897,24 +1881,12 @@ pub fn build_selector_match_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_known_dependency_extensions, lint_diagnostics_to_utf16};
+    use super::lint_diagnostics_to_utf16;
     use super::{host, FfiConversionError, PublicApiProjectionSubject, WasmVerterHost};
     #[cfg(target_arch = "wasm32")]
     use super::{
         public_api_to_wasm_value, FfiPublicApiProjectionError, FfiPublicApiResult, FfiTscResponse,
     };
-
-    #[test]
-    fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
-        let extensions = default_known_dependency_extensions();
-        assert_eq!(
-            extensions
-                .iter()
-                .filter(|ext| ext.as_str() == ".svelte")
-                .count(),
-            1
-        );
-    }
 
     /// A WASM host preloaded with a Vue SFC whose props type lives in a
     /// sibling `.ts` file — the same fixture shape the verter_session
@@ -2685,9 +2657,10 @@ mod framework_options_js_constructor_tests {
         js_sys::JSON::parse(json).expect("the fixture is valid JSON")
     }
 
-    fn sorted_carrier_extensions(host: &host::VerterHost) -> Vec<String> {
-        let mut extensions: Vec<String> = host
-            .language_classifier()
+    fn sorted_carrier_extensions(
+        classifier: &host::framework::HostLanguageClassifier,
+    ) -> Vec<String> {
+        let mut extensions: Vec<String> = classifier
             .carrier_extensions()
             .into_iter()
             .map(str::to_string)
@@ -2700,11 +2673,14 @@ mod framework_options_js_constructor_tests {
     fn host_constructor_narrows_with_the_js_frameworks_key() {
         let host = WasmVerterHost::new(js_config(r#"{"frameworks":["vue"]}"#))
             .expect("the Vue vertical is composed");
-        assert_eq!(sorted_carrier_extensions(&host.inner), vec!["vue"]);
+        assert_eq!(
+            sorted_carrier_extensions(host.inner.language_classifier()),
+            vec!["vue"]
+        );
 
         let default_host = WasmVerterHost::new(js_config("{}")).expect("default construction");
         assert_eq!(
-            sorted_carrier_extensions(&default_host.inner),
+            sorted_carrier_extensions(default_host.inner.language_classifier()),
             vec!["svelte", "vue"]
         );
     }
@@ -2723,7 +2699,7 @@ mod framework_options_js_constructor_tests {
         let project = WasmMetaProject::new(js_config(r#"{"frameworks":["svelte"]}"#))
             .expect("the Svelte vertical is composed");
         assert_eq!(
-            sorted_carrier_extensions(project.inner.host()),
+            sorted_carrier_extensions(project.inner.language_classifier()),
             vec!["svelte"]
         );
     }

@@ -16,7 +16,7 @@ fn remint(host: &verter_session::VerterHost) {
     let live_graph = Arc::clone(store.semantic_graph());
     let live_account = Arc::clone(store.retention_account());
     let counter = Arc::new(AtomicU64::new(0));
-    let _ = EngineStores::create(live_graph, live_account, &counter);
+    let _ = EngineStores::create(live_graph, live_account, &counter, Default::default());
 }
 
 fn main() {

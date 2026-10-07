@@ -19,7 +19,7 @@
 //! [`crate::analysis::type_eval_build::lower_top_level_statement`] arms.
 use verter_session_query::declarations::header_index::{
     DeclHeaderContributor, DeclHeaderIndex, EnumDeclHeader, JsdocTypedefHeader, MemberHeader,
-    NamespaceBlockRecord, TypeDeclHeader, TypeParamHeader, ValueDeclHeader,
+    MemberHeaderList, NamespaceBlockRecord, TypeDeclHeader, TypeParamHeader, ValueDeclHeader,
 };
 use verter_session_query::declarations::headers::EnumMemberPosition;
 
@@ -250,7 +250,7 @@ pub fn build_decl_header_index_with_owners(
                 span: typedef.comment_span,
                 name_span: typedef.name_span,
                 type_params: Vec::new(),
-                member_headers: Vec::new(),
+                member_headers: MemberHeaderList::new(),
                 contributors: Vec::new(),
                 vue_ignored_heritage: Vec::new(),
                 from_jsdoc_typedef: true,
@@ -509,7 +509,7 @@ fn index_enum(
         verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
         verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end),
         Vec::new(),
-        Vec::new(),
+        MemberHeaderList::new(),
         &[],
         ctx,
     );
@@ -520,7 +520,7 @@ fn index_enum(
             kind: ValueDeclKind::Enum,
             span: verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
             name_span: verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end),
-            object_member_headers: Vec::new(),
+            object_member_headers: MemberHeaderList::new(),
             contributors: Vec::new(),
         });
     value_entry.kind = ValueDeclKind::Enum;
@@ -844,12 +844,12 @@ fn index_interface(
     table: &mut DeclMap<TypeDeclHeader>,
 ) {
     let params = type_param_headers(decl.type_parameters.as_deref());
-    let mut members = Vec::new();
-    for sig in &decl.body.body {
-        if let Some(header) = interface_member_header(sig, ctx.source) {
-            members.push(header);
-        }
-    }
+    let members: MemberHeaderList = decl
+        .body
+        .body
+        .iter()
+        .filter_map(|sig| interface_member_header(sig, ctx.source))
+        .collect();
     let ignored_heritage_arms = vue_ignored_heritage_arms(decl, ctx);
     upsert_type_header(
         table,
@@ -973,7 +973,7 @@ fn index_class_field_value(
                 },
                 span,
                 name_span: span,
-                object_member_headers: Vec::new(),
+                object_member_headers: MemberHeaderList::new(),
                 contributors: Vec::new(),
             });
         push_contributor(&mut entry.contributors, ctx, span, span);
@@ -1015,7 +1015,7 @@ fn index_named_class(
                 kind: ValueDeclKind::Const,
                 span,
                 name_span: span,
-                object_member_headers: Vec::new(),
+                object_member_headers: MemberHeaderList::new(),
                 contributors: Vec::new(),
             });
         push_contributor(&mut entry.contributors, ctx, span, span);
@@ -1082,7 +1082,7 @@ fn index_named_class(
         verter_span::Span::new(decl.span.start, decl.span.end),
         verter_span::Span::new(id.span.start, id.span.end),
         params,
-        instance_members,
+        instance_members.into_iter().collect(),
         &[],
         ctx,
     );
@@ -1094,21 +1094,15 @@ fn index_named_class(
             kind: ValueDeclKind::Class,
             span: verter_span::Span::new(decl.span.start, decl.span.end),
             name_span: verter_span::Span::new(id.span.start, id.span.end),
-            object_member_headers: Vec::new(),
+            object_member_headers: MemberHeaderList::new(),
             contributors: Vec::new(),
         });
     entry.kind = ValueDeclKind::Class;
     entry.span = verter_span::Span::new(decl.span.start, decl.span.end);
     entry.name_span = verter_span::Span::new(id.span.start, id.span.end);
-    for header in static_members {
-        if !entry
-            .object_member_headers
-            .iter()
-            .any(|existing| existing.key == header.key)
-        {
-            entry.object_member_headers.push(header);
-        }
-    }
+    entry
+        .object_member_headers
+        .extend_first_wins(static_members);
     push_contributor(
         &mut entry.contributors,
         ctx,
@@ -1151,7 +1145,7 @@ fn index_function_in(
             kind,
             span: verter_span::Span::new(func.span.start, func.span.end),
             name_span: verter_span::Span::new(id.span.start, id.span.end),
-            object_member_headers: Vec::new(),
+            object_member_headers: MemberHeaderList::new(),
             contributors: Vec::new(),
         });
     // Last contributor wins for the representative kind/spans (matching
@@ -1229,21 +1223,13 @@ fn index_variable(
             kind: var_kind,
             span: verter_span::Span::new(decl.span.start, decl.span.end),
             name_span: verter_span::Span::new(id.span.start, id.span.end),
-            object_member_headers: Vec::new(),
+            object_member_headers: MemberHeaderList::new(),
             contributors: Vec::new(),
         });
     entry.kind = var_kind;
     entry.span = verter_span::Span::new(decl.span.start, decl.span.end);
     entry.name_span = verter_span::Span::new(id.span.start, id.span.end);
-    for header in members {
-        if !entry
-            .object_member_headers
-            .iter()
-            .any(|existing| existing.key == header.key)
-        {
-            entry.object_member_headers.push(header);
-        }
-    }
+    entry.object_member_headers.union_first_wins(members);
     push_contributor(
         &mut entry.contributors,
         ctx,
@@ -1314,7 +1300,7 @@ fn index_destructured_variable(
                 kind: var_kind,
                 span: verter_span::Span::new(decl.span.start, decl.span.end),
                 name_span: verter_span::Span::new(id.span.start, id.span.end),
-                object_member_headers: Vec::new(),
+                object_member_headers: MemberHeaderList::new(),
                 contributors: Vec::new(),
             });
         entry.kind = var_kind;
@@ -1359,7 +1345,7 @@ fn upsert_type_header(
     span: Span,
     name_span: Span,
     params: Vec<TypeParamHeader>,
-    members: Vec<MemberHeader>,
+    members: MemberHeaderList,
     ignored_heritage_arm_ordinals: &[u32],
     ctx: HeaderStatementContext<'_>,
 ) {
@@ -1370,7 +1356,7 @@ fn upsert_type_header(
             span,
             name_span,
             type_params: Vec::new(),
-            member_headers: Vec::new(),
+            member_headers: MemberHeaderList::new(),
             contributors: Vec::new(),
             vue_ignored_heritage: Vec::new(),
             from_jsdoc_typedef: false,
@@ -1391,15 +1377,7 @@ fn upsert_type_header(
             entry.type_params.push(param);
         }
     }
-    for member in members {
-        if !entry
-            .member_headers
-            .iter()
-            .any(|existing| existing.key == member.key)
-        {
-            entry.member_headers.push(member);
-        }
-    }
+    entry.member_headers.union_first_wins(members);
     let contributor_ordinal = entry
         .contributors
         .iter()
@@ -1469,23 +1447,23 @@ fn type_param_headers(decl: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<Type
 /// Direct syntactic member headers of a type-alias body: a `TSTypeLiteral`
 /// contributes its named members; intersection / parenthesized arms are
 /// descended (mirroring the lowered inventory's own-member header facts).
-/// Every other body shape has no direct syntactic members.
-fn alias_body_member_headers(ty: &TSType<'_>, source: &str) -> Vec<MemberHeader> {
-    let mut out = Vec::new();
+/// Every other body shape has no direct syntactic members. A repeated key
+/// keeps its first header.
+fn alias_body_member_headers(ty: &TSType<'_>, source: &str) -> MemberHeaderList {
+    let mut out = MemberHeaderList::new();
     collect_alias_member_headers(ty, source, &mut out);
     out
 }
 
-fn collect_alias_member_headers(ty: &TSType<'_>, source: &str, out: &mut Vec<MemberHeader>) {
+fn collect_alias_member_headers(ty: &TSType<'_>, source: &str, out: &mut MemberHeaderList) {
     match ty {
         TSType::TSTypeLiteral(literal) => {
-            for sig in &literal.members {
-                if let Some(header) = interface_member_header(sig, source) {
-                    if !out.iter().any(|existing| existing.key == header.key) {
-                        out.push(header);
-                    }
-                }
-            }
+            out.extend_first_wins(
+                literal
+                    .members
+                    .iter()
+                    .filter_map(|sig| interface_member_header(sig, source)),
+            );
         }
         TSType::TSIntersectionType(intersection) => {
             for part in &intersection.types {
@@ -1522,7 +1500,7 @@ fn interface_member_header(sig: &TSSignature<'_>, source: &str) -> Option<Member
 /// Direct member headers of an object-literal initializer, seen through
 /// `as` / `satisfies` / parenthesized wrappers (mirroring
 /// `extract_initializer_object_shape`).
-fn object_literal_member_headers(expr: &Expression<'_>, source: &str) -> Vec<MemberHeader> {
+fn object_literal_member_headers(expr: &Expression<'_>, source: &str) -> MemberHeaderList {
     match expr {
         Expression::ObjectExpression(obj) => object_expression_member_headers(obj, source),
         Expression::TSAsExpression(ts_as) => {
@@ -1534,39 +1512,36 @@ fn object_literal_member_headers(expr: &Expression<'_>, source: &str) -> Vec<Mem
         Expression::ParenthesizedExpression(paren) => {
             object_literal_member_headers(&paren.expression, source)
         }
-        _ => Vec::new(),
+        _ => MemberHeaderList::new(),
     }
 }
 
-fn object_expression_member_headers(obj: &ObjectExpression<'_>, source: &str) -> Vec<MemberHeader> {
-    let mut out: Vec<MemberHeader> = Vec::new();
-    for prop in &obj.properties {
-        if let ObjectPropertyKind::ObjectProperty(p) = prop {
-            let key = lower_property_key(&p.key, source);
-            // Mirror `push_object_property_with_override`: a duplicate
-            // key's LAST occurrence wins.
-            out.retain(|existing| existing.key != key);
-            out.push(MemberHeader {
-                key,
-                method_kind: if p.method || !matches!(p.kind, oxc_ast::ast::PropertyKind::Init) {
-                    Some(match p.kind {
-                        oxc_ast::ast::PropertyKind::Get => ObjectMethodKind::Get,
-                        oxc_ast::ast::PropertyKind::Set => ObjectMethodKind::Set,
-                        oxc_ast::ast::PropertyKind::Init => ObjectMethodKind::Method,
-                    })
-                } else {
-                    None
-                },
-                has_implementation_body: p.method
-                    || !matches!(p.kind, oxc_ast::ast::PropertyKind::Init),
-                optional: false,
-                readonly: false,
-            });
-        }
-    }
-    out
+fn object_expression_member_headers(obj: &ObjectExpression<'_>, source: &str) -> MemberHeaderList {
+    // Mirror `push_object_property_with_override`: a duplicate key's LAST
+    // occurrence wins, at its last position.
+    MemberHeaderList::from_last_wins(obj.properties.iter().filter_map(|prop| {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            return None;
+        };
+        let accessor_or_method = p.method || !matches!(p.kind, oxc_ast::ast::PropertyKind::Init);
+        Some(MemberHeader {
+            key: lower_property_key(&p.key, source),
+            method_kind: accessor_or_method.then_some(match p.kind {
+                oxc_ast::ast::PropertyKind::Get => ObjectMethodKind::Get,
+                oxc_ast::ast::PropertyKind::Set => ObjectMethodKind::Set,
+                oxc_ast::ast::PropertyKind::Init => ObjectMethodKind::Method,
+            }),
+            has_implementation_body: accessor_or_method,
+            optional: false,
+            readonly: false,
+        })
+    }))
 }
 
 #[cfg(test)]
 #[path = "decl_headers_tests.rs"]
 mod decl_headers_tests;
+
+#[cfg(test)]
+#[path = "decl_headers_key_index_tests.rs"]
+mod decl_headers_key_index_tests;

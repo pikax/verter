@@ -9,6 +9,7 @@ mod closed_carrier_in_autoimport_index;
 mod cross_file_navigation_ranges_fail_closed;
 mod decl_overlay_close_ownership;
 mod generated_only_spans_suppressed;
+mod handler_activity;
 mod kebab_tag_mapping_full_columns;
 mod lsp_audit_cancellation_finalizes_with_marker;
 mod lsp_audit_diagnostics_completion;
