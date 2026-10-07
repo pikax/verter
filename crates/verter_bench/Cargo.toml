@@ -225,6 +225,13 @@ name = "currency_phase_probe"
 path = "examples/currency_phase_probe.rs"
 
 [[example]]
+# Per-request resolver-context port call counts; the counters exist only
+# under `semantic-observe`, so an unmeasured build is a hard build error.
+name = "resolver_dispatch_profile"
+path = "examples/resolver_dispatch_profile.rs"
+required-features = ["semantic-observe"]
+
+[[example]]
 name = "route_overhead_baseline"
 path = "examples/route_overhead_baseline.rs"
 

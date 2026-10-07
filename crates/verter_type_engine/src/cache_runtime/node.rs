@@ -33,6 +33,7 @@ use super::singleflight::{
 };
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::FactValidation;
+use crate::resolver_core::resolver_context::RequestFlags;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::store_view::StoreViewCompatToken;
@@ -77,10 +78,10 @@ impl<'a> ComputeCtx<'a> {
     /// constructor is for callers that already hold only a resolver. It
     /// is exercised by the `cache_runtime` tests.
     #[allow(dead_code)]
-    pub fn from_resolver(resolver: &'a dyn FactValidation) -> Self {
+    pub fn from_resolver(resolver: &'a dyn FactValidation, flags: &'a RequestFlags) -> Self {
         Self {
             compat_token: resolver.compat_token(),
-            generation: resolver.current_project_generation(),
+            generation: flags.current_project_generation(),
             resolver,
         }
     }
@@ -169,10 +170,15 @@ pub trait ArtifactNode {
 /// [`CacheEntry`] and admitted (the runtime wraps it in `Arc`); a
 /// `ReturnOnly` returns the value to the winning flight alone (joiners
 /// fork and recompute); a `Failed` surfaces `None`.
+///
+/// `flags` is the request snapshot's flag handles, borrowed once at the
+/// caller's request boundary: every generation gate below reads them as
+/// plain fields, with no per-gate port dispatch.
 pub fn lookup<N: ArtifactNode>(
     node: &N,
     key: N::Key,
     resolver: &dyn FactValidation,
+    flags: &RequestFlags,
 ) -> Option<N::Value> {
     let compat_token = resolver.compat_token();
     // The compute-time generation snapshot, captured BEFORE the cold
@@ -183,7 +189,7 @@ pub fn lookup<N: ArtifactNode>(
     // to the entry's stamp: a project-generation bump that lands during
     // the cold window leaves the stamp behind the live generation, so
     // the entry is rejected (no stale publish, no warm hit).
-    let snapshot_generation = resolver.current_project_generation();
+    let snapshot_generation = flags.current_project_generation();
     let flight_key = QueryFlightKey {
         key: key.clone(),
         compat_token,
@@ -199,7 +205,7 @@ pub fn lookup<N: ArtifactNode>(
             let cx = ComputeCtx {
                 resolver,
                 compat_token,
-                generation: resolver.current_project_generation(),
+                generation: flags.current_project_generation(),
             };
             node.validate(&key, entry, &cx)
         },
@@ -241,7 +247,7 @@ pub fn lookup<N: ArtifactNode>(
             // Post-compute revalidation: gate the freshly built entry's
             // stamp against the LIVE generation. A generation bump that
             // landed during the cold window rejects the publish.
-            entry.validated_at_generation == resolver.current_project_generation()
+            entry.validated_at_generation == flags.current_project_generation()
                 && entry
                     .signature
                     .validate_with_self_roots(resolver, &entry.self_root_canonicals)
@@ -385,10 +391,14 @@ pub mod query {
     /// admission is lowered into a [`Candidate`] (with the node's
     /// discriminant) and published through the split lifecycle;
     /// `ReturnOnly` / `Failed` behave as for an artifact node.
+    ///
+    /// `flags` is the request snapshot's flag handles, borrowed once at the
+    /// caller's request boundary (see the artifact [`lookup`]).
     pub fn lookup<N: QueryNode>(
         node: &N,
         key: N::Key,
         resolver: &dyn FactValidation,
+        flags: &RequestFlags,
     ) -> Option<N::Value> {
         let compat_token = resolver.compat_token();
         // Compute-time snapshot stamps the candidate; the validity gates
@@ -396,7 +406,7 @@ pub mod query {
         // revalidation) re-read the LIVE generation each time so a
         // mid-compute generation bump rejects the candidate. See the
         // artifact `lookup` for the snapshot-vs-live rationale.
-        let snapshot_generation = resolver.current_project_generation();
+        let snapshot_generation = flags.current_project_generation();
         let flight_key = QueryFlightKey {
             key: key.clone(),
             compat_token,
@@ -413,7 +423,7 @@ pub mod query {
                 let cx = ComputeCtx {
                     resolver,
                     compat_token,
-                    generation: resolver.current_project_generation(),
+                    generation: flags.current_project_generation(),
                 };
                 node.lookup_candidate(&key, &cx)
             },
@@ -478,7 +488,7 @@ pub mod query {
                 })
             },
             |candidate: &Candidate<N::Discriminant, N::Value>| {
-                candidate.validated_at_generation == resolver.current_project_generation()
+                candidate.validated_at_generation == flags.current_project_generation()
                     && candidate
                         .signature
                         .validate_with_self_roots(resolver, &candidate.self_root_canonicals)

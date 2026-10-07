@@ -20,6 +20,9 @@ pub(crate) struct SessionRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
     request_view: RequestStoreView<'a>,
+    snapshot: verter_type_engine::resolver_core::RequestSnapshot<
+        crate::resolver_store::WorkspaceSlotClocks,
+    >,
     /// The view's overlay, built here only when the store view does not
     /// already carry it (a store view not derived from this view).
     fallback_overlay: std::sync::OnceLock<Option<verter_workspace::ResolutionOverlaySnapshot>>,
@@ -39,6 +42,7 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
     ) -> Self {
         Self(SessionRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view,
             request_view: RequestStoreView::new(base, overlay),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -54,6 +58,7 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
     ) -> Self {
         Self(SessionRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view,
             request_view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -68,6 +73,14 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn request_view(&self) -> &RequestStoreView<'_> {
         &self.request_view
+    }
+
+    fn request_snapshot(
+        &self,
+    ) -> &verter_type_engine::resolver_core::RequestSnapshot<
+        crate::resolver_store::WorkspaceSlotClocks,
+    > {
+        &self.snapshot
     }
 
     fn session_view(&self) -> Option<&dyn SessionView> {
