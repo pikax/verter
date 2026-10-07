@@ -261,7 +261,8 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
 }
 
 /// FOREIGN carrier IDE locations map through the surface set pinned at request
-/// start (`capture_foreign_carrier_ide_set` + `foreign_ide_context`); the
+/// start (`capture_foreign_carrier_ide_set` or the IDE view of a captured
+/// lifecycle root, + `foreign_ide_context`); the
 /// live-current foreign resolver is deleted and must not reappear.
 #[test]
 fn foreign_carrier_mapping_uses_request_start_pinned_set() {
@@ -280,7 +281,8 @@ fn foreign_carrier_mapping_uses_request_start_pinned_set() {
              pinned set (`foreign_ide_context`)"
         );
     }
-    // Every foreign-mapping consumer pins the set before the query.
+    // Every foreign-mapping consumer pins the set before the query — directly, or
+    // as the IDE view of the lifecycle root it captures once for every view.
     for (file, expected_pins) in [
         // definition, type_definition, references, rename.
         ("server/nav_features_navigation.rs", 4),
@@ -292,7 +294,8 @@ fn foreign_carrier_mapping_uses_request_start_pinned_set() {
         ("server/sync_orchestration.rs", 1),
     ] {
         let source = read_server_source(file);
-        let pins = source.matches("capture_foreign_carrier_ide_set(").count();
+        let pins = source.matches("capture_foreign_carrier_ide_set(").count()
+            + source.matches("lifecycle_root.carrier_ide_set(").count();
         assert!(
             pins >= expected_pins,
             "{file} must pin the foreign carrier IDE set before the provider query at \

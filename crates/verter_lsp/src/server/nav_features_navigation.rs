@@ -550,11 +550,12 @@ async fn definition_provider_attempt(
                         // queries), so a returned foreign location maps through
                         // the generation the attempt began against (never the
                         // merge-time current one).
-                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                        let foreign_api_set = server
+                        let lifecycle_root = server
                             .documents
                             .provider_surfaces()
-                            .capture_current_carrier_api_set();
+                            .capture_lifecycle_root();
+                        let foreign_ide_set = lifecycle_root.carrier_ide_set();
+                        let foreign_api_set = lifecycle_root.carrier_api_set();
                         let type_defs = tp.get_definition(&tsx_path, offset).await?;
                         Ok((type_defs, foreign_ide_set, foreign_api_set))
                     },
@@ -872,11 +873,12 @@ pub(super) async fn handle_goto_type_definition(
                     |tsx_path: String, offset: u32| async move {
                         // Pin the FOREIGN carrier IDE surfaces BEFORE the query
                         // (per attempt — see handle_goto_definition).
-                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                        let foreign_api_set = server
+                        let lifecycle_root = server
                             .documents
                             .provider_surfaces()
-                            .capture_current_carrier_api_set();
+                            .capture_lifecycle_root();
+                        let foreign_ide_set = lifecycle_root.carrier_ide_set();
+                        let foreign_api_set = lifecycle_root.carrier_api_set();
                         let type_defs = tp.get_type_definition(&tsx_path, offset).await?;
                         Ok((type_defs, foreign_ide_set, foreign_api_set))
                     },
@@ -1340,14 +1342,15 @@ pub(super) async fn handle_rename(
                     // the snapshot captured here for that exact path + generation;
                     // a path absent from the set, or whose generation was later
                     // superseded by a racing background sync, fails closed (drop).
-                    let query_snapshot = server
+                    let lifecycle_root = server
                         .documents
                         .provider_surfaces()
-                        .capture_current_carrier_api_set();
-                    // And the FOREIGN carrier IDE set, pinned under the same
-                    // fence, so a returned foreign `.vue.tsx` location maps
-                    // through the generation this request began against.
-                    let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                        .capture_lifecycle_root();
+                    let query_snapshot = lifecycle_root.carrier_api_set();
+                    // And the FOREIGN carrier IDE view of the same captured root,
+                    // so a returned foreign `.vue.tsx` location maps through the
+                    // generation this request began against.
+                    let foreign_ide_set = lifecycle_root.carrier_ide_set();
 
                     // IMPORTED-TYPE declaration UPGRADE: a `defineProps<ImportedType>()`
                     // child prop has no inline macro-field span (its declaration lives
