@@ -1905,22 +1905,6 @@ fn napi_module_reference_to_analysis(
     )
 }
 
-fn default_known_dependency_extensions() -> Vec<String> {
-    vec![
-        "".to_string(),
-        ".ts".to_string(),
-        ".tsx".to_string(),
-        ".js".to_string(),
-        ".jsx".to_string(),
-        ".mts".to_string(),
-        ".mjs".to_string(),
-        ".cts".to_string(),
-        ".cjs".to_string(),
-        ".vue".to_string(),
-        ".svelte".to_string(),
-    ]
-}
-
 fn host_module_reference_to_napi(input: host::ScriptModuleReference) -> NapiModuleReference {
     NapiModuleReference {
         syntax: host_module_reference_syntax_to_str(input.syntax).to_string(),
@@ -3239,7 +3223,7 @@ impl NapiVerterHost {
             .into_iter()
             .map(napi_module_reference_to_analysis)
             .collect::<Result<Vec<_>>>()?;
-        let extensions = extensions.unwrap_or_else(default_known_dependency_extensions);
+        let extensions = extensions.unwrap_or_else(|| self.inner.known_dependency_extensions());
         Ok(
             verter_resolution::resolve_known_module_reference_dependencies(
                 &owner_id,
@@ -4841,18 +4825,6 @@ mod tests {
                 "compileMany must never enter the lint subsystem; found `{forbidden}`"
             );
         }
-    }
-
-    #[test]
-    fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
-        let extensions = default_known_dependency_extensions();
-        assert_eq!(
-            extensions
-                .iter()
-                .filter(|ext| ext.as_str() == ".svelte")
-                .count(),
-            1
-        );
     }
 
     /// The typed unsupported-language failure surfaces at the NAPI

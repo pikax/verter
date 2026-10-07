@@ -903,7 +903,14 @@ impl VerterHost {
             state.as_ref(),
         )?;
 
-        let script_setup_type_bindings = if bundle_canonical_id.ends_with(".vue") {
+        // Script-setup type bindings are ADAPTER-DECLARED registry data: the
+        // materializer asks the composed registry whether the admitting
+        // adapter declares the surface, never a framework identity.
+        let script_setup_type_bindings = if self
+            .framework_registry()
+            .declares_script_setup_type_bindings(
+                &self.language_classifier.classify(bundle_canonical_id),
+            ) {
             self.build_script_setup_type_bindings(bundle_canonical_id, state.as_ref(), &dep_edges)
         } else {
             rustc_hash::FxHashMap::default()
@@ -1342,9 +1349,14 @@ impl VerterHost {
         }
         let dep_edges = self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref())?;
 
-        // 4. Build script-setup type bindings for Vue SFCs (once per bundle).
-        // Non-Vue files get an empty map — zero cost.
-        let script_setup_type_bindings = if canonical_id.ends_with(".vue") {
+        // 4. Build script-setup type bindings for adapters that declare the
+        // surface (once per bundle). An adapter without the surface gets an
+        // empty map — zero cost. The selection is ADAPTER-DECLARED registry
+        // data, never a host-side framework-identity branch.
+        let script_setup_type_bindings = if self
+            .framework_registry()
+            .declares_script_setup_type_bindings(&self.language_classifier.classify(canonical_id))
+        {
             self.build_script_setup_type_bindings(canonical_id, state.as_ref(), &dep_edges)
         } else {
             rustc_hash::FxHashMap::default()

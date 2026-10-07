@@ -89,6 +89,57 @@ pub struct FrameworkAdapterDescriptor {
     /// so it sets this `false`; an adapter that synthesizes per-export component
     /// surfaces sets it `true`.
     pub supports_named_export_surfaces: bool,
+    /// Whether this adapter's carrier carries a `<script setup>` block whose
+    /// generic type parameters must be surfaced as typed declarations in the
+    /// prepared-declaration bundle (the Vue SFC
+    /// `<script setup generic="T, U">` contract).
+    ///
+    /// The framework-NEUTRAL prepared-declaration materializer reads this
+    /// REGISTRY-DATA capability to decide whether to collect script-setup
+    /// generic type-parameter bindings — it does NOT branch on a framework
+    /// identity (`is_vue()`). The Vue descriptor declares the surface `true`;
+    /// an adapter whose carrier has no script-setup generics surface declares
+    /// it `false` and its bundles carry no bindings.
+    pub declares_script_setup_type_bindings: bool,
+    /// Whether this adapter's carrier analysis snapshot is served from its
+    /// parse artifact — the carrier's own structure/script parse products
+    /// threaded into the snapshot — together with template-analysis
+    /// inputs for the carrier's template surface (the SFC template).
+    ///
+    /// The framework-NEUTRAL snapshot builder and the narrowed-scope
+    /// serve read this REGISTRY-DATA capability to decide which snapshot
+    /// path a carrier takes and whether template inputs ride alongside —
+    /// they do NOT branch on a framework identity (`is_vue()`). The Vue
+    /// descriptor declares it `true` (an SFC snapshot serves from the
+    /// framework parse artifact and carries template inputs); an adapter
+    /// whose carrier has no template surface declares it `false` and its
+    /// snapshot rebuilds through the plain-script parse.
+    pub carries_template_analysis_inputs: bool,
+    /// Whether this adapter's carrier anchors its export spans at the
+    /// script-setup bindings and macros of its script analysis —
+    /// script-setup top-level bindings ARE the authored exports (the
+    /// `<script setup>` auto-export contract) — rather than at authored
+    /// export-signature statements.
+    ///
+    /// The framework-NEUTRAL export-span lookup reads this REGISTRY-DATA
+    /// capability to decide where a carrier's export anchors live — it
+    /// does NOT branch on a framework identity (`is_vue()`). The Vue
+    /// descriptor declares it `true`; an adapter whose exports are
+    /// ordinary signature statements declares it `false`.
+    pub anchors_exports_at_script_setup: bool,
+    /// This carrier's rank in the extension-probe priority for
+    /// extension-based dependency resolution: when one bare specifier
+    /// matches admitted carriers of several adapters (a same-stem
+    /// `.vue`/`.svelte` collision), the resolver probes extensions in
+    /// ASCENDING rank order and takes the first match.
+    ///
+    /// The rank is an explicit REGISTRATION DECISION a new adapter declares
+    /// next to the existing ones — deliberately NOT derived from the
+    /// classifier's carrier order (a longest-suffix-first MATCHING order)
+    /// nor from the capability catalog's identity sort (a lexicographic
+    /// accident), either of which would silently flip same-stem resolution.
+    /// Equal ranks keep the catalog's deterministic sorted-identity order.
+    pub carrier_probe_rank: u32,
 }
 
 /// An adapter's virtual-file naming policy — the single authority for how its
@@ -715,6 +766,19 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
         // only; a named-export framework surface is not yet a distinct
         // resolution.
         supports_named_export_surfaces: false,
+        // The Vue SFC `<script setup generic="T, U">` surface: the
+        // prepared-declaration materializer collects its type-parameter
+        // bindings as typed declarations.
+        declares_script_setup_type_bindings: true,
+        // An SFC snapshot serves from the framework parse artifact and
+        // carries template-analysis inputs for the template surface.
+        carries_template_analysis_inputs: true,
+        // `<script setup>` top-level bindings are the authored exports,
+        // so export spans anchor at the script-setup bindings/macros.
+        anchors_exports_at_script_setup: true,
+        // The established same-stem probe winner: a `./Widget` collision
+        // with a `.svelte` twin resolves to the `.vue` carrier first.
+        carrier_probe_rank: 0,
     }
 }
 
@@ -872,6 +936,17 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         // (a `.svelte` file is one component); a named-export framework surface
         // is not a distinct resolution for it.
         supports_named_export_surfaces: false,
+        // A `.svelte` script has no script-setup generics surface; its bundles
+        // carry no script-setup type bindings.
+        declares_script_setup_type_bindings: false,
+        // A `.svelte` snapshot rebuilds through the plain-script parse and
+        // carries no template-analysis inputs.
+        carries_template_analysis_inputs: false,
+        // A `.svelte` script's exports are ordinary signature statements,
+        // not script-setup auto-exports.
+        anchors_exports_at_script_setup: false,
+        // Probed after `.vue` on a same-stem collision.
+        carrier_probe_rank: 1,
     }
 }
 

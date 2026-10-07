@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::host_compile::{CompileBatchInput, CompileBatchOptions, CompileManyTarget};
-use verter_session::HostConfig;
+use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace};
 
 /// Heap attribution needs the wrapper installed as THE global allocator,
@@ -153,7 +153,8 @@ fn run_once(corpus: &[SourceFile]) -> (f64, usize) {
         ws.inject_file(file.id.clone(), Arc::from(file.source.as_str()));
     }
 
-    let meta_host = ComponentMetaHost::new(HostConfig::default(), ws);
+    let host = std::sync::Arc::new(VerterHost::new(HostConfig::default(), ws));
+    let meta_host = ComponentMetaHost::new_shared_host(std::sync::Arc::clone(&host));
     let session = meta_host
         .open_session()
         .expect("opening a component-meta session must succeed");
@@ -185,7 +186,7 @@ fn run_once(corpus: &[SourceFile]) -> (f64, usize) {
             component_id: None,
         })
         .collect();
-    let _ = meta_host.host().compile_many(
+    let _ = host.compile_many(
         inputs,
         CompileBatchOptions::default(),
         CompileManyTarget::HostBacked,

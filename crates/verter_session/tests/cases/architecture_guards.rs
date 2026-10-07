@@ -4818,7 +4818,6 @@ pub(crate) mod foundations_guards {
         // inversion-of-control seam is a public surface by design (caller
         // wiring lands with the query-layer adoption).
         "pub mod query_host_port",
-        "pub(crate) mod session_runtime",
         // Stage 4a SessionView trait surface — `HostView` and
         // `OverlaidView` impls. `pub` because the integration smoke
         // test `tests/cases/g_session/session_view_smoke.rs` consumes the trait
