@@ -262,11 +262,12 @@ impl SemanticGraphStore {
     pub fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
         &'s self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         key: SemanticQueryKey,
         execution: &mut Option<ExecutionScope>,
         capture: &mut ReadCapture<'_>,
     ) -> Acquired<'s> {
-        let mut attempt = match self.begin_query_claim(ctx, key, capture) {
+        let mut attempt = match self.begin_query_claim(ctx, flags, key, capture) {
             Ok(attempt) => attempt,
             Err(read) => return Acquired::Read(read),
         };
@@ -274,12 +275,12 @@ impl SemanticGraphStore {
             .get_or_insert_with(|| self.enter_execution())
             .task();
         loop {
-            match self.claim_query(ctx, &mut attempt, task, capture) {
+            match self.claim_query(ctx, flags, &mut attempt, task, capture) {
                 Claim::Read(read) => return Acquired::Read(read),
                 Claim::Recursive(recursion) => return Acquired::Recursive(recursion),
                 Claim::Produce(lease) => return Acquired::Produce(lease),
                 Claim::Subscribed(subscription) => {
-                    match subscription.wait(ctx, &mut attempt, capture) {
+                    match subscription.wait(ctx, flags, &mut attempt, capture) {
                         Joined::Read(read) => return Acquired::Read(read),
                         Joined::Recursive(recursion) => return Acquired::Recursive(recursion),
                         Joined::Retry => {}
@@ -291,9 +292,14 @@ impl SemanticGraphStore {
 
     /// Begin one logical claim of `key`. `Err` answers it without a claim:
     /// a cancelled request, or a validated warm result.
+    ///
+    /// `flags` is the request snapshot's flag handles, borrowed once at the
+    /// caller's request boundary: every cancellation observation below is a
+    /// plain field read, with no per-checkpoint port dispatch.
     pub fn begin_query_claim<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         key: SemanticQueryKey,
         capture: &mut ReadCapture<'_>,
     ) -> Result<ClaimAttempt, ValueRead> {
@@ -303,7 +309,7 @@ impl SemanticGraphStore {
         // Request cancellation is a typed ReturnOnly terminal and must be
         // observed before even a warm probe: canceled requests do not consume
         // shared semantic work or reuse a value as if they completed normally.
-        if ctx.request_flags().is_cancelled() {
+        if flags.is_cancelled() {
             return Err(cancelled_cache_read());
         }
 
@@ -332,7 +338,7 @@ impl SemanticGraphStore {
         // returned, so a stale candidate misses and the claim below
         // recomputes it.
         if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture) {
-            return Err(if ctx.request_flags().is_cancelled() {
+            return Err(if flags.is_cancelled() {
                 cancelled_cache_read()
             } else {
                 hit
@@ -366,11 +372,12 @@ impl SemanticGraphStore {
     pub fn claim_query<'s, C: crate::resolver_core::ResolverCapabilities>(
         &'s self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         attempt: &mut ClaimAttempt,
         task: &ExecutionTask,
         capture: &mut ReadCapture<'_>,
     ) -> Claim<'s> {
-        if ctx.request_flags().is_cancelled() {
+        if flags.is_cancelled() {
             return Claim::Read(cancelled_cache_read());
         }
         let prepared = &attempt.prepared;
@@ -497,6 +504,7 @@ impl Subscription<'_> {
     pub fn wait<C: crate::resolver_core::ResolverCapabilities>(
         self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
@@ -507,16 +515,15 @@ impl Subscription<'_> {
         } = self;
         let prepared = &attempt.prepared;
         let mut state = inflight.state.lock();
-        let wait_edge =
-            if state.completed.is_none() && !state.aborted && !ctx.request_flags().is_cancelled() {
-                let producer = state.owner.unwrap_or(waiter);
-                match store.task_registry.register_wait(waiter, producer) {
-                    Ok(edge) => Some(edge),
-                    Err(WaitCycle) => return Joined::Recursive(Recursion::WaitCycle),
-                }
-            } else {
-                None
-            };
+        let wait_edge = if state.completed.is_none() && !state.aborted && !flags.is_cancelled() {
+            let producer = state.owner.unwrap_or(waiter);
+            match store.task_registry.register_wait(waiter, producer) {
+                Ok(edge) => Some(edge),
+                Err(WaitCycle) => return Joined::Recursive(Recursion::WaitCycle),
+            }
+        } else {
+            None
+        };
         // Cooperative wait on the flight's condvar until it completes, is
         // aborted by a canonical-invalidation sweep, or this request is
         // cancelled. Subscribers never busy-spin.
@@ -526,7 +533,7 @@ impl Subscription<'_> {
         // which atomically releases `state` and parks).
         #[cfg(any(test, feature = "test-support"))]
         store.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
-        while state.completed.is_none() && !state.aborted && !ctx.request_flags().is_cancelled() {
+        while state.completed.is_none() && !state.aborted && !flags.is_cancelled() {
             // Timed parking is the cancellation observation rail. A canceled
             // subscriber detaches by returning; it never marks the shared
             // flight aborted, so it cannot disturb an uncancelled producer or
@@ -546,7 +553,7 @@ impl Subscription<'_> {
             ctx.0
                 .record_cache_event(verter_execution::request_context::CacheEventKind::JoinedWait);
         }
-        if ctx.request_flags().is_cancelled() {
+        if flags.is_cancelled() {
             drop(state);
             return Joined::Read(cancelled_cache_read());
         }
@@ -657,7 +664,8 @@ impl<'s> ProducerLease<'s> {
     /// so its flight is aborted and its value discarded.
     pub fn settle<C: crate::resolver_core::ResolverCapabilities>(
         self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        _ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         output: BuildOutput,
     ) -> Result<SettledProducer<'s>, ValueRead> {
         let Self {
@@ -714,7 +722,7 @@ impl<'s> ProducerLease<'s> {
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
             .fetch_add(build_held_ns, Ordering::Relaxed);
 
-        if ctx.request_flags().is_cancelled() {
+        if flags.is_cancelled() {
             store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
             return Err(cancelled_cache_read());
         }
@@ -795,16 +803,18 @@ impl SettledProducer<'_> {
     pub fn admit<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         capture: &mut ReadCapture<'_>,
     ) -> Result<(), ValueRead> {
         let store = self.store;
-        if ctx.request_flags().is_cancelled() {
+        if flags.is_cancelled() {
             return Err(self.abort_for_cancellation());
         }
         let mut root_publication = None;
         if self.admissible {
             let outcome = store.warm_publish_one(
                 ctx,
+                flags,
                 &self.prepared,
                 &self.result,
                 &self.walker_diagnostics,
@@ -831,7 +841,7 @@ impl SettledProducer<'_> {
                 WarmPublishOutcome::Skipped => true,
                 WarmPublishOutcome::Aborted => false,
             };
-            if !self.admission_linearized && ctx.request_flags().is_cancelled() {
+            if !self.admission_linearized && flags.is_cancelled() {
                 if let Some(slot) = capture.publication.as_deref_mut() {
                     *slot = None;
                 }
@@ -859,6 +869,7 @@ impl SettledProducer<'_> {
                 for backfill in std::mem::take(&mut self.pending_prefix_backfills) {
                     self.admission_linearized |= store.warm_publish_one_if_absent(
                         ctx,
+                        flags,
                         backfill.key,
                         QueryResult::Value(backfill.node),
                         self.carrier.clone(),
@@ -880,7 +891,7 @@ impl SettledProducer<'_> {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
             }
         }
-        if !self.admission_linearized && ctx.request_flags().is_cancelled() {
+        if !self.admission_linearized && flags.is_cancelled() {
             if let Some(slot) = capture.publication.as_deref_mut() {
                 *slot = None;
             }
@@ -1071,13 +1082,17 @@ impl SemanticGraphStore {
         O: Into<BuildOutput>,
         R: FnOnce() -> SemanticNodeId,
     {
+        // Test-support entry: capture the request snapshot's flag handles
+        // once here, so the claim/settle/admit protocol below reads plain
+        // fields exactly as the production dispatch path does.
+        let flags = crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx);
         let mut execution = None;
-        match self.acquire_query(ctx, key, &mut execution, capture) {
+        match self.acquire_query(ctx, flags, key, &mut execution, capture) {
             Acquired::Read(read) => read,
             Acquired::Recursive(recursion) => Self::recursion_read(recursion, recursion_sentinel()),
-            Acquired::Produce(lease) => match lease.settle(ctx, build().into()) {
+            Acquired::Produce(lease) => match lease.settle(ctx, flags, build().into()) {
                 Err(read) => read,
-                Ok(mut settled) => match settled.admit(ctx, capture) {
+                Ok(mut settled) => match settled.admit(ctx, flags, capture) {
                     Err(read) => read,
                     Ok(()) => settled.complete(ctx, capture),
                 },

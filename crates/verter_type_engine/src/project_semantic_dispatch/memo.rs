@@ -8,6 +8,7 @@ use crate::cache_runtime::{CacheAdmission, CacheEntry, NonAdmissionReason};
 use crate::component_meta_caches::*;
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
+use crate::resolver_core::resolver_context::{RequestFlags, RequestSnapshot};
 use dashmap::DashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -63,10 +64,14 @@ impl<
 pub struct MemoRead<'a, D> {
     db: &'a D,
     facts: &'a dyn FactValidation,
+    /// The request snapshot's flag handles, borrowed once at the request
+    /// boundary: the warm-read generation gates below read them as plain
+    /// fields, with no per-gate port dispatch.
+    flags: &'a RequestFlags,
 }
 impl<'a, D> MemoRead<'a, D> {
-    pub(super) fn new(db: &'a D, facts: &'a dyn FactValidation) -> Self {
-        Self { db, facts }
+    pub(super) fn new(db: &'a D, facts: &'a dyn FactValidation, flags: &'a RequestFlags) -> Self {
+        Self { db, facts, flags }
     }
 }
 /// Request-local output coordination; storage never owns cold callbacks.
@@ -76,14 +81,34 @@ impl<'a, D> MemoRead<'a, D> {
 pub struct MemoPublish<'a, D, W> {
     db: &'a D,
     facts: &'a dyn LiveFactValidation<Clocks = W>,
+    /// The snapshot the host captured when it admitted this request,
+    /// borrowed once at the request boundary so the admission generation
+    /// gates and basis samples below read plain fields.
+    snapshot: &'a RequestSnapshot<W>,
 }
 impl<'a, D, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> MemoPublish<'a, D, W> {
-    pub(super) fn new(db: &'a D, facts: &'a dyn LiveFactValidation<Clocks = W>) -> Self {
-        Self { db, facts }
+    pub(super) fn new(
+        db: &'a D,
+        facts: &'a dyn LiveFactValidation<Clocks = W>,
+        snapshot: &'a RequestSnapshot<W>,
+    ) -> Self {
+        Self {
+            db,
+            facts,
+            snapshot,
+        }
     }
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_test(db: &'a D, facts: &'a dyn LiveFactValidation<Clocks = W>) -> Self {
-        Self { db, facts }
+    pub(crate) fn for_test(
+        db: &'a D,
+        facts: &'a dyn LiveFactValidation<Clocks = W>,
+        snapshot: &'a RequestSnapshot<W>,
+    ) -> Self {
+        Self {
+            db,
+            facts,
+            snapshot,
+        }
     }
 }
 
@@ -410,13 +435,14 @@ fn single_entry_peek<K, V>(
     entries: &DashMap<K, Arc<CacheEntry<V>>>,
     key: &K,
     ctx: &dyn FactValidation,
+    flags: &RequestFlags,
 ) -> Option<V>
 where
     K: Eq + std::hash::Hash + Clone,
     V: Clone,
 {
     let entry_arc = entries.get(key).map(|e| e.clone())?;
-    if entry_arc.validated_at_generation == ctx.request_flags().current_project_generation()
+    if entry_arc.validated_at_generation == flags.current_project_generation()
         && entry_arc
             .signature
             .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
@@ -439,6 +465,7 @@ pub struct ShapeCacheOwnerScope<
 > {
     db: &'db ShapeCacheDb,
     ctx: &'db dyn LiveFactValidation<Clocks = W>,
+    snapshot: &'db RequestSnapshot<W>,
     probe: &'t crate::fact_signature_helpers::CacheabilityProbe<'t, W>,
 }
 
@@ -447,7 +474,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 {
     #[must_use]
     pub fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
-        MemoRead::new(self.db, self.ctx).peek(key)
+        MemoRead::new(self.db, self.ctx, self.snapshot.flags()).peek(key)
     }
 
     pub fn get_or_compute<F>(
@@ -458,7 +485,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     where
         F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
     {
-        MemoPublish::new(self.db, self.ctx)
+        MemoPublish::new(self.db, self.ctx, self.snapshot)
             .get_or_compute_in_scope(key, self.ctx, self.probe, compute)
     }
 
@@ -497,7 +524,7 @@ impl MemoRead<'_, ImportedRegistryDb> {
         let ctx = self.facts;
 
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
-        let generation = ctx.request_flags().current_project_generation();
+        let generation = self.flags.current_project_generation();
         crate::project_semantic_dispatch::memo::read_candidate(storage.store, key, |candidate| {
             // The carrier validates only file-content whole-hashes; a
             // `ProjectGeneration` reset bumps no file content, so the
@@ -531,7 +558,7 @@ impl MemoRead<'_, ShapeCacheDb> {
         // The subject's scope canonical is the entry's self-root —
         // strict warm-read validation rejects a same-scope content edit.
         // The entry carries its own self-roots, validated strictly.
-        let result = single_entry_peek(storage.entries, key, ctx);
+        let result = single_entry_peek(storage.entries, key, ctx, self.flags);
         if let Some(rctx) = crate::request_context::current_request_context() {
             // Every ShapeCacheDb subject is a member-shape-route identity
             // now that the TypeExpr-START route also keys its LOWERED
@@ -563,7 +590,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn peek(&self, key: &ImportedRegistryKey) -> Option<ImportedRegistryValue> {
-        MemoRead::new(self.db, self.facts).peek(key)
+        MemoRead::new(self.db, self.facts, self.snapshot.flags()).peek(key)
     }
     /// Cooperative-admission cold compute over the imported-registry
     /// cache, routed through the query-identity split-publish lifecycle
@@ -705,7 +732,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             compute: std::cell::RefCell::new(Some(node_compute)),
             unadmitted: None,
         };
-        crate::cache_runtime::query::lookup(&node, key.clone(), ctx)
+        crate::cache_runtime::query::lookup(&node, key.clone(), ctx, self.snapshot.flags())
     }
     /// Test-only: drive [`Self::get_or_compute`] the way a production producer
     /// does — inside a REAL cacheability tracer scope opened around the whole
@@ -809,7 +836,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                 single_entry_admission(probe, computed)
             })),
         };
-        lookup(&node, key.clone(), ctx)
+        lookup(&node, key.clone(), ctx, self.snapshot.flags())
     }
     /// Test-only: drive [`Self::get_or_compute`] the way a production producer
     /// does — inside a REAL cacheability tracer scope opened around the whole
@@ -893,7 +920,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                 single_entry_admission(probe, compute())
             })),
         };
-        lookup(&node, key.clone(), ctx)
+        lookup(&node, key.clone(), ctx, self.snapshot.flags())
     }
     /// Test-only: drive [`Self::get_or_compute`] the way a production producer
     /// does — inside a REAL cacheability tracer scope opened around the whole
@@ -987,7 +1014,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                 single_entry_admission(probe, compute())
             })),
         };
-        lookup(&node, key.clone(), ctx)
+        lookup(&node, key.clone(), ctx, self.snapshot.flags())
     }
     /// Test-only: drive [`Self::get_or_compute`] the way a production producer
     /// does — inside a REAL cacheability tracer scope opened around the whole
@@ -1015,7 +1042,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 {
     #[cfg(any(test, feature = "test-support"))]
     pub fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
-        MemoRead::new(self.db, self.facts).peek(key)
+        MemoRead::new(self.db, self.facts, self.snapshot.flags()).peek(key)
     }
     /// Open the sole production admission scope for this DB. The sealed
     /// capability passed to `f` is the only route to a Shape-cache write.
@@ -1026,11 +1053,15 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         let ctx = self.facts;
 
         crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx_and_snapshot(
+                ctx,
+                self.snapshot,
+            ),
             |probe| {
                 f(ShapeCacheOwnerScope {
                     db: self.db,
                     ctx,
+                    snapshot: self.snapshot,
                     probe,
                 })
             },
@@ -1104,7 +1135,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                 }
             })),
         };
-        lookup(&node, key.clone(), ctx)
+        lookup(&node, key.clone(), ctx, self.snapshot.flags())
     }
     /// Universal-caching admission helper. Admits an already-computed
     /// `(value, fact_dep_signature)` pair into the cache when the
@@ -1158,28 +1189,40 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 }
 impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     pub fn imported_registry_read(&self) -> MemoRead<'_, ImportedRegistryDb> {
-        MemoRead::new(self.binding.imported_registry.as_ref(), self.ctx)
+        MemoRead::new(
+            self.binding.imported_registry.as_ref(),
+            self.ctx,
+            self.snapshot.flags(),
+        )
     }
     pub fn imported_registry_publish(&self) -> MemoPublish<'_, ImportedRegistryDb, C::Clocks> {
-        MemoPublish::new(self.binding.imported_registry.as_ref(), self.ctx)
+        MemoPublish::new(
+            self.binding.imported_registry.as_ref(),
+            self.ctx,
+            self.snapshot,
+        )
     }
 
     pub fn declaration_publish(&self) -> MemoPublish<'_, DeclarationLookupDb, C::Clocks> {
-        MemoPublish::new(self.binding.declarations.as_ref(), self.ctx)
+        MemoPublish::new(self.binding.declarations.as_ref(), self.ctx, self.snapshot)
     }
 
     pub fn resolvability_publish(&self) -> MemoPublish<'_, ResolvabilityDb, C::Clocks> {
-        MemoPublish::new(self.binding.resolvability.as_ref(), self.ctx)
+        MemoPublish::new(self.binding.resolvability.as_ref(), self.ctx, self.snapshot)
     }
 
     pub fn owner_collection_publish(&self) -> MemoPublish<'_, OwnerCollectionDb, C::Clocks> {
-        MemoPublish::new(self.binding.owner_collections.as_ref(), self.ctx)
+        MemoPublish::new(
+            self.binding.owner_collections.as_ref(),
+            self.ctx,
+            self.snapshot,
+        )
     }
     pub fn with_shape_scope<F, R>(&self, f: F) -> R
     where
         F: for<'t> FnOnce(ShapeCacheOwnerScope<'_, 't, C::Clocks>) -> R,
     {
-        MemoPublish::new(self.binding.shapes.as_ref(), self.ctx).with_owner_scope(f)
+        MemoPublish::new(self.binding.shapes.as_ref(), self.ctx, self.snapshot).with_owner_scope(f)
     }
 }
 
@@ -1193,7 +1236,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     /// The request's live project generation.
     #[must_use]
     pub fn current_project_generation(&self) -> u64 {
-        FactValidation::request_flags(self.ctx).current_project_generation()
+        self.snapshot.current_project_generation()
     }
 
     /// Whether every fact in `facts` still validates under the request's live
@@ -1216,7 +1259,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         let (value, read_set) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
             verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
                 &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-                &self.ctx.request_snapshot().clocks().live(),
+                &self.snapshot.clocks().live(),
             ),
             |_cell| compute(),
         );

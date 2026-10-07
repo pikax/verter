@@ -683,7 +683,7 @@ pub struct RequestBoundAdapter<L>(pub(super) L);
 /// surface — which gives engine-tier code no path to the carrier at all. The
 /// lifecycle this carrier wraps DOES expose
 /// [`RequestBoundLifecycle::host`], and the adapter's port impls call it: the
-/// host stays on the session side of the adapter, behind the six ports.
+/// host stays on the session side of the adapter, behind the five ports.
 #[cfg(test)]
 mod adapter_field_set_witness {
     use super::RequestBoundAdapter;

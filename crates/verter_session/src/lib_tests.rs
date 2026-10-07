@@ -2766,6 +2766,54 @@ fn set_workspace_swaps_resolution_source() {
     );
 }
 
+/// A request snapshot is captured ONCE at request admission and every hot
+/// read goes through it, so its handles must be live: a workspace
+/// replacement that lands mid-request (which also advances the project
+/// generation) has to be visible to the request's NEXT read, or a stale
+/// basis would be published as if it were current. This drives the
+/// production capture path — a real request-bound host context's snapshot —
+/// rather than hand-built atomics.
+#[test]
+fn request_snapshot_captured_at_admission_observes_a_mid_request_workspace_replacement() {
+    use verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let snapshot = ctx.request_snapshot();
+    let generation_before = snapshot.current_project_generation();
+    let content_before = snapshot.clocks().live().content;
+
+    // One mid-request mutation of the outside world: a replacement
+    // workspace carrying one file, installed through the host's own
+    // lifecycle (which also advances the project generation).
+    let replacement = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    replacement.inject_file(
+        "/mid/request.ts".to_string(),
+        Arc::from("export type Mid = 1;"),
+    );
+    host.set_workspace(replacement);
+
+    assert!(
+        snapshot.current_project_generation() > generation_before,
+        "the captured snapshot must observe the project-generation bump the          replacement caused: before {generation_before}, after {}",
+        snapshot.current_project_generation(),
+    );
+    let live = snapshot.clocks().live();
+    assert_ne!(
+        live.content, content_before,
+        "the captured snapshot must read the replacement workspace's content          generation, not the value captured at admission"
+    );
+    assert_eq!(
+        live.workspace_shape,
+        snapshot.current_project_generation(),
+        "the aggregate clocks' workspace-shape read and the snapshot's own          project-generation read must agree, both being live handles"
+    );
+}
+
 #[test]
 fn configure_projects_syncs_to_workspace() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(

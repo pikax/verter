@@ -745,7 +745,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical_evidence_epoch: std::cell::Cell::new(0),
             operation_budget_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
-                connected_demand::DemandCancellation::from_context(ctx),
+                connected_demand::DemandCancellation::from_flags(snapshot.flags()),
             ),
         }
     }
@@ -1719,7 +1719,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     pub(super) fn flow_slice_driver(&self) -> flow_slice_driver::FlowSliceDriver<'_> {
-        flow_slice_driver::FlowSliceDriver::new(self.binding.flow_slice.as_ref(), self.ctx)
+        flow_slice_driver::FlowSliceDriver::new(
+            self.binding.flow_slice.as_ref(),
+            self.ctx,
+            self.snapshot.flags(),
+        )
     }
 
     pub fn graph(&self) -> &Arc<SemanticGraphStore> {
@@ -3429,15 +3433,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // producer, which runs the traced build and then settles, is
         // admitted and completes.
         let mut execution = None;
+        let flags = self.snapshot.flags();
         let cache_read =
-            match graph.acquire_query(self.ctx, key.clone(), &mut execution, &mut capture) {
+            match graph.acquire_query(self.ctx, flags, key.clone(), &mut execution, &mut capture) {
                 Acquired::Read(read) => read,
                 Acquired::Recursive(recursion) => {
                     SemanticGraphStore::recursion_read(recursion, sentinel())
                 }
-                Acquired::Produce(lease) => match lease.settle(self.ctx, traced_build()) {
+                Acquired::Produce(lease) => match lease.settle(self.ctx, flags, traced_build()) {
                     Err(read) => read,
-                    Ok(mut settled) => match settled.admit(self.ctx, &mut capture) {
+                    Ok(mut settled) => match settled.admit(self.ctx, flags, &mut capture) {
                         Err(read) => read,
                         Ok(()) => settled.complete(self.ctx, &mut capture),
                     },

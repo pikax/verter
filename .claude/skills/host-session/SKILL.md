@@ -33,8 +33,10 @@ aggregate clocks — are not port methods: they are handles on the engine-owned
 `RequestSnapshot` (`resolver_core/resolver_context.rs`) that each request
 lifecycle captures once at admission (`VerterHost::capture_request_snapshot`)
 and serves through `LiveFactValidation::request_snapshot` /
-`FactValidation::request_flags`; `ProjectSemanticDispatch` borrows it once at
-construction and reads it as plain fields. The snapshot holds handles only, so
+`FactValidation::request_flags` at admission boundaries only;
+`ProjectSemanticDispatch` borrows it once at construction, threads its flag
+handles into every producer, memo and cache-runtime entry point below
+(`&RequestFlags` beside the context), and reads plain fields throughout. The snapshot holds handles only, so
 every read is live: a mid-request cancellation, project reset or workspace edit
 is observed by the next read. Per-method call counts of these ports, per lane,
 come from the default-off `semantic-observe` counter

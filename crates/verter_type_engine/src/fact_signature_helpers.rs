@@ -311,10 +311,25 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     pub fn from_ctx(
         ctx: &'h dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
     ) -> Self {
+        Self::from_ctx_and_snapshot(
+            ctx,
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx),
+        )
+    }
+
+    /// Seed from a request-bound context whose request snapshot the caller
+    /// already borrowed (the dispatch borrows it once at request admission),
+    /// so opening a scope samples the live clocks as a plain field read
+    /// instead of re-fetching the snapshot through the port.
+    #[must_use]
+    pub fn from_ctx_and_snapshot(
+        ctx: &'h dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+        snapshot: &'h crate::resolver_core::resolver_context::RequestSnapshot<W>,
+    ) -> Self {
         Self {
             authority: BasisAuthority::Bound {
                 port: ctx,
-                clocks: ctx.request_snapshot().clocks(),
+                clocks: snapshot.clocks(),
             },
             seed: ctx.aggregate_basis_seed(),
         }

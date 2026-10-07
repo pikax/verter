@@ -249,8 +249,10 @@ project-generation clock and the live aggregate clock reader. Each request
 lifecycle captures it once when the request is admitted
 (`VerterHost::capture_request_snapshot`). `LiveFactValidation::request_snapshot`
 serves it, and `FactValidation::request_flags` serves its cancellation and
-generation handles. `ProjectSemanticDispatch` borrows it at construction and
-reads plain fields.
+generation handles; both are admission-boundary captures only.
+`ProjectSemanticDispatch` borrows it at construction, threads its flag handles
+into every producer and cache-runtime entry point below, and reads plain
+fields throughout.
 
 The `Cancellation` port and the `current_project_generation` and
 `aggregate_clock_reader` port methods are deleted, so the compiler rejects any
@@ -273,13 +275,27 @@ The moved methods no longer exist. The accessors that replaced them:
 | `LiveFactValidation::request_snapshot` | 18 | 6005 | 14 | 3007 | 809 | 9030 | 1034 | 3510 | 6004 | 25 | 222 |
 
 The dispatch now reads the generation and cancellation handles as plain
-fields. The memo producer, memo publication and cache-runtime paths still
-borrow the snapshot through one accessor call wherever they read it, because
-they receive only `&dyn ResolverContext`. That keeps `request_flags` at about
-one to four calls per node. Each of those calls returns a borrowed field
-instead of computing a port answer, and the fact-tracer basis no longer
-builds a clock reader per scope. Passing the borrowed snapshot into the
-producer's entry points would remove the remaining accessor calls.
+fields. The memo producer, memo publication and cache-runtime paths receive
+the borrowed snapshot's flag handles at their entry points: `acquire_query`,
+`begin_query_claim`, `claim_query`, `Subscription::wait`, `settle`, `admit`,
+the `warm_publish_one*` admission steps, the `cache_runtime` `lookup` entry
+points and the `FlowSliceDriver` all take `&RequestFlags` (and, where a basis
+sample is needed, `&RequestSnapshot<W>`) alongside the context, threaded from
+the snapshot the dispatch borrowed once at construction. The per-node reads
+below those entries are plain field reads with no port dispatch. The two
+accessors remain only as admission-boundary captures: the dispatch's one
+`request_snapshot` per request, and the test-support entries that capture the
+handles once before driving the same protocol. The fact-tracer basis no
+longer builds a clock reader per scope.
+
+The table above was taken before that threading landed. Re-measuring the two
+self-contained lanes on the threaded tree: `FactValidation::request_flags`
+falls to 0 across flow-return (was 126) and to 24 across component-meta (was
+530; the remainder is the session-side component-meta host paths' own coarse
+per-build reads), and `LiveFactValidation::request_snapshot` keeps only the
+per-request dispatch captures and the per-cold-build fact-tracer basis
+constructions. The scenario lanes need the semantic-perf scenario
+directories and re-measure through the same harness when present.
 
 Every scenario answered identically, with identical semantic-node,
 memo-entry and relation-proof counts, and every timing verdict is overlap:

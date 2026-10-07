@@ -31,7 +31,6 @@ use super::cost_receipt::{
     CostDependency, CostIdentity, CostScope, DemandCostReceipt, LogicalUsage, ReplayRefusal,
 };
 
-use crate::resolver_core::ResolverContext;
 use crate::semantic_query::PartialReasonSet;
 
 /// The work units one structured comparison the checker records costs the
@@ -181,12 +180,15 @@ pub(crate) struct DemandCancellation<'a> {
 }
 
 impl<'a> DemandCancellation<'a> {
-    /// Narrow the request's resolver context down to its cancellation signal.
-    pub(super) fn from_context<C: crate::resolver_core::ResolverCapabilities>(
-        ctx: &'a dyn ResolverContext<C>,
+    /// Narrow the request snapshot's flag handles down to the cancellation
+    /// signal. The dispatch passes the snapshot it borrowed once at request
+    /// admission, so every charge-boundary checkpoint below is a plain
+    /// field read.
+    pub(super) fn from_flags(
+        flags: &'a crate::resolver_core::resolver_context::RequestFlags,
     ) -> Self {
         Self {
-            checkpoint: ctx.request_flags().cancellation_checkpoint(),
+            checkpoint: flags.cancellation_checkpoint(),
             _request: std::marker::PhantomData,
         }
     }
