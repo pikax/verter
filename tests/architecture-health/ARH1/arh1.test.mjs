@@ -366,7 +366,7 @@ test("ARH1-surface dirty twin: a retained method owner must be a wired child of 
 test("ARH1-surface dirty twin: narrowing to an invented visibility or naming absent consumers is rejected", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).minimalPublicSurface.narrow.find(
-    (n) => n.item === "generation_floors",
+    (n) => n.item === "deferred_blocker_ids",
   );
   row.to = "pub"; // widening is not a narrowing disposition
   let result = validate(dirty, loadManifest(), arh0);
@@ -1227,7 +1227,7 @@ test("ARH1-import-direction: inline paths are measured and noise is not", () => 
 test("ARH1-surface dirty twin: a recorded field consumer without qualified use is rejected", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).minimalPublicSurface.narrow.find(
-    (n) => n.item === "generation_floors",
+    (n) => n.item === "deferred_blocker_ids",
   );
   // host_construction.rs uses constructors, not the retained scheduler field.
   row.consumersAffected.push("crates/verter_session/src/host_construction.rs");
@@ -1238,7 +1238,7 @@ test("ARH1-surface dirty twin: a recorded field consumer without qualified use i
       (e) =>
         e.caseId === "ARH1-surface" &&
         e.code === "narrow-consumer-without-reference" &&
-        e.detail.includes("Scheduler.generation_floors"),
+        e.detail.includes("Scheduler.deferred_blocker_ids"),
     ),
     JSON.stringify(result.errors),
   );
@@ -1264,8 +1264,12 @@ test("ARH1-surface: field use forms are type-qualified", () => {
   // An unambiguous field name: a bare receiver access outside the crate is
   // the owning type's consumer.
   assert.equal(
-    fieldUseForms("let g = sched.generation_floors.len();", "Scheduler", "generation_floors", true)
-      .receiver,
+    fieldUseForms(
+      "let g = sched.deferred_blocker_ids.len();",
+      "Scheduler",
+      "deferred_blocker_ids",
+      true,
+    ).receiver,
     true,
   );
 });

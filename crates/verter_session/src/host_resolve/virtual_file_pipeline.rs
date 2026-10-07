@@ -2325,7 +2325,7 @@ impl VerterHost {
                                 Arc::new(template_analysis),
                                 crate::types::RawTemplateSlotAdmission {
                                     store_published: true,
-                                    source_generation: Some(source_snap.generation),
+                                    source_version: Some(source_snap.version()),
                                     has_src_blocks: !compile_input.src_blocks.is_empty(),
                                     default_extraction: !profile
                                         .has_parse_affecting_template_options(),

@@ -1,11 +1,15 @@
 //! Convert `verter_actions::CodeAction` to its FFI representation. Span byte
-//! offsets are converted to UTF-16 for browser consumption.
+//! offsets are converted to UTF-16 for browser consumption through one
+//! [`OffsetIndex`] per source, shared by every action of a request.
 
 use crate::types::*;
 
-use super::offset::byte_offset_to_utf16;
+use super::offset::OffsetIndex;
 
-pub fn code_action_to_ffi(action: &verter_actions::CodeAction, source: &str) -> FfiCodeAction {
+pub fn code_action_to_ffi(
+    action: &verter_actions::CodeAction,
+    index: &OffsetIndex<'_>,
+) -> FfiCodeAction {
     FfiCodeAction {
         title: action.title.clone(),
         kind: match action.kind {
@@ -17,8 +21,8 @@ pub fn code_action_to_ffi(action: &verter_actions::CodeAction, source: &str) -> 
             .edits
             .iter()
             .map(|edit| FfiTextEdit {
-                span_start: byte_offset_to_utf16(source, edit.span.start),
-                span_end: byte_offset_to_utf16(source, edit.span.end),
+                span_start: index.to_utf16(edit.span.start),
+                span_end: index.to_utf16(edit.span.end),
                 new_text: edit.replacement.clone(),
             })
             .collect(),

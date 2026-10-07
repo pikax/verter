@@ -517,7 +517,7 @@ fn pre_publication_semantic_catalog_miss_is_stage_error_without_publish() {
     let before = host.carrier_publication.publication_store.audit_snapshot();
     let result = catch_unwind(AssertUnwindSafe(|| {
         crate::parse::with_forced_catalog_eval_source_miss(|| {
-            executor.execute_source("Miss.vue", FileLanguage::vue(), Arc::from(source), 1)
+            executor.execute_source("Miss.vue", FileLanguage::vue(), Arc::from(source), 1, 1)
         })
     }));
     let stage = result.unwrap_or_else(|_| {
