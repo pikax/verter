@@ -52,11 +52,11 @@ fn wide_object_literal(width: usize) -> String {
     format!("const wide = {{\n{members}}};\n")
 }
 
-fn type_members<'i>(index: &'i DeclHeaderIndex) -> &'i MemberHeaderList {
+fn type_members(index: &DeclHeaderIndex) -> &MemberHeaderList {
     &index.type_header("Wide").expect("Wide").member_headers
 }
 
-fn object_members<'i>(index: &'i DeclHeaderIndex) -> &'i MemberHeaderList {
+fn object_members(index: &DeclHeaderIndex) -> &MemberHeaderList {
     &index
         .value_header("wide")
         .expect("wide")
