@@ -5374,6 +5374,9 @@ async fn native_cross_file_definition_settles_through_its_admission() {
         let raced = server
             .goto_definition(goto_definition_params(&app_uri, position))
             .await;
+        // The armed action holds a server clone; clear it before any assertion
+        // so the server is released even when one fails.
+        server.request_barriers().clear();
         assert!(
             moved.load(std::sync::atomic::Ordering::SeqCst),
             "{movement}: the native definition passes through its admission"
@@ -6304,6 +6307,71 @@ async fn concurrent_stable_completions_do_not_cancel_each_other() {
             "stable concurrent completion {index} must remain typed, got {labels:?}"
         );
     }
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// A completion sent after an edit whose commit is still waiting on the
+/// edit-commit fence answers against that edit's revision. Admitting it before
+/// the queued edit commits would pin the replaced revision, and the edit
+/// committing ahead of the completion's source read would then answer
+/// `ContentModified` for an edit the client sent first.
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_sent_after_a_queued_edit_answers_the_edited_revision() {
+    let child_source =
+        "<script setup lang=\"ts\">\ndefineProps<{ tone0: string; caption1?: string }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport CorpusChild from './CorpusChild.vue'\n</script>\n<template>\n  <CorpusChild  />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/CorpusChild.vue", "vue", child_source),
+        ("src/Corpus1.vue", "vue", parent_source),
+    ])
+    .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/Corpus1.vue");
+    settle_child_contracts(server, &uri, &workspace_id, &["src/CorpusChild.vue"]).await;
+    let cursor = parent_source.find("<CorpusChild ").unwrap() + "<CorpusChild ".len();
+    let position = LineIndex::new_utf16(parent_source)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    let version = server.documents.get(&uri).expect("open").version;
+    let edited = format!("{parent_source}<!-- edited -->\n");
+
+    // Hold the fence so the edit queues on it, then send the completion.
+    let fence = server.did_change_mutex.lock().await;
+    let edit = super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: version + 1,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: edited.clone(),
+            }],
+        },
+    );
+    let completion = server.completion(completion_params(&uri, position, None));
+    let release = async move {
+        tokio::task::yield_now().await;
+        drop(fence);
+    };
+    let ((), response, ()) = futures_util::future::join3(edit, completion, release).await;
+
+    assert_eq!(
+        server.documents.get(&uri).expect("open").version,
+        version + 1,
+        "the queued edit committed"
+    );
+    let labels = completion_labels(
+        response.expect("a completion sent after the edit answers the edited revision"),
+    );
+    assert!(
+        labels.contains(&"tone0".to_string()),
+        "the completion answers the child's typed props: {labels:?}"
+    );
 
     drain_handle.abort();
     drop(service);

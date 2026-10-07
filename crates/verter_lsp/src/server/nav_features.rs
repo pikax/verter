@@ -646,8 +646,13 @@ pub(super) async fn handle_completion(
     // and is never reinterpreted against a later one. Background work that
     // moves no admitted input — a diagnostics-generation advance, an identical
     // surface re-record, an equivalent root publication — settles the answer.
+    // Completion reads its source under the edit-commit fence, so it is
+    // admitted under that fence too: an edit already queued ahead of this
+    // request commits first and the request pins the revision it was sent
+    // against, rather than pinning the replaced one and answering
+    // `ContentModified` for an edit that preceded it.
     server
-        .answer_foreground(
+        .answer_foreground_after_edit_commit(
             crate::documents::ForegroundRoute::Completion,
             &uri,
             handle_completion_attempt(server, &params),

@@ -705,6 +705,31 @@ impl VerterLanguageServer {
         uri: &Uri,
     ) -> Arc<crate::documents::ForegroundRequest> {
         let request = crate::documents::ForegroundRequest::admit(&self.documents, route, uri);
+        self.captured_foreground(request).await
+    }
+
+    /// [`Self::admit_foreground`] for a route whose answer reads source under
+    /// the edit-commit fence. Admission waits for every edit already queued on
+    /// that fence to commit and releases it before any computation, so a
+    /// request sent after an edit is never pinned to the revision that edit
+    /// replaces. An edit that commits after admission still moves the
+    /// admitted revision.
+    async fn admit_foreground_after_edit_commit(
+        &self,
+        route: crate::documents::ForegroundRoute,
+        uri: &Uri,
+    ) -> Arc<crate::documents::ForegroundRequest> {
+        let request = {
+            let _edit_commit = self.did_change_mutex.lock().await;
+            crate::documents::ForegroundRequest::admit(&self.documents, route, uri)
+        };
+        self.captured_foreground(request).await
+    }
+
+    async fn captured_foreground(
+        &self,
+        request: Arc<crate::documents::ForegroundRequest>,
+    ) -> Arc<crate::documents::ForegroundRequest> {
         #[cfg(test)]
         self.request_barriers
             .reach(test_support::RequestBarrier::Capture)
@@ -747,11 +772,42 @@ impl VerterLanguageServer {
         let compute = Box::pin(compute);
         async move {
             let request = self.admit_foreground(route, uri).await;
-            let response = request.compute(compute).await?;
-            self.settle_foreground(&request, response)
-                .await
-                .into_result()
+            self.answer_admitted(&request, compute).await
         }
+    }
+
+    /// [`Self::answer_foreground`] admitted through
+    /// [`Self::admit_foreground_after_edit_commit`].
+    pub(super) fn answer_foreground_after_edit_commit<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground_after_edit_commit(route, uri).await;
+            self.answer_admitted(&request, compute).await
+        }
+    }
+
+    /// Compute `request`'s answer once against its admission and settle it.
+    async fn answer_admitted<T, F>(
+        &self,
+        request: &Arc<crate::documents::ForegroundRequest>,
+        compute: F,
+    ) -> Result<Option<T>>
+    where
+        F: std::future::Future<Output = Result<Option<T>>>,
+    {
+        let response = request.compute(compute).await?;
+        self.settle_foreground(request, response)
+            .await
+            .into_result()
     }
 
     /// [`Self::answer_foreground`] for request-answering routes that repair the
