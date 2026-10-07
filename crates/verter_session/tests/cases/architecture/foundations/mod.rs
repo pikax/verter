@@ -1458,10 +1458,8 @@ pub fn origin_fence_reconstruction_violations() -> Vec<(String, usize, String)> 
 mod cache;
 mod capabilities;
 #[path = "../hermeticity.rs"]
-mod hermeticity;
+pub(crate) mod hermeticity;
 mod mappings;
-
-pub(crate) use hermeticity::external_corpus_paths_not_present_outside_gated_tests;
 
 fn external_corpus_guard_self_exempts(path: &std::path::Path) -> bool {
     ["foundations/mod.rs", "hermeticity.rs"].iter().any(|file| {

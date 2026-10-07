@@ -63,6 +63,12 @@ fn collect_production_session_src_files() -> Vec<PathBuf> {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
+        if path.components().any(|c| {
+            let c = c.as_os_str().to_str().unwrap_or("");
+            c == "tests" || c.ends_with("_tests")
+        }) {
+            continue;
+        }
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())

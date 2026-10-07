@@ -99,14 +99,15 @@ function rustFiles(dir, out = []) {
 
 let productionFilesCache;
 /** Production Rust sources: every `src/` file under `crates/` that is not a
- * test module file (`tests.rs`, `*_tests.rs`). */
+ * test module file (`tests.rs`, `*_tests.rs`, or under a `tests/` or `*_tests/` directory). */
 function productionRustFiles() {
   if (productionFilesCache) return productionFilesCache;
   productionFilesCache = rustFiles("crates").filter(
     (rel) =>
       /^crates\/[^/]+\/src\//.test(rel) &&
       !/(?:^|\/)tests\.rs$/.test(rel) &&
-      !/_tests\.rs$/.test(rel),
+      !/_tests\.rs$/.test(rel) &&
+      !/(?:^|\/)(?:tests|[^/]+_tests)\//.test(rel),
   );
   return productionFilesCache;
 }

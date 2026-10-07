@@ -49,6 +49,10 @@ fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("read_dir").flatten() {
         let path = entry.path();
         if path.is_dir() {
+            let dir = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if dir == "tests" || dir.ends_with("_tests") {
+                continue;
+            }
             walk_rs(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             out.push(path);
