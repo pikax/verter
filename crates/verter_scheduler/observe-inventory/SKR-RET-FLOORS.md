@@ -16,7 +16,7 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
-| `HostSourceRevisionToken.file_incarnation` for scheduler-registered sources | LSP host-revision staleness checks and external block request owner revisions | REQUIRED | Carried by `HostSourceData` for the committed snapshot's lifetime | `src/host_executor.rs` | always |
+| `HostSourceRevisionToken.source_version` (the committing host's scheduler `SourceVersion`) for every source ingress, ordinary or ingested envelope | LSP host-revision staleness checks and external block request owner revisions | REQUIRED | Carried by `HostSourceData` for the committed snapshot's lifetime | `src/host_executor.rs`, `src/carrier_publication_store/mod.rs` | always |
 | `RawTemplateAnalysisEntry.source_version` and `RawTemplateSlotAdmission.source_version` | Raw-template slot install ordering and reader validation | REQUIRED | One entry per canonical in `DerivedRawState`; dropped on removal and cleared by invalidation | `src/types.rs`, `src/host_manage/analysis_io.rs` | always |
 | Upsert commit fence on `SourceVersion` | `finish_upsert_post_commit` and committed carrier route publication refuse a read-back from another node object or generation | REQUIRED | One upsert transaction | `src/host_upsert.rs`, `src/host_manage/prepared_decl.rs` | always |
 

@@ -626,9 +626,8 @@ impl VerterHost {
                 whole_hash: parse.whole_hash,
                 framework_parse: Some(parsed),
                 store_published,
-                // This builder reads no scheduler node, so it can
-                // never attest a node generation; the computed
-                // template serves the caller but never persists.
+                // The parse above derives from this scheduler source
+                // read, so its node version is the persist rail.
                 source_version: Some(source_snapshot.version()),
             };
             if parse.refused.is_some() {

@@ -138,7 +138,9 @@ successor starts at generation 0. Committed `SourceSnapshot` and
 driver, and `version()` returns a `SourceVersion` (incarnation, generation)
 ordered incarnation-first, so a successor's versions order after its
 predecessor's and never compare equal to them. `StageExecutor::execute_source`
-receives the incarnation; the host's base revision token, its raw-template
+receives the incarnation; the host's revision token (`HostSourceRevisionToken`
+carries the committing host's own `SourceVersion` on every ingress, ingested
+envelopes included — never the registering owner's identity), its raw-template
 version rail and its upsert commit fence key on it. Internal admission,
 dispatch, publication, completion and failure use full incarnation identity.
 

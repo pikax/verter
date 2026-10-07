@@ -303,22 +303,32 @@ mod tests {
             assert_no_retained_state(&scheduler, &["/cycled.vue".to_string()]);
         }
 
-        // Distinct canonicals created and removed one at a time: once every
-        // node-table shard has seen a file, the backing capacity stops
-        // growing with the length of the removal history.
-        let cycle_distinct = |range: std::ops::Range<usize>| {
-            let ids: Vec<String> = range.map(|index| format!("/distinct-{index}.ts")).collect();
-            for id in &ids {
-                loader.insert(id.clone(), Arc::from("x"));
-                analyze(&scheduler, id);
-                scheduler.remove(id);
-            }
-            assert_no_retained_state(&scheduler, &ids);
+        // Distinct canonicals created and removed one at a time: the node
+        // table never holds more than one file, so no shard's backing
+        // capacity may exceed what a single occupant allocates, however
+        // long the removal history. Every shard sees many files, so any
+        // retained per-removal entry would grow some shard past that bound.
+        let ids: Vec<String> = (0..(16 * scheduler.nodes.shards().len()).max(2048))
+            .map(|index| format!("/distinct-{index}.ts"))
+            .collect();
+        for id in &ids {
+            loader.insert(id.clone(), Arc::from("x"));
+            analyze(&scheduler, id);
+            scheduler.remove(id);
+        }
+        assert_no_retained_state(&scheduler, &ids);
+        let single_occupant = {
+            let probe: DashMap<String, Arc<FileNode>> = DashMap::new();
+            probe.insert(
+                "/probe.ts".into(),
+                Arc::new(FileNode::new("/probe.ts".into(), FileLanguage::script_ts())),
+            );
+            probe.remove("/probe.ts");
+            probe.capacity()
         };
-        cycle_distinct(0..256);
-        let capacity = scheduler.nodes.capacity();
-        cycle_distinct(256..2048);
-        assert_eq!(scheduler.nodes.capacity(), capacity);
+        for shard in scheduler.nodes.shards() {
+            assert!(shard.read().capacity() <= single_occupant);
+        }
     }
 
     #[test]

@@ -2778,9 +2778,9 @@ pub(crate) struct VueTemplateInputs {
     /// Scheduler source version (node object + generation) of the source
     /// read these inputs were captured from — the value stamped onto
     /// [`RawTemplateAnalysisEntry::source_version`] at persist.
-    /// `None` when the capture site read no scheduler node (the
-    /// from-source snapshot builder, the artifact-serve lane): with no
-    /// generation to stamp, the computed template serves the caller
+    /// `None` when the capture site read no scheduler node (an overlay
+    /// registration, the artifact-serve lane): with no version to
+    /// stamp, the computed template serves the caller
     /// but the persist declines — an entry without a rail cannot be
     /// validated by any reader, so it must not exist.
     pub(crate) source_version: Option<verter_scheduler::node::SourceVersion>,

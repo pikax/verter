@@ -65,3 +65,5 @@ web-time = "1.1"
 
 [dev-dependencies]
 verter_execution = { path = "../verter_execution", features = ["test-support"] }
+# Shard-level capacity reads for the node table's drain witness.
+dashmap = { version = "6.2", features = ["raw-api"] }

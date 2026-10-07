@@ -255,17 +255,17 @@ impl HostStageExecutor {
         generation: u64,
         incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
-        // The host's base revision names the scheduler node object as well
-        // as its generation: a removed or reset file's successor restarts
-        // its generation sequence, so the generation alone could repeat a
+        // Every ingress names this host's scheduler node object as well as
+        // its generation: a removed or reset file's successor restarts its
+        // generation sequence, so the generation alone could repeat a
         // retired revision for different bytes.
-        let base_revision =
-            |source_generation| crate::carrier_publication_store::HostSourceRevisionToken {
-                host_instance: self.host_instance,
-                file_incarnation:
-                    verter_language::registered_source_authority::FileIncarnation::new(incarnation),
-                source_generation,
-            };
+        let revision_token = crate::carrier_publication_store::HostSourceRevisionToken {
+            host_instance: self.host_instance,
+            source_version: verter_scheduler::node::SourceVersion {
+                incarnation,
+                generation,
+            },
+        };
         // Carrier dispatch: a framework CARRIER file whose catalog frontend
         // is installed routes source-stage parse through the publication
         // store. EVERY OTHER framework row (a framework TEMPLATE, an
@@ -317,7 +317,7 @@ impl HostStageExecutor {
                 crate::parse::retained_semantic_for_source_stage(adapter_id, carrier_language_id)
                     .ok_or_else(|| StageError::new("semantic catalog miss for carrier identity"))?;
             let ingested = self.registered_envelope_ingest.lock().remove(canonical_id);
-            let (framework_parse, structure, revision_token) = if let Some(structure) = ingested {
+            let (framework_parse, structure) = if let Some(structure) = ingested {
                 let registered = structure.envelope().source();
                 if registered.canonical().as_str() != canonical_id
                     || registered.bytes() != content.as_ref()
@@ -327,13 +327,7 @@ impl HostStageExecutor {
                         "registered envelope/source identity mismatch",
                     ));
                 }
-                // The registering owner minted this envelope's identity.
-                let revision_token = crate::carrier_publication_store::HostSourceRevisionToken {
-                    host_instance: self.host_instance,
-                    file_incarnation: registered.file_incarnation(),
-                    source_generation: registered.generation(),
-                };
-                (Arc::clone(structure.artifact()), structure, revision_token)
+                (Arc::clone(structure.artifact()), structure)
             } else {
                 let registered = self
                     .source_authority
@@ -396,7 +390,6 @@ impl HostStageExecutor {
                 (
                     Arc::clone(envelope.artifact()),
                     crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
-                    base_revision(registered.generation()),
                 )
             };
             let eval_source = crate::parse::invoke_retained_semantic_eval_source(
@@ -471,11 +464,7 @@ impl HostStageExecutor {
                     framework_parse: None,
                     script_parse_key,
                     structure: None,
-                    revision_token: base_revision(
-                        verter_language::registered_source_authority::SourceGeneration::new(
-                            generation,
-                        ),
-                    ),
+                    revision_token,
                     file_language,
                     source_type,
                     eval_source: content,

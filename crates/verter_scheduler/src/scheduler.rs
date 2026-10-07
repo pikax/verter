@@ -8770,7 +8770,7 @@ mod tests {
     /// a replacement is validated as if it were the original. Two node
     /// objects for the same canonical can sit at the SAME generation, so
     /// the generation check cannot catch it either — a replacement
-    /// starts from generation 0 / the recorded floor and is bumped, and
+    /// starts its own generation sequence at 0 and is bumped, and
     /// nothing forces it past the value the original already had.
     ///
     /// Discriminator: the replacement here carries its OWN committed

@@ -375,6 +375,84 @@ fn base_revision_never_repeats_across_remove_and_reset() {
     }
 }
 
+/// The host revision names this host's own scheduler node object on every
+/// ingress. An ingested envelope carries its registering owner's identity,
+/// which restarts with that owner's file lifetime and lives in a numbering
+/// space independent of this host's scheduler; it must never stand in for
+/// this host's revision. A remove or reset followed by different bytes over
+/// any mix of ordinary and ingested upserts therefore yields a new revision.
+#[test]
+fn revision_never_repeats_across_remove_and_reset_for_any_ingress() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    #[derive(Debug, Clone, Copy)]
+    enum Ingress {
+        Ordinary,
+        Envelope,
+    }
+
+    fn host() -> crate::VerterHost {
+        let workspace: Arc<dyn WorkspaceAccess> =
+            Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        crate::VerterHost::new(crate::HostConfig::default(), workspace)
+    }
+    fn request(source: &str) -> crate::UpsertRequest {
+        crate::UpsertRequest {
+            canonical_id: Some(CANONICAL.to_string()),
+            input_id: CANONICAL.to_string(),
+            source: Arc::from(source),
+            file_language: verter_language::FileLanguage::vue(),
+            aliases: Vec::new(),
+        }
+    }
+    const CANONICAL: &str = "/src/App.vue";
+
+    for (first, second) in [
+        (Ingress::Envelope, Ingress::Envelope),
+        (Ingress::Ordinary, Ingress::Envelope),
+        (Ingress::Envelope, Ingress::Ordinary),
+    ] {
+        for reset in [false, true] {
+            let case = format!("{first:?} -> {second:?} reset={reset}");
+            // The registering owner mirrors the same file lifetime, so its
+            // own registration identity restarts alongside this host's.
+            let owner = host();
+            let host = host();
+            let upsert = |ingress: Ingress, source: &str| {
+                match ingress {
+                    Ingress::Ordinary => {
+                        let _ = host.upsert(request(source)).expect("upsert");
+                    }
+                    Ingress::Envelope => {
+                        let _ = owner.upsert(request(source)).expect("owner upsert");
+                        let structure = owner
+                            .registered_file_structure(CANONICAL)
+                            .expect("owner structure");
+                        let _ = host
+                            .upsert_registered_envelope(request(source), structure)
+                            .expect("envelope ingestion");
+                    }
+                }
+                host.registered_source_revision_token(CANONICAL)
+                    .expect("revision token")
+            };
+            let retired = upsert(first, "<script setup>const x = 1</script>");
+            if reset {
+                owner.close();
+                host.close();
+            } else {
+                // The owner knows the file only when it registered the
+                // retired revision.
+                let _ = owner.remove(CANONICAL);
+                host.remove(CANONICAL).expect("known file");
+            }
+            let current = upsert(second, "<script setup>const x = 2</script>");
+            assert_ne!(current, retired, "{case}");
+            assert_ne!(current.public_token(), retired.public_token(), "{case}");
+        }
+    }
+}
+
 #[test]
 fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
     let persistence =
