@@ -51,18 +51,24 @@ impl EngineStores {
     ///
     /// `store_account` is the retention account every retaining store charges;
     /// `cache_live` is the live-entry counter the single-entry memo stores
-    /// share; `provenance` instruments the semantic graph when present.
+    /// share; `provenance` instruments the semantic graph when present;
+    /// `task_registry` is the cycle authority the graph's producers register
+    /// with, minted by the caller's composition root.
     #[must_use]
     pub fn create(
         provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
         cache_live: &Arc<AtomicU64>,
+        task_registry: verter_execution::tasks::TaskRegistry,
     ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
         let retention_account = Arc::clone(store_account.get());
-        let graph = Arc::new(match provenance {
-            Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
-            None => SemanticGraphStore::with_account(store_account),
-        });
+        let graph = Arc::new(
+            match provenance {
+                Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
+                None => SemanticGraphStore::with_account(store_account),
+            }
+            .with_task_registry(task_registry),
+        );
         let authority = OutputAuthority {
             engine: EngineIdentity(Arc::downgrade(&graph)),
         };

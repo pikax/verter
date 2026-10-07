@@ -366,7 +366,6 @@ mod semantic_query_tests;
 #[cfg(test)]
 mod semantic_retention_account_tests;
 pub(crate) mod session_attachment;
-pub(crate) mod session_runtime;
 pub(crate) mod session_vfs_sink;
 pub mod session_view;
 mod shared;
@@ -504,6 +503,12 @@ pub struct VerterHost {
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
     /// lock and always read through the latest workspace after `set_workspace()`.
     pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+    /// The workspace-scoped services the composition root built once and
+    /// attaches to every workspace this host is given.
+    pub(crate) workspace_services: host_construction::WorkspaceServices,
+    /// The engine's execution policy, translated from [`HostConfig`] once
+    /// at construction; every request dispatch reads this value.
+    pub(crate) engine_policy: verter_type_engine::project_semantic_dispatch::EnginePolicy,
     /// Caller-supplied virtual-alias map populated at upsert time from
     /// [`UpsertRequest`](crate::types::UpsertRequest)`.aliases`. Maps
     /// non-canonical paths (e.g. synthetic IDs from the unplugin or LSP layer)

@@ -586,7 +586,15 @@ impl VerterHost {
             format!("owner={} bytes={}", canonical, source.len()),
         );
         let file_language = self.language_classifier.classify(canonical);
-        if file_language.is_vue() {
+        // The snapshot path is ADAPTER-DECLARED registry data: a carrier
+        // with the template-analysis surface serves its snapshot from the
+        // parse artifact together with template inputs; every other file
+        // rebuilds through the plain-script parse. The host never branches
+        // on a framework identity here.
+        if self
+            .framework_registry()
+            .carries_template_analysis_inputs(&file_language)
+        {
             let Some(source_snapshot) = self.scheduler.try_get_source(canonical) else {
                 return Some((FileAnalysisSnapshot::default(), None));
             };

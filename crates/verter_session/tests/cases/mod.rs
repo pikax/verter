@@ -16,6 +16,7 @@ mod carrier_encapsulation_guards;
 mod carrier_routing_no_vue_gate;
 mod carrier_stable_unit_reuse;
 mod client_framework_manifest_ts_freshness;
+mod closed_session_audited_route_refusal;
 mod component_meta_audit;
 mod content_mapper_projection;
 mod corpus_audit_layout;

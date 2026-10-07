@@ -1583,28 +1583,16 @@ fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKe
         },
         CarrierGrammarConfig::Svelte => verter_language::ParseOptions::default(),
     };
-    let language = accepted.source().resolved_file_language();
-    let syntax_profile = verter_language::syntax_profile_id_for(language, &options)
-        .expect("accepted carrier grammar has a supported syntax profile");
-    let (domain, epoch) = if language.is_vue() {
-        (
-            verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
-            verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
-        )
-    } else {
-        (
-            verter_language::SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
-            verter_language::SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
-        )
-    };
-    verter_language::parse_key_for(
+    // The language crate owns the (language, options) → compatibility
+    // domain/epoch selection: an accepted carrier of any adapter keys under
+    // its OWN domain, never another framework's.
+    let (_, parse_key) = verter_language::parse_identity_for(
         accepted.source().bytes(),
-        language,
-        domain,
-        epoch,
-        &syntax_profile,
+        accepted.source().resolved_file_language(),
+        &options,
     )
-    .expect("accepted carrier source has a supported parse identity")
+    .expect("accepted carrier source has a supported parse identity");
+    parse_key
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -45,6 +45,19 @@ impl SemanticGraphStore {
         }
     }
 
+    /// Bind this store's producers to `task_registry`: the one cycle
+    /// authority the host's composition root mints and shares with every
+    /// layer whose producers may wait on this engine's. A store built
+    /// without one owns a private registry.
+    #[must_use]
+    pub fn with_task_registry(
+        mut self,
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> Self {
+        self.task_registry = task_registry;
+        self
+    }
+
     /// The aggregate retained-byte account this store charges. Always
     /// present — an account-less memo store does not exist.
     pub fn retention_account(&self) -> &Arc<SemanticRetentionAccount> {

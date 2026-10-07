@@ -341,14 +341,6 @@ impl HostView {
             key_env_override: Some(env_hashes),
         }
     }
-
-    /// Borrow the underlying host. Reserved for impls that need
-    /// to reach the host directly (e.g., scheduler context
-    /// construction); resolver-tier code should not use this.
-    #[allow(dead_code)]
-    pub fn host(&self) -> &VerterHost {
-        &self.base
-    }
 }
 
 /// The one validated read of the resolve-domain store, shared by every
@@ -561,14 +553,6 @@ impl OverlaidView {
             // Lazy: see `Self::new`.
             overlay_set_fingerprint: std::sync::OnceLock::new(),
         }
-    }
-
-    /// Borrow the base host. Reserved for impls that need to
-    /// reach the host directly; resolver-tier code should not use
-    /// this.
-    #[allow(dead_code)]
-    pub fn host(&self) -> &VerterHost {
-        &self.base
     }
 
     /// Whether the view has an overlay for the requested canonical.
@@ -875,13 +859,6 @@ impl<'a> OverlaidViewRef<'a> {
     #[allow(dead_code)]
     pub fn has_overlay(&self, canonical: &str) -> bool {
         self.overlays.contains_key(canonical)
-    }
-
-    /// Borrow the base host. Reserved for internal consumer paths
-    /// that need to reach the host directly after consulting the
-    /// view.
-    pub fn host(&self) -> &VerterHost {
-        self.base
     }
 }
 
