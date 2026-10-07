@@ -705,6 +705,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
     let options_api = input.options_api.is_some();
     let flags = extract_flags(&input);
     let evaluated_types = input.evaluated_types;
+    let slot_binding_index = SlotBindingIndex::new(evaluated_types);
 
     let mut props = Vec::new();
     let mut events = Vec::new();
@@ -775,6 +776,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                     &slot_fields.fields,
                     &slot_fields.return_publications,
                     evaluated_types,
+                    &slot_binding_index,
                     &mut slots,
                 );
             }
@@ -830,6 +832,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             &resolved.slots,
             &resolved.slot_return_publications,
             evaluated_types,
+            &slot_binding_index,
             &mut slots,
         );
     }
@@ -1555,6 +1558,7 @@ fn extract_slots_from_macro(
     slot_fields: &[verter_session_query::analysis::types::AnalyzedSlotField],
     slot_return_publications: &[Option<TypePublication>],
     evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+    binding_index: &SlotBindingIndex<'_>,
     out: &mut Vec<SlotAnalysis>,
 ) {
     // The three lanes are independent partial observations:
@@ -1569,23 +1573,33 @@ fn extract_slots_from_macro(
     // Never use non-emptiness of one lane as proof that it is complete. An open
     // intersection arm can leave `define_slots` as a strict subset while the
     // graph-native binding walk still resolves every callable explicit arm.
-    let mut expanded_remaining = expanded_define_slot_entries(evaluated, macro_index);
+    let mut expanded_remaining =
+        expanded_define_slot_entries(evaluated, macro_index, binding_index);
+    // First occurrence of each expanded name. Field names are deduplicated
+    // below, so each name is claimed at most once — exactly the entry a
+    // first-match scan of the remaining list would select.
+    let mut expanded_first: rustc_hash::FxHashMap<String, usize> =
+        rustc_hash::FxHashMap::with_capacity_and_hasher(
+            expanded_remaining.len(),
+            Default::default(),
+        );
+    for (index, slot) in expanded_remaining.iter().enumerate() {
+        if let Some(slot) = slot {
+            expanded_first.entry(slot.name.clone()).or_insert(index);
+        }
+    }
     let mut seen_slots = rustc_hash::FxHashSet::default();
 
     for (field_index, field) in slot_fields.iter().enumerate() {
         if !seen_slots.insert(field.name.clone()) {
             continue;
         }
-        let expanded = expanded_remaining
-            .iter()
-            .position(|slot| slot.name == field.name)
-            .map(|index| expanded_remaining.remove(index));
+        let expanded = expanded_first
+            .get(field.name.as_str())
+            .and_then(|&index| expanded_remaining[index].take());
         let (expanded_bindings, is_required) = match expanded {
             Some(slot) => (slot.bindings, slot.is_required),
-            None => (
-                expanded_slot_bindings(evaluated, &field.name),
-                field.is_required,
-            ),
+            None => (binding_index.bindings_for(&field.name), field.is_required),
         };
         let bindings = merge_slot_bindings_with_source(field, expanded_bindings);
 
@@ -1613,7 +1627,7 @@ fn extract_slots_from_macro(
     // Expanded-only names append after the authored/resolved lane, preserving
     // the evaluator's deterministic property order. Exact name dedup prevents
     // duplicate shape rows from publishing the same slot twice.
-    for slot in expanded_remaining {
+    for slot in expanded_remaining.into_iter().flatten() {
         if !seen_slots.insert(slot.name.clone()) {
             continue;
         }
@@ -1652,10 +1666,13 @@ struct ExpandedSlotEntry {
     is_required: bool,
 }
 
+/// Evaluated `define_slots` members in property order. Authored fields take
+/// (`None`) the entries they claim, so the remainder keeps evaluator order.
 fn expanded_define_slot_entries(
     evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
-) -> Vec<ExpandedSlotEntry> {
+    binding_index: &SlotBindingIndex<'_>,
+) -> Vec<Option<ExpandedSlotEntry>> {
     let Some(entry) = expanded_define_slots_shape(evaluated, macro_index) else {
         return Vec::new();
     };
@@ -1665,60 +1682,124 @@ fn expanded_define_slot_entries(
         .value
         .properties
         .iter()
-        .map(|prop| ExpandedSlotEntry {
-            name: prop.name.clone(),
-            bindings: expanded_slot_bindings(evaluated, &prop.name),
-            is_required: !prop.optional,
+        .map(|prop| {
+            Some(ExpandedSlotEntry {
+                name: prop.name.clone(),
+                bindings: binding_index.bindings_for(&prop.name),
+                is_required: !prop.optional,
+            })
         })
         .collect()
 }
 
-fn expanded_slot_bindings(
-    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
-    slot_name: &str,
-) -> Vec<SlotBindingAnalysis> {
-    // The per-binding evaluation channel ("slotName.bindingName" entries) is
-    // the only lower-crate source of evaluated bindings: deriving bindings by
-    // walking a slot's materialized function shape is a host concern (the
-    // materialized surface lives on the host's hot mirror, never here).
-    let Some(evaluated) = evaluated else {
-        return Vec::new();
-    };
-    let prefix = format!("{slot_name}.");
-    let mut seen_bindings = rustc_hash::FxHashSet::default();
-    evaluated
-        .slot_bindings
-        .iter()
-        .filter_map(|field| {
-            // Graph-native no-parser rows carry the exact typed pair. Other
-            // rows use the established flat `slot.binding` transport key.
-            let binding_name = match field.authority.source() {
+#[cfg(any(test, feature = "semantic-observe"))]
+std::thread_local! {
+    static SLOT_BINDING_ROW_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Slot-binding rows inspected on the current thread since the last call:
+/// one per evaluated row while partitioning, plus one per bucket entry read
+/// while joining a slot. Measurement only; no production decision reads it.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn take_slot_binding_row_visits() -> u64 {
+    SLOT_BINDING_ROW_VISITS.with(|visits| visits.replace(0))
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+fn record_slot_binding_row_visits(rows: usize) {
+    SLOT_BINDING_ROW_VISITS.with(|visits| visits.set(visits.get() + rows as u64));
+}
+
+/// The evaluated per-binding channel partitioned once by exact slot identity.
+///
+/// The channel (`ExpandedComponentTypes::slot_bindings`) is the only
+/// lower-crate source of evaluated bindings: deriving bindings by walking a
+/// slot's materialized function shape is a host concern (the materialized
+/// surface lives on the host's hot mirror, never here). One partition per
+/// component keeps every slot join proportional to that slot's own rows
+/// instead of rescanning the whole binding population per slot.
+///
+/// Identity rules:
+///
+/// - graph-native rows carry the typed `(slot_name, binding_name)` pair and
+///   join only the slot with exactly that name — a typed `a`/`b.c` row never
+///   joins slot `a.b`, and a typed row without a slot name joins none;
+/// - other rows use the flat `slot.binding` transport key and join every slot
+///   whose name followed by `.` prefixes the key, so `a.b.c` is visible to
+///   both slot `a` (binding `b.c`) and slot `a.b` (binding `c`).
+///
+/// Each bucket keeps evaluator row order; when a slot is joined the first row
+/// per binding name wins and an empty binding name never joins.
+struct SlotBindingIndex<'a> {
+    by_slot: rustc_hash::FxHashMap<&'a str, Vec<SlotBindingRow<'a>>>,
+}
+
+/// One evaluated row as seen from one slot: the binding name under that slot
+/// and the row it came from.
+type SlotBindingRow<'a> = (
+    &'a str,
+    &'a verter_session_query::analysis::type_expand::ExpandedField,
+);
+
+impl<'a> SlotBindingIndex<'a> {
+    fn new(
+        evaluated: Option<&'a verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+    ) -> Self {
+        let rows = evaluated.map_or(&[][..], |evaluated| evaluated.slot_bindings.as_slice());
+        let mut by_slot: rustc_hash::FxHashMap<&'a str, Vec<SlotBindingRow<'a>>> =
+            rustc_hash::FxHashMap::default();
+        for field in rows {
+            match field.authority.source() {
                 Some(SemanticTypeSource::SyntheticSlotBinding(key))
                     if key.surface_kind
                         == verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding =>
                 {
-                    if key.slot_name.as_deref() != Some(slot_name) {
-                        return None;
+                    if let Some(slot_name) = key.slot_name.as_deref() {
+                        by_slot
+                            .entry(slot_name)
+                            .or_default()
+                            .push((&key.binding_name, field));
                     }
-                    key.binding_name.as_ref()
                 }
-                _ => field.name.strip_prefix(&prefix)?,
-            };
-            if binding_name.is_empty() || !seen_bindings.insert(binding_name.to_string()) {
-                return None;
+                _ => {
+                    let name = field.name.as_str();
+                    for (dot, _) in name.match_indices('.') {
+                        by_slot
+                            .entry(&name[..dot])
+                            .or_default()
+                            .push((&name[dot + 1..], field));
+                    }
+                }
             }
-            let type_expansion = field_expansion_metadata(field);
-            Some(SlotBindingAnalysis {
+        }
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_slot_binding_row_visits(rows.len());
+        Self { by_slot }
+    }
+
+    /// The slot's evaluated bindings in evaluator row order.
+    fn bindings_for(&self, slot_name: &str) -> Vec<SlotBindingAnalysis> {
+        let Some(rows) = self.by_slot.get(slot_name) else {
+            return Vec::new();
+        };
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_slot_binding_row_visits(rows.len());
+        let mut seen_bindings = rustc_hash::FxHashSet::default();
+        rows.iter()
+            .filter(|(binding_name, _)| {
+                !binding_name.is_empty() && seen_bindings.insert(*binding_name)
+            })
+            .map(|&(binding_name, field)| SlotBindingAnalysis {
                 name: binding_name.to_string(),
                 publication: TypePublication::new(
                     field.authority.clone(),
                     field.authored_evidence.clone(),
                     &PublicationPolicy::exact_only(),
                 ),
-                type_expansion: Some(type_expansion),
+                type_expansion: Some(field_expansion_metadata(field)),
             })
-        })
-        .collect()
+            .collect()
+    }
 }
 
 fn merge_slot_bindings_with_source(
@@ -1731,9 +1812,15 @@ fn merge_slot_bindings_with_source(
     // Membership sets only suppress duplicate identities; no hash iteration
     // participates in output order.
     let mut expanded_seen = rustc_hash::FxHashSet::default();
-    let mut expanded_remaining: Vec<SlotBindingAnalysis> = expanded_bindings
+    let mut expanded_remaining: Vec<Option<SlotBindingAnalysis>> = expanded_bindings
         .into_iter()
         .filter(|binding| expanded_seen.insert(binding.name.clone()))
+        .map(Some)
+        .collect();
+    let expanded_by_name: rustc_hash::FxHashMap<String, usize> = expanded_remaining
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| Some((binding.as_ref()?.name.clone(), index)))
         .collect();
     let mut merged: Vec<SlotBindingAnalysis> =
         Vec::with_capacity(source_field.bindings.len() + expanded_remaining.len());
@@ -1743,9 +1830,9 @@ fn merge_slot_bindings_with_source(
         if !merged_seen.insert(source_binding.name.clone()) {
             continue;
         }
-        let Some(position) = expanded_remaining
-            .iter()
-            .position(|candidate| candidate.name == source_binding.name)
+        let Some(mut binding) = expanded_by_name
+            .get(source_binding.name.as_str())
+            .and_then(|&index| expanded_remaining[index].take())
         else {
             merged.push(SlotBindingAnalysis {
                 name: source_binding.name.clone(),
@@ -1762,7 +1849,6 @@ fn merge_slot_bindings_with_source(
             });
             continue;
         };
-        let mut binding = expanded_remaining.remove(position);
         let source_evidence = authored_type_evidence(
             source_binding.payload.as_ref(),
             source_binding.type_annotation.as_deref(),
@@ -1785,6 +1871,7 @@ fn merge_slot_bindings_with_source(
     merged.extend(
         expanded_remaining
             .into_iter()
+            .flatten()
             .filter(|binding| merged_seen.insert(binding.name.clone())),
     );
     merged
@@ -1840,8 +1927,10 @@ fn merge_template_slots(
     template_slots: &[verter_session_query::analysis::template::DefinedSlot],
     out: &mut Vec<SlotAnalysis>,
 ) {
+    let mut published: rustc_hash::FxHashSet<String> =
+        out.iter().map(|slot| slot.name.clone()).collect();
     for tslot in template_slots {
-        if !out.iter().any(|s| s.name == tslot.name) {
+        if published.insert(tslot.name.clone()) {
             // Template-discovered slots have no AnalyzedSlotField source —
             // pair is (None, None) per the pairing invariant.
             out.push(SlotAnalysis {
