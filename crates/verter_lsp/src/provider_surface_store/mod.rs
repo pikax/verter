@@ -494,6 +494,42 @@ struct Lifecycle {
     /// Per-path lifecycle state. Present ⇒ known virtual surface (either state);
     /// absent ⇒ fully unknown.
     paths: HashMap<Arc<str>, ProviderPathState>,
+    /// The immutable root every foreground capture shares: the same per-path
+    /// states as `paths`, resolved to their snapshots and keyed by filesystem
+    /// identity. Rewritten under the lifecycle WRITE lock in the same critical
+    /// section as each `paths` mutation, so a capture never observes the two
+    /// apart.
+    root: ProviderLifecycleRoot,
+}
+
+impl Lifecycle {
+    /// Publish `path`'s new state into the shared root (`None` ⇒ fully
+    /// unknown). Called under the lifecycle write lock by every `paths`
+    /// mutation. A capture already holding the previous root keeps it unchanged:
+    /// the persistent map copies only the nodes on this one path's route.
+    fn publish(&mut self, path: &Arc<str>, state: Option<CapturedPathState>) {
+        let identity = InjectedPathKey::new(path);
+        let mut spellings: Vec<(Arc<str>, CapturedPathState)> = self
+            .root
+            .by_identity
+            .get(&identity)
+            .map(|spellings| {
+                spellings
+                    .iter()
+                    .filter(|(spelling, _)| **spelling != **path)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(state) = state {
+            spellings.push((Arc::clone(path), state));
+        }
+        if spellings.is_empty() {
+            self.root.by_identity.remove(&identity);
+        } else {
+            self.root.by_identity.insert(identity, spellings.into());
+        }
+    }
 }
 
 /// Returned by [`ProviderSurfaceStore::forget`]; the ONLY key that can finalize
@@ -747,6 +783,10 @@ impl ProviderSurfaceStore {
             Arc::clone(&provider_path),
             ProviderPathState::Current { generation },
         );
+        lifecycle.publish(
+            &provider_path,
+            Some(CapturedPathState::Current(Arc::clone(&snapshot))),
+        );
         // Release the store's hold on the generation this record displaced, AFTER
         // the lifecycle already points at the new one (so no reader can observe
         // `Current { displaced }` and then miss its snapshot) and still under the
@@ -893,6 +933,7 @@ impl ProviderSurfaceStore {
         lifecycle
             .paths
             .insert(Arc::clone(&path), ProviderPathState::Closing { epoch });
+        lifecycle.publish(&path, Some(CapturedPathState::KnownNonMappable));
         // Release the store's hold on the generation this close retired, AFTER the
         // lifecycle already reads `Closing` and still under the write lock. This is
         // the other half of the retention bound: without it, every closed document's
@@ -943,6 +984,7 @@ impl ProviderSurfaceStore {
                 // `close_after_capture_preserves_captured_snapshot`, which reads
                 // `retained_surface_count()` across exactly this sequence.
                 lifecycle.paths.remove(&token.provider_path);
+                lifecycle.publish(&token.provider_path, None);
                 true
             }
             // Reopened (now `Current`), retired again by a newer close (`Closing`
@@ -1189,84 +1231,45 @@ impl ProviderSurfaceStore {
         }
     }
 
-    /// Capture EVERY tracked path's lifecycle state — the immutable in-flight
-    /// pinned set a cross-file rename holds across its provider query, and the SOLE
-    /// authority [`classify_captured_api_surface`] routes on (it never reads the
-    /// live store afterward).
+    /// Capture the store's immutable lifecycle root — the shared handle a
+    /// foreground request takes ONCE and derives every captured view from
+    /// ([`ProviderLifecycleRoot::carrier_api_set`],
+    /// [`ProviderLifecycleRoot::carrier_ide_set`]).
     ///
-    /// COMPLETENESS (condition b): the returned set distinguishes the three states
-    /// classify needs, so it can classify + map WITHOUT any later live read:
-    /// - a `Current` `CarrierApi` path → [`CapturedPathState::Current`] with its
-    ///   full immutable snapshot (maps onto the `.vue` or, if it has no source map,
-    ///   drops);
-    /// - a `Closing` path, OR a `Current` path that is not `CarrierApi`, OR a
-    ///   `Current` path whose snapshot Arc is somehow absent → captured as
-    ///   [`CapturedPathState::KnownNonMappable`] (known-virtual-but-not-mappable →
-    ///   `VirtualDrop`, never `NotVirtual`). A `Closing` path is INCLUDED here (the
-    ///   prior capture SKIPPED it, forcing a live re-consult — the third TOCTOU);
-    /// - a path ABSENT from the map → absent from the capture too (a genuinely real
-    ///   file → `NotVirtual`).
+    /// CONSTANT COST: the capture clones one persistent-map handle under the
+    /// lifecycle read guard. It visits no path, copies no entry and takes no
+    /// reference on any snapshot, so warm capture work, request-owned entries and
+    /// lock hold time are independent of how many unrelated paths the workspace
+    /// tracks. The snapshots the root reaches stay alive only while a request
+    /// holds it; dropping the request (completion or cancellation) releases them.
     ///
-    /// ATOMICITY (condition a): the whole capture runs under ONE `lifecycle.read()`
-    /// guard held for the entire loop — no drop-and-re-acquire, no second lock. The
-    /// `snapshots` DashMap lookup for a `Current` path's generation is performed
-    /// WHILE STILL HOLDING that guard, so the captured `(state, snapshot)` pair
-    /// cannot be torn by a concurrent `record`/`forget`/`finalize_close`. This is
-    /// sound because [`Self::record`] PUBLISHES the snapshot into `snapshots` BEFORE
-    /// pointing the lifecycle state at its generation: holding the lifecycle read
-    /// guard and then reading `snapshots` for the generation the guard observed
-    /// always yields a consistent pair (the snapshot for the observed generation is
-    /// already present). A concurrent writer is blocked on the lifecycle write lock
-    /// for the whole loop.
-    ///
-    /// Because every captured value is immutable (an `Arc` snapshot, or a state tag),
-    /// a concurrent background sync that advances a path's generation, or a close
-    /// that retires/finalizes it, AFTER this capture can never change what a captured
-    /// entry resolves to — the no-race property the third-TOCTOU fix completes.
+    /// ATOMICITY: every lifecycle mutation rewrites the root under the lifecycle
+    /// WRITE lock in the same critical section as the per-path state it mirrors,
+    /// so the captured root is one consistent point-in-time view of every path's
+    /// state and snapshot — no `(state, snapshot)` pair can tear, and a later
+    /// `record`/`forget`/`finalize_close` never changes what it resolves to.
+    #[must_use]
+    pub fn capture_lifecycle_root(&self) -> ProviderLifecycleRoot {
+        self.inner.lifecycle.read().root.clone()
+    }
+
+    /// The captured carrier-API view of every tracked path — the immutable
+    /// in-flight set a cross-file rename holds across its provider query, and the
+    /// SOLE authority [`classify_captured_api_surface`] routes on (it never reads
+    /// the live store afterward). A request that also needs the IDE view captures
+    /// [`Self::capture_lifecycle_root`] once and derives both from it.
     #[must_use]
     pub fn capture_current_carrier_api_set(&self) -> ProviderQuerySnapshot {
-        self.capture_current_set_of_kind(ProviderSurfaceKind::CarrierApi)
+        self.capture_lifecycle_root().carrier_api_set()
     }
 
-    /// Capture EVERY tracked path's lifecycle state with `CarrierIde` snapshots
-    /// as the mappable role — the immutable in-flight pinned set a navigation
-    /// handler holds across its provider query so a returned FOREIGN carrier
-    /// IDE location maps through the surface captured when the request began,
-    /// never whatever surface is current at merge time. Same atomicity and
-    /// completeness contract as [`Self::capture_current_carrier_api_set`].
+    /// The captured carrier-IDE view of every tracked path — the immutable
+    /// in-flight set a navigation handler holds across its provider query so a
+    /// returned FOREIGN carrier IDE location maps through the surface captured
+    /// when the request began, never whatever surface is current at merge time.
     #[must_use]
     pub fn capture_current_carrier_ide_set(&self) -> ProviderQuerySnapshot {
-        self.capture_current_set_of_kind(ProviderSurfaceKind::CarrierIde)
-    }
-
-    fn capture_current_set_of_kind(&self, kind: ProviderSurfaceKind) -> ProviderQuerySnapshot {
-        // ONE read guard for the ENTIRE capture (atomicity, condition a).
-        let lifecycle = self.inner.lifecycle.read();
-        let mut by_path: HashMap<InjectedPathKey, CapturedPathState> =
-            HashMap::with_capacity(lifecycle.paths.len());
-        for (path, state) in lifecycle.paths.iter() {
-            let captured = match state {
-                // `Closing` (retired-but-known): no mappable snapshot, but the store
-                // knew it as virtual → KnownNonMappable so it drops, never falls
-                // through to NotVirtual. (This is the path the OLD capture skipped.)
-                ProviderPathState::Closing { .. } => CapturedPathState::KnownNonMappable,
-                // `Current`: resolve its snapshot Arc UNDER THIS SAME READ GUARD so
-                // the (state, snapshot) pair is consistent and cannot tear (see
-                // ATOMICITY above). A snapshot of the requested role is mappable;
-                // anything else (a different role, or a missing snapshot) is
-                // known-virtual but not mappable → drop.
-                ProviderPathState::Current { generation } => {
-                    match self.inner.snapshots.get(&(Arc::clone(path), *generation)) {
-                        Some(entry) if entry.value().kind == kind => {
-                            CapturedPathState::Current(Arc::clone(entry.value()))
-                        }
-                        _ => CapturedPathState::KnownNonMappable,
-                    }
-                }
-            };
-            by_path.insert(InjectedPathKey::new(path), captured);
-        }
-        ProviderQuerySnapshot { by_path }
+        self.capture_lifecycle_root().carrier_ide_set()
     }
 
     /// The account this store charges. Tests only — production never needs to
@@ -1302,32 +1305,95 @@ impl ProviderSurfaceStore {
     }
 }
 
-/// The per-path lifecycle state CAPTURED at the rename fence — the SOLE input to
-/// [`classify_captured_api_surface`]. Captured atomically under one `lifecycle`
-/// read guard so it is a consistent point-in-time snapshot of the store's view of
-/// every path, immune to any live mutation after capture.
+/// The per-path lifecycle state CAPTURED at the request fence — the SOLE input to
+/// [`classify_captured_api_surface`]. Read from one captured
+/// [`ProviderLifecycleRoot`], so it is a consistent point-in-time view of the
+/// store, immune to any live mutation after capture.
 ///
-/// Three cases are explicit; a path ABSENT from [`ProviderQuerySnapshot::by_path`]
-/// is the fourth (a genuinely real on-disk file the store did not know as virtual
-/// at capture → `NotVirtual`, edit in place).
+/// Three cases are explicit; a path ABSENT from the captured root is the fourth (a
+/// genuinely real on-disk file the store did not know as virtual at capture →
+/// `NotVirtual`, edit in place).
+#[derive(Clone)]
 pub enum CapturedPathState {
-    /// A `Current` `CarrierApi` path with its full immutable snapshot — the only
-    /// case that can map a returned `{carrier}.ts` offset onto the `.vue`. The
-    /// merge maps ONLY through this captured generation's own source map.
+    /// A `Current` path of the view's role with its full immutable snapshot —
+    /// the only case that can map a returned `{carrier}.ts` offset onto the
+    /// `.vue`. The merge maps ONLY through this captured generation's own source
+    /// map.
     Current(Arc<ProviderSurfaceSnapshot>),
     /// A path the store KNEW as virtual at capture but for which there is NO
     /// mappable snapshot: it was `Closing` (a close in flight), or `Current` but
-    /// not a `CarrierApi` surface, or its snapshot Arc was somehow absent. Its
-    /// offsets index VIRTUAL content, so it MUST classify `VirtualDrop` (fail
-    /// closed) — never fall through to the real-file branch and edit a same-named
-    /// real file with virtual offsets.
+    /// of another role than the view's. Its offsets index VIRTUAL content, so it
+    /// MUST classify `VirtualDrop` (fail closed) — never fall through to the
+    /// real-file branch and edit a same-named real file with virtual offsets.
     KnownNonMappable,
 }
 
-/// An immutable, point-in-time capture of EVERY tracked path's lifecycle state,
-/// pinned by a cross-file rename across its provider query.
+/// The answer for a known path that has no mappable snapshot in a view.
+static KNOWN_NON_MAPPABLE: CapturedPathState = CapturedPathState::KnownNonMappable;
+
+/// The immutable provider lifecycle root: every tracked path's lifecycle state,
+/// resolved to its snapshot, keyed by filesystem identity
+/// ([`InjectedPathKey`], so a provider-returned slash, drive-letter or — on a
+/// case-folding host — case spelling resolves the surface it names).
 ///
-/// This captured set is the SOLE merge authority: [`classify_captured_api_surface`]
+/// The store publishes a new root on every lifecycle mutation; a foreground
+/// request captures the current one with
+/// [`ProviderSurfaceStore::capture_lifecycle_root`]. Cloning a root is
+/// constant-cost and shares every node, so a captured root costs the request
+/// nothing per tracked path, and pins old snapshots only for as long as the
+/// request lives.
+///
+/// Each identity carries every raw spelling the store tracks under it. Two
+/// tracked spellings of one file are never mappable through a third spelling:
+/// a lookup that does not match one of them exactly classifies
+/// [`CapturedPathState::KnownNonMappable`] (fail closed), never an arbitrary
+/// pick.
+#[derive(Clone, Default)]
+pub struct ProviderLifecycleRoot {
+    by_identity: imbl::HashMap<InjectedPathKey, IdentitySpellings>,
+}
+
+/// Every raw spelling tracked under one filesystem identity, with its state.
+type IdentitySpellings = Arc<[(Arc<str>, CapturedPathState)]>;
+
+impl ProviderLifecycleRoot {
+    /// This root viewed with `CarrierApi` snapshots as the mappable role.
+    #[must_use]
+    pub fn carrier_api_set(&self) -> ProviderQuerySnapshot {
+        self.view(ProviderSurfaceKind::CarrierApi)
+    }
+
+    /// This root viewed with `CarrierIde` snapshots as the mappable role.
+    #[must_use]
+    pub fn carrier_ide_set(&self) -> ProviderQuerySnapshot {
+        self.view(ProviderSurfaceKind::CarrierIde)
+    }
+
+    fn view(&self, kind: ProviderSurfaceKind) -> ProviderQuerySnapshot {
+        ProviderQuerySnapshot {
+            root: self.clone(),
+            kind,
+        }
+    }
+
+    /// The state captured for `provider_path`'s filesystem identity, or `None`
+    /// when the store did not know it as virtual.
+    fn state_for(&self, provider_path: &str) -> Option<&CapturedPathState> {
+        let spellings = self.by_identity.get(&InjectedPathKey::new(provider_path))?;
+        Some(match &**spellings {
+            [(_, state)] => state,
+            spellings => spellings
+                .iter()
+                .find(|(spelling, _)| **spelling == *provider_path)
+                .map_or(&KNOWN_NON_MAPPABLE, |(_, state)| state),
+        })
+    }
+}
+
+/// One role's view of a captured [`ProviderLifecycleRoot`], pinned by a
+/// provider-backed request across its provider query.
+///
+/// This captured view is the SOLE merge authority: [`classify_captured_api_surface`]
 /// resolves every returned provider location by looking its path up HERE, never the
 /// live store. A path captured [`CapturedPathState::Current`] maps through that
 /// captured generation's own snapshot; a path captured
@@ -1335,28 +1401,36 @@ pub enum CapturedPathState {
 /// a genuinely real on-disk file (edited in place). A path whose live generation or
 /// lifecycle later changes is irrelevant: this capture is the state the provider's
 /// offsets were produced against.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct ProviderQuerySnapshot {
-    by_path: HashMap<InjectedPathKey, CapturedPathState>,
+    root: ProviderLifecycleRoot,
+    kind: ProviderSurfaceKind,
 }
 
 impl ProviderQuerySnapshot {
     /// The captured per-path lifecycle state for `provider_path`, or `None` if the
     /// path was ABSENT from the capture (the store did not know it as virtual at
-    /// capture → a genuinely real file). This is the lookup classify routes on.
+    /// capture → a genuinely real file). This is the lookup classify routes on. A
+    /// `Current` surface of another role than this view's is known but not
+    /// mappable.
     #[must_use]
     pub fn captured_state_for(&self, provider_path: &str) -> Option<&CapturedPathState> {
-        self.by_path.get(&InjectedPathKey::new(provider_path))
+        Some(match self.root.state_for(provider_path)? {
+            CapturedPathState::Current(snapshot) if snapshot.kind != self.kind => {
+                &KNOWN_NON_MAPPABLE
+            }
+            state => state,
+        })
     }
 
     /// The captured MAPPABLE snapshot for `provider_path`, if it was a `Current`
-    /// `CarrierApi` surface at capture time. Returns `None` for a
+    /// surface of this view's role at capture time. Returns `None` for a
     /// [`CapturedPathState::KnownNonMappable`] path (e.g. `Closing` at capture) and
     /// for an absent path alike — only a path with a mappable snapshot can vouch a
     /// `.vue` edit.
     #[must_use]
     pub fn snapshot_for(&self, provider_path: &str) -> Option<&Arc<ProviderSurfaceSnapshot>> {
-        match self.by_path.get(&InjectedPathKey::new(provider_path)) {
+        match self.captured_state_for(provider_path) {
             Some(CapturedPathState::Current(snapshot)) => Some(snapshot),
             _ => None,
         }
@@ -1366,7 +1440,7 @@ impl ProviderQuerySnapshot {
     /// mappable `Current` surface nor a known-non-mappable one).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_path.is_empty()
+        self.root.by_identity.is_empty()
     }
 }
 

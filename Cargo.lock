@@ -3537,6 +3537,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "glob",
+ "imbl",
  "lru",
  "oxc_allocator",
  "oxc_ast",

@@ -265,6 +265,42 @@ fn captured_provider_paths_use_filesystem_identity() {
 }
 
 #[test]
+fn two_tracked_spellings_of_one_identity_resolve_exactly_or_fail_closed() {
+    let store = ProviderSurfaceStore::new();
+    for (provider, content) in [
+        (r"D:\src\Twin.svelte.verter.ts", "first\n"),
+        ("d:/src/Twin.svelte.verter.ts", "second\n"),
+    ] {
+        store.record(RecordSurface::carrier_api_legacy(
+            provider.to_string(),
+            r"D:\src\Twin.svelte".to_string(),
+            Arc::from(content),
+            None,
+            Arc::from("carrier\n"),
+        ));
+    }
+
+    let captured = store.capture_current_carrier_api_set();
+    let exact = |spelling: &str| {
+        captured
+            .snapshot_for(spelling)
+            .map(|s| s.provider_content.to_string())
+    };
+    assert_eq!(
+        exact(r"D:\src\Twin.svelte.verter.ts").as_deref(),
+        Some("first\n")
+    );
+    assert_eq!(
+        exact("d:/src/Twin.svelte.verter.ts").as_deref(),
+        Some("second\n")
+    );
+    assert!(matches!(
+        captured.captured_state_for("D:/src/Twin.svelte.verter.ts"),
+        Some(CapturedPathState::KnownNonMappable)
+    ));
+}
+
+#[test]
 fn captured_foreign_ide_surface_maps_when_imported_carrier_is_closed() {
     use tower_lsp_server::ls_types::PositionEncodingKind;
 
@@ -2486,4 +2522,58 @@ fn foreground_bracket_survives_only_identical_re_records() {
             bytes_honored
         );
     }
+}
+
+/// A warm foreground capture does no work proportional to the workspace.
+///
+/// Definition and rename pin BOTH the carrier-IDE and carrier-API views before
+/// their provider await. Those captures must share the store's published
+/// lifecycle root rather than materialise a per-request map of every tracked
+/// path: a request that later looks up one path must not visit, copy or take a
+/// reference on the hundreds of unrelated surfaces the workspace also tracks.
+///
+/// The work count is each unrelated snapshot's strong-reference count. A capture
+/// that visits a path to copy it into a request-owned map must clone that path's
+/// snapshot `Arc`, so the count moves by one per capture; a capture of the shared
+/// root leaves every count untouched. Timing and allocation are deliberately not
+/// gated — the count is exact on every host.
+#[test]
+fn warm_capture_neither_visits_nor_pins_unrelated_tracked_paths() {
+    const UNRELATED: usize = 256;
+
+    let store = ProviderSurfaceStore::new();
+    let unrelated: Vec<Arc<ProviderSurfaceSnapshot>> = (0..UNRELATED)
+        .map(|index| store.record(record_surface_for(index, 0)))
+        .collect();
+    let references_before: Vec<usize> = unrelated.iter().map(Arc::strong_count).collect();
+
+    let api_set = store.capture_current_carrier_api_set();
+    let ide_set = store.capture_current_carrier_ide_set();
+
+    let references_after: Vec<usize> = unrelated.iter().map(Arc::strong_count).collect();
+    assert_eq!(
+        references_after, references_before,
+        "a warm capture must not visit or pin tracked paths the request never looks up"
+    );
+
+    // The shared root still answers every lookup the captured map answered:
+    // a matching-role surface maps, another role is known but not mappable, and
+    // an untracked path stays absent.
+    assert!(api_set.snapshot_for("/src/Doc7.vue.ts").is_some());
+    assert!(matches!(
+        ide_set.captured_state_for("/src/Doc7.vue.ts"),
+        Some(CapturedPathState::KnownNonMappable)
+    ));
+    assert!(api_set
+        .captured_state_for("/src/Untracked.vue.ts")
+        .is_none());
+
+    // A later write never reaches back into the captured root.
+    store.record(record_surface_for(7, 1));
+    assert!(Arc::ptr_eq(
+        api_set
+            .snapshot_for("/src/Doc7.vue.ts")
+            .expect("captured surface"),
+        &unrelated[7],
+    ));
 }
