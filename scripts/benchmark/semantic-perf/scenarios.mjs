@@ -425,14 +425,14 @@ export function allScenarios() {
 /** Perf-suite families this harness does not measure, each with its reason. */
 export const UNCOVERED = [
   {
-    family: "workspace concurrency",
+    family: "workspace concurrency at batch scale",
     reason:
-      "sibling batches of 12/50 components importing ./types measure resolution operations, fs reads, restarts and single-flight across a whole workspace; that is a multi-file, multi-request lifecycle workload with no single demanded probe and needs its own harness",
+      "sessions.mjs measures concurrent demands across files in one live engine; sibling batches of 12/50 components with fs-read, restart and single-flight counts are a workspace lifecycle workload that needs its own harness",
   },
   {
-    family: "whole-project (InputMenu.vue)",
+    family: "a real component library project",
     reason:
-      "an equivalent demand for a Vue SFC needs matched project dependencies, libraries and projection boundaries on both sides; Verter's SFC projection has no tsc counterpart request, so it needs its own harness",
+      "sessions.mjs measures an InputMenu-equivalent component built from local sources; a real library's dependency graph is an external corpus, outside the hermetic catalog",
   },
   {
     family: "frame-runtime overhead on shallow common paths",
