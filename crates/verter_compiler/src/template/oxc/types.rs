@@ -12,6 +12,8 @@ use oxc_diagnostics::OxcDiagnostic;
 use crate::ast::types::TemplateAst;
 use crate::types::NodeId;
 
+pub use super::scope::{LexicalScopeId, LexicalScopes};
+
 // Re-export Dynamism so `use self::types::*` in mod.rs picks it up.
 pub use crate::utils::oxc::Dynamism;
 
@@ -171,12 +173,13 @@ pub struct OxcParsedExpression<'alloc> {
     /// (adjusted via `BindingContext::base_offset`).
     pub bindings: Option<BindingExtractionResult<'alloc>>,
 
-    /// Lexical locals that remain authoritative when an IDE expression does not
+    /// Lexical scope that remains authoritative when an IDE expression does not
     /// parse (for example, a v-slot receiver while the user has typed `title.`).
+    /// Query it through [`OxcParsedAst::scopes`].
     ///
     /// This is populated only for the IDE error path. It preserves an existing
     /// scope fact; it is not inferred from a repaired or synthetic expression.
-    pub ide_recovery_scope: Vec<&'alloc str>,
+    pub ide_recovery_scope: Option<LexicalScopeId>,
 
     /// Three-state dynamism classification.
     pub dynamism: Dynamism,
@@ -258,10 +261,11 @@ pub struct OxcParsedElement<'alloc> {
     /// [`props`]: OxcParsedElement::props
     pub prop_lookup: Vec<Option<u32>>,
 
-    /// Additional ignored bindings from this element's v-for/v-slot locals.
-    /// `None` means "same as parent — no locals added" (avoids Vec clone).
-    /// `Some(vec)` includes inherited parent bindings + this element's locals.
-    pub provided_locals: Option<Vec<&'alloc str>>,
+    /// Lexical scope of this element's props, `v-slot` value and dynamic slot
+    /// name: the enclosing scope plus this element's own `v-for` aliases, but
+    /// NOT its own `v-slot` parameters (only descendants see those — read them
+    /// through [`OxcParsedAst::children_scope`]).
+    pub props_scope: LexicalScopeId,
 
     /// Per-element expression analysis flags (static class/style/key/condition).
     /// Codegen combines with `PropFlag` in O(1) for final patch-flag decisions.
@@ -382,6 +386,12 @@ pub struct ComponentSlotSummary {
 #[derive(Debug)]
 pub struct OxcParsedAst<'alloc> {
     pub data: Vec<OxcNodeData<'alloc>>,
+    /// Persistent lexical-scope frames for this template (`v-for` aliases and
+    /// `v-slot` parameters), shared by every node through scope handles.
+    pub scopes: LexicalScopes<'alloc>,
+    /// NodeId-aligned handle to the scope a node's CHILDREN see. Produced by
+    /// the forward pass, so no consumer walks ancestors to find a scope.
+    children_scopes: Vec<LexicalScopeId>,
     /// NodeId-aligned IDE slot summaries, each built lazily and independently on
     /// first demand: `slot_summaries[id.0]` resolves to `Some` for a static
     /// component eligible for slot checking and `None` otherwise (non-component
@@ -396,12 +406,45 @@ pub struct OxcParsedAst<'alloc> {
 }
 
 impl<'alloc> OxcParsedAst<'alloc> {
-    /// Wrap the per-node parsed data, with slot summaries unbuilt.
+    /// Wrap per-node parsed data that declares no template-scope names, with
+    /// slot summaries unbuilt.
     pub fn new(data: Vec<OxcNodeData<'alloc>>) -> Self {
+        let children_scopes = vec![LexicalScopeId::ROOT; data.len()];
+        Self::with_scopes(data, LexicalScopes::new(), children_scopes)
+    }
+
+    /// Wrap per-node parsed data with its lexical scopes and the NodeId-aligned
+    /// scope handle each node's children see, with slot summaries unbuilt.
+    pub fn with_scopes(
+        data: Vec<OxcNodeData<'alloc>>,
+        scopes: LexicalScopes<'alloc>,
+        children_scopes: Vec<LexicalScopeId>,
+    ) -> Self {
         Self {
             data,
+            scopes,
+            children_scopes,
             slot_summaries: OnceCell::new(),
         }
+    }
+
+    /// The scope the children of node `id` see: the node's own scope plus any
+    /// `v-for` aliases and `v-slot` parameters it declares.
+    #[inline]
+    pub fn children_scope(&self, id: NodeId) -> LexicalScopeId {
+        self.children_scopes
+            .get(id.0)
+            .copied()
+            .unwrap_or(LexicalScopeId::ROOT)
+    }
+
+    /// The scope node `id` itself sits in (its parent's children scope). An
+    /// element's own `v-if` condition and `v-for` source resolve here.
+    #[inline]
+    pub fn scope_of(&self, id: NodeId, ast: &TemplateAst) -> LexicalScopeId {
+        ast.nodes[id.0]
+            .parent
+            .map_or(LexicalScopeId::ROOT, |parent| self.children_scope(parent))
     }
 
     /// The IDE slot summary for the component at `id`, built once and memoized.
@@ -541,7 +584,7 @@ mod iter_expressions_tests {
             multi_statement: false,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Static,
         }
     }
@@ -564,7 +607,7 @@ mod iter_expressions_tests {
                 })
                 .collect(),
             prop_lookup: Vec::new(),
-            provided_locals: None,
+            props_scope: LexicalScopeId::ROOT,
             expression_flag: ExpressionFlag::empty(),
         }))
     }
