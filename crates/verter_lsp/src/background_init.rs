@@ -8,7 +8,16 @@ use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDIN
 /// Spawn the heartbeat task. Sends `$/verter/heartbeat` every 5 seconds.
 /// Called first in `initialized()` so the extension always sees heartbeats,
 /// even during long background initialization.
-pub(super) fn spawn_heartbeat(client: Outbound, handler_activity: Arc<HandlerActivity>) {
+///
+/// Takes the SERVER, not loose handles: the heartbeat's view of the
+/// interactive lane is the server's own handler activity by construction —
+/// there is no call-site wiring that could substitute another activity.
+/// The active-count trace line that reads it is OPTIONAL freeze diagnosis,
+/// compiled in only under the default-off `semantic-observe` feature.
+pub(super) fn spawn_heartbeat(server: &VerterLanguageServer) {
+    let client = server.client.clone();
+    #[cfg(feature = "semantic-observe")]
+    let handler_activity = Arc::clone(&server.handler_activity);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -17,11 +26,14 @@ pub(super) fn spawn_heartbeat(client: Outbound, handler_activity: Arc<HandlerAct
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let active = handler_activity.active();
-            tracing::info!(
-                "heartbeat TICK ts={ts} active_handlers={active} thread={:?}",
-                std::thread::current().id()
-            );
+            #[cfg(feature = "semantic-observe")]
+            {
+                let active = handler_activity.active();
+                tracing::info!(
+                    "heartbeat TICK ts={ts} active_handlers={active} thread={:?}",
+                    std::thread::current().id()
+                );
+            }
             client
                 .send_notification::<Heartbeat>(HeartbeatParams { timestamp: ts })
                 .await;
@@ -32,51 +44,95 @@ pub(super) fn spawn_heartbeat(client: Outbound, handler_activity: Arc<HandlerAct
 
 /// Arguments for the background initialization task.
 /// All fields are owned or Arc-wrapped so the task can run independently.
+///
+/// Every server-owned handle — including the server's handler activity the
+/// scanner yields behind — is taken by [`Self::from_server`], the struct's
+/// one constructor: the wiring holds by construction, and no caller can
+/// hand the background task another activity or another server's state.
 pub(super) struct BackgroundInitArgs {
-    pub(super) roots: Vec<String>,
-    pub(super) vite_opts: verter_workspace::ViteConfigOptions,
-    pub(super) init_lint_opts: Option<serde_json::Value>,
-    pub(super) my_gen: u64,
-    pub(super) client: Outbound,
-    pub(super) type_provider: Option<Arc<dyn TypeProvider>>,
-    pub(super) workspace_scanner:
+    roots: Vec<String>,
+    vite_opts: verter_workspace::ViteConfigOptions,
+    init_lint_opts: Option<serde_json::Value>,
+    my_gen: u64,
+    client: Outbound,
+    type_provider: Option<Arc<dyn TypeProvider>>,
+    workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
-    pub(super) init_generation: Arc<std::sync::atomic::AtomicU64>,
+    init_generation: Arc<std::sync::atomic::AtomicU64>,
     /// The server's interactive-handler activity, handed to the scanner so
     /// background admission waits on THIS server's handlers only.
-    pub(super) handler_activity: Arc<HandlerActivity>,
-    pub(super) ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
-    pub(super) project_sync: Option<ProjectSync>,
-    pub(super) documents: Arc<DocumentRegistry>,
-    pub(super) provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
-    pub(super) pending_snapshot_provider_sync: Arc<DashSet<String>>,
-    pub(super) is_tsgo: bool,
+    handler_activity: Arc<HandlerActivity>,
+    ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
+    project_sync: Option<ProjectSync>,
+    documents: Arc<DocumentRegistry>,
+    provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    pending_snapshot_provider_sync: Arc<DashSet<String>>,
+    is_tsgo: bool,
     /// Snapshot of MRU list at init time for drain ordering.
-    pub(super) mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
+    mru_canonical_ids: Arc<parking_lot::Mutex<Vec<String>>>,
     /// VFS workspace handle — populated during background_init with a FilesystemWorkspace.
-    pub(super) vfs_workspace:
-        Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
+    vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
     /// The tsserver carrier-publish coordinator (the store-publish membership
     /// path). `Some` only for the tsserver engine; `None` for tsgo and when no
     /// type provider is connected.
-    pub(super) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
-    pub(super) carrier_transaction_coordinator:
-        Arc<crate::external_ts::CarrierTransactionCoordinator>,
+    carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
     /// The proactive declaration-overlay lifecycle owner (shared with the server's
     /// `did_close` lifecycle).
-    pub(super) decl_overlay_owner: Arc<super::DeclOverlayOwner>,
+    decl_overlay_owner: Arc<super::DeclOverlayOwner>,
     /// Project-level coalescing singleflight for `resync_open_files`, shared with
     /// the server so concurrent init generations collapse their resync sweeps.
-    pub(super) resync_coordinator: Arc<crate::resync_singleflight::ResyncCoordinator>,
+    resync_coordinator: Arc<crate::resync_singleflight::ResyncCoordinator>,
     /// Per-document import-set freshness memo, shared with the server so a
     /// workspace installed here evicts entries keyed on the previous one.
-    pub(super) import_sync: Arc<super::ImportSyncMemo>,
+    import_sync: Arc<super::ImportSyncMemo>,
     /// Cheap-`Clone` server handle: once the snapshot publishes and the
     /// pending-sync drain settles, init enqueues a background
     /// import-dependency publication for every OPEN document so
     /// DependencyReady receipts mint under the fresh snapshot generation (the
     /// snapshot bump invalidated any earlier ones by key).
-    pub(super) server: super::VerterLanguageServer,
+    server: super::VerterLanguageServer,
+}
+
+impl BackgroundInitArgs {
+    /// Build the background-init bundle from the server instance that owns
+    /// every handle, plus the per-spawn inputs (roots, resolved vite
+    /// options, init lint options, the spawn's generation number).
+    pub(super) fn from_server(
+        server: &super::VerterLanguageServer,
+        roots: Vec<String>,
+        vite_opts: verter_workspace::ViteConfigOptions,
+        init_lint_opts: Option<serde_json::Value>,
+        my_gen: u64,
+    ) -> Self {
+        Self {
+            roots,
+            vite_opts,
+            init_lint_opts,
+            my_gen,
+            client: server.client.clone(),
+            type_provider: server.type_provider.clone(),
+            workspace_scanner: Arc::clone(&server.workspace_scanner),
+            init_generation: Arc::clone(&server.init_generation),
+            handler_activity: Arc::clone(&server.handler_activity),
+            ownership_generation_fence: Arc::clone(&server.ownership_generation_fence),
+            project_sync: server.project_sync.clone(),
+            documents: Arc::clone(&server.documents),
+            provider_sync_states: Arc::clone(&server.provider_sync_states),
+            pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),
+            is_tsgo: matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo),
+            mru_canonical_ids: Arc::new(parking_lot::Mutex::new(
+                server.mru_canonical_ids.lock().clone(),
+            )),
+            vfs_workspace: Arc::clone(&server.vfs_workspace),
+            carrier_publish_coordinator: server.carrier_publish_coordinator.clone(),
+            carrier_transaction_coordinator: Arc::clone(&server.carrier_transaction_coordinator),
+            decl_overlay_owner: Arc::clone(&server.decl_overlay_owner),
+            resync_coordinator: Arc::clone(&server.resync_coordinator),
+            import_sync: Arc::clone(&server.import_sync),
+            server: server.clone(),
+        }
+    }
 }
 
 struct PublishedWorkspaceBuild {

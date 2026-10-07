@@ -2653,9 +2653,10 @@ mod framework_options_js_constructor_tests {
         js_sys::JSON::parse(json).expect("the fixture is valid JSON")
     }
 
-    fn sorted_carrier_extensions(host: &host::VerterHost) -> Vec<String> {
-        let mut extensions: Vec<String> = host
-            .language_classifier()
+    fn sorted_carrier_extensions(
+        classifier: &host::framework::HostLanguageClassifier,
+    ) -> Vec<String> {
+        let mut extensions: Vec<String> = classifier
             .carrier_extensions()
             .into_iter()
             .map(str::to_string)
@@ -2668,11 +2669,14 @@ mod framework_options_js_constructor_tests {
     fn host_constructor_narrows_with_the_js_frameworks_key() {
         let host = WasmVerterHost::new(js_config(r#"{"frameworks":["vue"]}"#))
             .expect("the Vue vertical is composed");
-        assert_eq!(sorted_carrier_extensions(&host.inner), vec!["vue"]);
+        assert_eq!(
+            sorted_carrier_extensions(host.inner.language_classifier()),
+            vec!["vue"]
+        );
 
         let default_host = WasmVerterHost::new(js_config("{}")).expect("default construction");
         assert_eq!(
-            sorted_carrier_extensions(&default_host.inner),
+            sorted_carrier_extensions(default_host.inner.language_classifier()),
             vec!["svelte", "vue"]
         );
     }
@@ -2691,7 +2695,7 @@ mod framework_options_js_constructor_tests {
         let project = WasmMetaProject::new(js_config(r#"{"frameworks":["svelte"]}"#))
             .expect("the Svelte vertical is composed");
         assert_eq!(
-            sorted_carrier_extensions(project.inner.host()),
+            sorted_carrier_extensions(project.inner.language_classifier()),
             vec!["svelte"]
         );
     }

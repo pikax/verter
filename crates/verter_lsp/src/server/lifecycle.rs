@@ -319,8 +319,10 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     tracing::info!("verter-lsp initialized");
 
     // A. Spawn heartbeat FIRST — ensures the extension sees heartbeats
-    // even while background initialization is running.
-    spawn_heartbeat(server.client.clone(), Arc::clone(&server.handler_activity));
+    // even while background initialization is running. The server itself
+    // is the wiring: the heartbeat reads the server's own handler
+    // activity, never a call-site-supplied handle.
+    spawn_heartbeat(server);
 
     // B. Send immediate non-blocking notifications
     let tp_label = server.type_provider_kind.to_string();
@@ -819,6 +821,9 @@ pub(super) async fn handle_did_change(
     //
     // By serializing through a tokio::sync::Mutex, waiting handlers YIELD their worker
     // thread instead of blocking it. Only one handler holds the blocking lock at a time.
+    // The active-count report is OPTIONAL freeze diagnosis, compiled in only
+    // under the default-off `semantic-observe` feature.
+    #[cfg(feature = "semantic-observe")]
     tracing::info!(
         "did_change MUTEX_WAIT v{version} active={} thread={:?}",
         server.handler_activity.active(),

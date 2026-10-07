@@ -45,7 +45,15 @@ use crate::type_provider::merge;
 mod handler_guard;
 #[allow(unused_imports)]
 use self::handler_guard::block_in_place_if_available;
+// The server-scoped admission activity reaches the separate
+// integration-test binary through the default-off `test-support` seam —
+// the same pattern as every other item the consolidated test target
+// drives. Default builds (and any dependent) still see only the
+// crate-internal path below.
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) use self::handler_guard::HandlerActivity;
+#[cfg(any(test, feature = "test-support"))]
+pub use self::handler_guard::{HandlerActivity, HandlerGuard};
 // Re-export the runtime-flavor-guarded blocking helper so sibling top-level
 // modules (e.g. the background `sync_coordinator` / `background_init` diagnostic
 // publish paths) can route VFS source reads through the same guard the server
@@ -1403,6 +1411,16 @@ impl VerterLanguageServer {
     /// The outbound transport this server sends through.
     pub fn outbound(&self) -> &Outbound {
         &self.client
+    }
+
+    /// This server's interactive-handler activity — the ONE activity its
+    /// handlers hold guards on and its background scanner waits behind.
+    /// Test-support seam for the consolidated integration-test binary,
+    /// which proves the server-scoped admission wiring; the field itself
+    /// stays server-private so no caller can substitute another activity.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handler_activity(&self) -> &std::sync::Arc<HandlerActivity> {
+        &self.handler_activity
     }
 }
 

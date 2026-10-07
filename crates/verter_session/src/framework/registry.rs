@@ -723,6 +723,36 @@ impl HostServices {
     pub fn framework_registry(&self) -> &FrameworkAdapterRegistry {
         &self.registry
     }
+
+    /// The admitted carrier extensions in the adapters' DECLARED probe-rank
+    /// order — the explicit PROBE priority for extension-based dependency
+    /// resolution (first match wins).
+    ///
+    /// This order is a registration decision (each descriptor's
+    /// `carrier_probe_rank`), distinct from both derived orders it must
+    /// never fall back to: the classifier's carrier order (longest-suffix
+    /// first, a MATCHING order — `.svelte.ts` must beat `.ts`) and the
+    /// capability catalog's identity sort (lexicographic). A same-stem
+    /// `.vue`/`.svelte` collision resolves by the declared rank, not by
+    /// suffix length or spelling. Carrier-less adapters contribute no
+    /// extension; equal ranks keep the catalog's deterministic order.
+    #[must_use]
+    pub fn carrier_probe_extensions(&self) -> Vec<String> {
+        let mut ranked: Vec<(u32, String)> = self
+            .capabilities
+            .adapter_ids()
+            .filter_map(|adapter_id| {
+                self.registry.get(adapter_id).and_then(|registration| {
+                    registration
+                        .descriptor
+                        .carrier_extension()
+                        .map(|extension| (registration.descriptor.carrier_probe_rank, extension))
+                })
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        ranked.into_iter().map(|(_, extension)| extension).collect()
+    }
 }
 
 /// The framework adapter registry.
@@ -896,6 +926,47 @@ impl FrameworkAdapterRegistry {
         adapter_id: &FrameworkAdapterId,
     ) -> Option<&Arc<dyn ComponentApiProjector>> {
         self.get(adapter_id).and_then(|r| r.api_projector.as_ref())
+    }
+
+    /// Whether the adapter that owns `language` declares its carrier's
+    /// script-setup type-bindings surface — REGISTRY DATA the
+    /// framework-neutral prepared-declaration materializer reads instead of
+    /// branching on a framework identity (`is_vue()`). A non-framework
+    /// language or an unregistered adapter declares nothing.
+    #[must_use]
+    pub fn declares_script_setup_type_bindings(&self, language: &FileLanguage) -> bool {
+        language
+            .adapter_id()
+            .and_then(|adapter_id| self.get(adapter_id))
+            .is_some_and(|registration| registration.descriptor.declares_script_setup_type_bindings)
+    }
+
+    /// Whether the adapter that owns `language` declares its carrier's
+    /// template-analysis surface — REGISTRY DATA the framework-neutral
+    /// snapshot builder and narrowed-scope serve read instead of branching
+    /// on a framework identity (`is_vue()`): a carrier with the surface
+    /// serves its analysis snapshot from the parse artifact together with
+    /// template-analysis inputs. A non-framework language or an
+    /// unregistered adapter declares nothing.
+    #[must_use]
+    pub fn carries_template_analysis_inputs(&self, language: &FileLanguage) -> bool {
+        language
+            .adapter_id()
+            .and_then(|adapter_id| self.get(adapter_id))
+            .is_some_and(|registration| registration.descriptor.carries_template_analysis_inputs)
+    }
+
+    /// Whether the adapter that owns `language` anchors its carrier's
+    /// export spans at script-setup bindings and macros — REGISTRY DATA
+    /// the framework-neutral export-span lookup reads instead of
+    /// branching on a framework identity (`is_vue()`). A non-framework
+    /// language or an unregistered adapter declares nothing.
+    #[must_use]
+    pub fn anchors_exports_at_script_setup(&self, language: &FileLanguage) -> bool {
+        language
+            .adapter_id()
+            .and_then(|adapter_id| self.get(adapter_id))
+            .is_some_and(|registration| registration.descriptor.anchors_exports_at_script_setup)
     }
 
     /// The adapter id of the unique registered adapter that SYNTHESIZES a

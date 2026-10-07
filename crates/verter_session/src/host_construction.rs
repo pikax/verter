@@ -269,10 +269,17 @@ impl VerterHost {
 
     /// The extension probe order for resolving module references against a
     /// caller-provided known-file set: the bare specifier, the script
-    /// extensions, then the framework carriers this host composed, in
-    /// registry order. The carriers come from the host's classifier, so an
-    /// unadmitted vertical's extension is never probed; the native and
-    /// browser bindings default to this list instead of spelling their own.
+    /// extensions, then the framework carriers this host composed, in the
+    /// adapters' DECLARED probe-rank order. Carrier MEMBERSHIP comes from
+    /// the composed admission (an unadmitted vertical's extension is never
+    /// probed), while carrier ORDER is each descriptor's explicit
+    /// `carrier_probe_rank` — deliberately NOT the classifier's
+    /// `carrier_extensions()` order, which is the longest-suffix-first
+    /// MATCHING order (a classification concern): extension probing is
+    /// first-match-wins resolution, so a same-stem `.vue`/`.svelte`
+    /// collision resolves by declared rank, not by suffix length. The
+    /// native and browser bindings default to this list instead of spelling
+    /// their own.
     #[must_use]
     pub fn known_dependency_extensions(&self) -> Vec<String> {
         const SCRIPT_EXTENSIONS: [&str; 9] = [
@@ -281,12 +288,7 @@ impl VerterHost {
         SCRIPT_EXTENSIONS
             .iter()
             .map(|extension| (*extension).to_string())
-            .chain(
-                self.language_classifier
-                    .carrier_extensions()
-                    .into_iter()
-                    .map(|extension| format!(".{extension}")),
-            )
+            .chain(self.framework_services.carrier_probe_extensions())
             .collect()
     }
 
@@ -2119,22 +2121,6 @@ mod framework_options_construction_tests {
             probes.iter().any(|extension| extension == ".vue")
                 && !probes.iter().any(|extension| extension == ".svelte"),
             "known-file dependency resolution probes only admitted carriers: {probes:?}"
-        );
-    }
-
-    #[test]
-    fn the_default_host_probes_scripts_then_every_composed_carrier() {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        assert_eq!(
-            host.known_dependency_extensions(),
-            [
-                "", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".svelte",
-                ".vue",
-            ]
-            .map(String::from)
-            .to_vec(),
-            "the bare specifier and scripts probe before carriers, which follow the \
-             classifier's longest-suffix-first registry order"
         );
     }
 

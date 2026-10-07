@@ -964,13 +964,14 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
     ) -> Option<verter_span::Span> {
         let (file_language, script_analysis, export_signatures) =
             self.host.load_export_graph_analysis(canonical_id)?;
-        VerterHost::find_export_span(
-            &file_language,
-            &script_analysis,
-            &export_signatures,
-            binding_name,
-        )
-        .map(|(start, end)| verter_span::Span::new(start, end))
+        self.host
+            .find_export_span(
+                &file_language,
+                &script_analysis,
+                &export_signatures,
+                binding_name,
+            )
+            .map(|(start, end)| verter_span::Span::new(start, end))
     }
 
     fn resolve_reexport_target(

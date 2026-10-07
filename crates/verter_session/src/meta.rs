@@ -208,7 +208,7 @@ pub(crate) struct SessionState {
 /// concurrency is separated by the existing
 /// `StoreViewCompatToken`-keyed singleflight (R19).
 pub struct MetaProject {
-    host: VerterHost,
+    host: std::sync::Arc<VerterHost>,
     /// Cached base sources for overlay revert. Key = canonical ID.
     base_sources: parking_lot::RwLock<HashMap<String, Arc<str>>>,
     /// Set of canonical IDs in the base file index.
@@ -224,6 +224,14 @@ pub struct MetaProject {
 impl MetaProject {
     /// Create a new project wrapping the given host.
     pub fn new(host: VerterHost) -> Arc<Self> {
+        Self::from_shared_host(std::sync::Arc::new(host))
+    }
+
+    /// Create a new project over a host the caller constructed and still
+    /// holds a shared handle to. The caller's handle and the project's are
+    /// the same host instance — the explicit construction graph consumes
+    /// the single instance instead of minting a second owner.
+    pub fn from_shared_host(host: std::sync::Arc<VerterHost>) -> Arc<Self> {
         Arc::new(Self {
             host,
             base_sources: parking_lot::RwLock::new(HashMap::new()),
@@ -414,9 +422,27 @@ impl MetaProject {
         self.shutdown.load(Ordering::Acquire)
     }
 
-    /// Get a reference to the underlying host (for advanced use).
+    /// Get a reference to the underlying host. Crate-private: the project
+    /// owns the host, and the whole-host accessor is not part of the
+    /// session crate's public surface — external consumers reach their
+    /// own construction handle (see [`Self::from_shared_host`]) or a
+    /// narrow read instead.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn host(&self) -> &VerterHost {
+        self.host.as_ref()
+    }
+
+    /// The same whole-host read, visible ONLY to this crate's own test
+    /// code: the consolidated integration-test binary (which links the
+    /// crate as a non-test dependency) and the unit tests. The default-off
+    /// `test-support` feature — the crate's established seam for exactly
+    /// this — keeps it a COMPILE-ABSENT item in every production build,
+    /// so the production surface offers no catch-all route to the whole
+    /// host; a production consumer holds its own construction handle
+    /// (see [`Self::from_shared_host`]) instead.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn host(&self) -> &VerterHost {
-        &self.host
+        self.host.as_ref()
     }
 
     /// Returns the set of canonical IDs in the base file index.
@@ -507,7 +533,11 @@ pub struct MetaSession {
 }
 
 impl MetaSession {
-    fn check_alive(&self) -> Result<(), MetaError> {
+    /// Liveness for the session's own routes AND the host-seam routes the
+    /// component-meta host re-exports: a closed session must refuse BEFORE
+    /// any host operation (resolution, audit publication) runs under its
+    /// identity.
+    pub(crate) fn check_alive(&self) -> Result<(), MetaError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(MetaError::SessionClosed);
         }

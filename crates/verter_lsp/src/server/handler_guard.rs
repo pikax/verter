@@ -11,17 +11,19 @@
 /// the epoch only distinguishes "no handler started or finished since" for
 /// the quiet window.
 #[derive(Debug, Default)]
-pub(crate) struct HandlerActivity {
+pub struct HandlerActivity {
     active: std::sync::atomic::AtomicU32,
     idle: tokio::sync::Notify,
     epoch: std::sync::atomic::AtomicU64,
 }
 
 impl HandlerActivity {
-    /// In-flight handlers right now. When this reaches the tokio worker
-    /// thread count, the runtime is saturated and timers/heartbeats can't
-    /// fire.
-    pub(crate) fn active(&self) -> u32 {
+    /// In-flight handlers right now — a diagnostic read with no production
+    /// consumer in default builds (the heartbeat and handler trace lines
+    /// that report it compile away), so the accessor exists only for the
+    /// observation feature and the crate's own tests.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    pub fn active(&self) -> u32 {
         self.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -32,7 +34,7 @@ impl HandlerActivity {
     /// request may race immediately after this returns, but then competes
     /// with at most one carrier compile; it can never sit behind the
     /// remainder of a workspace pass.
-    pub(crate) async fn wait_idle(&self) {
+    pub async fn wait_idle(&self) {
         wait_for_idle_counter(&self.active, &self.idle).await;
     }
 
@@ -46,7 +48,7 @@ impl HandlerActivity {
     /// forever. The return value distinguishes a genuine quiet-window
     /// admission from the fairness deadline, which is useful to callers that
     /// want to trace the latter.
-    pub(crate) async fn wait_quiet(
+    pub async fn wait_quiet(
         &self,
         quiet: std::time::Duration,
         max_defer: std::time::Duration,
@@ -115,33 +117,51 @@ async fn wait_for_quiet_counter_bounded(
 }
 
 /// RAII guard that tracks one handler's lifetime on its server's
-/// [`HandlerActivity`]. Logs entry (with thread ID and active handler count)
-/// on creation, logs exit (with duration) on drop.
-pub(crate) struct HandlerGuard<'a> {
+/// [`HandlerActivity`]: REQUIRED admission bookkeeping (count, wake, epoch)
+/// always, and — compiled in only under the default-off `semantic-observe`
+/// feature — the freeze-diagnosis enter/exit trace lines with the name,
+/// entry timestamp and thread id only those lines consume.
+pub struct HandlerGuard<'a> {
     activity: &'a HandlerActivity,
+    #[cfg(feature = "semantic-observe")]
     name: &'static str,
+    #[cfg(feature = "semantic-observe")]
     start: std::time::Instant,
+    #[cfg(feature = "semantic-observe")]
     thread_id: std::thread::ThreadId,
 }
 
 impl<'a> HandlerGuard<'a> {
-    pub(crate) fn new(activity: &'a HandlerActivity, name: &'static str) -> Self {
+    pub fn new(activity: &'a HandlerActivity, name: &'static str) -> Self {
         activity
             .epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(feature = "semantic-observe")]
         let prev = activity
             .active
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let thread_id = std::thread::current().id();
-        tracing::info!(
-            "HANDLER_ENTER {name} active={} thread={thread_id:?}",
-            prev + 1
-        );
-        Self {
-            activity,
-            name,
-            start: std::time::Instant::now(),
-            thread_id,
+        #[cfg(not(feature = "semantic-observe"))]
+        activity
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let thread_id = std::thread::current().id();
+            tracing::info!(
+                "HANDLER_ENTER {name} active={} thread={thread_id:?}",
+                prev + 1
+            );
+            Self {
+                activity,
+                name,
+                start: std::time::Instant::now(),
+                thread_id,
+            }
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = name;
+            Self { activity }
         }
     }
 }
@@ -159,12 +179,15 @@ impl Drop for HandlerGuard<'_> {
         activity
             .epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let elapsed = self.start.elapsed();
-        tracing::info!(
-            "HANDLER_EXIT {} active={remaining} elapsed={elapsed:?} thread={:?}",
-            self.name,
-            self.thread_id,
-        );
+        #[cfg(feature = "semantic-observe")]
+        {
+            let elapsed = self.start.elapsed();
+            tracing::info!(
+                "HANDLER_EXIT {} active={remaining} elapsed={elapsed:?} thread={:?}",
+                self.name,
+                self.thread_id,
+            );
+        }
     }
 }
 
@@ -180,38 +203,6 @@ pub(crate) fn block_in_place_if_available<R>(f: impl FnOnce() -> R) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Background admission is scoped to its server: a handler in flight on
-    /// one server holds back that server's background work and nobody
-    /// else's, and releasing it wakes its own server's waiter.
-    #[tokio::test(start_paused = true)]
-    async fn handler_activity_gates_only_its_own_servers_background_work() {
-        use std::task::Poll;
-
-        let busy = HandlerActivity::default();
-        let other = HandlerActivity::default();
-        let quiet = std::time::Duration::from_millis(30);
-        let start = tokio::time::Instant::now();
-        let handler = HandlerGuard::new(&busy, "hover");
-
-        let mut busy_waiter = Box::pin(busy.wait_idle());
-        assert!(
-            matches!(futures_util::poll!(&mut busy_waiter), Poll::Pending),
-            "a server's own in-flight handler holds back its background work"
-        );
-        other.wait_idle().await;
-        assert!(
-            other
-                .wait_quiet(quiet, std::time::Duration::from_secs(1))
-                .await,
-            "another server's handler must not consume this server's quiet window"
-        );
-        assert_eq!(tokio::time::Instant::now(), start + quiet);
-
-        drop(handler);
-        busy_waiter.await;
-        assert_eq!(busy.active(), 0);
-    }
 
     /// Admission is an event, so it is proven by polling, not by racing two
     /// wall-clock timeouts: `Pending` while a handler is active, `Ready` on

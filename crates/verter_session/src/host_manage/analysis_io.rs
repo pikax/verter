@@ -585,7 +585,13 @@ impl VerterHost {
             let source = source_snap.source.clone();
             let framework_parse = hd.framework_parse.clone();
             let scope = self.config.effective_scope();
-            if file_language.is_vue()
+            // The narrowed-scope serve is ADAPTER-DECLARED registry data:
+            // only a carrier with the template-analysis surface serves its
+            // stored snapshot with template inputs under a narrowed scope —
+            // the host never branches on a framework identity here.
+            if self
+                .framework_registry()
+                .carries_template_analysis_inputs(&file_language)
                 && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
             {
                 #[cfg(test)]
@@ -2728,7 +2734,7 @@ impl VerterHost {
             let analysis_snap = self.scheduler.try_get_analysis(&canonical)?;
             let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
-            Self::find_export_span(
+            self.find_export_span(
                 &file_language,
                 &ad.script_analysis,
                 &ad.export_signatures,
@@ -2739,6 +2745,7 @@ impl VerterHost {
 
     /// Shared logic for finding an export span from analysis data.
     pub(super) fn find_export_span(
+        &self,
         file_language: &FileLanguage,
         script_analysis: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
         export_signatures: &[verter_session_query::analysis::types::ExportSignature],
@@ -2753,7 +2760,15 @@ impl VerterHost {
             return Some((0, 0));
         }
 
-        if file_language.is_vue() {
+        // The export-anchor policy is ADAPTER-DECLARED registry data: a
+        // carrier whose script-setup bindings ARE its authored exports
+        // anchors export spans at those bindings and macros; every other
+        // file anchors at its export signatures. The host never branches
+        // on a framework identity here.
+        if self
+            .framework_registry()
+            .anchors_exports_at_script_setup(file_language)
+        {
             if let Some(binding) = script_analysis
                 .bindings
                 .iter()

@@ -74,6 +74,8 @@ mod invalidation_perf;
 mod jsdoc_provenance_p2;
 #[path = "g_misc0/known_but_unsupported_language.rs"]
 mod known_but_unsupported_language;
+#[path = "g_misc0/known_dependency_probe_priority.rs"]
+mod known_dependency_probe_priority;
 #[path = "g_misc0/language_routing_characterization.rs"]
 mod language_routing_characterization;
 #[path = "g_misc0/legacy_dep_signature_field_gone.rs"]

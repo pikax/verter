@@ -205,7 +205,35 @@ impl ComponentMetaHost {
         Ok(())
     }
 
-    /// Access the underlying host.
+    /// Build a component-meta host over a host the caller constructed and
+    /// still holds a shared handle to. The whole host is NOT re-exported
+    /// from the meta host: a caller that needs its own host surface keeps
+    /// its own construction handle, and the meta host consumes the same
+    /// single instance.
+    pub fn new_shared_host(host: Arc<VerterHost>) -> Self {
+        Self {
+            inner: Arc::new(ComponentMetaHostInner {
+                project: crate::meta::MetaProject::from_shared_host(host),
+                generation: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// The project host's language-classification authority: which carrier
+    /// languages and adapters this composition admits. A narrow read that
+    /// replaces whole-host access for admission questions.
+    pub fn language_classifier(&self) -> &crate::framework::HostLanguageClassifier {
+        self.inner.project.host().language_classifier()
+    }
+
+    /// The whole host behind this meta host — the test-support seam ONLY:
+    /// visible to this crate's own test code (the consolidated
+    /// integration-test binary links the crate as a non-test dependency)
+    /// and a COMPILE-ABSENT item in every production build. Production
+    /// callers keep their own construction handle
+    /// (see [`Self::new_shared_host`]); the meta host re-exports no
+    /// whole-host route.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn host(&self) -> &VerterHost {
         self.inner.project.host()
     }
@@ -519,6 +547,21 @@ impl ComponentMetaSession {
         Option<crate::meta_resolve::ComponentMetaOutput>,
         ComponentMetaHostError,
     > {
+        // Session liveness gates the audited lane FIRST: a closed session
+        // (or a shut-down project) must refuse BEFORE the host-level path
+        // runs — no resolution, no request id, no audit publication may
+        // happen under a session that no longer owns a lifetime. The
+        // refusal carries the cheap default-filled record like every other
+        // pre-capture refusal (nothing was captured because nothing ran).
+        if let Err(error) = self.inner.check_alive() {
+            return verter_audit::AuditedResult::err(
+                ComponentMetaHostError::from(error),
+                cheap_component_meta_record(
+                    canonical_or_alias,
+                    verter_audit::AuditCaptureState::FilteredNoop,
+                ),
+            );
+        }
         if !self.inner.audit_capture_enabled() {
             // No audit record is produced when capture is off — carry
             // the cheap default-filled record marked `AuditDisabled`
