@@ -15,9 +15,11 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use super::{ConditionalBranchSelection, ProjectSemanticDispatch};
+use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
-    BranchSelection, ConditionalPendingSubstitution, OriginEdgeKind, OriginMeta, QueryError,
-    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, OriginEdgeKind,
+    OriginMeta, PartialReason, QueryError, QueryResult, ResultCompleteness, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey,
 };
 
 /// The infer-routing classification of a conditional's `extends` pattern
@@ -34,25 +36,74 @@ pub(super) enum ConditionalInferRoute {
 
 /// A type read through the conditional query: what a consumer of a
 /// conditional (a relation, a closedness walk) takes it as.
-pub(super) enum ConditionalOutcome {
+///
+/// Every arm is a COMPLETE reading: a conditional the checker keeps whole
+/// ([`Self::Deferred`]) is an exact answer, not a failure. A conditional
+/// the query could not finish is not a reading at all — it is the
+/// unavailable arm of the [`ConditionalFact`] the query establishes.
+pub(super) enum ConditionalReading {
     /// Not a conditional.
     NotConditional,
     /// A conditional that reduced to this type.
     Reduced(SemanticNodeId),
     /// A conditional the checker keeps.
     Deferred(DeferredConditional),
-    /// A conditional the query could not finish.
-    Undecided,
 }
 
-impl ConditionalOutcome {
+/// The fact a conditional read establishes: a complete
+/// [`ConditionalReading`], or the unavailable arm naming why the query
+/// could not finish it ([`PartialReason::UndecidedConditional`] plus the
+/// read's own classes or the query error's classification). A partial read
+/// is never an approximate reading — a branch selection made over an
+/// unfinished conditional has no documented usable interpretation. A read
+/// that observed cancellation or a superseded view aborts
+/// ([`ExecutionAbort`]).
+///
+/// [`PartialReason::UndecidedConditional`]: crate::semantic_query::PartialReason::UndecidedConditional
+pub(super) type ConditionalFact = Result<FactResult<ConditionalReading>, ExecutionAbort>;
+
+/// The fact one conditional QUERY read establishes about the type it
+/// reduces to: the complete value, or unavailable naming
+/// [`PartialReason::UndecidedConditional`] with the read's own classes, its
+/// error's classification, or same-path recursion. A read that observed
+/// cancellation or a superseded view aborts. Never approximate: a partial
+/// read's value is discarded, not offered as a reading.
+pub(super) fn conditional_read_fact(
+    read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+) -> Result<FactResult<SemanticNodeId>, ExecutionAbort> {
+    let undecided = NonEmptyReasons::of(PartialReason::UndecidedConditional);
+    if read.result_is_partial {
+        let classes = read.partial_reason_classes();
+        if let Some(abort) = ExecutionAbort::observed_in(ResultCompleteness::partial(classes)) {
+            return Err(abort);
+        }
+        return Ok(FactResult::unavailable(undecided.with(classes)));
+    }
+    Ok(match read.value {
+        QueryResult::Value(value) => FactResult::complete(value),
+        QueryResult::Error(error) => {
+            FactResult::unavailable(undecided.union(NonEmptyReasons::from_query_error(&error)))
+        }
+        QueryResult::Recursive(_) => FactResult::unavailable(
+            undecided.union(NonEmptyReasons::of(PartialReason::SamePathRecursion)),
+        ),
+    })
+}
+
+impl ConditionalReading {
     /// The deferred conditional this operand is, if it is one.
     pub(super) fn into_deferred(self) -> Option<DeferredConditional> {
         match self {
             Self::Deferred(conditional) => Some(conditional),
-            Self::NotConditional | Self::Reduced(_) | Self::Undecided => None,
+            Self::NotConditional | Self::Reduced(_) => None,
         }
     }
+}
+
+/// The exact reading of a conditional fact: `None` for an unfinished or
+/// aborted read.
+pub(super) fn exact_reading(fact: ConditionalFact) -> Option<ConditionalReading> {
+    fact.ok().and_then(FactResult::into_exact)
 }
 
 /// A deferred conditional's operands and branches, the branches read
@@ -1620,9 +1671,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// type, related by the rules for one), or a conditional the query could
     /// not finish. Every consumer that asks which branch a conditional
     /// takes reads it here.
-    pub(super) fn conditional_outcome(&self, node: SemanticNodeId) -> ConditionalOutcome {
+    pub(super) fn conditional_outcome(&self, node: SemanticNodeId) -> ConditionalFact {
         let Some(data) = self.graph().node_data(node) else {
-            return ConditionalOutcome::NotConditional;
+            return Ok(FactResult::complete(ConditionalReading::NotConditional));
         };
         let SemanticNodeData::Conditional {
             check,
@@ -1633,7 +1684,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             pending,
         } = data.as_ref()
         else {
-            return ConditionalOutcome::NotConditional;
+            return Ok(FactResult::complete(ConditionalReading::NotConditional));
         };
         // The procedure keeps a conditional over a naked type parameter
         // whole before it reads anything else (`getConditionalType` defers
@@ -1659,16 +1710,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let value = if kept {
             node
         } else {
-            let read = self.execute_read(key);
-            if read.result_is_partial {
-                return ConditionalOutcome::Undecided;
+            match conditional_read_fact(self.execute_read(key))? {
+                FactResult::Complete(value) => value,
+                FactResult::Unavailable { causes } => return Ok(FactResult::unavailable(causes)),
+                FactResult::Approximate { causes, .. } => {
+                    return Ok(FactResult::unavailable(causes))
+                }
             }
-            let QueryResult::Value(value) = read.value else {
-                return ConditionalOutcome::Undecided;
-            };
-            value
         };
-        match self.graph().node_data(value).as_deref() {
+        let reading = match self.graph().node_data(value).as_deref() {
             Some(SemanticNodeData::Conditional {
                 check,
                 extends,
@@ -1676,7 +1726,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 false_branch_ref,
                 distributive,
                 pending,
-            }) => ConditionalOutcome::Deferred(DeferredConditional {
+            }) => ConditionalReading::Deferred(DeferredConditional {
                 check: *check,
                 extends: *extends,
                 true_branch: self.apply_conditional_branch_pending(
@@ -1691,7 +1741,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ),
                 distributive: *distributive,
             }),
-            _ => ConditionalOutcome::Reduced(value),
-        }
+            _ => ConditionalReading::Reduced(value),
+        };
+        Ok(FactResult::complete(reading))
     }
 }
+
+#[cfg(test)]
+#[path = "conditional_decision_tests.rs"]
+mod conditional_decision_tests;

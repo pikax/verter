@@ -126,6 +126,7 @@ pub mod call_resolve;
 pub mod dispatch_txn;
 pub mod flow_return;
 pub(crate) mod flow_return_callee;
+mod flow_return_fact;
 pub mod flow_return_products;
 mod flow_return_widening;
 // The completeness-proof layer for flow-bearing operations: production-live
