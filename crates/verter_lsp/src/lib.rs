@@ -70,6 +70,34 @@ where
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
+/// Run the server's async entry point on the serve thread, then end the
+/// process.
+///
+/// `serve` returns once the client sent `exit` (or closed its input) and every
+/// response has been written. The process then exits with the runtime still
+/// alive; the runtime is never dropped. Dropping it would shut its timer and
+/// I/O drivers down without waiting for a background task that is inside
+/// `tokio::task::block_in_place`: when that closure returns, the task keeps
+/// polling on its own thread, and its next timer poll panics. Engine process
+/// trees are terminated first — the order the client-death monitor uses — so
+/// no provider outlives the server.
+pub fn serve_until_exit<F, Fut>(serve: F) -> !
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _runtime = run_on_serve_thread(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("multi-thread tokio runtime must build");
+        runtime.block_on(serve());
+        runtime
+    });
+    verter_tsgo_api::process::terminate_registered_engine_trees();
+    std::process::exit(0)
+}
+
 #[cfg(test)]
 #[path = "serve_thread_tests.rs"]
 mod serve_thread_tests;
