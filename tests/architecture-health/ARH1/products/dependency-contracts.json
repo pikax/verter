@@ -1540,6 +1540,7 @@
           "crates/verter_session/tests/cases/family_warm_read_releases_mutex_before_validate.rs",
           "crates/verter_session/tests/cases/flow_product_lattice.rs",
           "crates/verter_session/tests/cases/flow_solve_completeness.rs",
+          "crates/verter_session/tests/cases/g_audit/audit_request_ids_share_one_host_key_space.rs",
           "crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs",
           "crates/verter_session/tests/cases/g_block/block_1_i_discriminators.rs",
           "crates/verter_session/tests/cases/g_block/block_6i_leak_option_a_discriminator.rs",

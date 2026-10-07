@@ -605,14 +605,6 @@ impl VerterHost {
         project_type_store
             .indexed()
             .install_test_audit_hook(Arc::clone(&test_force.audit));
-        // Build the audit records store ONCE and share its `Arc` between
-        // the legacy `audit_records` field and the new `host_audit_runtime`
-        // so writes through either surface land in the same map. The
-        // legacy field becomes a thin `Arc::clone` of the runtime's
-        // store accessor; this avoids a dual-store regression where
-        // each surface accumulated its own records.
-        let audit_records_init: Arc<crate::component_meta_audit::AuditRecordsStore> =
-            Arc::new(crate::component_meta_audit::AuditRecordsStore::default());
         // Mirror the relevant `HostConfig` flags into the substrate's
         // `AuditConfig` snapshot. The substrate-side flag is what
         // `AuditRequestRegistration::new` and the sampler thread read,
@@ -701,10 +693,8 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
-            audit_records: Arc::clone(&audit_records_init),
             host_audit_runtime: Arc::new(crate::host_audit_runtime::HostAuditRuntime::new(
                 audit_config,
-                Arc::clone(&audit_records_init),
             )),
             // `usize::MAX` is the "unobserved" sentinel. A real worker
             // overwrites this with either its host-pool id or `usize::MAX`

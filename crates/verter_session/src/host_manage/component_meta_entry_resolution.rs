@@ -113,7 +113,7 @@ impl VerterHost {
     /// `FileArtifactStore`) and a synthesized `RequestAuditRecord` with
     /// `from_cache = true`, `total_ms = 0.0` is finalised through the
     /// registration so audit consumers via
-    /// `take_audit_record(resolution.request_id)` work uniformly.
+    /// `take_record(resolution.request_id)` work uniformly.
     ///
     /// An aborted computation also returns `None`: it publishes nothing.
     /// [`Self::try_get_component_meta_with_resolution`] names the abort.
@@ -385,7 +385,7 @@ impl VerterHost {
     /// `from_cache` record). EVERY terminal — success, the non-resolving
     /// `None`, and the typed output-materialization error — carries the
     /// stamped request id, so audit consumers retrieve the matching record
-    /// via [`VerterHost::take_audit_record`] regardless of outcome: the
+    /// via [`HostAuditRuntime::take_record`](crate::host_audit_runtime::HostAuditRuntime::take_record) regardless of outcome: the
     /// resolution publishes its REAL record when the audit scope drops, and
     /// an error terminal that dropped the id would orphan that record while
     /// the consumer fabricated a zero-id stand-in.
@@ -576,7 +576,7 @@ impl VerterHost {
         // was inert here. Install-if-none, so an outer context (the audited
         // `get_component_meta_with_resolution` entry) keeps its own.
         let _session_budget_ctx_guard = self.install_request_budget_context_if_none(
-            crate::meta_resolve::next_component_meta_audit_request_id(),
+            self.next_request_id(),
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
@@ -652,7 +652,7 @@ impl VerterHost {
     /// `total_ms = 0.0` and finalises it through the
     /// `AuditRequestRegistration` planted on the active
     /// `RequestContext` so audit consumers via
-    /// `take_audit_record(resolution.request_id)` returns it
+    /// `take_record(resolution.request_id)` returns it
     /// uniformly with cold-resolver records.
     fn try_with_resolution_cache_hit(
         &self,
@@ -718,7 +718,7 @@ impl VerterHost {
         let resolution = cached.resolution_template.rehydrate(snapshot, request_id);
 
         // Synthesize a from_cache audit record so consumers via
-        // `take_audit_record(resolution.request_id)` get uniform
+        // `take_record(resolution.request_id)` get uniform
         // observability. Snapshot per-request cache counters from
         // the active TLS context — the warm path consulted
         // `ComponentMetaResultDb::get` and `FileArtifactStore::get`
@@ -853,7 +853,7 @@ impl VerterHost {
                 capture_state: verter_audit::AuditCaptureState::ActiveStored,
             };
             verter_debug_assert_eq!(synthesized.request_id, resolution.request_id);
-            self.finalize_request_audit_record(synthesized);
+            self.host_audit_runtime().publish_record(synthesized);
         }
 
         Some((cached.analysis.clone(), resolution))

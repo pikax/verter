@@ -306,7 +306,8 @@ fn resolve_cold_builds(host: &Arc<VerterHost>, canonical: &str) -> u64 {
         .get_component_meta_with_resolution(canonical)
         .unwrap_or_else(|| panic!("resolve of {canonical} returned None (no component meta)"));
     let record = host
-        .take_audit_record(resolution.request_id)
+        .host_audit_runtime()
+        .take_record(resolution.request_id)
         .unwrap_or_else(|| {
             panic!(
                 "audit record missing for {canonical} (request_id {})",
@@ -860,7 +861,8 @@ fn resolve_audited_stats(host: &Arc<VerterHost>, canonical: &str) -> AuditedReso
         .get_component_meta_with_resolution(canonical)
         .unwrap_or_else(|| panic!("resolve of {canonical} returned None (no component meta)"));
     let record = host
-        .take_audit_record(resolution.request_id)
+        .host_audit_runtime()
+        .take_record(resolution.request_id)
         .unwrap_or_else(|| {
             panic!(
                 "audit record missing for {canonical} (request_id {})",

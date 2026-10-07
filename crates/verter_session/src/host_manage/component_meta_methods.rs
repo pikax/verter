@@ -36,9 +36,9 @@ use crate::meta_resolve::{
     RegistryMaterialization, ResolvedComponentMetaState,
 };
 use crate::meta_resolve::{
-    next_component_meta_audit_request_id, request_source_performed_compute,
-    should_skip_imported_registry_seed_refresh, trace_request_source, CapturedComponentMetaInputs,
-    ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
+    request_source_performed_compute, should_skip_imported_registry_seed_refresh,
+    trace_request_source, CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit,
+    ResolvedTypeRegistryMeta,
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
@@ -181,23 +181,21 @@ impl VerterHost {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let _ctx_guard = self.install_request_budget_context_if_none(
-            next_component_meta_audit_request_id(),
+            self.next_request_id(),
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
         let audit = self.config.audit_enabled.then(|| {
             // Prefer the request_id stamped by
             // `get_component_meta_with_resolution` (via the installed
-            // `RequestContext`). Falls back to the global static only
-            // when no context is installed — e.g. direct callers of
-            // `resolve_component_meta` outside the audited-request
-            // path. Without this link `take_audit_record` would look
-            // up the outer id while the record is stored under the
+            // `RequestContext`); a fresh host-minted id only when no
+            // context is in scope. Without this link `take_record` would
+            // look up the outer id while the record is stored under the
             // inner id, and every `AuditedRequest::resolve` would
             // fail with `AuditRecordMissing`.
             let request_id = verter_type_engine::request_context::current_request_context()
                 .map(|ctx| ctx.request_id)
-                .unwrap_or_else(next_component_meta_audit_request_id);
+                .unwrap_or_else(|| self.next_request_id());
             let (host_cache_before_bytes, workspace_before_bytes) =
                 self.component_meta_audit_memory_bytes();
             (
@@ -441,11 +439,11 @@ impl VerterHost {
             // on the active `RequestContext`. The registration removes
             // the in-flight slot from the host's active-request
             // registry and inserts the record into the records store
-            // so `take_audit_record(resolution.request_id)` returns it.
-            // When no registration is in scope (synthetic test
-            // fixture path), the helper falls back to a direct insert
-            // so the host-wide store stays consistent.
-            self.finalize_request_audit_record(record);
+            // so `take_record(resolution.request_id)` returns it.
+            // When no registration is in scope (a read outside an
+            // audited entry-point), the runtime inserts the record
+            // directly into the same store.
+            self.host_audit_runtime().publish_record(record);
         }
 
         result.value.map(|resolved| (resolved, admission))

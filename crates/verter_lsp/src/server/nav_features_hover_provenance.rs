@@ -50,7 +50,7 @@ pub(super) fn enrich_hover_with_provenance(
     // Cache miss — check whether the host can actually produce a
     // useful payload BEFORE spawning. If `audit_enabled` or
     // `footprint_capture` are off, `get_component_meta_with_resolution`
-    // would run to completion but `take_audit_record` would
+    // would run to completion but `take_record` would
     // return None and the cache would stay empty. That means
     // every subsequent hover would spawn another futile task.
     // Short-circuit here so the user sees the legacy hover and
@@ -73,7 +73,11 @@ pub(super) fn enrich_hover_with_provenance(
         else {
             return;
         };
-        let Some(record) = host.host().take_audit_record(resolution.request_id) else {
+        let Some(record) = host
+            .host()
+            .host_audit_runtime()
+            .take_record(resolution.request_id)
+        else {
             return;
         };
         let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);

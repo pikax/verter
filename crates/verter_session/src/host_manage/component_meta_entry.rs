@@ -488,7 +488,7 @@ impl VerterHost {
         // every output raise. Install-if-none so a batch / outer caller
         // keeps its context.
         let _budget_ctx_guard = self.install_request_budget_context_if_none(
-            crate::meta_resolve::next_component_meta_audit_request_id(),
+            self.next_request_id(),
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
@@ -776,7 +776,7 @@ impl VerterHost {
         // resolve install no-ops. Matches the inner audited id source so the
         // resolve-phase audit is unchanged.
         let _view_budget_ctx_guard = self.install_request_budget_context_if_none(
-            crate::meta_resolve::next_component_meta_audit_request_id(),
+            self.next_request_id(),
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
@@ -1447,53 +1447,13 @@ impl VerterHost {
         )
     }
 
-    /// Monotonic request-id generator. Starts at 1; zero is reserved
-    /// for "not populated" (see `ResolvedComponentMetaState::request_id`).
+    /// Monotonic request-id generator — the host's only request-id
+    /// authority, so every record in its audit store is keyed in one id
+    /// space. Starts at 1; zero is reserved for "not populated" (see
+    /// `ResolvedComponentMetaState::request_id`).
     pub(crate) fn next_request_id(&self) -> u64 {
         use std::sync::atomic::Ordering;
         self.request_id_counter.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// Drain the `RequestAuditRecord` matching `request_id` from the host's
-    /// bounded audit-record store. Returns `None` when the record was
-    /// never inserted (capture disabled) or already drained by a prior
-    /// `take_audit_record` call.
-    pub fn take_audit_record(
-        &self,
-        request_id: u64,
-    ) -> Option<crate::component_meta_audit::RequestAuditRecord> {
-        self.audit_records.take(request_id)
-    }
-
-    /// Finalise a finished audit record through the
-    /// [`crate::host_audit_runtime::AuditRequestRegistration`] planted
-    /// on the active [`verter_type_engine::request_context::RequestContext`]. The
-    /// registration removes the in-flight slot from the host's
-    /// active-request registry and inserts the record into the
-    /// records store.
-    ///
-    /// When no registration is installed (the active context predates
-    /// the audited entry-point or no context is in scope at all), the
-    /// record is inserted directly so the host-wide store stays
-    /// consistent. This branch covers code paths that bypass the
-    /// public audited entry-point — e.g. tests that drive
-    /// `resolve_component_meta` without first installing a
-    /// registration, or callers that go through the lower-level
-    /// `ComponentMetaSession::get_component_meta` API on an
-    /// audit-enabled host. The fallback never touches the
-    /// active-request registry; only the records store is
-    /// populated.
-    pub fn finalize_request_audit_record(
-        &self,
-        record: crate::component_meta_audit::RequestAuditRecord,
-    ) {
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
-            if let Some(registration) = ctx.audit_registration.get() {
-                registration.finalize(record);
-                return;
-            }
-        }
-        self.audit_records.insert(record);
     }
 
     /// Selective surface API (D32 / D102) — host-level entry point.

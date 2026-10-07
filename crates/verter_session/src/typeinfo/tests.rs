@@ -512,7 +512,7 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/single.ts", "export type T = number;\n");
 
-    let baseline = host.audit_records.len();
+    let baseline = host.host_audit_runtime().audit_records_store().len();
     let (_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/single.ts",
         "T",
@@ -520,7 +520,7 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     ));
     // record is always present now (carrier `audit` field is mandatory).
     let _ = &record;
-    let after = host.audit_records.len();
+    let after = host.host_audit_runtime().audit_records_store().len();
     // EXACTLY one new record was inserted — discriminating
     // assertion against any "internal sub-query bumped the count"
     // regression.
@@ -795,7 +795,7 @@ fn evaluate_with_audit_emits_one_record() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/scope.ts", "export type Anchor = number;\n");
 
-    let baseline = host.audit_records.len();
+    let baseline = host.host_audit_runtime().audit_records_store().len();
     let req = EvaluateTypeExpressionRequest {
         scope: "/scope.ts".to_string(),
         expression: "string".to_string(),
@@ -806,7 +806,7 @@ fn evaluate_with_audit_emits_one_record() {
     let (_node, record) = parts(host.evaluate_type_expression_with_audit(req));
     // record is always present now (carrier `audit` field is mandatory).
     let _ = &record;
-    let after = host.audit_records.len();
+    let after = host.host_audit_runtime().audit_records_store().len();
     assert_eq!(
         after - baseline,
         1,

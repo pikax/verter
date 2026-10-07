@@ -39,11 +39,6 @@ use verter_type_engine::engine_test_knobs::TracerScope;
 
 use verter_type_engine::instant::Instant;
 
-pub(crate) fn next_component_meta_audit_request_id() -> u64 {
-    static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Attach the request tracer's finalized dependency evidence to the returned
 /// resolution and translate non-admission outcomes into the request driver's
 /// typed cache-refusal rail. This is the sole producer of the resolved-meta
