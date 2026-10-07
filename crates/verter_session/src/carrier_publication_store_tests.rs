@@ -312,6 +312,225 @@ fn registered_structure_views_resolve_noncanonical_alias_spelling() {
         .is_some());
 }
 
+/// A removed or reset file's successor restarts its scheduler generation
+/// sequence, so the host's base revision must also name the scheduler node
+/// object: the successor's first revision never repeats the retired one.
+#[test]
+fn base_revision_never_repeats_across_remove_and_reset() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    for (canonical, language, before, after) in [
+        (
+            "/src/App.vue",
+            verter_language::FileLanguage::vue(),
+            "<script setup>const x = 1</script>",
+            "<script setup>const x = 2</script>",
+        ),
+        (
+            "/src/util.ts",
+            verter_language::FileLanguage::script_ts(),
+            "export const x = 1;",
+            "export const x = 2;",
+        ),
+    ] {
+        for reset in [false, true] {
+            let workspace: Arc<dyn WorkspaceAccess> =
+                Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+            let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+            let upsert = |source: &str| {
+                let _ = host
+                    .upsert(crate::UpsertRequest {
+                        canonical_id: Some(canonical.to_string()),
+                        input_id: canonical.to_string(),
+                        source: Arc::from(source),
+                        file_language: language.clone(),
+                        aliases: Vec::new(),
+                    })
+                    .expect("upsert");
+                let generation = host
+                    .scheduler
+                    .try_get_source(canonical)
+                    .expect("committed source")
+                    .generation;
+                let token = host
+                    .registered_source_revision_token(canonical)
+                    .expect("revision token");
+                (generation, token)
+            };
+            let (retired_generation, retired) = upsert(before);
+            if reset {
+                host.close();
+            } else {
+                host.remove(canonical).expect("known file");
+            }
+            let (generation, current) = upsert(after);
+            assert_eq!(generation, retired_generation, "{canonical} reset={reset}");
+            assert_ne!(current, retired, "{canonical} reset={reset}");
+            assert_ne!(
+                current.public_token(),
+                retired.public_token(),
+                "{canonical} reset={reset}"
+            );
+        }
+    }
+}
+
+/// A registered carrier source is bound to the scheduler node object that
+/// committed it. A remove or reset retires that object, and its successor
+/// restarts at the same generation, so identical bytes re-added afterwards
+/// must mint a new registered snapshot and envelope: a reader still holding
+/// the retired structure never shares an identity or handle with the
+/// successor, and the retired registration is retracted rather than kept.
+#[test]
+fn registered_structure_never_aliases_across_remove_and_reset() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    const CANONICAL: &str = "/src/App.vue";
+    const SOURCE: &str = "<script setup>const x = 1</script>";
+    for reset in [false, true] {
+        let workspace: Arc<dyn WorkspaceAccess> =
+            Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+        let upsert = || {
+            let _ = host
+                .upsert(crate::UpsertRequest {
+                    canonical_id: Some(CANONICAL.to_string()),
+                    input_id: CANONICAL.to_string(),
+                    source: Arc::from(SOURCE),
+                    file_language: verter_language::FileLanguage::vue(),
+                    aliases: Vec::new(),
+                })
+                .expect("upsert");
+            let generation = host
+                .scheduler
+                .try_get_source(CANONICAL)
+                .expect("committed source")
+                .generation;
+            let structure = host
+                .registered_file_structure(CANONICAL)
+                .expect("registered structure");
+            (generation, structure)
+        };
+        let (retired_generation, retired) = upsert();
+        if reset {
+            host.close();
+        } else {
+            host.remove(CANONICAL).expect("known file");
+        }
+        let (generation, current) = upsert();
+        assert_eq!(generation, retired_generation, "reset={reset}");
+        let retired_source = retired.envelope().source();
+        let current_source = current.envelope().source();
+        assert_ne!(
+            current_source.file_incarnation(),
+            retired_source.file_incarnation(),
+            "reset={reset}"
+        );
+        assert_ne!(
+            current_source.snapshot_id(),
+            retired_source.snapshot_id(),
+            "reset={reset}"
+        );
+        assert_ne!(
+            current.envelope().id(),
+            retired.envelope().id(),
+            "reset={reset}"
+        );
+        assert!(
+            !Arc::ptr_eq(current.envelope(), retired.envelope()),
+            "reset={reset}"
+        );
+        let authority = &host.carrier_publication.source_authority;
+        assert!(
+            authority.validate_current(current_source).is_ok(),
+            "reset={reset}"
+        );
+        assert!(
+            authority.validate_current(retired_source).is_err(),
+            "the retired registration is retracted, reset={reset}"
+        );
+        assert_eq!(authority.len(), 1, "reset={reset}");
+    }
+}
+
+/// The host revision names this host's own scheduler node object on every
+/// ingress. An ingested envelope carries its registering owner's identity,
+/// which restarts with that owner's file lifetime and lives in a numbering
+/// space independent of this host's scheduler; it must never stand in for
+/// this host's revision. A remove or reset followed by different bytes over
+/// any mix of ordinary and ingested upserts therefore yields a new revision.
+#[test]
+fn revision_never_repeats_across_remove_and_reset_for_any_ingress() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    #[derive(Debug, Clone, Copy)]
+    enum Ingress {
+        Ordinary,
+        Envelope,
+    }
+
+    fn host() -> crate::VerterHost {
+        let workspace: Arc<dyn WorkspaceAccess> =
+            Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        crate::VerterHost::new(crate::HostConfig::default(), workspace)
+    }
+    fn request(source: &str) -> crate::UpsertRequest {
+        crate::UpsertRequest {
+            canonical_id: Some(CANONICAL.to_string()),
+            input_id: CANONICAL.to_string(),
+            source: Arc::from(source),
+            file_language: verter_language::FileLanguage::vue(),
+            aliases: Vec::new(),
+        }
+    }
+    const CANONICAL: &str = "/src/App.vue";
+
+    for (first, second) in [
+        (Ingress::Envelope, Ingress::Envelope),
+        (Ingress::Ordinary, Ingress::Envelope),
+        (Ingress::Envelope, Ingress::Ordinary),
+    ] {
+        for reset in [false, true] {
+            let case = format!("{first:?} -> {second:?} reset={reset}");
+            // The registering owner mirrors the same file lifetime, so its
+            // own registration identity restarts alongside this host's.
+            let owner = host();
+            let host = host();
+            let upsert = |ingress: Ingress, source: &str| {
+                match ingress {
+                    Ingress::Ordinary => {
+                        let _ = host.upsert(request(source)).expect("upsert");
+                    }
+                    Ingress::Envelope => {
+                        let _ = owner.upsert(request(source)).expect("owner upsert");
+                        let structure = owner
+                            .registered_file_structure(CANONICAL)
+                            .expect("owner structure");
+                        let _ = host
+                            .upsert_registered_envelope(request(source), structure)
+                            .expect("envelope ingestion");
+                    }
+                }
+                host.registered_source_revision_token(CANONICAL)
+                    .expect("revision token")
+            };
+            let retired = upsert(first, "<script setup>const x = 1</script>");
+            if reset {
+                owner.close();
+                host.close();
+            } else {
+                // The owner knows the file only when it registered the
+                // retired revision.
+                let _ = owner.remove(CANONICAL);
+                host.remove(CANONICAL).expect("known file");
+            }
+            let current = upsert(second, "<script setup>const x = 2</script>");
+            assert_ne!(current, retired, "{case}");
+            assert_ne!(current.public_token(), retired.public_token(), "{case}");
+        }
+    }
+}
+
 #[test]
 fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
     let persistence =

@@ -387,9 +387,6 @@ pub struct Scheduler {
     /// landed (driver crash between insert and dequeue) without
     /// inserting an extra sweep loop.
     pub(crate) auto_ingested_recent: DashMap<Arc<str>, AutoIngestedRecord>,
-    /// Restart fence for external artifact publishers that carry only a
-    /// generation. Internal queued/worker work uses object incarnations.
-    pub generation_floors: DashMap<String, u64>,
     /// Count of stage completions refused at their publish point
     /// because the owning `FileNode` moved between dispatch and
     /// publish — a superseded generation or a re-homed incarnation.
@@ -574,7 +571,6 @@ impl Scheduler {
             io_pool,
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
-            generation_floors: DashMap::new(),
             #[cfg(any(test, feature = "semantic-observe"))]
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
@@ -672,7 +668,6 @@ impl Scheduler {
             io_pool,
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
-            generation_floors: DashMap::new(),
             #[cfg(any(test, feature = "semantic-observe"))]
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
@@ -1193,7 +1188,6 @@ impl Scheduler {
                 for id in &ids {
                     if let Some((_, node)) = self.nodes.remove(id) {
                         node.retire(&mut dag);
-                        self.generation_floors.insert(id.clone(), node.generation());
                         let canonical: Arc<str> = Arc::from(id.as_str());
                         publication.absent(&canonical, node.incarnation_id(), node.generation());
                     }
@@ -1338,11 +1332,7 @@ impl Scheduler {
                     self.nodes
                         .entry(dep_id.clone())
                         .or_insert_with(|| {
-                            self.create_node_at_least(
-                                dep_id,
-                                Some(dep_languages[dep_id].clone()),
-                                1,
-                            )
+                            self.create_node_at(dep_id, Some(dep_languages[dep_id].clone()), 1)
                         })
                         .value(),
                 );
@@ -2714,6 +2704,7 @@ mod tests {
             file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
+            incarnation: u64,
         ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             let inbox = self.inbox.get().expect("inbox installed before driving");
             while inbox.try_send(Submission::Wake).is_ok() {}
@@ -2723,6 +2714,7 @@ mod tests {
                 file_language,
                 content,
                 generation,
+                incarnation,
             )
         }
     }
@@ -3929,6 +3921,7 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
+            _incarnation: u64,
         ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             Err(crate::execution::executor::StageError {
                 kind: crate::execution::executor::StageErrorKind::Generic,
@@ -3990,6 +3983,7 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
+            _incarnation: u64,
         ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             panic!("synthetic source panic");
         }
@@ -4282,7 +4276,7 @@ mod tests {
     // ── P1 lifecycle tests ──
 
     #[test]
-    fn remove_and_readd_uses_higher_generation() {
+    fn remove_and_readd_uses_a_higher_version() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("v1"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
@@ -4297,8 +4291,8 @@ mod tests {
             request_context: None,
         });
         sched.drive_all();
-        let gen1 = match h.try_get().unwrap() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let v1 = match h.try_get().unwrap() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
@@ -4306,7 +4300,8 @@ mod tests {
         sched.remove("/a.vue");
         assert!(!sched.has_node("/a.vue"));
 
-        // Re-add v2 → must get a generation > gen1
+        // Re-add v2: a fresh node object whose versions order after every
+        // version of the removed one, without any retained removal history.
         loader.insert("/a.vue".to_string(), Arc::from("v2"));
         let h2 = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -4317,15 +4312,16 @@ mod tests {
             request_context: None,
         });
         sched.drive_all();
-        let gen2 = match h2.try_get().unwrap() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let v2 = match h2.try_get().unwrap() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
         assert!(
-            gen2 > gen1,
-            "re-added file must have generation ({gen2}) > removed generation ({gen1})"
+            v2 > v1,
+            "re-added file must have version ({v2:?}) > removed version ({v1:?})"
         );
+        assert_ne!(v2.incarnation, v1.incarnation);
     }
 
     #[test]
@@ -4850,12 +4846,11 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn reset_seeds_generation_floors_for_cleared_nodes() {
+    fn reset_successor_versions_never_alias_the_cleared_node() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
-        // Build up to gen N
         let h = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Analysis,
@@ -4864,8 +4859,8 @@ mod tests {
             file_language: None,
             request_context: None,
         });
-        let pre_gen = match h.wait() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let pre = match h.wait() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
@@ -4873,7 +4868,8 @@ mod tests {
         sched.reset();
         sched.restart_driver();
 
-        // Re-add same file — must get generation > pre_gen
+        // The successor restarts its generation sequence; its committed
+        // versions are told apart by the node object that committed them.
         let h2 = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Analysis,
@@ -4882,14 +4878,17 @@ mod tests {
             file_language: None,
             request_context: None,
         });
-        let post_gen = match h2.wait() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let post = match h2.wait() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
+        let current = sched.try_get_source("/a.vue").expect("re-added source");
+        assert_eq!(current.version(), post);
+        assert_eq!(post.generation, pre.generation);
         assert!(
-            post_gen > pre_gen,
-            "post-reset generation ({post_gen}) must be > pre-reset ({pre_gen})"
+            post.incarnation > pre.incarnation,
+            "post-reset version ({post:?}) must order after pre-reset ({pre:?})"
         );
     }
 
@@ -5654,6 +5653,7 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
+            _incarnation: u64,
         ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             if let Some(entry) = self.gates.get(canonical_id) {
                 let (entered_tx, release_rx) = entry.value();
@@ -6022,6 +6022,7 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
+            _incarnation: u64,
         ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             let id = verter_execution::request_context::current_request_id().unwrap_or(0);
             self.source_observed.store(id, AtomicOrdering::SeqCst);
@@ -6436,6 +6437,7 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
+                _incarnation: u64,
             ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
                 let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 if canonical_id == DEP {
@@ -8141,6 +8143,7 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
+            _incarnation: u64,
         ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError> {
             if let Some(gate) = self.gates.get(canonical_id) {
                 // Signal entry to the test thread. Best-effort —
@@ -8767,7 +8770,7 @@ mod tests {
     /// a replacement is validated as if it were the original. Two node
     /// objects for the same canonical can sit at the SAME generation, so
     /// the generation check cannot catch it either — a replacement
-    /// starts from generation 0 / the recorded floor and is bumped, and
+    /// starts its own generation sequence at 0 and is bumped, and
     /// nothing forces it past the value the original already had.
     ///
     /// Discriminator: the replacement here carries its OWN committed
@@ -9876,16 +9879,13 @@ mod tests {
     }
 
     #[test]
-    fn removed_max_generation_refuses_replacement_before_identity_reuse() {
+    fn exhausted_live_generation_refuses_advancement_and_leaves_no_history() {
         let sched = Scheduler::test_new_sync(
             SchedulerConfig::default(),
             Arc::new(MemorySourceLoader::new()),
         );
-        sched
-            .generation_floors
-            .insert("/exhausted.vue".into(), u64::MAX - 1);
-        let node = sched.create_node("/exhausted.vue", Some(FileLanguage::vue()));
-        assert_eq!(node.generation(), u64::MAX);
+        let node = sched.create_node_at("/exhausted.vue", Some(FileLanguage::vue()), u64::MAX);
+        let exhausted_incarnation = node.incarnation_id();
         let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sched
                 .source_root
@@ -9902,18 +9902,12 @@ mod tests {
         );
         sched.nodes.insert("/exhausted.vue".into(), node);
         sched.remove("/exhausted.vue");
-        let allocation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sched.create_node("/exhausted.vue", Some(FileLanguage::vue()))
-        }));
-        assert!(
-            allocation.is_err(),
-            "exhausted external publication identity must not be reused"
-        );
         assert!(!sched.has_node("/exhausted.vue"));
-        assert_eq!(
-            *sched.generation_floors.get("/exhausted.vue").unwrap(),
-            u64::MAX
-        );
+        // The successor is a new object, not a continuation of the exhausted
+        // one, so it starts a fresh generation sequence.
+        let successor = sched.create_node("/exhausted.vue", Some(FileLanguage::vue()));
+        assert_eq!(successor.generation(), 0);
+        assert!(successor.incarnation_id() > exhausted_incarnation);
     }
 
     /// A language re-home advances a PUBLISHED file's generation, so it
@@ -12613,6 +12607,7 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
+            _incarnation: u64,
         ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError> {
             Ok(crate::node::SourceSnapshot::new_empty(content, generation))
         }
@@ -13721,6 +13716,7 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
+                _incarnation: u64,
             ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
             {
                 (self.source_hook)(canonical_id);
@@ -14066,6 +14062,7 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
+                _incarnation: u64,
             ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
             {
                 (self.source_hook)(canonical_id);
@@ -15816,6 +15813,7 @@ mod tests {
                     _k: FileLanguage,
                     content: Arc<str>,
                     generation: u64,
+                    _incarnation: u64,
                 ) -> Result<SourceSnapshot, crate::execution::executor::StageError>
                 {
                     self.source_kind.store(
@@ -15951,6 +15949,7 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
+                _incarnation: u64,
             ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
             {
                 if let Some(gate) = self.gates.get(canonical_id) {

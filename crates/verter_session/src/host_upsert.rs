@@ -617,9 +617,9 @@ impl VerterHost {
         // The committed stage's generation is the fence. Empty-analysis
         // hosts stop at Source; analysis-bearing hosts retain the Analysis
         // fence. Artifact is never an upsert target.
-        let committed_generation = match ready {
-            RequestResult::Source(source_snap) => source_snap.generation,
-            RequestResult::Analysis(analysis_snap) => analysis_snap.generation,
+        let committed_version = match ready {
+            RequestResult::Source(source_snap) => source_snap.version(),
+            RequestResult::Analysis(analysis_snap) => analysis_snap.version(),
             RequestResult::Artifact(_) => {
                 return Err(HostError::MissingSource {
                     canonical_id: canonical_id.clone(),
@@ -639,12 +639,13 @@ impl VerterHost {
                 canonical_id: canonical_id.clone(),
             })?;
 
-        // Commit fence: the source snapshot must match the generation the
-        // Analysis stage committed against. A higher source generation
-        // means a newer upsert raced in after our batch admitted; the
+        // Commit fence: the source snapshot must match the version (node
+        // object + generation) the stage committed against. A newer version
+        // means a newer upsert, removal or reset raced in after our batch
+        // admitted; the
         // read-back parse would be torn relative to the analysis we waited
         // on — reject as superseded rather than publishing a stale result.
-        if new_source_snap.generation != committed_generation {
+        if new_source_snap.version() != committed_version {
             return Err(HostError::Superseded);
         }
 
@@ -1057,7 +1058,7 @@ impl VerterHost {
                 &canonical_id,
                 old_source_snap,
                 Arc::clone(&new_source_snap),
-                committed_generation,
+                committed_version,
             );
         }
         self.ingest_ambient_contributor(canonical_id.as_ref(), req.source.as_ref());
