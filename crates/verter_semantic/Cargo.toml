@@ -73,7 +73,7 @@ web-time = "1.1"
 verter_resolution = { workspace = true }
 verter_session_query = { workspace = true, features = ["test-support"] }
 static_assertions = "1.1.0"
-# The C2 privacy-rail UI harness (tests/ui/type_info_privacy.rs) compiles its
+# The C2 privacy-rail UI harness (tests/cases/type_info_privacy.rs) compiles its
 # fixtures through trybuild, mirroring the workspace's compile-contract
 # runner; it is a dev-only edge and never enters the production closure.
 trybuild = "1.0"
@@ -87,9 +87,3 @@ verter_test_support = { path = "../verter_test_support" }
 # production builds compile `parse_inline_style_declarations` without the
 # counter TLS or its increment.
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
-
-# C2 privacy-rail UI harness: not auto-discovered (lives under tests/ui/),
-# declared explicitly so nextest runs it like any other integration test.
-[[test]]
-name = "type_info_privacy"
-path = "tests/ui/type_info_privacy.rs"

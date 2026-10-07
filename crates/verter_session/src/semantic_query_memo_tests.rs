@@ -10,18 +10,13 @@ use verter_type_engine::semantic_query::demand::{
     MaterializedPoint, MaterializedSet, ProjectionPath,
 };
 use verter_type_engine::semantic_query::{
-    DepSignature, NodeScopeId, OriginEdgeKind, QueryError, QueryResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
+    DepSignature, NodeScopeId, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey, SemanticQueryValue,
 };
-use verter_type_engine::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
-use verter_type_engine::semantic_query_memo::arena::{shard_index_for, NUM_SHARDS};
-use verter_type_engine::semantic_query_memo::family::{
-    carrier_facts_reference_canonical, FamilyKey, ModeSlot,
-};
+use verter_type_engine::semantic_query::{PathSegment, ProjectionMode};
+use verter_type_engine::semantic_query_memo::family::{FamilyKey, ModeSlot};
 use verter_type_engine::semantic_query_memo::inflight::FlightCell;
 use verter_type_engine::semantic_query_memo::inflight::MAX_INFLIGHT_RETRIES;
-use verter_type_engine::semantic_query_memo::interner::DepSignatureInterner;
-use verter_type_engine::semantic_query_memo::interner::SWEEP_INTERVAL;
 use verter_type_engine::semantic_query_memo::scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, SccRootWitness,
 };

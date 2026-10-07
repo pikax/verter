@@ -54,3 +54,5 @@ mod vue_carrier_frontend;
 mod vue_projection_backend;
 mod vue_runtime_backend;
 mod vue_semantic_authority;
+
+mod compile_type_info_routes;

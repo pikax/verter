@@ -4021,15 +4021,19 @@ dependencies = [
 name = "verter_source_policy_gate"
 version = "0.0.1-beta.6"
 dependencies = [
+ "proc-macro2",
  "serde_json",
  "static_assertions",
+ "syn 2.0.117",
  "tempfile",
+ "toml",
  "verter_no_typeexpr",
  "verter_session",
  "verter_span",
  "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
+ "walkdir",
 ]
 
 [[package]]

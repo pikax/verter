@@ -120,7 +120,7 @@ use std::path::{Path, PathBuf};
 /// literal `value_node` needle strings for its own structural assertions.
 /// (This guard file is auto-excluded by `is_test_file` — it lives under a
 /// `tests/` segment — so it never needs an explicit name entry.)
-const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["architecture_guards.rs"];
+const SELF_EXCLUDED_FILE_NAMES: &[&str] = &[];
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

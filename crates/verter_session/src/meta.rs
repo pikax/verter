@@ -1274,7 +1274,7 @@ impl Drop for MetaSession {
 }
 
 #[cfg(test)]
-#[path = "meta_tests.rs"]
+#[path = "tests/meta/mod.rs"]
 mod meta_tests;
 
 #[cfg(test)]

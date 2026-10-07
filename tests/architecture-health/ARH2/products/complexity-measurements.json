@@ -2,7 +2,10 @@
   "schema": "ARH2ComplexityMeasurements",
   "version": 1,
   "contractNode": "ARH2",
-  "sourceReference": {"title":"docs(arch): ratify responsibility, visibility and dependency contracts (#636)","date":"2026-09-19"},
+  "sourceReference": {
+    "title": "docs(arch): ratify responsibility, visibility and dependency contracts (#636)",
+    "date": "2026-09-19"
+  },
   "predecessorProducts": {
     "codebaseInventory": "tests/architecture-health/ARH0/products/codebase-inventory.json",
     "dependencyContracts": "tests/architecture-health/ARH1/products/dependency-contracts.json"
@@ -27,6 +30,7 @@
         "cargo nextest run -p verter_session flow_return_frame_seal_tests",
         "cargo nextest run -p verter_session cycle_gate_tests",
         "cargo nextest run -p verter_type_engine dispatch_txn_tests",
+        "cargo nextest run -p verter_type_engine semantic_query_memo::tests::substrate",
         "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
         "cargo nextest run -p verter_type_engine stable_key_tests",
         "cargo nextest run -p verter_session flow_slice_content_tests"
@@ -65,11 +69,12 @@
         "cargo nextest run -p verter_session flow_return_frame_seal_tests",
         "cargo nextest run -p verter_session cycle_gate_tests",
         "cargo nextest run -p verter_type_engine dispatch_txn_tests",
+        "cargo nextest run -p verter_type_engine semantic_query_memo::tests::substrate",
         "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
         "cargo nextest run -p verter_type_engine stable_key_tests",
         "cargo nextest run -p verter_session flow_slice_content_tests"
       ],
-      "measures": "per-lane runtime cost of the twelve pinned characterization nextest lanes (the same commands as production-behavior; this dimension accounts wall/RSS, never pass/fail)",
+      "measures": "per-lane runtime cost of the pinned characterization nextest lanes (the same commands as production-behavior; this dimension accounts wall/RSS, never pass/fail)",
       "separates": "test cost is never reported as application latency or build time: the pinned behavior lanes may be run cheaply for pass/fail while their cost is accounted only here"
     },
     {

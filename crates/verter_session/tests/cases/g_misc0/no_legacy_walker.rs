@@ -526,7 +526,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
 /// self-exclude (the gate file itself plus the sibling
 /// `architecture_guards.rs`, which carries literal needle strings in
 /// its assertions and would otherwise self-trip).
-const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["no_legacy_walker.rs", "architecture_guards.rs"];
+const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["no_legacy_walker.rs"];
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

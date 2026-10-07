@@ -1205,5 +1205,5 @@ impl VerterHost {
 }
 
 #[cfg(test)]
-#[path = "host_manage_tests.rs"]
+#[path = "tests/host_manage/mod.rs"]
 mod tests;

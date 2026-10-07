@@ -1,6 +1,3 @@
-//! C2 compile-transaction type-info route tests (charter home:
-//! `crates/verter_compiler/tests/compile_type_info_routes.rs`).
-//!
 //! Every table row of the ratified entry contract proves, through the
 //! sealed `CompileTypeInfo` gateway: the all-missing route refusal
 //! carrying the row's missing-input proof id; the complete/preloaded
