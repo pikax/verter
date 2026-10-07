@@ -2688,9 +2688,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 );
                 self.deposit_operand_self_roots(&output.observed_self_roots);
                 self.fold_into_top_build_local_taint_with(
-                    output.result_is_partial,
+                    output.result_is_partial(),
                     output.cache_suppress,
-                    output.partial_reasons,
+                    output.partial_reasons(),
                 );
                 match output.result {
                     QueryResult::Value(node) => node,

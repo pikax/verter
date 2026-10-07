@@ -2866,8 +2866,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let mut output: QueryBuildOutput<SemanticQueryValue> =
                         (QueryResult::Error(QueryError::Miss), fence).into();
                     output.cache_suppress = true;
-                    output.result_is_partial = true;
-                    output.partial_reasons = NO_VALUE_REASON_CLASS;
+                    output.mark_partial();
+                    output.add_partial_reasons(NO_VALUE_REASON_CLASS);
                     return output;
                 }
                 let proof = match &verdict {
@@ -2907,9 +2907,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // class.
                     Some(FlowSolveOutcome::Partial(partial)) => {
                         output.cache_suppress = true;
-                        output.result_is_partial = true;
-                        output.partial_reasons =
-                            flow_partial_reason_class(&partial.reason, partial.value.degradation());
+                        output.mark_partial();
+                        output.add_partial_reasons(flow_partial_reason_class(
+                            &partial.reason,
+                            partial.value.degradation(),
+                        ));
                     }
                     // The demand could not be planned at all, or a
                     // refused member batch withheld the root's proof:
@@ -2922,9 +2924,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // cause) keeps the contained degraded-success class.
                     None => {
                         output.cache_suppress = true;
-                        output.result_is_partial = true;
-                        output.partial_reasons = plan_refusal_reason_class(plan_refusal)
-                            .union(member_batch_partial_reasons);
+                        output.mark_partial();
+                        output.add_partial_reasons(
+                            plan_refusal_reason_class(plan_refusal)
+                                .union(member_batch_partial_reasons),
+                        );
                     }
                     // Handled above.
                     Some(FlowSolveOutcome::NoValue(_)) => unreachable!(),
@@ -2942,8 +2946,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // enclosing build.
                 self.dispatch_txn.borrow_mut().flow.last_root_failure = Some(failure);
                 output.cache_suppress = true;
-                output.result_is_partial = true;
-                output.partial_reasons = NO_VALUE_REASON_CLASS;
+                output.mark_partial();
+                output.add_partial_reasons(NO_VALUE_REASON_CLASS);
                 output
             }
         };

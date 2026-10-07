@@ -537,11 +537,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // typed gap: the shell stands where the checker's answer should be,
         // so it is never published complete or warm-admitted.
         if selection == ConditionalBranchSelection::Undecided {
-            output.result_is_partial = true;
+            output.mark_partial();
             output.cache_suppress = true;
-            output.partial_reasons = output
-                .partial_reasons
-                .union(crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL);
+            output.add_partial_reasons(
+                crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL,
+            );
         }
         output
     }
@@ -666,8 +666,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let read = self.execute_read(key);
         let mut output = super::walk::QueryBuildOutput::from((read.value, read.dep_signature));
         output.cache_suppress = read.cache_suppress;
-        output.result_is_partial = read.result_is_partial;
-        output.partial_reasons = read.partial_reasons;
+        output.set_partial(read.result_is_partial);
+        output.add_partial_reasons(read.partial_reasons);
         output
     }
 
@@ -697,15 +697,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             let member_output = reduce_member(member);
             output.cache_suppress |= member_output.cache_suppress;
-            output.result_is_partial |= member_output.result_is_partial;
-            output.partial_reasons = output.partial_reasons.union(member_output.partial_reasons);
+            output.fold_partial(member_output.result_is_partial());
+            output.add_partial_reasons(member_output.partial_reasons());
             output
                 .observed_self_roots
                 .extend(member_output.observed_self_roots);
             match member_output.result {
                 QueryResult::Value(node) => per_member.push(node),
                 _ => {
-                    self.fold_into_top_build_local_taint_with(true, true, output.partial_reasons);
+                    self.fold_into_top_build_local_taint_with(true, true, output.partial_reasons());
                     self.deposit_operand_self_roots(&output.observed_self_roots);
                     return None;
                 }
@@ -716,8 +716,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         });
         output.cache_suppress |= normalized.cache_suppress;
-        output.result_is_partial |= normalized.result_is_partial;
-        output.partial_reasons = output.partial_reasons.union(normalized.partial_reasons);
+        output.fold_partial(normalized.result_is_partial());
+        output.add_partial_reasons(normalized.partial_reasons());
         output.result = normalized.result;
         Some(output)
     }

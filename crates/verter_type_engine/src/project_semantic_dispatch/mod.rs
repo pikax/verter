@@ -2533,9 +2533,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         evidence_target_key: Option<&SemanticQueryKey>,
         key: &SemanticQueryKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
-        output.result_is_partial |= build_local.result_is_partial;
+        output.fold_partial(build_local.result_is_partial);
         output.cache_suppress |= build_local.cache_suppress;
-        output.partial_reasons = output.partial_reasons.union(build_local.partial_reasons);
+        output.add_partial_reasons(build_local.partial_reasons);
         // A build that observed cancellation or a superseded/torn view is no
         // fact: its value flows to the caller but is never admitted.
         output.cache_suppress |= output.projection_fact(key).is_err();
@@ -2735,7 +2735,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.project_generation_signature(),
                 )
                     .into();
-                output.result_is_partial = true;
+                output.mark_partial();
                 output.cache_suppress = true;
                 return Some(output);
             }
@@ -2756,7 +2756,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     output.walker_diagnostics =
                         self.connected_limit_diagnostics(carrier, reasons).to_vec();
                     output.cache_suppress = true;
-                    output.result_is_partial = true;
+                    output.mark_partial();
                     return Some(output);
                 }
             }
@@ -3326,9 +3326,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // read's diagnostic rail (the recorded reason, not
                         // just its presence).
                         output.cache_suppress = true;
-                        output.result_is_partial = true;
-                        output.partial_reasons =
-                            crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+                        output.mark_partial();
+                        output.add_partial_reasons(crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE);
                         output
                             .walker_diagnostics
                             .push(crate::project_semantic_dispatch::walk::ShallowDiagnostic::PendingFlowRoot { gap });
@@ -3560,7 +3559,7 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
 ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<T> {
     let mut output = output;
     if carrier_prelude.is_partial() {
-        output.result_is_partial = true;
+        output.mark_partial();
         output.cache_suppress = true;
         crate::request_context::fold_result_completeness(
             crate::semantic_query::ResultCompleteness::partial(carrier_prelude.partial_reasons()),
@@ -3728,11 +3727,11 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
     // results (`cache_suppress=true, result_is_partial=false`) are left
     // untouched: they stay out of the memo but still warm component-meta
     // (which gates on `result_is_partial` ONLY).
-    if output.result_is_partial {
+    if output.result_is_partial() {
         output.cache_suppress = true;
     }
     verter_debug_assert!(
-        !output.result_is_partial || output.cache_suppress,
+        !output.result_is_partial() || output.cache_suppress,
         "§1 invariant violated at finalisation: result_is_partial \
          without cache_suppress would launder a partial into the memo"
     );

@@ -697,7 +697,7 @@ fn cycle_gate_observed_self_roots_cover_root_and_every_visited_decl() {
         "every visited declaration is an observed self-root with its observed hash"
     );
     assert!(
-        !output.cache_suppress && !output.result_is_partial,
+        !output.cache_suppress && !output.result_is_partial(),
         "a complete walk carries clean admission rails"
     );
 }

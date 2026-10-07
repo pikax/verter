@@ -86,16 +86,11 @@ impl<T> QueryBuildOutput<T> {
         &self,
         key: &SemanticQueryKey,
     ) -> Result<FactResult<&T>, ExecutionAbort> {
-        let observed = if self.result_is_partial {
-            ResultCompleteness::partial(self.partial_reasons)
-        } else {
-            ResultCompleteness::Complete
-        };
         let value = match &self.result {
             QueryResult::Value(value) => Some(value),
             QueryResult::Recursive(_) | QueryResult::Error(_) => None,
         };
-        projection_fact(key, value, observed)
+        projection_fact(key, value, self.completeness())
     }
 }
 
