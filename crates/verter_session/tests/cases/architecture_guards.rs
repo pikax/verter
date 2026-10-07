@@ -2522,7 +2522,7 @@ fn no_off_store_host_caches_discriminator_self_test() {
 // STRUCTURALLY (CLAUDE.md:500: landed enforcement is structural, never a
 // name-keyed source scanner):
 //
-//   - `resolver_core::request_ports` is the six request-bound port set. Each
+//   - `resolver_core::request_ports` is the five request-bound port set. Each
 //     port returns owned records or typed demands; none returns a host,
 //     store or config handle, so the engine carrier cannot obtain one.
 //   - `crates/verter_session/tests/cases/compile-fail/engine_ports_*.rs`

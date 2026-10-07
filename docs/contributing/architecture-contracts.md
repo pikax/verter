@@ -88,10 +88,10 @@ subset. Retained functions: `resolved_dag_budget`, `len`, `is_empty`,
 `drive_all`, `wait_or_drive`, `wait_or_drive_with_caller`. Retained types:
 `SchedulerCounters`, `SchedulerConfig`, `Request`,
 `ScopedCacheNodeRequest`, `ScopedCacheNodeError`, `ScopedCacheFlight`,
-`Admission`, `BatchHandle`, `Scheduler`. The three bookkeeping fields
-(`tombstones`, `generation_floors`, `deferred_blocker_ids`) and the
-fifteen `test_`-prefixed hooks are ratified for narrowing to `pub(crate)` /
-test configuration — do not add new consumers of them; they are not a
+`Admission`, `BatchHandle`, `Scheduler`. The remaining bookkeeping field
+(`deferred_blocker_ids`; removal tombstones and generation floors have no
+storage) and the fifteen `test_`-prefixed hooks are ratified for narrowing to
+`pub(crate)` / test configuration — do not add new consumers of them; they are not a
 supported API for contributions.
 
 ### Flow-return dispatch — `crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs`

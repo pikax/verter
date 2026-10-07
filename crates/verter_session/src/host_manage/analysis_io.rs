@@ -266,9 +266,9 @@ impl VerterHost {
     /// on the caller's snapshot unconditionally; whether it ALSO persists into
     /// the shared raw-template slot is decided by the slot's write authority
     /// ([`Self::persist_raw_template_analysis`] →
-    /// [`crate::types::RawTemplateSlotAdmission::admitted_generation`]), to
+    /// [`crate::types::RawTemplateSlotAdmission::admitted_version`]), to
     /// which this lane only attests its facts (threaded `store_published` and
-    /// `source_generation`, its own src-block inventory, default extraction —
+    /// `source_version`, its own src-block inventory, default extraction —
     /// this lane compiles with default `CodegenOptions`).
     ///
     /// Source acquisition is caller-threaded ONLY: `inputs` carry the
@@ -317,7 +317,7 @@ impl VerterHost {
             whole_hash,
             framework_parse,
             store_published,
-            source_generation,
+            source_version,
         } = inputs;
 
         // The file's resolved carrier row — template-data ingestion is gated on
@@ -417,7 +417,7 @@ impl VerterHost {
                 tpl_arc,
                 crate::types::RawTemplateSlotAdmission {
                     store_published,
-                    source_generation,
+                    source_version,
                     has_src_blocks: !src_blocks.is_empty(),
                     // This lane compiles with default `CodegenOptions`
                     // — no parse-affecting profile options reach it.
@@ -440,7 +440,7 @@ impl VerterHost {
     /// structural write authority
     /// ([`crate::types::DerivedRawState::install_raw_template_analysis`]
     /// gating via
-    /// [`crate::types::RawTemplateSlotAdmission::admitted_generation`])
+    /// [`crate::types::RawTemplateSlotAdmission::admitted_version`])
     /// — the slot field is module-private, so no writer can exist
     /// outside that gate. The pre-check below only avoids creating a
     /// `DerivedRawState` entry for a statement the gate would decline.
@@ -450,7 +450,7 @@ impl VerterHost {
         template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         admission: crate::types::RawTemplateSlotAdmission,
     ) {
-        if admission.admitted_generation().is_none() {
+        if admission.admitted_version().is_none() {
             return;
         }
         // raw_template_analysis lives on DerivedRawState (D48 split).
@@ -478,7 +478,7 @@ impl VerterHost {
     pub(crate) fn validated_raw_template_analysis(
         &self,
         canonical: &str,
-        source_generation: u64,
+        source_version: verter_scheduler::node::SourceVersion,
     ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
         // Cheap map short-circuits first; the shard guard ends with this
         // block. `ReadSetSignature` is an `Arc<[FactVersionRef]>` carrier,
@@ -486,7 +486,7 @@ impl VerterHost {
         let (template, signature) = {
             let derived = self.derived_raw_cache().get(canonical)?;
             let entry = derived.raw_template_analysis()?;
-            if entry.source_generation != source_generation {
+            if entry.source_version != source_version {
                 return None;
             }
             (
@@ -609,7 +609,7 @@ impl VerterHost {
                     framework_parse: framework_parse.clone(),
                     // Live scheduler read — store-authoritative.
                     store_published: true,
-                    source_generation: Some(source_snap.generation),
+                    source_version: Some(source_snap.version()),
                 });
                 // This branch builds an OWNED, mutated snapshot (it calls
                 // `mark_bindings_used_in_style` and moves fields out), so it
@@ -626,12 +626,13 @@ impl VerterHost {
                 // generation's products.
                 let stored_styles = Arc::new(hd.parse.style_analyses.clone());
                 let stored_markup_tokens = Arc::new(hd.parse.markup_class_tokens.clone());
-                // Generation rail: accept the persisted template only
-                // at THIS branch's own source generation — a late
-                // persist stamped with a superseded generation must
-                // not serve as current.
+                // Version rail: accept the persisted template only at
+                // THIS branch's own source version — a late persist
+                // stamped with a superseded version, including one from
+                // a removed or reset node object, must not serve as
+                // current.
                 let template =
-                    self.validated_raw_template_analysis(canonical, source_snap.generation);
+                    self.validated_raw_template_analysis(canonical, source_snap.version());
                 let export_sigs = hd.parse.export_signatures.clone();
                 // The exact bytes this branch's analyzer observes, taken from
                 // the SAME held source read (`whole_hash` is already
@@ -827,7 +828,9 @@ impl VerterHost {
                     whole_hash: parse.whole_hash,
                     framework_parse: Some(parsed),
                     store_published: false,
-                    source_generation: Some(structure.envelope().source().generation().get()),
+                    // An overlay registration is not a scheduler node
+                    // version; the computed template never persists.
+                    source_version: None,
                 };
                 let mut snapshot = self.finalize_analysis_snapshot(
                     canonical.as_str(),
@@ -1790,7 +1793,7 @@ impl VerterHost {
         let template_inputs = self
             .scheduler
             .try_get_source(canonical)
-            .filter(|source_snap| source_snap.generation == analysis_snap.generation)
+            .filter(|source_snap| source_snap.version() == analysis_snap.version())
             .and_then(|source_snap| {
                 let hd = source_snap.downcast_data::<HostSourceData>()?;
                 // Template-data ingestion is gated on whether the file's adapter
@@ -1807,7 +1810,7 @@ impl VerterHost {
                     // Live scheduler reads at one generation —
                     // store-authoritative.
                     store_published: true,
-                    source_generation: Some(source_snap.generation),
+                    source_version: Some(source_snap.version()),
                 })
             });
         Some((snapshot, template_inputs))
@@ -1822,23 +1825,22 @@ impl VerterHost {
 
         let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
-        // Generation rail: accept the persisted template only at the
-        // analysis snapshot's own generation (analysis snapshots are
-        // generation-coherent with their source) — a late persist
-        // stamped with a superseded generation must not serve as
-        // current.
-        let template = self.validated_raw_template_analysis(canonical, analysis_snap.generation);
+        // Version rail: accept the persisted template only at the
+        // analysis snapshot's own source version (analysis snapshots are
+        // version-coherent with their source) — a late persist stamped
+        // with a superseded version must not serve as current.
+        let template = self.validated_raw_template_analysis(canonical, analysis_snap.version());
 
-        // Same generation rail for the anchor revision: the identity is the
+        // Same version rail for the anchor revision: the identity is the
         // source node's own `parse.whole_hash` (already `hash_16` of the whole
         // file bytes — no re-hash here), accepted ONLY at this analysis
-        // snapshot's generation. A torn join leaves the revision UNSTAMPED, and
+        // snapshot's version. A torn join leaves the revision UNSTAMPED, and
         // an unstamped revision matches no live buffer, so an anchor consumer
         // fails closed rather than editing from unpaired geometry.
         let anchor_revision = self
             .scheduler
             .try_get_source(canonical)
-            .filter(|source_snap| source_snap.generation == analysis_snap.generation)
+            .filter(|source_snap| source_snap.version() == analysis_snap.version())
             .and_then(|source_snap| {
                 let hd = source_snap.downcast_data::<crate::host_executor::HostSourceData>()?;
                 Some(verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(

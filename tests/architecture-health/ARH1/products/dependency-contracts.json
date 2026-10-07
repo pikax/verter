@@ -473,10 +473,10 @@
           "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
         },
         {
-          "state": "Scheduler.generation_floors, Scheduler.deferred_blocker_ids",
+          "state": "Scheduler.deferred_blocker_ids",
           "owner": "Scheduler",
           "lifetime": "session",
-          "evidence": "generation floors retain the external publication/revision fence pending migration and retirement by SKR-RET-FLOORS; deferred blocker ids are replayed at Source completion",
+          "evidence": "deferred blocker ids are replayed at Source completion; no generation-floor history exists: external artifact publication and cleanup are fenced by the scheduler-minted SourceWitness, and host revisions and version rails name the committing node incarnation through SourceVersion",
           "soleOwner": "crates/verter_scheduler/src/scheduler.rs"
         },
         {
@@ -564,13 +564,6 @@
           "Scheduler"
         ],
         "narrow": [
-          {
-            "item": "generation_floors",
-            "kind": "field",
-            "to": "pub(crate)",
-            "consumersAffected": [],
-            "note": "no reference outside crates/verter_scheduler at ratification"
-          },
           {
             "item": "deferred_blocker_ids",
             "kind": "field",

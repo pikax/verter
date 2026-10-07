@@ -1542,7 +1542,7 @@ pub(super) fn absent_unless_aborted<T>(
         crate::resolver_core::HostCapabilities,
     >,
 ) -> Result<Option<T>, verter_type_engine::semantic_query::ExecutionAbort> {
-    if ctx.is_cancelled() {
+    if ctx.request_flags().is_cancelled() {
         Err(verter_type_engine::semantic_query::ExecutionAbort::Cancelled)
     } else {
         Ok(None)

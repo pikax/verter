@@ -482,6 +482,12 @@ pub use test_worker_pools::{
 pub struct VerterHost {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) source_input_leases: resolver_core::request_inputs::InputArtifactLeases,
+    /// The request snapshot the test-only direct-host resolver seam serves.
+    /// Its handles are live, so one capture serves every direct read.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) direct_request_snapshot: std::sync::OnceLock<
+        verter_type_engine::resolver_core::RequestSnapshot<resolver_store::WorkspaceSlotClocks>,
+    >,
 
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,

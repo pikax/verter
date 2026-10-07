@@ -3490,10 +3490,15 @@ impl NapiVerterHost {
                 let mut seen = std::collections::HashSet::new();
                 actions.retain(|a| seen.insert(a.title.clone()));
 
-                actions
-                    .iter()
-                    .map(|a| code_action_to_ffi(a, source).into())
-                    .collect::<Vec<NapiCodeAction>>()
+                if actions.is_empty() {
+                    Vec::new()
+                } else {
+                    let index = verter_ffi::convert::OffsetIndex::new(source);
+                    actions
+                        .iter()
+                        .map(|a| code_action_to_ffi(a, &index).into())
+                        .collect::<Vec<NapiCodeAction>>()
+                }
             }
             _ => Vec::new(),
         };
@@ -4194,11 +4199,6 @@ fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
     verter_ffi::convert::utf16_to_byte_offset(source, utf16_offset)
 }
 
-/// Safe UTF-16 conversion that handles 0 as identity.
-fn byte_offset_to_utf16_safe(source: &str, byte_offset: u32) -> u32 {
-    verter_ffi::convert::byte_offset_to_utf16(source, byte_offset)
-}
-
 /// Monaco SymbolKind constants (subset used for document symbols).
 mod symbol_kind {
     pub const MODULE: u32 = 1;
@@ -4215,6 +4215,8 @@ fn build_document_symbols_from_analysis(
     snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiDocumentSymbol> {
+    // One index per source, shared by every symbol span.
+    let index = verter_ffi::convert::OffsetIndex::new(source);
     let mut symbols = Vec::new();
 
     if !snapshot.bindings.is_empty() || !snapshot.imports.is_empty() || !snapshot.macros.is_empty()
@@ -4253,10 +4255,10 @@ fn build_document_symbols_from_analysis(
                 name: binding.name.clone(),
                 detail: binding.type_annotation.clone(),
                 kind,
-                span_start: byte_offset_to_utf16_safe(source, binding.span.start),
-                span_end: byte_offset_to_utf16_safe(source, binding.span.end),
-                selection_start: byte_offset_to_utf16_safe(source, binding.span.start),
-                selection_end: byte_offset_to_utf16_safe(source, binding.span.end),
+                span_start: index.to_utf16(binding.span.start),
+                span_end: index.to_utf16(binding.span.end),
+                selection_start: index.to_utf16(binding.span.start),
+                selection_end: index.to_utf16(binding.span.end),
                 children: Vec::new(),
             });
         }
@@ -4302,10 +4304,10 @@ fn build_document_symbols_from_analysis(
                 name: comp.name.clone(),
                 detail: Some(format!("{} prop(s)", comp.props.len())),
                 kind: symbol_kind::CLASS,
-                span_start: byte_offset_to_utf16_safe(source, comp.span.start),
-                span_end: byte_offset_to_utf16_safe(source, comp.span.end),
-                selection_start: byte_offset_to_utf16_safe(source, comp.span.start),
-                selection_end: byte_offset_to_utf16_safe(source, comp.span.end),
+                span_start: index.to_utf16(comp.span.start),
+                span_end: index.to_utf16(comp.span.end),
+                selection_start: index.to_utf16(comp.span.start),
+                selection_end: index.to_utf16(comp.span.end),
                 children: Vec::new(),
             });
         }
@@ -4315,7 +4317,7 @@ fn build_document_symbols_from_analysis(
             detail: Some(format!("{} component(s)", template.components.len())),
             kind: symbol_kind::STRUCT,
             span_start: 0,
-            span_end: source.encode_utf16().count() as u32,
+            span_end: index.to_utf16(source.len() as u32),
             selection_start: 0,
             selection_end: 0,
             children,
@@ -4331,10 +4333,10 @@ fn build_document_symbols_from_analysis(
                     name: format!(".{}", class.name),
                     detail: None,
                     kind: symbol_kind::PROPERTY,
-                    span_start: byte_offset_to_utf16_safe(source, class.span.start),
-                    span_end: byte_offset_to_utf16_safe(source, class.span.end),
-                    selection_start: byte_offset_to_utf16_safe(source, class.span.start),
-                    selection_end: byte_offset_to_utf16_safe(source, class.span.end),
+                    span_start: index.to_utf16(class.span.start),
+                    span_end: index.to_utf16(class.span.end),
+                    selection_start: index.to_utf16(class.span.start),
+                    selection_end: index.to_utf16(class.span.end),
                     children: Vec::new(),
                 });
             }
@@ -4373,6 +4375,8 @@ fn build_selector_match_results(
         None => return Vec::new(),
     };
 
+    // One index per source, shared by every selector and element span.
+    let index = verter_ffi::convert::OffsetIndex::new(source);
     let mut results = Vec::new();
 
     for style in snapshot.styles.iter() {
@@ -4396,8 +4400,8 @@ fn build_selector_match_results(
                 );
                 matches.push(FfiElementMatch {
                     tag: element.tag.clone(),
-                    span_start: byte_offset_to_utf16_safe(source, element.span.start),
-                    span_end: byte_offset_to_utf16_safe(source, element.span.end),
+                    span_start: index.to_utf16(element.span.start),
+                    span_end: index.to_utf16(element.span.end),
                     result: match result {
                         verter_semantic::analysis::selector_match::MatchResult::Matches => {
                             "match".to_string()
@@ -4414,8 +4418,8 @@ fn build_selector_match_results(
 
             results.push(FfiSelectorMatchResult {
                 selector_text: selector.text.clone(),
-                selector_start: byte_offset_to_utf16_safe(source, selector.span.start),
-                selector_end: byte_offset_to_utf16_safe(source, selector.span.end),
+                selector_start: index.to_utf16(selector.span.start),
+                selector_end: index.to_utf16(selector.span.end),
                 matches,
             });
         }

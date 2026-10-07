@@ -398,11 +398,18 @@ pub trait RouteLookup {
 
 /// The installed cancellation selector is evaluated at each checkpoint, after
 /// cooperative job entry, so a cancelled waiter cannot cancel sibling work.
+///
+/// The checkpoint is a handle, not a sampled flag: every
+/// [`Self::is_cancelled`] re-selects the token, so a cancellation that
+/// lands mid-request is observed at the next checkpoint.
 #[derive(Clone, Copy)]
 pub struct CancellationCheckpoint {
     _private: (),
 }
 impl CancellationCheckpoint {
+    pub(crate) const fn new() -> Self {
+        Self { _private: () }
+    }
     pub(crate) fn token(self) -> Option<verter_execution::cancellation::CancellationToken> {
         let job = verter_execution::cancellation::current_job_cancellation_token();
         if job
@@ -413,27 +420,16 @@ impl CancellationCheckpoint {
         }
         crate::request_context::current_request_cancellation_token().or(job)
     }
+    /// Whether the selected cancellation token is cancelled now.
     #[cfg_attr(feature = "test-support", track_caller)]
-    pub(crate) fn is_cancelled(self) -> bool {
+    #[inline]
+    pub fn is_cancelled(self) -> bool {
         let cancelled = self.token().is_some_and(|token| token.is_cancelled());
         #[cfg(feature = "test-support")]
         if cancelled {
             crate::cancel_trace::observed(std::panic::Location::caller());
         }
         cancelled
-    }
-}
-
-pub trait Cancellation {
-    fn cancellation_checkpoint(&self) -> CancellationCheckpoint {
-        CancellationCheckpoint { _private: () }
-    }
-    /// A port consumer that needs the live token takes it from the checkpoint
-    /// (`cancellation_checkpoint().token()`); the port therefore exposes no
-    /// second, unread cancellation accessor.
-    #[cfg_attr(feature = "test-support", track_caller)]
-    fn is_cancelled(&self) -> bool {
-        self.cancellation_checkpoint().is_cancelled()
     }
 }
 

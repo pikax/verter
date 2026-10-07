@@ -894,7 +894,7 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
     // read CROSS-FILE carrier types; validating the recorded fact signature +
     // project generation against the live view invalidates the entry lazily on a
     // carrier edit.
-    let generation = ctx.current_project_generation();
+    let generation = ctx.request_flags().current_project_generation();
     if let Some(cached) = crate::framework::surface_store::read_framework_surface(
         surfaces,
         &key,

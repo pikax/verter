@@ -226,7 +226,11 @@ impl ImportedRegistryDb {
         &'a self,
         ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
     ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
-        crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
+        crate::project_semantic_dispatch::memo::MemoPublish::for_test(
+            self,
+            ctx,
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx),
+        )
     }
 
     pub fn new() -> Self {
@@ -412,7 +416,11 @@ impl DeclarationLookupDb {
         &'a self,
         ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
     ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
-        crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
+        crate::project_semantic_dispatch::memo::MemoPublish::for_test(
+            self,
+            ctx,
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx),
+        )
     }
 
     pub fn new() -> Self {
@@ -496,7 +504,11 @@ impl ResolvabilityDb {
         &'a self,
         ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
     ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
-        crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
+        crate::project_semantic_dispatch::memo::MemoPublish::for_test(
+            self,
+            ctx,
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx),
+        )
     }
 
     pub fn new() -> Self {
@@ -599,7 +611,11 @@ impl OwnerCollectionDb {
         &'a self,
         ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
     ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
-        crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
+        crate::project_semantic_dispatch::memo::MemoPublish::for_test(
+            self,
+            ctx,
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx),
+        )
     }
 
     pub fn new() -> Self {
@@ -1163,7 +1179,11 @@ impl ShapeCacheDb {
         &'a self,
         ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
     ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
-        crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
+        crate::project_semantic_dispatch::memo::MemoPublish::for_test(
+            self,
+            ctx,
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx),
+        )
     }
 
     pub fn new() -> Self {

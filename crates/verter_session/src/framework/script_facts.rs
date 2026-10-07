@@ -1078,7 +1078,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // (so the warm read + publish gate on the SAME generation the executor's
     // surface entry validates under), else the live project generation.
     let generation = match request_ctx {
-        Some(ctx) => ctx.current_project_generation(),
+        Some(ctx) => ctx.request_flags().current_project_generation(),
         None => host.project_type_store().project_generation(),
     };
 

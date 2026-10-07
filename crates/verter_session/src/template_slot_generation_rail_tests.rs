@@ -8,10 +8,12 @@
 //! still current at PERSIST time: an upsert landing between the
 //! coherent capture and the persist clears the slot, and the late
 //! persist then repopulates it with a template describing the
-//! superseded bytes. The slot therefore carries the scheduler node
-//! generation of the source the template derives from, and every
-//! reader accepts the entry only at its own snapshot's generation —
-//! read-side authoritative, covering every persist path.
+//! superseded bytes. The slot therefore carries the scheduler source
+//! version (node object + generation) of the source the template derives
+//! from, and every reader accepts the entry only at its own snapshot's
+//! version — read-side authoritative, covering every persist path. A
+//! removed file's successor restarts its generation sequence, so the
+//! generation alone cannot reject a late persist from the removed node.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -63,6 +65,14 @@ fn upsert(host: &VerterHost, source: &str) {
 /// warm-serving the superseded one.
 #[test]
 fn source_move_between_compute_and_persist_never_serves_the_stale_template() {
+    // An edit moves the generation; a remove + re-add reaches the same
+    // generation again on a fresh scheduler node.
+    for remove_first in [false, true] {
+        source_move_between_compute_and_persist(remove_first);
+    }
+}
+
+fn source_move_between_compute_and_persist(remove_first: bool) {
     let host = make_host();
     upsert(&host, SOURCE_A);
 
@@ -76,6 +86,9 @@ fn source_move_between_compute_and_persist_never_serves_the_stale_template() {
         let moved = Arc::clone(&moved);
         *host.template_persist_seam_hook.lock() = Some(Arc::new(move || {
             if !moved.swap(true, Ordering::SeqCst) {
+                if remove_first {
+                    hook_host.remove(CANONICAL).expect("known file");
+                }
                 upsert(&hook_host, SOURCE_B);
             }
         }));
