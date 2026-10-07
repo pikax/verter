@@ -1,6 +1,3 @@
-//! C2 non-flow gateway contract tests (charter home:
-//! `crates/verter_semantic/tests/type_info_non_flow.rs`).
-//!
 //! Every table row proves, for its operation: the all-missing
 //! `NeedInputs` outcome with the operation's missing-input proof id and
 //! load set; the complete payload's identities, provenance and

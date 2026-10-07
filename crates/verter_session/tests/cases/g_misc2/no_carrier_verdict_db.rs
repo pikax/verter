@@ -71,7 +71,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
 /// File names whose presence at the head of the path should make us
 /// self-exclude (this gate file itself plus the sibling
 /// `architecture_guards.rs`).
-const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["no_carrier_verdict_db.rs", "architecture_guards.rs"];
+const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["no_carrier_verdict_db.rs"];
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

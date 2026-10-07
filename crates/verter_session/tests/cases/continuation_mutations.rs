@@ -1,6 +1,3 @@
-//! C2 request-local continuation: resume-mutation evidence (charter home:
-//! `crates/verter_session/tests/c2_continuation_mutations.rs`).
-//!
 //! Every observation-specific resume mutation must FAIL to resume: a
 //! changed, appeared, disappeared, reordered, or reconfigured staged
 //! observation between an operation's rounds forces a whole-operation

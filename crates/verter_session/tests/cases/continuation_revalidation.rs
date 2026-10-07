@@ -1,6 +1,3 @@
-//! C2 request-local continuation: revalidation evidence (charter home:
-//! `crates/verter_session/tests/c2_continuation_revalidation.rs`).
-//!
 //! The continuation is private and request-local, so its contract is
 //! discriminated through the session's public seams: the macro semantic
 //! producer behind `VerterHost::vue_macro_semantic_input`. Incremental

@@ -7,6 +7,7 @@
 //! from the entries that consume them and are intentionally absent
 //! from this manifest.
 
+#[path = "architecture/mod.rs"]
 mod architecture_guards;
 mod capability_matrix_css_family_rows_ratified;
 mod carrier_byte_parity;
@@ -76,3 +77,7 @@ mod virtual_file_naming_characterization;
 mod virtual_file_naming_ts_freshness;
 mod vue_macro_tsc_typecheck_gate;
 mod warm_style_parse_reuse;
+
+mod continuation_mutations;
+
+mod continuation_revalidation;

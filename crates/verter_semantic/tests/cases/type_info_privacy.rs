@@ -1,6 +1,3 @@
-//! C2 gateway privacy rails (charter home:
-//! `crates/verter_semantic/tests/ui/type_info_privacy.rs`).
-//!
 //! The three blocking compile-fail rails of the sealed gateway:
 //!
 //! * `C2-GAP3-FOREIGN-IMPL` — a foreign crate cannot implement the

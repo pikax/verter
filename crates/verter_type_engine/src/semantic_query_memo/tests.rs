@@ -39,3 +39,5 @@ fn production_relation_admission_is_semantic_store_owned() {
         "the production relation write must be crate-private"
     );
 }
+
+mod substrate;

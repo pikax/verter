@@ -97,16 +97,30 @@ function rustFiles(dir, out = []) {
   return out;
 }
 
+const MOVED_TEST_DIRS = [
+  "crates/verter_compiler/src/compile_tests/",
+  "crates/verter_compiler/src/ide/template/tests/",
+  "crates/verter_compiler/src/svelte/runtime/client_tests/",
+  "crates/verter_compiler/src/template/code_gen/ssr/tests/",
+  "crates/verter_execution/src/tasks/tests/",
+  "crates/verter_lsp/src/server/tests/",
+  "crates/verter_session/src/tests/host_manage/",
+  "crates/verter_session/src/tests/meta/",
+  "crates/verter_type_engine/src/project_semantic_dispatch/tests/",
+  "crates/verter_type_engine/src/semantic_query_memo/tests/",
+];
+
 let productionFilesCache;
 /** Production Rust sources: every `src/` file under `crates/` that is not a
- * test module file (`tests.rs`, `*_tests.rs`). */
+ * test module file (`tests.rs`, `*_tests.rs`, or under a split test-module directory). */
 function productionRustFiles() {
   if (productionFilesCache) return productionFilesCache;
   productionFilesCache = rustFiles("crates").filter(
     (rel) =>
       /^crates\/[^/]+\/src\//.test(rel) &&
       !/(?:^|\/)tests\.rs$/.test(rel) &&
-      !/_tests\.rs$/.test(rel),
+      !/_tests\.rs$/.test(rel) &&
+      !MOVED_TEST_DIRS.some((dir) => rel.startsWith(dir)),
   );
   return productionFilesCache;
 }

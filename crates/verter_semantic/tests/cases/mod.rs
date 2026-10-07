@@ -6,3 +6,7 @@
 mod jsdoc_tag_type_payload_parity;
 mod nested_special_pseudo_facts;
 mod resolver_core_ownership;
+
+mod type_info_non_flow;
+
+mod type_info_privacy;

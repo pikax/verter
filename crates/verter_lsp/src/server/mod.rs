@@ -1874,7 +1874,7 @@ impl LanguageServer for VerterLanguageServer {
     clippy::too_many_arguments,
     clippy::cloned_ref_to_slice_refs
 )]
-#[path = "../server_tests.rs"]
+#[path = "tests/mod.rs"]
 mod server_tests;
 
 /// Throwaway future-size instrumentation (ignored tests). See docs/contributing/gate-performance.md.

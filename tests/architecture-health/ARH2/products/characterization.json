@@ -2,7 +2,10 @@
   "schema": "ARH2Characterization",
   "version": 1,
   "contractNode": "ARH2",
-  "sourceReference": {"title":"docs(arch): ratify responsibility, visibility and dependency contracts (#636)","date":"2026-09-19"},
+  "sourceReference": {
+    "title": "docs(arch): ratify responsibility, visibility and dependency contracts (#636)",
+    "date": "2026-09-19"
+  },
   "predecessorProducts": {
     "responsibilityMap": "tests/architecture-health/ARH0/products/responsibility-map.json",
     "dependencyContracts": "tests/architecture-health/ARH1/products/dependency-contracts.json",
@@ -61,7 +64,8 @@
               "file": "crates/verter_scheduler/src/dag_tests.rs",
               "test": "cancel_older_generation_drops_stale_node"
             }
-          ]
+          ],
+          "crate": "verter_scheduler"
         },
         {
           "behavior": "the driver owns admission and ordering policy: a ready node enters its priority-class lane, and a pre-dispatch dedup that adds a dependency removes the ready token from the lane",
@@ -76,7 +80,8 @@
               "file": "crates/verter_scheduler/src/dag_lanes_tests.rs",
               "test": "pre_dispatch_dedup_adding_dep_removes_ready_token_from_lane"
             }
-          ]
+          ],
+          "crate": "verter_scheduler"
         },
         {
           "behavior": "cancellation latches are one-shot and idempotent across clones",
@@ -91,7 +96,8 @@
               "file": "crates/verter_scheduler/tests/cases/cancellation_token.rs",
               "test": "cancel_is_idempotent"
             }
-          ]
+          ],
+          "crate": "verter_scheduler"
         }
       ]
     },
@@ -126,7 +132,8 @@
               "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs",
               "test": "flow_return_empty_cycle_is_return_only_and_never_never"
             }
-          ]
+          ],
+          "crate": "verter_session"
         },
         {
           "behavior": "flow products are selected and scoped: script-setup functions serve under the instance owner only, Svelte script functions under the instance owner, not the module owner",
@@ -141,7 +148,8 @@
               "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs",
               "test": "svelte_script_functions_serve_under_the_instance_owner_not_the_module_owner"
             }
-          ]
+          ],
+          "crate": "verter_session"
         }
       ]
     },
@@ -172,7 +180,8 @@
               "file": "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
               "test": "cycle_gate_decided_stop_on_generic_mutual_recursion"
             }
-          ]
+          ],
+          "crate": "verter_session"
         },
         {
           "behavior": "the store assembles through dispatch transactions: a staged session is deposit-inactive and commits exactly once; abandonment respects the commit boundary",
@@ -208,22 +217,31 @@
       "pins": [
         {
           "behavior": "the memo table interns stable identities: interning returns unique stable ids, dedups structural values across contexts, and resolve-decl memo keys discriminate the top-level owner",
+          "command": "cargo nextest run -p verter_type_engine semantic_query_memo::tests::substrate",
+          "filter": "semantic_query_memo::tests::substrate",
+          "witnesses": [
+            {
+              "file": "crates/verter_type_engine/src/semantic_query_memo/tests/substrate.rs",
+              "test": "interning_returns_unique_stable_ids"
+            },
+            {
+              "file": "crates/verter_type_engine/src/semantic_query_memo/tests/substrate.rs",
+              "test": "intern_dedups_structural_values_across_contexts"
+            }
+          ],
+          "crate": "verter_type_engine"
+        },
+        {
+          "behavior": "the memo table interns stable identities: interning returns unique stable ids, dedups structural values across contexts, and resolve-decl memo keys discriminate the top-level owner",
           "command": "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
           "filter": "semantic_query_memo_tests::tests",
           "witnesses": [
             {
               "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
-              "test": "interning_returns_unique_stable_ids"
-            },
-            {
-              "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
-              "test": "intern_dedups_structural_values_across_contexts"
-            },
-            {
-              "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
               "test": "resolve_decl_memo_key_discriminates_top_level_owner"
             }
-          ]
+          ],
+          "crate": "verter_session"
         },
         {
           "behavior": "query keys bind deterministically: equal-prefix literals order by exact key and primitive tags are fixed independent of intern order",
@@ -270,7 +288,8 @@
               "file": "crates/verter_session/src/flow_slice_content_tests.rs",
               "test": "runtime_occurrence_classification_does_not_rescan_hoisted_alias_groups"
             }
-          ]
+          ],
+          "crate": "verter_session"
         },
         {
           "behavior": "slice publication admission gates on the budget: the flow product budget boundary is exact and never warm",
@@ -281,7 +300,8 @@
               "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_frame_seal_tests.rs",
               "test": "flow_product_budget_boundary_is_exact_and_never_warm"
             }
-          ]
+          ],
+          "crate": "verter_session"
         }
       ]
     }
@@ -290,7 +310,10 @@
     {
       "cutoverRow": "ARH1-CUT-2",
       "path": "crates/verter_scheduler/src/scheduler.rs",
-      "narrowingOwner": { "id": "ARH4", "kind": "node" },
+      "narrowingOwner": {
+        "id": "ARH4",
+        "kind": "node"
+      },
       "surface": {
         "kind": "fields",
         "items": ["deferred_blocker_ids"]
@@ -337,14 +360,18 @@
               "file": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
               "test": "delayed_failure_cannot_cancel_same_generation_successor_after_remove_or_reset"
             }
-          ]
+          ],
+          "crate": "verter_scheduler"
         }
       ]
     },
     {
       "cutoverRow": "ARH1-CUT-3",
       "path": "crates/verter_scheduler/src/scheduler.rs",
-      "narrowingOwner": { "id": "ARH4", "kind": "node" },
+      "narrowingOwner": {
+        "id": "ARH4",
+        "kind": "node"
+      },
       "surface": {
         "kind": "pub-test-hooks",
         "derivedLive": "the verifier counts the pub fn test_* population of scheduler.rs and joins it to the ARH1 test-configuration narrowing rows"
@@ -363,14 +390,18 @@
               "file": "crates/verter_scheduler/src/scheduler.rs",
               "test": "single_worker_pool_wait_or_drive_executes_cpu_dependency_inline"
             }
-          ]
+          ],
+          "crate": "verter_scheduler"
         }
       ]
     },
     {
       "cutoverRow": "ARH1-CUT-4",
       "path": "crates/verter_type_engine/src/semantic_query.rs",
-      "narrowingOwner": { "id": "ARH3", "kind": "node" },
+      "narrowingOwner": {
+        "id": "ARH3",
+        "kind": "node"
+      },
       "surface": {
         "kind": "bulk",
         "derivedLive": "the verifier joins the ARH1 minimalPublicSurface bulk row: retainedTypes, retainedAssocItems, and consumersAffected must equal the ARH1 populations exactly",
@@ -447,7 +478,6 @@
           "crates/verter_session/src/host_manage/fallthrough.rs",
           "crates/verter_session/src/host_manage/jsdoc_resolve.rs",
           "crates/verter_session/src/host_manage/template_class_facts.rs",
-          "crates/verter_session/src/host_manage_tests.rs",
           "crates/verter_session/src/host_resolve/compile_request_build.rs",
           "crates/verter_session/src/host_resolve/route_surface.rs",
           "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
@@ -486,7 +516,6 @@
           "crates/verter_session/src/meta_resolve/slot_binding_graph_carrier_tests.rs",
           "crates/verter_session/src/meta_resolve/typed_ir_consumer_tests.rs",
           "crates/verter_session/src/meta_resolve_tests.rs",
-          "crates/verter_session/src/meta_tests.rs",
           "crates/verter_session/src/output_sinks.rs",
           "crates/verter_session/src/owner_import_surface.rs",
           "crates/verter_session/src/project_global_cache_tests.rs",
@@ -597,6 +626,12 @@
           "crates/verter_session/src/structural_carrier_producer_tests/script_setup_binder_tests.rs",
           "crates/verter_session/src/structural_carrier_producer_tests/structural_lower_tests.rs",
           "crates/verter_session/src/tests/dispatch_bridges.rs",
+          "crates/verter_session/src/tests/host_manage/general.rs",
+          "crates/verter_session/src/tests/host_manage/workspace.rs",
+          "crates/verter_session/src/tests/meta/expose.rs",
+          "crates/verter_session/src/tests/meta/props.rs",
+          "crates/verter_session/src/tests/meta/resolution.rs",
+          "crates/verter_session/src/tests/meta/slots.rs",
           "crates/verter_session/src/typeinfo/evaluate_type_expression.rs",
           "crates/verter_session/src/typeinfo/framework_surface/executor.rs",
           "crates/verter_session/src/typeinfo/framework_surface/plan.rs",
@@ -630,7 +665,6 @@
           "crates/verter_session/src/types.rs",
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
-          "crates/verter_session/tests/allocation_cases/flow_literal_provenance.rs",
           "crates/verter_session/tests/allocation_cases/flow_products.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
@@ -700,20 +734,22 @@
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_read_once.rs",
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
-          "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs"
+          "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
+          "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
         ]
       },
       "pins": [
         {
           "behavior": "the envelope surface's identity behavior the narrowing must preserve: intern identity discriminates the top-level owner",
-          "command": "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
-          "filter": "semantic_query_memo_tests::tests",
+          "command": "cargo nextest run -p verter_type_engine semantic_query_memo::tests::substrate",
+          "filter": "semantic_query_memo::tests::substrate",
           "witnesses": [
             {
-              "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
+              "file": "crates/verter_type_engine/src/semantic_query_memo/tests/substrate.rs",
               "test": "intern_identity_discriminates_top_level_owner"
             }
-          ]
+          ],
+          "crate": "verter_type_engine"
         }
       ]
     },
@@ -738,7 +774,8 @@
               "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_frame_seal_tests.rs",
               "test": "flow_product_budget_boundary_is_exact_and_never_warm"
             }
-          ]
+          ],
+          "crate": "verter_session"
         }
       ]
     },
@@ -767,7 +804,8 @@
               "file": "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
               "test": "cycle_gate_decided_stop_on_generic_mutual_recursion"
             }
-          ]
+          ],
+          "crate": "verter_session"
         }
       ]
     }
@@ -803,7 +841,7 @@
             "test": "cancelled_joiner_detaches_without_aborting_live_winner"
           },
           {
-            "file": "crates/verter_session/src/semantic_query_memo_tests/tasks_tests.rs",
+            "file": "crates/verter_execution/src/tasks/tests/wait_cycles.rs",
             "test": "two_task_wait_cycle_is_detected_before_parking"
           }
         ],

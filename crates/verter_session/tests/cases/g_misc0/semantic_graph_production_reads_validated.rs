@@ -44,10 +44,18 @@ fn workspace_root() -> PathBuf {
 /// own coordination flow performs the validate-before-publish dance.
 const SANCTIONED_FILE: &str = "crates/verter_type_engine/src/semantic_query_memo/mod.rs";
 
+/// Test-module directories whose files are not named `*_tests.rs`.
+const MOVED_TEST_DIRS: [&str; 4] = [
+    "verter_session/src/tests/meta",
+    "verter_session/src/tests/host_manage",
+    "verter_type_engine/src/project_semantic_dispatch/tests",
+    "verter_type_engine/src/semantic_query_memo/tests",
+];
+
 /// Collect every production (non-test) `.rs` file under the
 /// `verter_session` and `verter_type_engine` crate `src/` trees (the
 /// semantic graph store and most of its readers live in the engine).
-/// `*_tests.rs` files, `tests.rs` module files, and the `#[cfg(test)]`-gated `host_test_audit.rs`
+/// `*_tests.rs` files, `tests.rs` module files, the `MOVED_TEST_DIRS` trees, and the `#[cfg(test)]`-gated `host_test_audit.rs`
 /// are excluded — they are not production warm-read paths.
 fn collect_production_session_src_files() -> Vec<PathBuf> {
     use walkdir::WalkDir;
@@ -61,6 +69,12 @@ fn collect_production_session_src_files() -> Vec<PathBuf> {
         }
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if path
+            .ancestors()
+            .any(|dir| MOVED_TEST_DIRS.iter().any(|moved| dir.ends_with(moved)))
+        {
             continue;
         }
         let file_name = path
