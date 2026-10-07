@@ -1,5 +1,11 @@
 import { defineConfig } from "vitest/config";
 
+// Node writes a stderr warning when FORCE_COLOR and NO_COLOR are both set,
+// and several child assertions require an empty stderr. FORCE_COLOR wins.
+if (process.env.FORCE_COLOR !== undefined && process.env.NO_COLOR !== undefined) {
+  delete process.env.NO_COLOR;
+}
+
 export default defineConfig({
   test: {
     // ONLY this harness's own self-tests. The pinned official checkouts live

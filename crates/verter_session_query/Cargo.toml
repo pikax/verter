@@ -17,6 +17,8 @@ test-support = []
 # (`src/currency_probe.rs`). Absent from `default`; requested ONLY by
 # measurement harnesses, never by a production edge.
 currency_probe = []
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
+semantic-observe = []
 
 # Dependency closure is a FIREWALL contract: this crate must never reach the
 # parser/compiler front-end (`verter_parser`, `verter_compiler`,
