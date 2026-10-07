@@ -144,6 +144,7 @@
         "crates/verter_session/src/framework/synth.rs",
         "crates/verter_session/src/framework/self_file.rs",
         "crates/verter_session/src/host_compile_audit.rs",
+        "crates/verter_session/src/host_manage/analysis_io.rs",
         "crates/verter_semantic_source/src/rune_ambient.rs",
         "crates/verter_tsc/src/checker.rs"
       ],

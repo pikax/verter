@@ -15,10 +15,10 @@ The reviewed contract data lives in `tests/kernel/UAK0/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `owner-consumer-inventory.v1.json` | Named boundaries `B01`–`B06`, outcomes `O01`–`O13`, consumers `C01`–`C17`, retained seams `S01`–`S14`, the superseded-proposal map, the zero-work baseline cells `Z01`–`Z06` and the transferred obligations |
+| `owner-consumer-inventory.v1.json` | Named boundaries `B01`–`B06`, outcomes `O01`–`O13`, consumers `C01`–`C17`, retained seams `S01`–`S13`, the superseded-proposal map, the zero-work baseline cells `Z01`–`Z06` and the transferred obligations |
 | `deletion-retag-ledger.v1.json` | Displaced routes `D01`–`D19` with category, symbols, paths, disposition, one deletion owner, successor path and receiving acceptance ID, plus the three empty populations |
 
-Every owner in both files is an existing plan node. Every `successorPath`
+Every implementation and deletion owner in both files is an existing plan node; retained seams are owned by their current crate. `consumes` names boundaries (`B..`); `consumesOutcomes` names outcomes (`O..`). Each deletion owner updates the repository skill documenting the route it removes in the same change. Every `successorPath`
 starts at UAK0, and each step follows a predecessor edge recorded in the
 receiving charter. UAM0 (`UAM0-AC-R1`) owns the validator that checks this
 data and runs its negative controls. This node ships no validator.
@@ -101,7 +101,7 @@ Empty populations at this head:
 For each successor identity or service, exactly one row names its
 implementation owner (`O01`–`O13`), and every current carrier of that
 authority is a displaced route with one deletion owner. No route appears under
-two owners, and no retained seam (`S01`–`S14`) duplicates a successor
+two owners, and no retained seam (`S01`–`S13`) duplicates a successor
 authority. The seams are:
 
 - the engine crates, kept as kernel services under their existing owners;
