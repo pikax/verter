@@ -51,6 +51,27 @@ impl SchedulerDag {
         }
     }
 
+    /// Store `set` under `key`, indexing its owner generation, the
+    /// canonicals it references and its analysis demand in the same step.
+    /// `set` must be non-empty and `key` vacant.
+    fn store_blocker_entry(&mut self, key: (Arc<str>, u64), set: PendingBlockerSet) {
+        verter_debug_assert!(!set.is_empty(), "an empty blocker set is stored as absence");
+        self.add_analysis_blocker_demand(&set);
+        self.canonical_index.add_blocker_owner(&key.0, key.1);
+        self.canonical_index.add_blocker_refs(&key, &set);
+        let previous = self.artifact_blocker_deps.insert(key, set);
+        verter_debug_assert!(previous.is_none(), "a blocker entry is stored once");
+    }
+
+    /// Remove the entry under `key`, dropping every index the store added.
+    fn take_blocker_entry(&mut self, key: &(Arc<str>, u64)) -> Option<PendingBlockerSet> {
+        let set = self.artifact_blocker_deps.remove(key)?;
+        self.remove_analysis_blocker_demand(&set);
+        self.canonical_index.remove_blocker_owner(&key.0, key.1);
+        self.canonical_index.remove_blocker_refs(key, &set);
+        Some(set)
+    }
+
     /// Record a late blocker set for `(owner, generation)`. Replaces
     /// any prior entry — a second `record` for the same key is treated
     /// as the new authoritative blocker set, not an append. An empty
@@ -64,15 +85,9 @@ impl SchedulerDag {
         set: PendingBlockerSet,
     ) {
         let key = (Arc::clone(owner), generation);
-        if let Some(previous) = self.artifact_blocker_deps.remove(&key) {
-            self.remove_analysis_blocker_demand(&previous);
-        }
-        if set.is_empty() {
-            self.canonical_index.remove_blocker_owner(owner, generation);
-        } else {
-            self.add_analysis_blocker_demand(&set);
-            self.artifact_blocker_deps.insert(key, set);
-            self.canonical_index.add_blocker_owner(owner, generation);
+        let _ = self.take_blocker_entry(&key);
+        if !set.is_empty() {
+            self.store_blocker_entry(key, set);
         }
     }
 
@@ -90,12 +105,7 @@ impl SchedulerDag {
         generation: u64,
     ) -> PendingBlockerSet {
         let key = (Arc::clone(owner), generation);
-        let removed = self.artifact_blocker_deps.remove(&key);
-        if let Some(ref set) = removed {
-            self.remove_analysis_blocker_demand(set);
-            self.canonical_index.remove_blocker_owner(owner, generation);
-        }
-        removed.unwrap_or_default()
+        self.take_blocker_entry(&key).unwrap_or_default()
     }
 
     /// Peek at the blocker set for `(owner, generation)` without
@@ -123,10 +133,7 @@ impl SchedulerDag {
     /// believes there are no late blockers).
     pub(crate) fn clear_artifact_blockers(&mut self, owner: &Arc<str>, generation: u64) {
         let key = (Arc::clone(owner), generation);
-        if let Some(set) = self.artifact_blocker_deps.remove(&key) {
-            self.remove_analysis_blocker_demand(&set);
-            self.canonical_index.remove_blocker_owner(owner, generation);
-        }
+        let _ = self.take_blocker_entry(&key);
     }
 
     /// Scrub every recorded blocker entry for any `DepKey` (live or
@@ -134,35 +141,21 @@ impl SchedulerDag {
     /// that a stale `FileStage` dep on a removed file does not pin
     /// an Artifact at another file forever. Empty entries (no live
     /// deps AND no failed records) are dropped.
+    ///
+    /// Visits only the entries that reference `canonical`, through the
+    /// per-canonical reference index.
     pub(crate) fn scrub_artifact_blockers_referencing(&mut self, canonical: &str) {
-        // An emptied entry may belong to ANY owner (the scrub keys off
-        // the entry's deps, not its owner), so collect the owner keys
-        // that drop out and prune the reverse index by their owner.
-        let mut removed: Vec<(Arc<str>, u64)> = Vec::new();
-        let mut removed_demands: Vec<DepKey> = Vec::new();
-        self.artifact_blocker_deps.retain(|key, set| {
-            set.deps.retain(|dep| {
-                let keep = !dep_references_canonical(dep, canonical);
-                if !keep {
-                    removed_demands.push(dep.clone());
-                }
-                keep
-            });
+        for key in self.canonical_index.blocker_entries_referencing(canonical) {
+            let Some(mut set) = self.take_blocker_entry(&key) else {
+                continue;
+            };
+            set.deps
+                .retain(|dep| !dep_references_canonical(dep, canonical));
             set.failed
                 .retain(|record| !dep_references_canonical(&record.dep_key, canonical));
-            if set.is_empty() {
-                removed.push((Arc::clone(&key.0), key.1));
-                false
-            } else {
-                true
+            if !set.is_empty() {
+                self.store_blocker_entry(key, set);
             }
-        });
-        for dep in removed_demands {
-            self.remove_analysis_blocker_dep(&dep);
-        }
-        for (owner, generation) in removed {
-            self.canonical_index
-                .remove_blocker_owner(&owner, generation);
         }
     }
 
@@ -172,19 +165,17 @@ impl SchedulerDag {
     /// Called on `remove(canonical)` before the FileNode disappears
     /// so a fresh `record_artifact_blockers(canonical, ...)` cannot
     /// race with a stale owner entry from the prior incarnation.
+    ///
+    /// Visits only the owner's generations through the per-canonical
+    /// index.
     pub(crate) fn artifact_blocker_deps_remove_owner(&mut self, canonical: &str) {
-        let removed: Vec<PendingBlockerSet> = self
-            .artifact_blocker_deps
-            .iter()
-            .filter(|((owner, _gen), _)| owner.as_ref() == canonical)
-            .map(|(_, set)| set.clone())
-            .collect();
-        self.artifact_blocker_deps
-            .retain(|(owner, _gen), _| owner.as_ref() != canonical);
-        for set in &removed {
-            self.remove_analysis_blocker_demand(set);
+        let Some((owner, generations)) = self.canonical_index.remove_blocker_owner_all(canonical)
+        else {
+            return;
+        };
+        for generation in generations {
+            let _ = self.take_blocker_entry(&(Arc::clone(&owner), generation));
         }
-        self.canonical_index.remove_blocker_owner_all(canonical);
     }
 }
 
