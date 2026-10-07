@@ -1,0 +1,38 @@
+{
+  "name": "cli-warm",
+  "description": "A planted manifest for the evidence-run self-tests.",
+  "tier": "quick",
+  "scenarios": [
+    "baseline-empty"
+  ],
+  "settings": [
+    "strict"
+  ],
+  "arms": [
+    "verter",
+    "tsc-cli"
+  ],
+  "modes": [
+    "cold",
+    "warm"
+  ],
+  "threads": [
+    "default"
+  ],
+  "repeat": 2,
+  "warmup": 0,
+  "warmRepeats": 1,
+  "noise": "docs/contributing/semantic-benchmark.md#verdicts",
+  "requiredCells": [
+    {
+      "scenario": "baseline-empty",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "warm",
+      "threads": "default",
+      "metrics": [
+        "wallMs"
+      ]
+    }
+  ]
+}
