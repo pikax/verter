@@ -252,6 +252,22 @@ impl ProviderReadyReceipt {
     pub(crate) fn for_test(binding: &ProjectBinding) -> Self {
         Self::mint(binding, 0, 0, "test", &[])
     }
+
+    /// A receipt for tests that commit one advertised companion through the admission
+    /// gate without a live reconcile: it attests `companion` at `source_revision`, under
+    /// the transaction's captured `intent_epoch`. Test-only: production receipts are
+    /// minted after the companions they attest were published or opened.
+    #[cfg(test)]
+    pub(crate) fn for_test_attesting(
+        binding: &ProjectBinding,
+        source_revision: u64,
+        intent_epoch: u64,
+        companion: CompanionFingerprint,
+    ) -> Self {
+        let mut receipt = Self::mint(binding, source_revision, intent_epoch, "test", &[]);
+        receipt.companions = vec![companion];
+        receipt
+    }
 }
 
 /// A sealed, POST-OPEN authorization to mint a [`ProviderReadyReceipt`] for a tsgo
