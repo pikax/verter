@@ -1309,6 +1309,15 @@ impl ProjectTypeStore {
 
     /// Current monotonic project generation. Owned by the host / workspace
     /// layer — queries read it but never mutate it.
+    /// The live project-generation clock a request snapshot carries.
+    pub(crate) fn project_generation_clock(
+        &self,
+    ) -> verter_type_engine::resolver_core::ProjectGenerationClock {
+        verter_type_engine::resolver_core::ProjectGenerationClock::new(Arc::clone(
+            &self.project_generation,
+        ))
+    }
+
     pub(crate) fn project_generation_reader(
         &self,
     ) -> verter_session_query::facts::clocks::ProjectGenerationRead {

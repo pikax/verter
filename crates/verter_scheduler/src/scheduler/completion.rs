@@ -459,7 +459,7 @@ impl Scheduler {
                                             self.nodes
                                                 .entry(dep_id.clone())
                                                 .or_insert_with(|| {
-                                                    self.create_node_at_least(
+                                                    self.create_node_at(
                                                         dep_id,
                                                         Some(dep_language.clone()),
                                                         1,

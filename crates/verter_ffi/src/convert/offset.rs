@@ -3,6 +3,43 @@
 
 use crate::types::*;
 
+/// Source bytes visited by offset conversion on the current thread.
+///
+/// OPTIONAL measurement counter: it has no production consumer and exists so
+/// tests and measurement builds can show that a batch of conversions visits
+/// its source once rather than once per span. Default builds compile every
+/// recording site away.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub mod visit_counter {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SOURCE_UNITS_VISITED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn record(units: usize) {
+        SOURCE_UNITS_VISITED.with(|visited| visited.set(visited.get() + units as u64));
+    }
+
+    /// Source bytes visited on this thread since the last [`reset`].
+    #[must_use]
+    pub fn source_units_visited() -> u64 {
+        SOURCE_UNITS_VISITED.with(Cell::get)
+    }
+
+    /// Start a new measurement window on this thread.
+    pub fn reset() {
+        SOURCE_UNITS_VISITED.with(|visited| visited.set(0));
+    }
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+use visit_counter::record as record_source_visit;
+
+#[cfg(not(any(test, feature = "semantic-observe")))]
+#[inline(always)]
+fn record_source_visit(_units: usize) {}
+
 pub(super) fn clamp_to_char_boundary(source: &str, byte_offset: usize) -> usize {
     let mut clamped = byte_offset.min(source.len());
     while clamped > 0 && !source.is_char_boundary(clamped) {
@@ -16,9 +53,11 @@ pub fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
     let prefix = &source.as_bytes()[..clamped];
     // A pure-ASCII prefix has one UTF-16 unit per byte. `is_ascii` is a
     // vectorised byte scan; the fallback decodes and counts per character.
+    record_source_visit(clamped);
     if prefix.is_ascii() {
         return clamped as u32;
     }
+    record_source_visit(clamped);
     source[..clamped].encode_utf16().count() as u32
 }
 
@@ -55,12 +94,14 @@ struct OffsetMark {
 impl<'a> OffsetIndex<'a> {
     #[must_use]
     pub fn new(source: &'a str) -> Self {
+        record_source_visit(source.len());
         if source.is_ascii() {
             return Self {
                 source,
                 marks: Vec::new(),
             };
         }
+        record_source_visit(source.len());
         let mut marks = Vec::new();
         let mut utf16_deficit = 0u32;
         let mut utf32_deficit = 0u32;
@@ -142,6 +183,15 @@ pub(super) fn mandatory_utf16_offset(byte_offset: u32, source: Option<&str>) -> 
         .unwrap_or(byte_offset)
 }
 
+/// Batch form of [`mandatory_utf16_offset`]: convert through the source's
+/// index when there is one, otherwise pass the byte offset through.
+pub(super) fn mandatory_utf16_offset_with(
+    byte_offset: u32,
+    index: Option<&OffsetIndex<'_>>,
+) -> u32 {
+    index.map_or(byte_offset, |index| index.to_utf16(byte_offset))
+}
+
 // ── Offset encoding conversion ──────────────────────────────────
 
 /// Target encoding for offset conversion.
@@ -177,9 +227,11 @@ pub fn utf8_to_utf16_offset(text: &str, byte_offset: u32) -> u32 {
 pub(super) fn utf8_to_utf32_offset(text: &str, byte_offset: u32) -> u32 {
     let clamped = clamp_to_char_boundary(text, byte_offset as usize);
     let prefix = &text.as_bytes()[..clamped];
+    record_source_visit(clamped);
     if prefix.is_ascii() {
         return clamped as u32;
     }
+    record_source_visit(clamped);
     text[..clamped].chars().count() as u32
 }
 
@@ -202,16 +254,28 @@ pub fn convert_destructured_block_meta(
     tsx_code: &str,
     encoding: OffsetEncoding,
 ) -> FfiDestructuredBlockMeta {
+    // One index per source, built only when it converts anything: UTF-8 is a
+    // pass-through and an empty binding list touches no SFC offset.
+    let index_for = |text, needed: bool| {
+        (needed && encoding != OffsetEncoding::Utf8).then(|| OffsetIndex::new(text))
+    };
+    let convert = |index: &Option<OffsetIndex<'_>>, byte_offset| {
+        index
+            .as_ref()
+            .map_or(byte_offset, |index| index.convert(byte_offset, encoding))
+    };
+    let sfc_index = index_for(sfc_source, !bindings.is_empty());
+    let tsx_index = index_for(tsx_code, true);
     FfiDestructuredBlockMeta {
         bindings: bindings
             .iter()
             .map(|b| FfiDestructuredBinding {
                 name: b.name.to_string(),
-                source_start: convert_offset(sfc_source, b.source_start, encoding),
-                source_end: convert_offset(sfc_source, b.source_end, encoding),
+                source_start: convert(&sfc_index, b.source_start),
+                source_end: convert(&sfc_index, b.source_end),
             })
             .collect(),
-        block_start: convert_offset(tsx_code, block_start, encoding),
-        block_end: convert_offset(tsx_code, block_end, encoding),
+        block_start: convert(&tsx_index, block_start),
+        block_end: convert(&tsx_index, block_end),
     }
 }

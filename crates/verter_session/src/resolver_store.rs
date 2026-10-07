@@ -5082,6 +5082,18 @@ impl verter_session_query::facts::clocks::WorkspaceClocks for WorkspaceSlotClock
     }
 }
 impl crate::VerterHost {
+    /// Capture the handles a request's hot paths read — its cancellation
+    /// checkpoint, project-generation clock and live aggregate clocks — once,
+    /// when the request is admitted. Constant-cost: handle clones only.
+    pub(crate) fn capture_request_snapshot(
+        &self,
+    ) -> verter_type_engine::resolver_core::RequestSnapshot<WorkspaceSlotClocks> {
+        verter_type_engine::resolver_core::RequestSnapshot::new(
+            self.project_type_store().project_generation_clock(),
+            self.aggregate_clock_reader(),
+        )
+    }
+
     pub(crate) fn aggregate_clock_reader(
         &self,
     ) -> verter_session_query::facts::clocks::AggregateClockReader<WorkspaceSlotClocks> {

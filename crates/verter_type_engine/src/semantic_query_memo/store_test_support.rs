@@ -505,6 +505,7 @@ impl SemanticGraphStore {
     ) -> WarmPublishOutcome {
         self.warm_publish_one(
             ctx,
+            crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx),
             prepared,
             result,
             walker_diagnostics,
@@ -533,6 +534,7 @@ impl SemanticGraphStore {
     ) -> bool {
         self.warm_publish_one_if_absent(
             ctx,
+            crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx),
             key,
             result,
             read_set_signature,

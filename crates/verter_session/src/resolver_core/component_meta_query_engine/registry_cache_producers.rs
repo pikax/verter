@@ -204,7 +204,7 @@ impl ComponentMetaQueryEngine<'_> {
                                     // A simulated concurrent publish stamps the
                                     // live project generation, exactly as the
                                     // real cold-compute path does.
-                                    validated_at_generation: ctx.current_project_generation(),
+                                    validated_at_generation: ctx.request_flags().current_project_generation(),
                                 },
                             ),
                         );
@@ -295,7 +295,7 @@ impl ComponentMetaQueryEngine<'_> {
         // / workspace-folder change) bumps no file content, so the entry carries
         // its compute-time generation explicitly. The read-side gates reject the
         // entry once the live generation moves past this snapshot.
-        let validated_at_generation = ctx.current_project_generation();
+        let validated_at_generation = ctx.request_flags().current_project_generation();
         // The single, side-effecting resolution: the wildcard-route fuse is
         // consumed here at most once per key.
         let resolved: Option<
