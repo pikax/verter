@@ -167,8 +167,7 @@ defineProps<{ msg: string; count: number }>()
 fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     let project = make_project();
     upsert_simple_props_fixture(&project);
-    let session = project.open_session_batch().unwrap();
-    let host = session.host();
+    let host = project.host();
     let mode = verter_type_engine::semantic_query::ProjectionMode::Expanded;
     let canonical = host.resolve_alias_or_canonical("/Simple.vue");
     let view = HostViewRef::new(host);
@@ -289,7 +288,7 @@ fn dispatch_lowering_cost_bounded_on_editortoolbar() {
     let project = make_project();
     upsert_editor_toolbar_fixture(&project);
     let session = project.open_session_batch().unwrap();
-    let host = session.host();
+    let host = project.host();
 
     // Cold — first resolution pays parse / shallow / decl / dispatch-lowering
     // cost and populates the `ComponentMetaResultDb` final-result cache.
@@ -355,7 +354,7 @@ fn concurrent_warm_readers_all_hit_the_final_result_cache() {
     // Warm the cache before the concurrent burst.
     let _ = session.get_component_meta("/EditorToolbar.vue").unwrap();
 
-    let host = session.host();
+    let host = project.host();
     let misses_before = host
         .provenance()
         .component_meta_result_cache_misses
@@ -619,10 +618,9 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
 
     let project = make_project();
     upsert_editor_toolbar_fixture(&project);
-    // Open the session batch but DO NOT query the (canonical, mode) meta
-    // key beforehand — the burst must hit a COLD singleflight lane.
-    let session = project.open_session_batch().unwrap();
-    let host = session.host();
+    // DO NOT query the (canonical, mode) meta key beforehand — the burst
+    // must hit a COLD singleflight lane.
+    let host = project.host();
 
     let mode = verter_type_engine::semantic_query::ProjectionMode::Expanded;
     let canonical = host.resolve_alias_or_canonical("/EditorToolbar.vue");
@@ -859,9 +857,9 @@ fn instantiate_memo_node_count_within_budget() {
 
     // Drive the canonical workload.
     let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
-    let _ = session.host().get_component_meta("/EditorToolbar.vue");
+    let _ = project.host().get_component_meta("/EditorToolbar.vue");
 
-    let host = session.host();
+    let host = project.host();
     let store = host.project_type_store();
     let semantic_graph = store.semantic_graph();
     let node_count = semantic_graph.node_count();
@@ -932,7 +930,7 @@ defineProps<{ x: Lib }>()
     let session = project.open_session_batch().unwrap();
     let _ = session.evaluate_types("/Comp.vue").unwrap();
 
-    let host = session.host();
+    let host = project.host();
     let store = host.project_type_store();
 
     // The materialize_memo_db should have entries from the resolution.
@@ -1592,8 +1590,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
 
     let project = make_project();
     upsert_simple_props_fixture(&project);
-    let session = project.open_session_batch().unwrap();
-    let host = session.host();
+    let host = project.host();
     let mode = verter_type_engine::semantic_query::ProjectionMode::Expanded;
     let canonical = host.resolve_alias_or_canonical("/Simple.vue");
 
@@ -1807,7 +1804,7 @@ fn host_evict_releases_the_closed_documents_semantic_nodes_and_the_reopen_recomp
     let project = make_project();
     upsert_editor_toolbar_fixture(&project);
     let session = project.open_session_batch().unwrap();
-    let host = session.host();
+    let host = project.host();
     let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
     let meta_before = host
         .get_component_meta("/EditorToolbar.vue")

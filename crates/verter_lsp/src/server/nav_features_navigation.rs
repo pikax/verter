@@ -162,7 +162,7 @@ pub(super) async fn handle_goto_definition(
     server: &VerterLanguageServer,
     params: GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
-    let _hg = HandlerGuard::new("goto_definition");
+    let _hg = HandlerGuard::new(&server.handler_activity, "goto_definition");
     let uri = &params.text_document_position_params.text_document.uri;
     let _timer = server
         .statistics
@@ -776,7 +776,7 @@ pub(super) async fn handle_goto_type_definition(
     server: &VerterLanguageServer,
     params: GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
-    let _hg = HandlerGuard::new("goto_type_definition");
+    let _hg = HandlerGuard::new(&server.handler_activity, "goto_type_definition");
     let uri = &params.text_document_position_params.text_document.uri;
     let _timer = server
         .statistics
@@ -965,7 +965,7 @@ pub(super) async fn handle_references(
     server: &VerterLanguageServer,
     params: ReferenceParams,
 ) -> Result<Option<Vec<Location>>> {
-    let _hg = HandlerGuard::new("references");
+    let _hg = HandlerGuard::new(&server.handler_activity, "references");
     let uri = &params.text_document_position.text_document.uri;
     let _timer = server
         .statistics
@@ -1229,7 +1229,7 @@ pub(super) async fn handle_rename(
     server: &VerterLanguageServer,
     params: RenameParams,
 ) -> Result<Option<WorkspaceEdit>> {
-    let _hg = HandlerGuard::new("rename");
+    let _hg = HandlerGuard::new(&server.handler_activity, "rename");
     let uri = &params.text_document_position.text_document.uri;
     let position = &params.text_document_position.position;
     let new_name = &params.new_name;

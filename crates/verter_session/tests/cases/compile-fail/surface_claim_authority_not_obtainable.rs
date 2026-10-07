@@ -2,8 +2,10 @@
 //! cannot obtain the surface-claim authority of a live host, nor build one
 //! out of nothing.
 //!
-//! 1. the host keeps its engine's authority private: neither the project store
-//!    nor the request attachment hands it out across the crate boundary;
+//! 1. the host keeps its engine's authority private: the project store holds
+//!    none (the host's construction root hands it to the request attachment),
+//!    and the request attachment does not hand it out across the crate
+//!    boundary;
 //! 2. the engine's one mint is crate-private (its only caller is
 //!    `EngineStores::create`, which builds a NEW engine);
 //! 3. the authority has no `Default` and no `Clone`, so a borrow never yields

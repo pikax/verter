@@ -1,20 +1,20 @@
 error[E0308]: arguments to this function are incorrect
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_reminted_from_live_stores.rs
   |
-  |     let _ = EngineStores::create(live_graph, live_account, &counter);
+  |     let _ = EngineStores::create(live_graph, live_account, &counter, Default::default());
   |             ^^^^^^^^^^^^^^^^^^^^
   |
 note: expected `Option<Arc<EngineProvenance>>`, found `Arc<SemanticGraphStore>`
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_reminted_from_live_stores.rs
   |
-  |     let _ = EngineStores::create(live_graph, live_account, &counter);
+  |     let _ = EngineStores::create(live_graph, live_account, &counter, Default::default());
   |                                  ^^^^^^^^^^
   = note: expected enum `std::option::Option<Arc<EngineProvenance>>`
            found struct `Arc<SemanticGraphStore>`
 note: expected `StoreAccount`, found `Arc<SemanticRetentionAccount>`
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_reminted_from_live_stores.rs
   |
-  |     let _ = EngineStores::create(live_graph, live_account, &counter);
+  |     let _ = EngineStores::create(live_graph, live_account, &counter, Default::default());
   |                                              ^^^^^^^^^^^^
   = note: expected struct `verter_session_query::retention::StoreAccount`
              found struct `Arc<verter_session_query::retention::SemanticRetentionAccount>`

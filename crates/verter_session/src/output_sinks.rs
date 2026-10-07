@@ -310,6 +310,7 @@ mod tests {
             None,
             verter_session_query::retention::StoreAccount::default(),
             &Arc::new(AtomicU64::new(0)),
+            verter_execution::tasks::TaskRegistry::default(),
         );
         let _ = foreign.materialize_output_type_expr(&dispatch, SemanticNodeId(0));
     }
@@ -355,6 +356,7 @@ mod carrier_identity_tests {
             None,
             verter_session_query::retention::StoreAccount::default(),
             &Arc::new(AtomicU64::new(0)),
+            verter_execution::tasks::TaskRegistry::default(),
         )
         .1
     }

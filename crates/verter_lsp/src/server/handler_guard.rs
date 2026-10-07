@@ -1,42 +1,61 @@
-// ── Handler tracking for freeze diagnosis ──────────────────────────────
+// ── Handler activity: interactive-lane admission for background work ────
 
-/// Global counter of in-flight LSP request handlers. When this reaches the tokio
-/// worker thread count, the runtime is saturated and timers/heartbeats can't fire.
-pub(crate) static ACTIVE_HANDLERS: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
-static HANDLERS_IDLE: tokio::sync::Notify = tokio::sync::Notify::const_new();
-static HANDLER_ACTIVITY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Admit one unit of background CPU work only while no LSP handler is active.
+/// The interactive-handler activity of ONE server: the in-flight handler
+/// count, the idle wake, and the activity epoch the coarse quiet window
+/// reads.
 ///
-/// The check is intentionally repeated before every scanner item. A request may
-/// race immediately after this returns, but then competes with at most one
-/// carrier compile; it can never sit behind the remainder of a workspace pass.
-pub(crate) async fn wait_for_handlers_idle() {
-    wait_for_idle_counter(&ACTIVE_HANDLERS, &HANDLERS_IDLE).await;
+/// Owned by the server instance and shared, by `Arc`, with that server's
+/// handlers, background scanner and heartbeat — never process-global, so two
+/// servers in one process never hold back each other's background work. The
+/// count is current occupancy (a handler adds itself for its own lifetime);
+/// the epoch only distinguishes "no handler started or finished since" for
+/// the quiet window.
+#[derive(Debug, Default)]
+pub struct HandlerActivity {
+    active: std::sync::atomic::AtomicU32,
+    idle: tokio::sync::Notify,
+    epoch: std::sync::atomic::AtomicU64,
 }
 
-/// Admit coarse background work only after the interactive lane has remained
-/// idle for a complete quiet window. This is used before non-preemptible units
-/// such as a filesystem discovery walk; per-file scanner work continues to use
-/// [`wait_for_handlers_idle`].
-/// Give coarse background work a quiet-window preference without allowing
-/// continuous interactive traffic to starve correctness work forever.
-///
-/// The return value distinguishes a genuine quiet-window admission from the
-/// fairness deadline, which is useful to callers that want to trace the latter.
-pub(crate) async fn wait_for_handlers_quiet(
-    quiet: std::time::Duration,
-    max_defer: std::time::Duration,
-) -> bool {
-    wait_for_quiet_counter_bounded(
-        &ACTIVE_HANDLERS,
-        &HANDLERS_IDLE,
-        &HANDLER_ACTIVITY_EPOCH,
-        quiet,
-        max_defer,
-    )
-    .await
+impl HandlerActivity {
+    /// In-flight handlers right now — a diagnostic read with no production
+    /// consumer in default builds (the heartbeat and handler trace lines
+    /// that report it compile away), so the accessor exists only for the
+    /// observation feature and the crate's own tests.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    pub fn active(&self) -> u32 {
+        self.active.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Admit one unit of background CPU work only while no handler of this
+    /// server is active.
+    ///
+    /// The check is intentionally repeated before every scanner item. A
+    /// request may race immediately after this returns, but then competes
+    /// with at most one carrier compile; it can never sit behind the
+    /// remainder of a workspace pass.
+    pub async fn wait_idle(&self) {
+        wait_for_idle_counter(&self.active, &self.idle).await;
+    }
+
+    /// Admit coarse background work only after this server's interactive
+    /// lane has remained idle for a complete quiet window. This is used
+    /// before non-preemptible units such as a filesystem discovery walk;
+    /// per-file scanner work continues to use [`Self::wait_idle`].
+    ///
+    /// Gives coarse background work a quiet-window preference without
+    /// allowing continuous interactive traffic to starve correctness work
+    /// forever. The return value distinguishes a genuine quiet-window
+    /// admission from the fairness deadline, which is useful to callers that
+    /// want to trace the latter.
+    pub async fn wait_quiet(
+        &self,
+        quiet: std::time::Duration,
+        max_defer: std::time::Duration,
+    ) -> bool {
+        wait_for_quiet_counter_bounded(&self.active, &self.idle, &self.epoch, quiet, max_defer)
+            .await
+    }
 }
 
 async fn wait_for_idle_counter(active: &std::sync::atomic::AtomicU32, idle: &tokio::sync::Notify) {
@@ -97,44 +116,78 @@ async fn wait_for_quiet_counter_bounded(
     .is_ok()
 }
 
-/// RAII guard that tracks handler lifecycle. Logs entry (with thread ID and active
-/// handler count) on creation, logs exit (with duration) on drop.
-pub(crate) struct HandlerGuard {
+/// RAII guard that tracks one handler's lifetime on its server's
+/// [`HandlerActivity`]: REQUIRED admission bookkeeping (count, wake, epoch)
+/// always, and — compiled in only under the default-off `semantic-observe`
+/// feature — the freeze-diagnosis enter/exit trace lines with the name,
+/// entry timestamp and thread id only those lines consume.
+pub struct HandlerGuard<'a> {
+    activity: &'a HandlerActivity,
+    #[cfg(feature = "semantic-observe")]
     name: &'static str,
+    #[cfg(feature = "semantic-observe")]
     start: std::time::Instant,
+    #[cfg(feature = "semantic-observe")]
     thread_id: std::thread::ThreadId,
 }
 
-impl HandlerGuard {
-    pub(crate) fn new(name: &'static str) -> Self {
-        HANDLER_ACTIVITY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let prev = ACTIVE_HANDLERS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let thread_id = std::thread::current().id();
-        tracing::info!(
-            "HANDLER_ENTER {name} active={} thread={thread_id:?}",
-            prev + 1
-        );
-        Self {
-            name,
-            start: std::time::Instant::now(),
-            thread_id,
+impl<'a> HandlerGuard<'a> {
+    pub fn new(activity: &'a HandlerActivity, name: &'static str) -> Self {
+        activity
+            .epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(feature = "semantic-observe")]
+        let prev = activity
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(not(feature = "semantic-observe"))]
+        activity
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let thread_id = std::thread::current().id();
+            tracing::info!(
+                "HANDLER_ENTER {name} active={} thread={thread_id:?}",
+                prev + 1
+            );
+            Self {
+                activity,
+                name,
+                start: std::time::Instant::now(),
+                thread_id,
+            }
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = name;
+            Self { activity }
         }
     }
 }
 
-impl Drop for HandlerGuard {
+impl Drop for HandlerGuard<'_> {
     fn drop(&mut self) {
-        let remaining = ACTIVE_HANDLERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) - 1;
+        let activity = self.activity;
+        let remaining = activity
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            - 1;
         if remaining == 0 {
-            HANDLERS_IDLE.notify_waiters();
+            activity.idle.notify_waiters();
         }
-        HANDLER_ACTIVITY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let elapsed = self.start.elapsed();
-        tracing::info!(
-            "HANDLER_EXIT {} active={remaining} elapsed={elapsed:?} thread={:?}",
-            self.name,
-            self.thread_id,
-        );
+        activity
+            .epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let elapsed = self.start.elapsed();
+            tracing::info!(
+                "HANDLER_EXIT {} active={remaining} elapsed={elapsed:?} thread={:?}",
+                self.name,
+                self.thread_id,
+            );
+        }
     }
 }
 

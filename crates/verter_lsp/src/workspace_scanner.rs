@@ -125,6 +125,9 @@ pub struct WorkspaceScannerConfig {
     /// (both `.vue` files and non-carrier source files).
     /// Used by the server to send `$/verter/typeProviderSyncComplete`.
     pub done_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// The owning server's interactive-handler activity. Background work
+    /// yields to that server's handlers, never to another server's.
+    pub(crate) handler_activity: Arc<crate::server::HandlerActivity>,
 }
 
 /// Priority tier for a discovered `.vue` file.
@@ -391,8 +394,10 @@ async fn scanner_loop(
     // references/rename themselves are interactive traffic, and after a
     // provider-generation restart their polling must not prevent the scanner
     // that makes their project frontier complete from even starting.
-    let _ =
-        crate::server::wait_for_handlers_quiet(DISCOVERY_IDLE_GRACE, BACKGROUND_MAX_DEFER).await;
+    let handler_activity = Arc::clone(&config.handler_activity);
+    let _ = handler_activity
+        .wait_quiet(DISCOVERY_IDLE_GRACE, BACKGROUND_MAX_DEFER)
+        .await;
     let (carrier_paths, source_paths) = tokio::task::spawn_blocking(move || {
         let mut carrier = Vec::new();
         let mut src = Vec::new();
@@ -493,12 +498,10 @@ async fn scanner_loop(
         // fairness deadline therefore admits one bounded batch, then yields
         // priority back to handlers before admitting another batch.
         if fairness_burst_remaining == 0 {
-            let admitted_at_idle = tokio::time::timeout(
-                BACKGROUND_MAX_DEFER,
-                crate::server::wait_for_handlers_idle(),
-            )
-            .await
-            .is_ok();
+            let admitted_at_idle =
+                tokio::time::timeout(BACKGROUND_MAX_DEFER, handler_activity.wait_idle())
+                    .await
+                    .is_ok();
             if !admitted_at_idle {
                 fairness_burst_remaining = BATCH_SIZE;
             }
