@@ -5669,7 +5669,7 @@ fn evaluator_display_perturbation_cannot_change_publication_inputs_or_result() {
             .expect("evaluator row display")
             .text()
             .to_string();
-        let expanded = expanded_slot_bindings(Some(&evaluated), "default");
+        let expanded = SlotBindingIndex::new(Some(&evaluated)).bindings_for("default");
         let bindings = merge_slot_bindings_with_source(&source, expanded);
         let output = SlotAnalysis {
             name: source.name,
@@ -6023,4 +6023,245 @@ fn constructor_array_null_element_folds_to_primitive_null_union() {
             )
         ))
     );
+}
+
+fn typed_slot_binding(
+    slot: Option<&str>,
+    binding: &str,
+    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind,
+    flat_name: &str,
+) -> verter_session_query::analysis::type_expand::ExpandedField {
+    let key = verter_type_expr::SyntheticCarrierKey {
+        scope_canonical_id: Arc::from("test:component"),
+        surface_kind,
+        slot_name: slot.map(Arc::from),
+        binding_name: Arc::from(binding),
+        value_node: 0,
+    };
+    verter_session_query::analysis::type_expand::ExpandedField {
+        name: flat_name.to_string(),
+        authority: test_authority(
+            SourcePosition::Present(SemanticTypeSource::SyntheticSlotBinding(Arc::new(key))),
+            verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+        ),
+        ..test_slot_binding("unused", "unused", PrimitiveName::String)
+    }
+}
+
+fn slot_binding_names<'s>(slots: &'s [SlotAnalysis], slot: &str) -> Vec<&'s str> {
+    slots
+        .iter()
+        .find(|candidate| candidate.name == slot)
+        .unwrap_or_else(|| panic!("slot {slot} must publish"))
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect()
+}
+
+/// Every slot joins only its own evaluated rows: the inspected-row count is
+/// one partition pass plus each slot's own bucket, so it grows linearly with
+/// the slot count instead of slots × total binding rows.
+#[test]
+fn slot_binding_join_inspects_rows_proportional_to_slot_count() {
+    const BINDINGS: [&str; 4] = ["item", "index", "open", "close"];
+    let mut visits_per_size = Vec::new();
+    for slot_count in [128usize, 256, 512, 1024] {
+        let names: Vec<String> = (0..slot_count).map(|i| format!("slot{i}")).collect();
+        let macros = vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
+            kind: AnalyzedMacroKind::DefineSlots,
+            // Authored lane for the first half; the shape lane alone carries
+            // the second half, so both join paths are exercised.
+            slot_fields: names[..slot_count / 2]
+                .iter()
+                .map(|name| test_slot(name))
+                .collect(),
+            ..make_define_props(vec![])
+        }];
+        let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
+            define_slots: vec![
+                verter_session_query::analysis::type_expand::ExpandedMacroObjectShape {
+                    macro_index: 0,
+                    result: verter_session_query::analysis::type_expand::ExpansionResult::exact(
+                        verter_session_query::analysis::type_expand::ExpandedObjectShape {
+                            properties: names
+                                .iter()
+                                .map(|name| test_expanded_slot(name, false))
+                                .collect(),
+                            index_signatures: Vec::new(),
+                            call_signatures: Vec::new(),
+                        },
+                    ),
+                },
+            ],
+            slot_bindings: names
+                .iter()
+                .flat_map(|name| {
+                    BINDINGS
+                        .iter()
+                        .map(move |binding| test_slot_binding(name, binding, PrimitiveName::String))
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut input = empty_input(&macros);
+        input.evaluated_types = Some(&evaluated);
+
+        take_slot_binding_row_visits();
+        let result = extract_component_meta(input);
+        let visits = take_slot_binding_row_visits();
+
+        assert_eq!(result.slots.len(), slot_count);
+        for (slot, name) in result.slots.iter().zip(&names) {
+            assert_eq!(
+                &slot.name, name,
+                "slot order follows authored then shape order"
+            );
+            let bindings: Vec<_> = slot.bindings.iter().map(|b| b.name.as_str()).collect();
+            assert_eq!(bindings, BINDINGS, "slot={name}");
+        }
+        let rows = (slot_count * BINDINGS.len()) as u64;
+        assert_eq!(
+            visits,
+            2 * rows,
+            "one partition pass plus one bucket read per slot at {slot_count} slots"
+        );
+        visits_per_size.push(visits);
+    }
+    for pair in visits_per_size.windows(2) {
+        assert_eq!(
+            pair[1],
+            2 * pair[0],
+            "doubling slots doubles inspected rows"
+        );
+    }
+}
+
+/// Partitioning keeps exact slot identity: typed rows join only their own
+/// slot even when their flat spellings collide, flat rows keep prefix
+/// semantics, rows of another carrier kind use the flat key, and duplicate
+/// rows/names keep first-wins order and unavailable status.
+#[test]
+fn slot_binding_partition_keeps_exact_identity_and_order() {
+    use verter_type_expr::SyntheticCarrierSurfaceKind::{Binding, SlotBinding};
+    let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![
+            test_slot("a"),
+            test_slot("a.b"),
+            test_slot("x"),
+            test_slot("x.y"),
+            test_slot("dup"),
+            // A duplicate authored name publishes once.
+            test_slot("a"),
+        ],
+        ..make_define_props(vec![])
+    }];
+    let mut failed = test_slot_binding("dup", "broken", PrimitiveName::String);
+    failed.authority = test_authority(
+        SourcePosition::Failed(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        ),
+        verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete,
+    );
+    failed.exactness = verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete;
+    let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
+        slot_bindings: vec![
+            // Same flat spelling `a.b.c`, distinct typed identities.
+            typed_slot_binding(Some("a"), "b.c", SlotBinding, "a.b.c"),
+            typed_slot_binding(Some("a.b"), "c", SlotBinding, "a.b.c"),
+            // No slot name: joins no slot, and is never re-read through its
+            // flat spelling.
+            typed_slot_binding(None, "orphan", SlotBinding, "a.orphan"),
+            // Another carrier kind falls back to the flat transport key.
+            typed_slot_binding(Some("a"), "ignored", Binding, "x.kind"),
+            // Flat rows are visible to every prefixing slot.
+            test_slot_binding("x.y", "z", PrimitiveName::Number),
+            test_slot_binding("dup", "first", PrimitiveName::Number),
+            failed,
+            // Duplicate binding identity: the first row wins.
+            test_slot_binding("dup", "first", PrimitiveName::Boolean),
+            // Empty binding names never join.
+            test_slot_binding("dup", "", PrimitiveName::Boolean),
+        ],
+        ..Default::default()
+    };
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+    let result = extract_component_meta(input);
+
+    let slot_names: Vec<_> = result.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(slot_names, vec!["a", "a.b", "x", "x.y", "dup"]);
+    assert_eq!(slot_binding_names(&result.slots, "a"), vec!["b.c"]);
+    assert_eq!(slot_binding_names(&result.slots, "a.b"), vec!["c"]);
+    assert_eq!(slot_binding_names(&result.slots, "x"), vec!["kind", "y.z"]);
+    assert_eq!(slot_binding_names(&result.slots, "x.y"), vec!["z"]);
+    assert_eq!(
+        slot_binding_names(&result.slots, "dup"),
+        vec!["first", "broken"]
+    );
+
+    let dup = result.slots.iter().find(|slot| slot.name == "dup").unwrap();
+    assert_eq!(
+        dup.bindings[0].publication.source_position(),
+        SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+        "first duplicate row is authoritative"
+    );
+    assert_eq!(
+        dup.bindings[1].publication.source_position(),
+        SourcePosition::Failed(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        ),
+        "an unavailable binding type keeps its failed status"
+    );
+    assert_eq!(
+        dup.bindings[1]
+            .type_expansion
+            .as_ref()
+            .expect("evaluated row keeps expansion metadata")
+            .exactness,
+        verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete
+    );
+}
+
+/// Template slots join the published set by exact name: names the macro
+/// lanes already published and repeated template names publish once.
+#[test]
+fn template_slots_append_unpublished_names_once() {
+    let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![test_slot("default")],
+        ..make_define_props(vec![])
+    }];
+    let template = TemplateAnalysisSnapshot {
+        defined_slots: ["default", "footer", "footer", "header"]
+            .into_iter()
+            .map(
+                |name| verter_session_query::analysis::template::DefinedSlot {
+                    name: name.to_string(),
+                    has_bindings: name == "footer",
+                    binding_names: Vec::new(),
+                    binding_expressions: Vec::new(),
+                    binding_value_spans: Vec::new(),
+                    has_fallback_content: false,
+                    span: verter_span::Span::default(),
+                },
+            )
+            .collect(),
+        ..Default::default()
+    };
+    let mut input = empty_input(&macros);
+    input.template = Some(&template);
+    let result = extract_component_meta(input);
+
+    let slot_names: Vec<_> = result.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(slot_names, vec!["default", "footer", "header"]);
+    assert!(
+        !result.slots[0].is_scoped,
+        "macro row keeps its own scoping"
+    );
+    assert!(result.slots[1].is_scoped);
 }
