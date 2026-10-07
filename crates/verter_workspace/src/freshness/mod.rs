@@ -56,6 +56,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
+use verter_debug_assert::verter_debug_assert;
 
 #[cfg(test)]
 #[path = "freshness_tests.rs"]
@@ -334,14 +335,14 @@ impl FreshnessHistory {
         let mut state = self.state.write();
         let state = &mut *state;
         let entry = state.exact.get_mut(key);
-        debug_assert!(
+        verter_debug_assert!(
             entry.is_some(),
             "canonical freshness lease released without an entry"
         );
         let Some(entry) = entry else {
             return;
         };
-        debug_assert!(
+        verter_debug_assert!(
             entry.readers > 0,
             "canonical freshness lease double-released"
         );
@@ -371,7 +372,7 @@ impl FreshnessHistory {
         let mut state = self.state.write();
         let state = &mut *state;
         let count = state.views.get(&generation).copied();
-        debug_assert!(
+        verter_debug_assert!(
             count.is_some(),
             "view freshness lease released without a record"
         );
@@ -418,7 +419,7 @@ impl FreshnessHistory {
             match kind {
                 EntryKind::Exact => {
                     let removed = state.exact.remove(&key);
-                    debug_assert!(
+                    verter_debug_assert!(
                         removed.is_some_and(|entry| entry.readers == 0),
                         "queued exact freshness entry must be unleased"
                     );
