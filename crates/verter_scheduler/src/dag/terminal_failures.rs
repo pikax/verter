@@ -68,8 +68,8 @@ impl SchedulerDag {
     /// disambiguate the failure mode (FileNotFound vs StageFailed)
     /// instead of reconstructing it from the dep key alone.
     ///
-    /// This method ONLY touches the `waiters` reverse-index entry
-    /// for the Analysis DepKey; it does NOT cancel any DAG node,
+    /// This method ONLY takes the Analysis DepKey's edges from the
+    /// dependency-edge store; it does NOT cancel any DAG node,
     /// release any capacity permit, or alter `by_identity`. The
     /// caller (`terminalize_failure(Source)`) handles the Source
     /// identity cancellation separately.
@@ -110,13 +110,13 @@ impl SchedulerDag {
     /// disambiguate the failure mode (FileNotFound vs StageFailed)
     /// instead of reconstructing it from the dep key alone.
     ///
-    /// This method ONLY touches the `waiters` reverse-index entry
-    /// for the Analysis DepKey; it does NOT cancel the Analysis
+    /// This method ONLY takes the Analysis DepKey's edges from the
+    /// dependency-edge store; it does NOT cancel the Analysis
     /// DAG identity or release its capacity permit. The caller
     /// (`terminalize_failure(Analysis)`) calls this BEFORE
-    /// `cancel(&analysis_identity)` so the cancel's waiter sweep
-    /// observes an empty reverse-index entry and does not strip
-    /// the dep without recording the failure.
+    /// `cancel(&analysis_identity)` so the cancel finds no edge
+    /// left to take and does not strip the dep without recording
+    /// the failure.
     pub fn fanout_analysis_failure_to_waiters(
         &mut self,
         canonical: &Arc<str>,

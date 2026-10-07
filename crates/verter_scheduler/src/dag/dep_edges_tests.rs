@@ -57,14 +57,26 @@ fn drain_and_assert_empty(dag: &mut SchedulerDag) {
         let _ = dag.complete(&identity);
     }
     assert_eq!(dag.total_active(), 0, "every node terminalized");
-    assert!(dag.dep_edges.is_drained(), "every dependency edge unlinked");
+    let occupancy = dag.dependency_occupancy().dep_edges;
+    assert_eq!(
+        (
+            occupancy.edges,
+            occupancy.gated_deps,
+            occupancy.file_canonicals,
+            occupancy.file_generations,
+            occupancy.file_deps,
+        ),
+        (0, 0, 0, 0, 0),
+        "every dependency edge and file-index entry unlinked",
+    );
     assert!(dag.canonical_index.node_tokens.is_empty());
     assert_eq!(dag.in_flight_permits(), 0, "every permit returned");
 }
 
 /// Cancelling every sibling gated on one shared dependency removes each
-/// edge by key: the waiter entries visited grow linearly with the sibling
-/// count, never with the siblings still linked.
+/// edge by key: the edge-sequence keys compared per removal grow with the
+/// logarithm of the siblings still linked, never linearly, so 8x the
+/// siblings stays far below the 64x a sibling scan would cost.
 #[test]
 fn sibling_cancellations_remove_each_edge_directly() {
     let mut visits = Vec::new();
@@ -77,9 +89,11 @@ fn sibling_cancellations_remove_each_edge_directly() {
         for identity in &identities {
             gated(&mut dag, identity.clone(), vec![shared.clone()]);
         }
-        assert_eq!(dag.dep_edges.edge_count(), siblings);
+        let occupancy = dag.dependency_occupancy().dep_edges;
+        assert_eq!((occupancy.edges, occupancy.gated_deps), (siblings, 1));
+        assert_eq!((occupancy.file_canonicals, occupancy.file_deps), (1, 1));
 
-        let before = dag.dep_edge_observations().unlink_entries_visited;
+        let before = dag.dep_edge_observations().unlink_keys_compared;
         // Interleave from both ends so neither end of the edge order is
         // privileged.
         let mut order: Vec<usize> = Vec::with_capacity(siblings);
@@ -98,19 +112,19 @@ fn sibling_cancellations_remove_each_edge_directly() {
                 "a cancelled waiter strands nothing",
             );
         }
-        visits.push(dag.dep_edge_observations().unlink_entries_visited - before);
+        visits.push(dag.dep_edge_observations().unlink_keys_compared - before);
         drain_and_assert_empty(&mut dag);
     }
-    for (siblings, visited) in SIZES.iter().zip(&visits) {
-        assert_eq!(
-            *visited, *siblings as u64,
-            "{siblings} sibling cancellations visit one edge each",
+    for (siblings, compared) in SIZES.iter().zip(&visits) {
+        let log2 = u64::from(siblings.ilog2());
+        assert!(
+            *compared <= *siblings as u64 * 4 * log2,
+            "{siblings} sibling cancellations compared {compared} edge keys",
         );
     }
-    assert_eq!(
-        visits[3] / visits[0],
-        8,
-        "8x the siblings is 8x the removal work, not 64x",
+    assert!(
+        visits[3] < 16 * visits[0],
+        "8x the siblings is near-linear removal work, not 64x: {visits:?}",
     );
 }
 
@@ -151,9 +165,9 @@ fn unrelated_supersessions_visit_only_retired_dependencies() {
             vec![analysis("/target.ts", 1, 2)],
         );
 
-        let before = dag.dep_edge_observations().retire_keys_visited;
+        let before = dag.dep_edge_observations().retire_entries_visited;
         let stranded = dag.retire_generations_below(&Arc::from("/target.ts"), 2);
-        visits.push(dag.dep_edge_observations().retire_keys_visited - before);
+        visits.push(dag.dep_edge_observations().retire_entries_visited - before);
 
         assert_eq!(
             stranded.iter().copied().collect::<BTreeSet<_>>(),
@@ -177,8 +191,11 @@ fn unrelated_supersessions_visit_only_retired_dependencies() {
         }
         drain_and_assert_empty(&mut dag);
     }
+    // One canonical bucket, one retired generation bucket and its one
+    // dependency key: neither the surviving generation nor any unrelated
+    // file is traversed.
     assert!(
-        visits.iter().all(|visited| *visited == 1),
+        visits.iter().all(|visited| *visited == 3),
         "supersession visits the one retired dependency at every scale: {visits:?}",
     );
 }
@@ -234,7 +251,7 @@ fn cancellation_and_arrival_race_the_producer_cleanly() {
 
     // Cancellation lands while the producer runs.
     assert!(dag.cancel(&waiter).is_empty());
-    assert_eq!(dag.dep_edges.edge_count(), 0);
+    assert_eq!(dag.dependency_occupancy().dep_edges.edges, 0);
     // A new arrival of the same identity re-links.
     let second = gated(&mut dag, waiter.clone(), vec![dep.clone()]);
     assert_ne!(first, second, "the cancelled node is not revived");
@@ -301,7 +318,7 @@ fn cancelling_a_self_gated_node_leaves_no_dangling_edge() {
         identity.clone(),
         vec![DepKey::from_identity(&identity)],
     );
-    assert_eq!(dag.dep_edges.edge_count(), 1);
+    assert_eq!(dag.dependency_occupancy().dep_edges.edges, 1);
     assert!(dag.cancel(&identity).is_empty());
     drain_and_assert_empty(&mut dag);
 }

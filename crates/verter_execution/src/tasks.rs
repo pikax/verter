@@ -112,6 +112,22 @@ pub struct TaskRegistry {
     state: Arc<Mutex<RegistryState>>,
 }
 
+/// Current occupancy of a registry's wait-for graph, read under one lock.
+/// Always available; every count is derived from the resident tables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitGraphOccupancy {
+    /// Registered `waiter -> producer` edges.
+    pub edges: usize,
+    /// Backing capacity of the waiter → producer table.
+    pub edges_capacity: usize,
+    /// Producers with at least one registered waiter.
+    pub producers: usize,
+    /// Waiter entries in the producer → waiters reverse index.
+    pub reverse_entries: usize,
+    /// Backing capacity of the producer → waiters reverse index.
+    pub reverse_capacity: usize,
+}
+
 /// A refused wait: registering it would close a cycle of waiting tasks (or
 /// the waiter cannot wait at all).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +247,18 @@ impl TaskRegistry {
     #[cfg(any(test, feature = "test-support"))]
     pub fn remove_wait_for_tests(&self, waiter: TaskId, producer: TaskId) {
         self.remove_wait(waiter, producer);
+    }
+
+    /// Current occupancy of the wait-for graph and its reverse index.
+    pub fn wait_graph_occupancy(&self) -> WaitGraphOccupancy {
+        let state = self.state.lock();
+        WaitGraphOccupancy {
+            edges: state.waits.len(),
+            edges_capacity: state.waits.capacity(),
+            producers: state.waiters.len(),
+            reverse_entries: state.waiters.values().map(FxHashSet::len).sum(),
+            reverse_capacity: state.waiters.capacity(),
+        }
     }
 
     /// Whether `task` is registered and not retired.
@@ -486,6 +514,9 @@ mod tests {
             .register_wait(unrelated.id(), other.id())
             .expect("acyclic wait registers");
         assert_eq!(registry.wait_count_for_tests(), 65);
+        let occupancy = registry.wait_graph_occupancy();
+        assert_eq!((occupancy.edges, occupancy.producers), (65, 2));
+        assert_eq!(occupancy.reverse_entries, 65);
 
         let producer_id = producer.id();
         drop(producer);
@@ -513,6 +544,16 @@ mod tests {
         assert!(
             reverse_index(&registry).is_empty(),
             "the reverse index drains"
+        );
+        let drained = registry.wait_graph_occupancy();
+        assert_eq!(
+            (drained.edges, drained.producers, drained.reverse_entries),
+            (0, 0, 0),
+            "occupancy drains with the edges",
+        );
+        assert!(
+            drained.edges_capacity >= 65,
+            "backing capacity is reported separately from membership",
         );
     }
 

@@ -29,7 +29,52 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{DepKey, SubmissionToken};
 
 /// Admission order of one dependency edge. Unique per [`DepEdges`] store.
-pub(in crate::dag) type EdgeSeq = u64;
+///
+/// Every equality and ordering comparison of two sequences is counted in
+/// observed builds: removing an edge from its dependency's waiters must
+/// compare sequence keys to find it, so the count measures the search a
+/// removal performed — a keyed lookup compares a logarithmic number, a
+/// sibling scan compares every sibling it passes.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::dag) struct EdgeSeq(u64);
+
+impl PartialEq for EdgeSeq {
+    fn eq(&self, other: &Self) -> bool {
+        count_edge_seq_comparison();
+        self.0 == other.0
+    }
+}
+
+impl Eq for EdgeSeq {}
+
+impl PartialOrd for EdgeSeq {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for EdgeSeq {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        count_edge_seq_comparison();
+        self.0.cmp(&other.0)
+    }
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+thread_local! {
+    static EDGE_SEQ_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_edge_seq_comparison() {
+    #[cfg(any(test, feature = "semantic-observe"))]
+    EDGE_SEQ_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+fn edge_seq_comparisons() -> u64 {
+    EDGE_SEQ_COMPARISONS.with(std::cell::Cell::get)
+}
 
 /// Waiters gated on one dependency, in edge-admission order.
 pub(in crate::dag) type DepWaiters = BTreeMap<EdgeSeq, SubmissionToken>;
@@ -43,7 +88,7 @@ pub(in crate::dag) struct DepEdges {
     /// generation (every incarnation). Holds only non-empty buckets, so a
     /// generation retirement visits the retired dependencies alone.
     by_file: FxHashMap<Arc<str>, BTreeMap<u64, FxHashSet<DepKey>>>,
-    next_seq: EdgeSeq,
+    next_seq: u64,
     #[cfg(any(test, feature = "semantic-observe"))]
     observations: DepEdgeObservations,
 }
@@ -53,18 +98,41 @@ pub(in crate::dag) struct DepEdges {
 #[cfg(any(test, feature = "semantic-observe"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DepEdgeObservations {
-    /// Waiter entries visited to remove single edges. Keyed removal visits
-    /// exactly one entry per removed edge.
-    pub unlink_entries_visited: u64,
-    /// Gated dependency keys visited by generation retirement.
-    pub retire_keys_visited: u64,
+    /// Edge-sequence keys compared while searching a dependency's waiters
+    /// to remove single edges. Keyed removal compares logarithmically many
+    /// per edge; a scan over the siblings compares each one it passes.
+    pub unlink_keys_compared: u64,
+    /// File-index entries generation retirement traversed: the canonical
+    /// bucket, each generation bucket and each gated dependency key it
+    /// walked, counted as reached rather than as returned.
+    pub retire_entries_visited: u64,
+}
+
+/// Current occupancy of the dependency-edge store and its file index.
+/// Always available; every count is derived from the resident tables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DepEdgeOccupancy {
+    /// Linked `waiter -> dependency` edges.
+    pub edges: usize,
+    /// Dependencies with at least one waiter.
+    pub gated_deps: usize,
+    /// Backing capacity of the dependency → waiters table.
+    pub gated_deps_capacity: usize,
+    /// Canonicals with at least one gated file dependency.
+    pub file_canonicals: usize,
+    /// Backing capacity of the canonical table of the file index.
+    pub file_canonicals_capacity: usize,
+    /// `(canonical, generation)` buckets of the file index.
+    pub file_generations: usize,
+    /// Gated file dependencies held by the file index.
+    pub file_deps: usize,
 }
 
 impl DepEdges {
     /// Link `waiter` to `dep`, returning the edge's sequence number. The
     /// caller records it in the waiter's `deps_remaining` in the same step.
     pub(in crate::dag) fn link(&mut self, dep: DepKey, waiter: SubmissionToken) -> EdgeSeq {
-        let seq = self.next_seq;
+        let seq = EdgeSeq(self.next_seq);
         self.next_seq = self
             .next_seq
             .checked_add(1)
@@ -87,12 +155,14 @@ impl DepEdges {
             verter_debug_assert!(false, "a recorded dependency edge is linked");
             return;
         };
+        #[cfg(any(test, feature = "semantic-observe"))]
+        let compared_before = edge_seq_comparisons();
         let removed = waiters.remove(&seq);
-        verter_debug_assert!(removed.is_some(), "a recorded dependency edge is linked");
         #[cfg(any(test, feature = "semantic-observe"))]
         {
-            self.observations.unlink_entries_visited += 1;
+            self.observations.unlink_keys_compared += edge_seq_comparisons() - compared_before;
         }
+        verter_debug_assert!(removed.is_some(), "a recorded dependency edge is linked");
         if waiters.is_empty() {
             self.waiters.remove(dep);
             unindex_file_dep(&mut self.by_file, dep);
@@ -121,43 +191,62 @@ impl DepEdges {
     /// Gated dependencies on `canonical` whose generation is strictly below
     /// `floor`, across every incarnation. Visits only those dependencies.
     pub(in crate::dag) fn gated_below(&mut self, canonical: &str, floor: u64) -> Vec<DepKey> {
-        let retired: Vec<DepKey> = self
-            .by_file
-            .get(canonical)
-            .map(|gens| {
-                gens.range(..floor)
-                    .flat_map(|(_, deps)| deps.iter().cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut retired = Vec::new();
+        let Some(gens) = self.by_file.get(canonical) else {
+            return retired;
+        };
         #[cfg(any(test, feature = "semantic-observe"))]
         {
-            self.observations.retire_keys_visited += retired.len() as u64;
+            self.observations.retire_entries_visited += 1;
+        }
+        for (_, deps) in gens.range(..floor) {
+            #[cfg(any(test, feature = "semantic-observe"))]
+            {
+                self.observations.retire_entries_visited += 1;
+            }
+            for dep in deps {
+                #[cfg(any(test, feature = "semantic-observe"))]
+                {
+                    self.observations.retire_entries_visited += 1;
+                }
+                retired.push(dep.clone());
+            }
         }
         retired
     }
 
-    /// Drop every edge. The waiter nodes are dropped by the same reset.
+    /// Drop every edge and release the tables' backing storage. The waiter
+    /// nodes are dropped by the same reset.
     pub(in crate::dag) fn clear(&mut self) {
-        self.waiters.clear();
-        self.by_file.clear();
+        self.waiters = FxHashMap::default();
+        self.by_file = FxHashMap::default();
+    }
+
+    /// Current occupancy of the store and its file index.
+    pub(in crate::dag) fn occupancy(&self) -> DepEdgeOccupancy {
+        let (file_generations, file_deps) =
+            self.by_file
+                .values()
+                .fold((0, 0), |(generations, deps), gens| {
+                    (
+                        generations + gens.len(),
+                        deps + gens.values().map(FxHashSet::len).sum::<usize>(),
+                    )
+                });
+        DepEdgeOccupancy {
+            edges: self.waiters.values().map(BTreeMap::len).sum(),
+            gated_deps: self.waiters.len(),
+            gated_deps_capacity: self.waiters.capacity(),
+            file_canonicals: self.by_file.len(),
+            file_canonicals_capacity: self.by_file.capacity(),
+            file_generations,
+            file_deps,
+        }
     }
 
     #[cfg(any(test, feature = "semantic-observe"))]
     pub(in crate::dag) fn observations(&self) -> DepEdgeObservations {
         self.observations
-    }
-
-    /// Number of linked edges.
-    #[cfg(test)]
-    pub(in crate::dag) fn edge_count(&self) -> usize {
-        self.waiters.values().map(BTreeMap::len).sum()
-    }
-
-    /// Whether the store and its file index are both empty.
-    #[cfg(test)]
-    pub(in crate::dag) fn is_drained(&self) -> bool {
-        self.waiters.is_empty() && self.by_file.is_empty()
     }
 
     /// Every gated dependency, for index-equals-scan oracles.

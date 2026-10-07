@@ -1058,6 +1058,12 @@ impl Scheduler {
         &self.counters
     }
 
+    /// Current occupancy of the DAG's dependency-edge and blocker
+    /// reference tables, read under one DAG lock.
+    pub fn dependency_occupancy(&self) -> crate::dag::DependencyOccupancy {
+        self.dag.lock().dependency_occupancy()
+    }
+
     // ── Sync Fast-Path Reads ──
 
     /// Get current source snapshot if generation-coherent.

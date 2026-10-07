@@ -221,7 +221,7 @@ fn assert_edges_match_nodes(dag: &SchedulerDag) {
         }
     }
     assert_eq!(
-        dag.dep_edges.edge_count(),
+        dag.dependency_occupancy().dep_edges.edges,
         node_edges,
         "edge store holds edges no node records",
     );
@@ -575,8 +575,11 @@ fn reverse_index_matches_scan_after_removals_and_shutdown() {
     assert!(dag.canonical_index.node_tokens.is_empty());
     assert!(dag.canonical_index.blocker_owner_gens.is_empty());
     assert!(dag.canonical_index.terminal_failure_keys.is_empty());
-    assert!(dag.canonical_index.blocker_dep_refs.is_empty());
-    assert!(dag.dep_edges.is_drained());
+    assert_eq!(
+        dag.dependency_occupancy(),
+        DependencyOccupancy::default(),
+        "reset drains every dependency table and releases its backing storage",
+    );
 }
 
 /// The node candidate set a supersede iterates is the bumped

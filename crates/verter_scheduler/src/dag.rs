@@ -53,6 +53,7 @@ mod blocker_registry;
 mod dep_edges;
 #[cfg(any(test, feature = "semantic-observe"))]
 pub use dep_edges::DepEdgeObservations;
+pub use dep_edges::DepEdgeOccupancy;
 use dep_edges::{DepEdges, EdgeSeq};
 
 /// Terminal-failure store + dependency-failure fan-out — owns the
@@ -658,6 +659,21 @@ pub struct CacheNodeTerminalCounts {
     pub cancelled: u64,
 }
 
+/// Current occupancy of the DAG's dependency state, read under the DAG
+/// lock. Always available; every count is derived from the resident
+/// tables, so it reports membership and backing capacity separately.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DependencyOccupancy {
+    /// The dependency-edge store and its `(canonical, generation)` index.
+    pub dep_edges: DepEdgeOccupancy,
+    /// Referenced canonicals in the blocker reference index.
+    pub blocker_ref_canonicals: usize,
+    /// `(owner, generation)` entries across the blocker reference index.
+    pub blocker_ref_entries: usize,
+    /// Backing capacity of the blocker reference index's canonical table.
+    pub blocker_ref_capacity: usize,
+}
+
 pub struct SchedulerDag {
     /// Per-token node bookkeeping. Visibility is narrowed to
     /// `pub(in crate::dag)` because the `terminal_failures` child
@@ -1084,7 +1100,7 @@ impl CanonicalReverseIndex {
         self.node_tokens.clear();
         self.blocker_owner_gens.clear();
         self.terminal_failure_keys.clear();
-        self.blocker_dep_refs.clear();
+        self.blocker_dep_refs = FxHashMap::default();
     }
 }
 
@@ -1134,6 +1150,18 @@ impl SchedulerDag {
         self.dep_edges.observations()
     }
 
+    /// Current occupancy of the dependency-edge store, its file index and
+    /// the blocker reference index.
+    pub fn dependency_occupancy(&self) -> DependencyOccupancy {
+        let refs = &self.canonical_index.blocker_dep_refs;
+        DependencyOccupancy {
+            dep_edges: self.dep_edges.occupancy(),
+            blocker_ref_canonicals: refs.len(),
+            blocker_ref_entries: refs.values().map(FxHashMap::len).sum(),
+            blocker_ref_capacity: refs.capacity(),
+        }
+    }
+
     /// Current in-flight permit count across both pools (diagnostic).
     pub fn in_flight_permits(&self) -> u64 {
         self.capacity_counter.load(Ordering::Acquire)
@@ -1172,7 +1200,7 @@ impl SchedulerDag {
 
     // ─────────────────────────────────────────────────────────────
     // Ready-lane index management. The lane matrix is the ONLY
-    // ready-set representation; `nodes`/`waiters`/`deps_remaining`
+    // ready-set representation; `nodes`/`dep_edges`/`deps_remaining`
     // remain the canonical ownership/gating state. Every lifecycle
     // mutation that can change a token's dispatch-readiness routes
     // through `refresh_ready_membership` so the lane index stays in
@@ -1489,7 +1517,7 @@ impl SchedulerDag {
     /// - New identity → new token, returned.
     /// - Identity already pending (not yet dispatched) → priority is
     ///   merged (`min` over base + inherited), incoming `deps` are
-    ///   merged into `deps_remaining` plus the `waiters` reverse-index,
+    ///   merged into `deps_remaining` plus the dependency-edge store,
     ///   and the existing token is returned. The merged dispatch does
     ///   not start until all merged deps complete.
     /// - Identity already dispatched (in-flight) → joiner shares the

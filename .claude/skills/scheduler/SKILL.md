@@ -124,6 +124,10 @@ remove a node's edges by key (no sibling rescans) and retirement reaches waiters
 of never-admitted producers through the file index alone (no global key scan).
 Removal drives off the per-canonical node, blocker-owner, blocker-reference and
 terminal-failure indices; no removal path scans a DAG-wide map.
+`SchedulerDag::dependency_occupancy` (and `Scheduler::dependency_occupancy`)
+reports the edge store, its file index and the blocker reference index as
+membership counts plus backing capacity in every build; reset releases those
+tables' backing storage.
 
 `remove` marks the object retired, signals Shutdown, cancels work, scrubs records,
 unpublishes the node and publishes its source-root Absent state under one DAG

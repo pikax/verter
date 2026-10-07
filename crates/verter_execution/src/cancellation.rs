@@ -41,12 +41,37 @@ struct AggregateOwners {
 /// probe pops dead owners off the end until it meets a live one: each
 /// registration is examined as dead at most once, and the probe never
 /// rescans the owners that remain.
-#[derive(Debug, Default)]
+///
+/// Dead owners buried under a live tail are retired by registration: once
+/// the list reaches twice the live owners the previous compaction kept, the
+/// next registration keeps only live owners. Each compaction examines at
+/// most twice as many entries as registrations since the last one, so the
+/// work stays amortized constant per registration, and the list never
+/// exceeds twice the owners live at the last compaction (at least
+/// [`MIN_OWNER_COMPACTION`]) however many owners have come and gone.
+#[derive(Debug)]
 struct OwnerEntries {
     owners: Vec<Weak<CancellationOwnerState>>,
-    /// Owner entries the liveness probe has examined. Tests only.
+    /// List length at which the next registration compacts.
+    compact_at: usize,
+    /// Owner entries the liveness probe and compaction have examined.
+    /// Tests only.
     #[cfg(test)]
     examined: u64,
+}
+
+/// Smallest owner-list length that triggers a compaction.
+const MIN_OWNER_COMPACTION: usize = 8;
+
+impl Default for OwnerEntries {
+    fn default() -> Self {
+        Self {
+            owners: Vec::new(),
+            compact_at: MIN_OWNER_COMPACTION,
+            #[cfg(test)]
+            examined: 0,
+        }
+    }
 }
 
 impl OwnerEntries {
@@ -58,13 +83,32 @@ impl OwnerEntries {
             {
                 self.examined += 1;
             }
-            if last.upgrade().is_some_and(|owner| owner.is_live()) {
+            if owner_is_live(last) {
                 return true;
             }
             self.owners.pop();
         }
         false
     }
+
+    /// Register `owner`, first retiring every dead owner when the list has
+    /// reached its compaction length.
+    fn push(&mut self, owner: Weak<CancellationOwnerState>) {
+        if self.owners.len() >= self.compact_at {
+            #[cfg(test)]
+            {
+                self.examined += self.owners.len() as u64;
+            }
+            self.owners.retain(owner_is_live);
+            self.compact_at = (2 * self.owners.len()).max(MIN_OWNER_COMPACTION);
+            self.owners.shrink_to(self.compact_at);
+        }
+        self.owners.push(owner);
+    }
+}
+
+fn owner_is_live(owner: &Weak<CancellationOwnerState>) -> bool {
+    owner.upgrade().is_some_and(|owner| owner.is_live())
 }
 
 #[derive(Debug)]
@@ -139,7 +183,7 @@ impl CancellationToken {
             self.state.cancelled.store(true, Ordering::Release);
             return None;
         }
-        entries.owners.push(Arc::downgrade(&state));
+        entries.push(Arc::downgrade(&state));
         owners.ever_registered.store(true, Ordering::Release);
         Some(CancellationOwner { state })
     }
@@ -394,6 +438,65 @@ mod tests {
         assert!(aggregate.is_cancelled());
         assert!(owners.entries.lock().owners.is_empty());
         drop(survivor);
+    }
+
+    /// A job that is never left ownerless keeps a bounded owner list: each
+    /// successor registers before its predecessor departs, so every
+    /// departed owner sits below a live one, with or without a long-lived
+    /// builder at the head. The retired-registration storage stays bounded
+    /// by the live owners, and the work per handoff stays constant.
+    #[test]
+    fn rolling_owner_handoffs_retain_only_a_bounded_owner_list() {
+        for with_builder in [false, true] {
+            let mut per_handoff = Vec::new();
+            for handoffs in [128_u64, 256, 512, 1024] {
+                let aggregate = CancellationToken::aggregate();
+                let builder = with_builder.then(|| {
+                    aggregate
+                        .register_owner(None)
+                        .expect("the builder registers")
+                });
+                let mut request = CancellationToken::new();
+                let mut current = aggregate
+                    .register_owner(Some(request.clone()))
+                    .expect("the first joiner registers");
+                let before = examined(&aggregate);
+                for _ in 0..handoffs {
+                    let next_request = CancellationToken::new();
+                    let next = aggregate
+                        .register_owner(Some(next_request.clone()))
+                        .expect("a successor joins a live job");
+                    request.cancel();
+                    drop(current);
+                    assert!(!aggregate.is_cancelled(), "the successor keeps the job");
+                    (request, current) = (next_request, next);
+                }
+                let owners = aggregate.state.owners.as_ref().expect("aggregate token");
+                let entries = owners.entries.lock();
+                assert!(
+                    entries.owners.len() <= MIN_OWNER_COMPACTION
+                        && entries.owners.capacity() <= 2 * MIN_OWNER_COMPACTION,
+                    "{handoffs} handoffs with builder={with_builder} retain {} owner entries \
+                     (capacity {})",
+                    entries.owners.len(),
+                    entries.owners.capacity(),
+                );
+                let visited = entries.examined - before;
+                drop(entries);
+                assert!(
+                    visited <= 4 * handoffs,
+                    "{handoffs} handoffs examined {visited} owner entries",
+                );
+                per_handoff.push(visited / handoffs);
+                drop(current);
+                drop(builder);
+                assert!(aggregate.is_cancelled(), "no owner remains");
+            }
+            assert!(
+                per_handoff.windows(2).all(|pair| pair[0] == pair[1]),
+                "per-handoff work is independent of the handoff count: {per_handoff:?}",
+            );
+        }
     }
 
     #[test]
