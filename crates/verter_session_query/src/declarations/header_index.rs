@@ -86,6 +86,176 @@ impl MemberHeader {
     }
 }
 
+/// Direct member headers in exact source order, with a key → position index.
+///
+/// Key identity is the authored key's exact equality: `1` and `"1"` are
+/// distinct keys here, as are distinct `unique symbol` identities and
+/// distinct computed keys. Every insertion is one index probe, so a wide
+/// interface, type literal or object literal costs linear key work instead
+/// of a scan of the members already recorded.
+#[derive(Debug, Clone, Default)]
+pub struct MemberHeaderList {
+    members: Vec<MemberHeader>,
+    positions: FxHashMap<TypeAuthoredPropertyKey, u32>,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    key_probes: u64,
+}
+
+impl MemberHeaderList {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Union headers into the list: a key already present keeps its first
+    /// header and position.
+    pub fn extend_first_wins(&mut self, headers: impl IntoIterator<Item = MemberHeader>) {
+        for header in headers {
+            self.insert_first_wins(header);
+        }
+    }
+
+    /// Union another list into this one, first-wins. An empty list takes
+    /// `other` whole, keeping its index.
+    pub fn union_first_wins(&mut self, other: MemberHeaderList) {
+        if self.members.is_empty() {
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            let key_probes = self.key_probes;
+            *self = other;
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            {
+                self.key_probes += key_probes;
+            }
+            return;
+        }
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        {
+            self.key_probes += other.key_probes;
+        }
+        self.extend_first_wins(other.members);
+    }
+
+    /// Insert one header unless its key is already present. Returns whether
+    /// it was inserted.
+    pub fn insert_first_wins(&mut self, header: MemberHeader) -> bool {
+        self.count_key_probe();
+        if self.positions.contains_key(&header.key) {
+            return false;
+        }
+        self.count_key_probe();
+        let next = self.next_position();
+        self.positions.insert(header.key.clone(), next);
+        self.members.push(header);
+        true
+    }
+
+    /// Build the list where a repeated key's LAST header wins, at its last
+    /// position: `{ a, b, a }` yields `b, a`.
+    #[must_use]
+    pub fn from_last_wins(headers: impl IntoIterator<Item = MemberHeader>) -> Self {
+        let mut list = Self::default();
+        let mut slots: Vec<Option<MemberHeader>> = Vec::new();
+        for header in headers {
+            list.count_key_probe();
+            let slot = u32::try_from(slots.len()).expect("member count fits u32");
+            if let Some(previous) = list.positions.insert(header.key.clone(), slot) {
+                slots[previous as usize] = None;
+            }
+            slots.push(Some(header));
+        }
+        // Compact the vacated slots and remap each key's slot to its final
+        // position.
+        let mut final_position = vec![0_u32; slots.len()];
+        list.members.reserve(list.positions.len());
+        for (slot, header) in slots.into_iter().enumerate() {
+            if let Some(header) = header {
+                final_position[slot] = list.next_position();
+                list.members.push(header);
+            }
+        }
+        for position in list.positions.values_mut() {
+            *position = final_position[*position as usize];
+        }
+        list
+    }
+
+    /// The header recorded under `key`.
+    #[must_use]
+    pub fn get(&self, key: &TypeAuthoredPropertyKey) -> Option<&MemberHeader> {
+        self.positions
+            .get(key)
+            .map(|&position| &self.members[position as usize])
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[MemberHeader] {
+        &self.members
+    }
+
+    /// Key-index operations (lookups and insertions) performed while
+    /// building this list: at most two per offered header.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    #[must_use]
+    pub fn key_probes(&self) -> u64 {
+        self.key_probes
+    }
+
+    #[inline]
+    fn count_key_probe(&mut self) {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        {
+            self.key_probes += 1;
+        }
+    }
+
+    fn next_position(&self) -> u32 {
+        u32::try_from(self.members.len()).expect("member count fits u32")
+    }
+}
+
+impl PartialEq for MemberHeaderList {
+    fn eq(&self, other: &Self) -> bool {
+        self.members == other.members
+    }
+}
+
+impl Eq for MemberHeaderList {}
+
+impl std::ops::Deref for MemberHeaderList {
+    type Target = [MemberHeader];
+
+    fn deref(&self) -> &[MemberHeader] {
+        &self.members
+    }
+}
+
+impl<'a> IntoIterator for &'a MemberHeaderList {
+    type Item = &'a MemberHeader;
+    type IntoIter = std::slice::Iter<'a, MemberHeader>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.members.iter()
+    }
+}
+
+impl IntoIterator for MemberHeaderList {
+    type Item = MemberHeader;
+    type IntoIter = std::vec::IntoIter<MemberHeader>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.members.into_iter()
+    }
+}
+
+impl FromIterator<MemberHeader> for MemberHeaderList {
+    /// First-wins collection.
+    fn from_iter<T: IntoIterator<Item = MemberHeader>>(iter: T) -> Self {
+        let mut list = Self::default();
+        list.extend_first_wins(iter);
+        list
+    }
+}
+
 /// One type-parameter header: the parameter name plus the source locators
 /// of its constraint / default clauses (the clauses themselves lower with
 /// the body, on demand).
@@ -113,7 +283,7 @@ pub struct TypeDeclHeader {
     /// Direct syntactic member headers, unioned across contributors in
     /// first-seen order (matching `TypeDeclGroup::merged_member_header_facts`'
     /// own-member inventory: heritage members are NOT included).
-    pub member_headers: Vec<MemberHeader>,
+    pub member_headers: MemberHeaderList,
     /// Source-order locators of every contributing declaration
     /// (deduplicated by `(statement anchor, declaration span)` — one
     /// statement can contribute several same-name declarations; DISTINCT
@@ -142,9 +312,11 @@ pub struct ValueDeclHeader {
     /// Name-identifier span of the last contributor.
     pub name_span: Span,
     /// Direct syntactic member headers of an object-literal initializer
-    /// (`const x = { a, b }`), in first-seen order. Empty for
-    /// non-object-literal values.
-    pub object_member_headers: Vec<MemberHeader>,
+    /// (`const x = { a, b }`) or a class's static members. Within one
+    /// object literal a repeated key's last occurrence wins, at its last
+    /// position; across contributors the first-seen key wins. Empty for
+    /// other values.
+    pub object_member_headers: MemberHeaderList,
     /// Source-order top-level statement indices of every contributing
     /// statement (deduplicated).
     pub contributors: Vec<DeclHeaderContributor>,
@@ -581,3 +753,7 @@ impl DeclHeaderIndex {
         index
     }
 }
+
+#[cfg(test)]
+#[path = "header_index_tests.rs"]
+mod header_index_tests;
