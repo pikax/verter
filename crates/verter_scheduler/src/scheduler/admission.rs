@@ -198,9 +198,9 @@ impl Scheduler {
         // With the DAG, the file's pending artifact waiters at this
         // generation are still in the dag's `file_waiters` map. The
         // dispatch loop will pick them up on the next pass once the
-        // dependency gate clears — which `cancel_matching` already
+        // dependency gate clears — which the cancel sweep already
         // did when it dropped the cancelled identity from the
-        // waiters reverse-index.
+        // dependency-edge store.
         //
         // We re-trigger the dispatch by sending a Wake into the
         // inbox; the driver picks it up, re-runs the cooperative

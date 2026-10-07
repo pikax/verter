@@ -115,6 +115,23 @@ nodes, dependency waiters, blocker records and failure records. It stores no DAG
 retirement floor. Admission's live-object check rejects later stale work,
 including gates on stages that were never admitted.
 
+Dependency edges have one representation, `dag::dep_edges::DepEdges`. A node's
+`deps_remaining` maps each `DepKey` to the edge's sequence number; the store maps
+the `DepKey` to its waiters keyed by that sequence (edge-admission order) and
+indexes every gated file dependency by `(canonical, generation)` across
+incarnations. Link and unlink touch both sides in one step, so `complete`/`cancel`
+remove a node's edges by key (no sibling rescans) and retirement reaches waiters
+of never-admitted producers through the file index alone (no global key scan).
+Removal drives off the per-canonical node, blocker-owner, blocker-reference and
+terminal-failure indices; no removal path scans a DAG-wide map.
+`SchedulerDag::dependency_occupancy` (and `Scheduler::dependency_occupancy`)
+reports the edge store, its file index and the blocker reference index as
+membership counts plus backing capacity in every build — including the summed
+capacity of the nested per-generation and per-canonical hash tables, which keep
+their backing while any member survives; reset releases those tables' backing
+storage. `TaskRegistry::wait_graph_occupancy` reports the wait-for graph the
+same way, including the per-producer waiter sets.
+
 `remove` marks the object retired, signals Shutdown, cancels work, scrubs records,
 unpublishes the node and publishes its source-root Absent state under one DAG
 hold. Stranded-waiter wakes run after unlock. `reset` uses the same ordering for
