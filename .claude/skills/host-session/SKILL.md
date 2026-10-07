@@ -79,9 +79,26 @@ back into the host for a service it was not given.
   only route by which a workspace receives them, both at construction and on
   `set_workspace`.
 - Known-file dependency resolution probes `VerterHost::known_dependency_extensions()`:
-  the bare specifier, then script extensions, then the classifier's admitted
-  carriers. The NAPI and WASM bindings default to it and spell no framework list
-  of their own.
+  the bare specifier, then script extensions, then the admitted carriers. Carrier
+  MEMBERSHIP comes from the composed admission (an unadmitted vertical's
+  extension is never probed); carrier ORDER is each descriptor's declared
+  `carrier_probe_rank` (`FrameworkAdapterRegistry::carrier_probe_extensions`),
+  never the classifier's `carrier_extensions()` order — that is a
+  longest-suffix-first MATCHING order and would flip same-stem
+  `.vue`/`.svelte` resolution. The NAPI and WASM bindings default to it and
+  spell no framework list of their own.
+
+The charter boundary names map onto existing owners; there are no Rust types
+called `RequestSession` or `ProjectSession` (the TypeScript `ProjectSession` in
+`@verter/component-meta` is unrelated):
+
+| Boundary name | Rust owner | Lifetime |
+| --- | --- | --- |
+| `VerterHost` | `VerterHost` (`host_construction.rs`, `host_lifecycle.rs`) | One host; the composition root |
+| `HostServices` | `framework::HostServices` (`framework/registry.rs`): capability catalog, adapter registry, framework options | One host; composed once at construction |
+| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy plus the process-local `ResolutionRetention` adapter | One host; attached to each workspace through `WorkspaceServices::attach` |
+| `RequestSession` | `resolver_core::request_bound::RequestBoundAdapter<L>` over a `RequestBoundLifecycle` — `SessionRequestLifecycle<'a>` (`SessionResolverContext<'a>`) or `HostRequestLifecycle<'a>` (`HostResolverContext<'a>`) | One request; host, session view and request view are borrowed for `'a` |
+| `ProjectSession` | `meta::MetaProject` (project lifetime; terminal `shutdown`) plus `meta::MetaSession` (session lifetime; `close`, and close on drop) | Project until shutdown; session until close or drop |
 
 Session lifetimes are scoped. `MetaSession` lends three audited-lane operations
 (capture check, output-bearing resolution, record drain) and never hands out

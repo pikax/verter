@@ -61,3 +61,41 @@ fn a_closed_session_refuses_the_audited_lane_before_resolution_or_publication() 
     assert_eq!(record.canonical_id, "/ClosedAudited.vue");
     assert!(record.files.is_empty(), "no resolution ran for the refusal");
 }
+
+/// The refusal record's capture state reports the HOST's audit config, not a
+/// fixed label: on a host with audit disabled the closed-session refusal is
+/// marked `AuditDisabled` (capture is off at host config), never
+/// `FilteredNoop` (which claims audit is enabled and a filter rejected the
+/// kind). On an audited host the same refusal stays `FilteredNoop`.
+#[test]
+fn a_closed_session_refusal_reports_the_hosts_capture_state() {
+    for (audit_enabled, expected) in [
+        (false, verter_audit::AuditCaptureState::AuditDisabled),
+        (true, verter_audit::AuditCaptureState::FilteredNoop),
+    ] {
+        let host = ComponentMetaHost::new_standalone(HostConfig {
+            audit_enabled,
+            footprint_capture: audit_enabled,
+            ..HostConfig::default()
+        });
+        host.upsert_base("/ClosedAudited.vue", SFC)
+            .expect("the base upsert succeeds");
+        let session = host.open_session().expect("the host is live");
+        session.close();
+
+        let (outcome, record) = session
+            .get_component_meta_with_audit("/ClosedAudited.vue")
+            .into_parts();
+        let error = outcome.expect_err("a closed session refuses the audited lane");
+        assert!(
+            error.to_string().contains("session is closed"),
+            "the closed-session refusal wins over the audit-config refusal \
+             (audit_enabled={audit_enabled}): {error}"
+        );
+        assert_eq!(
+            record.capture_state, expected,
+            "the refusal record reports the host's capture state \
+             (audit_enabled={audit_enabled})"
+        );
+    }
+}

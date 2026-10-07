@@ -1030,12 +1030,16 @@ impl FrameworkAdapterRegistry {
 /// the `carrier_language_id()` contract requires: a same-adapter TEMPLATE row
 /// or a same-adapter non-carrier language answers `false`, never inheriting
 /// the carrier's declared capabilities. A carrier-less adapter (`None`
-/// `carrier_language`) has no carrier row, so no row confirms against it.
+/// `carrier_language`) has no carrier row, so no row confirms against it:
+/// confirmation requires a PRESENT carrier id on both sides — two absent
+/// identities never match.
 fn is_registered_carrier_row(
     language: &FileLanguage,
     descriptor: &crate::framework::descriptor::FrameworkAdapterDescriptor,
 ) -> bool {
-    language.carrier_language_id() == descriptor.carrier_language.as_ref()
+    language
+        .carrier_language_id()
+        .is_some_and(|carrier_id| descriptor.carrier_language.as_ref() == Some(carrier_id))
 }
 
 /// The Vue adapter registration row.

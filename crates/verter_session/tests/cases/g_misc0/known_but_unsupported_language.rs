@@ -327,3 +327,61 @@ fn carrier_capability_predicates_require_the_carrier_row() {
     assert!(!registry.carries_template_analysis_inputs(&svelte_carrier));
     assert!(!registry.anchors_exports_at_script_setup(&svelte_carrier));
 }
+
+/// A CARRIER-LESS registration (`carrier_language: None`) has no carrier row,
+/// so no row confirms against it — even when its descriptor declares every
+/// carrier capability. DISCRIMINATING: a confirmation that compares the two
+/// optional identities directly matches the template row's absent carrier id
+/// (`None`) against the descriptor's absent carrier language (`None`) and
+/// grants all three capabilities to a non-carrier.
+#[test]
+fn carrier_less_registration_confirms_no_row() {
+    use verter_session::framework::{
+        surface_store::FrameworkSurfaceStore, vue_descriptor, FrameworkAdapterRegistry,
+        FrameworkRegistration, SurfaceRegistration,
+    };
+    use verter_session::typeinfo::framework_surface::{MacroSurfaceDtos, VueSurfaceKey};
+
+    let mut descriptor = vue_descriptor();
+    descriptor.carrier_language = None;
+    descriptor.declares_script_setup_type_bindings = true;
+    descriptor.carries_template_analysis_inputs = true;
+    descriptor.anchors_exports_at_script_setup = true;
+    let registry = FrameworkAdapterRegistry::from_registrations([(
+        verter_session::FrameworkAdapterId::vue(),
+        FrameworkRegistration {
+            descriptor,
+            carrier: None,
+            synth: None,
+            api_projector: None,
+            script_fact_providers: Vec::new(),
+            surface: SurfaceRegistration::Deferred,
+            surface_store: Arc::new(
+                FrameworkSurfaceStore::<VueSurfaceKey, MacroSurfaceDtos>::new(),
+            ),
+        },
+    )]);
+
+    let template_row = FileLanguage::FrameworkTemplate {
+        adapter_id: verter_session::FrameworkAdapterId::vue(),
+        owner_hint: None,
+    };
+    let carrier_shaped_row = FileLanguage::vue();
+    for row in [&template_row, &carrier_shaped_row] {
+        assert!(
+            !registry.declares_script_setup_type_bindings(row),
+            "a carrier-less adapter has no carrier row to grant the \
+             script-setup type-bindings surface to: {row:?}"
+        );
+        assert!(
+            !registry.carries_template_analysis_inputs(row),
+            "a carrier-less adapter has no carrier row to grant \
+             template-analysis inputs to: {row:?}"
+        );
+        assert!(
+            !registry.anchors_exports_at_script_setup(row),
+            "a carrier-less adapter has no carrier row to grant \
+             script-setup export anchoring to: {row:?}"
+        );
+    }
+}

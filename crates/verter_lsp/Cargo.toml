@@ -28,9 +28,11 @@ test-support = []
 # bookkeeping — the handler enter/exit and heartbeat active-count trace
 # lines and the timer/thread fields only they consume — behind
 # `cfg(feature = "semantic-observe")`, so default builds compile them away
-# with no per-operation enabled checks. Nothing forwards: the crate's own
-# traces gate on its own feature.
-semantic-observe = []
+# with no per-operation enabled checks. Forwards to the session through the
+# existing dependency edge (which forwards to every lower layer), so an
+# observation build of this root captures the same layers as the
+# measurement harness. No production edge or default feature enables it.
+semantic-observe = ["verter_session/semantic-observe"]
 
 [dependencies]
 verter_resolution = { workspace = true }

@@ -534,12 +534,16 @@ impl ComponentMetaSession {
     ///   holds a cheap default-filled record so the always-a-record
     ///   contract holds.
     /// - `Err(ComponentMetaHostError)` — a genuine request fault
-    ///   (`AuditNotEnabled` when the host config does not enable
-    ///   `audit_enabled` + `footprint_capture`, or `AuditRecordMissing`
+    ///   (`Host("session is closed")` / `Shutdown` when the session or its
+    ///   project no longer owns a lifetime — checked FIRST, before any
+    ///   capture-config check;
+    ///   `AuditNotEnabled` when the host config does not enable
+    ///   `audit_enabled` + `footprint_capture`; or `AuditRecordMissing`
     ///   when the bounded store evicted the record before retrieval).
-    ///   The carrier carries a cheap default-filled record marked
-    ///   `AuditDisabled` / `FilteredNoop` respectively so a consumer can
-    ///   still read `audit` regardless of outcome.
+    ///   The carrier carries a cheap default-filled record so a consumer
+    ///   can still read `audit` regardless of outcome: `AuditDisabled`
+    ///   whenever host capture is off (including a closed-session refusal
+    ///   on an unaudited host), `FilteredNoop` otherwise.
     pub fn get_component_meta_with_audit(
         &self,
         canonical_or_alias: &str,
@@ -552,17 +556,22 @@ impl ComponentMetaSession {
         // runs — no resolution, no request id, no audit publication may
         // happen under a session that no longer owns a lifetime. The
         // refusal carries the cheap default-filled record like every other
-        // pre-capture refusal (nothing was captured because nothing ran).
+        // pre-capture refusal (nothing was captured because nothing ran),
+        // marked with the HOST's capture state: `AuditDisabled` when the
+        // host config turns capture off, never a label claiming audit ran.
+        let capture_enabled = self.inner.audit_capture_enabled();
         if let Err(error) = self.inner.check_alive() {
+            let capture_state = if capture_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
             return verter_audit::AuditedResult::err(
                 ComponentMetaHostError::from(error),
-                cheap_component_meta_record(
-                    canonical_or_alias,
-                    verter_audit::AuditCaptureState::FilteredNoop,
-                ),
+                cheap_component_meta_record(canonical_or_alias, capture_state),
             );
         }
-        if !self.inner.audit_capture_enabled() {
+        if !capture_enabled {
             // No audit record is produced when capture is off — carry
             // the cheap default-filled record marked `AuditDisabled`
             // so the carrier's always-a-record contract still holds.
