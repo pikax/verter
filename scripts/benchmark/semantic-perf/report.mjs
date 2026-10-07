@@ -212,7 +212,7 @@ export function renderMarkdown(run) {
     push(
       "## Observe build (semantic-observe compiled in vs physically compiled out; not compared with tsc)",
       "",
-      "Both builds run the production configuration. REQUIRED state compares the retained occupancy and charges (semantic nodes, memo entries, relation proofs, relate keys, union views, shape-cache entries, retained and pinned bytes) of every completed measurement; histories and peaks are optional state and excluded.",
+      "Both builds run the production configuration. REQUIRED state compares the retained occupancy and charges (semantic nodes, memo entries, union views, shape-cache entries, retained and pinned bytes) of every completed measurement; histories and peaks are optional state and excluded.",
       "",
     );
     push(
@@ -235,15 +235,15 @@ export function renderMarkdown(run) {
   if (o.arms.includes("verter-counted")) {
     push("## Verter work and allocation counts (instrumented run; its times are not compared)", "");
     push(
-      "| scenario | setting | cold-request allocations | allocated MB | relation proofs | semantic nodes | memo entries | retention peak MB |",
-      "|---|---|---:|---:|---:|---:|---:|---:|",
+      "| scenario | setting | cold-request allocations | allocated MB | semantic nodes | memo entries | retention peak MB |",
+      "|---|---|---:|---:|---:|---:|---:|",
     );
     for (const c of cells) {
       const k = c.arms["verter-counted"];
       const r = c.arms.verter?.retention;
       if (!k) continue;
       push(
-        `| ${c.scenario} | ${c.setting} | ${k.coldAllocations?.median ?? "—"} | ${k.coldAllocatedBytes ? (k.coldAllocatedBytes.median / 1048576).toFixed(1) : "—"} | ${r?.relationProofs ?? "—"} | ${r?.semanticNodes ?? "—"} | ${r?.semanticMemoEntries ?? "—"} | ${r ? (r.peakTotalBytes / 1048576).toFixed(1) : "—"} |`,
+        `| ${c.scenario} | ${c.setting} | ${k.coldAllocations?.median ?? "—"} | ${k.coldAllocatedBytes ? (k.coldAllocatedBytes.median / 1048576).toFixed(1) : "—"} | ${r?.semanticNodes ?? "—"} | ${r?.semanticMemoEntries ?? "—"} | ${r ? (r.peakTotalBytes / 1048576).toFixed(1) : "—"} |`,
       );
     }
     push("");

@@ -46,8 +46,6 @@ export const sessionArmsOf = (arms) => arms.filter((a) => SESSION_ARMS.includes(
 export const REQUIRED_RETENTION = [
   "semanticNodes",
   "semanticMemoEntries",
-  "relationProofs",
-  "relateKeys",
   "unionViews",
   "shapeCacheEntries",
   "retainedBytes",
