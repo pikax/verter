@@ -46,13 +46,12 @@
 //! [`reconcile_source_membership`](MembershipReconciler::reconcile_source_membership)
 //! / [`remove_source_membership`](MembershipReconciler::remove_source_membership).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dashmap::DashMap;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use verter_session::external_ts::{CarrierOwnershipResolution, ProjectBinding, SnapshotRole};
 use verter_session_query::analysis::types::Hash16;
@@ -627,6 +626,169 @@ impl std::fmt::Display for ReconcileErr {
 
 impl std::error::Error for ReconcileErr {}
 
+/// Slots a drained registry keeps as backing capacity. Retirement shrinks the map
+/// back to this floor once churn has left it mostly empty, so a burst of distinct
+/// sources does not pin its peak allocation for the rest of the session.
+const SOURCE_GATE_SLOT_FLOOR: usize = 16;
+
+/// The per-source membership gates, each owned by its participants.
+///
+/// A participant is every transition that has asked for a source's gate and not yet
+/// left it: the holder, every waiter queued behind it, and an entrant that arrives
+/// while either is present. The registry counts them under its own lock, so the four
+/// moves on a source — lookup, registration, retirement and re-entry — are atomic with
+/// respect to one another: a gate retires only when its last participant leaves, an
+/// entrant either joins the live gate or (when none is live) installs the only one,
+/// and a source therefore never has two live gates. Waiters are served in arrival
+/// order (the gate is a FIFO async mutex), and gates for different sources never
+/// contend: the registry lock is held only for the O(1) bookkeeping, never across an
+/// `.await`.
+pub struct SourceGates {
+    slots: parking_lot::Mutex<HashMap<Arc<str>, SourceGateSlot>>,
+}
+
+/// One live gate and the number of participants that own it.
+struct SourceGateSlot {
+    /// The map key, shared so a joining participant names the source without
+    /// allocating.
+    source: Arc<str>,
+    gate: Arc<AsyncMutex<()>>,
+    participants: usize,
+}
+
+impl SourceGates {
+    /// An empty registry. One per session, shared by every reconciler the
+    /// coordinator builds.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            slots: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register a participant on `source`'s gate, installing the gate when no
+    /// participant owns one.
+    fn join(gates: &Arc<Self>, source: &str) -> SourceGateParticipant {
+        let mut slots = gates.slots.lock();
+        let (source, gate) = match slots.get_mut(source) {
+            Some(slot) => {
+                slot.participants += 1;
+                (Arc::clone(&slot.source), Arc::clone(&slot.gate))
+            }
+            None => {
+                let key: Arc<str> = Arc::from(source);
+                let gate = Arc::new(AsyncMutex::new(()));
+                slots.insert(
+                    Arc::clone(&key),
+                    SourceGateSlot {
+                        source: Arc::clone(&key),
+                        gate: Arc::clone(&gate),
+                        participants: 1,
+                    },
+                );
+                (key, gate)
+            }
+        };
+        drop(slots);
+        SourceGateParticipant {
+            gates: Arc::clone(gates),
+            source,
+            gate,
+        }
+    }
+
+    /// One participant leaves `source`'s gate; the last one retires it.
+    fn leave(&self, source: &str, gate: &Arc<AsyncMutex<()>>) {
+        let mut slots = self.slots.lock();
+        let Some(slot) = slots.get_mut(source) else {
+            verter_debug_assert!(
+                false,
+                "a participant left a gate the registry does not hold"
+            );
+            return;
+        };
+        verter_debug_assert!(
+            Arc::ptr_eq(&slot.gate, gate),
+            "a participant left a gate that is not the source's live gate"
+        );
+        slot.participants -= 1;
+        if slot.participants != 0 {
+            return;
+        }
+        slots.remove(source);
+        // Shrink only once the map is at most a quarter full, to the larger of its
+        // population and the floor: the result is at most half full, so a shrink is
+        // never repeated before the population halves again (amortized O(1)).
+        let retained = slots.len().max(SOURCE_GATE_SLOT_FLOOR);
+        if slots.capacity() > retained * 4 {
+            slots.shrink_to(retained);
+        }
+    }
+
+    /// Sources with a live gate — the current gate population. Zero once every
+    /// participant has left.
+    #[must_use]
+    pub fn live_gates(&self) -> usize {
+        self.slots.lock().len()
+    }
+
+    /// Participants currently owning `source`'s gate (holder plus waiters), zero
+    /// when the source has no live gate.
+    #[must_use]
+    pub fn participants(&self, source: &str) -> usize {
+        self.slots
+            .lock()
+            .get(source)
+            .map_or(0, |slot| slot.participants)
+    }
+
+    /// Slots the registry's backing map can hold without reallocating. After any
+    /// retirement it is at most four times the larger of the live population and
+    /// the retained floor.
+    #[must_use]
+    pub fn backing_capacity(&self) -> usize {
+        self.slots.lock().capacity()
+    }
+}
+
+impl Default for SourceGates {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A registered participant that has not yet acquired the gate. Dropping it — the
+/// waiter's future cancelled — leaves the gate.
+struct SourceGateParticipant {
+    gates: Arc<SourceGates>,
+    source: Arc<str>,
+    gate: Arc<AsyncMutex<()>>,
+}
+
+impl SourceGateParticipant {
+    /// Wait for the gate (FIFO among this source's participants) and hold it.
+    async fn hold(self) -> SourceGateGuard {
+        let held = Arc::clone(&self.gate).lock_owned().await;
+        SourceGateGuard {
+            _held: held,
+            _participant: self,
+        }
+    }
+}
+
+impl Drop for SourceGateParticipant {
+    fn drop(&mut self) {
+        self.gates.leave(&self.source, &self.gate);
+    }
+}
+
+/// The held gate. Fields drop in declaration order: the gate is released before the
+/// participant leaves, so a retired gate is never still held.
+struct SourceGateGuard {
+    _held: OwnedMutexGuard<()>,
+    _participant: SourceGateParticipant,
+}
+
 /// The authoritative source-membership reconciler.
 ///
 /// Holds the source-indexed [`MembershipLedger`] (the membership authority) and the
@@ -647,17 +809,15 @@ pub struct MembershipReconciler {
     /// `.await`s, WITHOUT holding the ledger lock (see `apply_owned`). Two concurrent
     /// transitions for the SAME source would otherwise interleave that read-modify-write
     /// and produce a torn or superseded advertisement (e.g. a stale companion never
-    /// closed, or an A→B owner change clobbered by a stale A commit). This map
+    /// closed, or an A→B owner change clobbered by a stale A commit). The registry
     /// serializes transitions PER SOURCE while leaving different sources fully
-    /// concurrent.
+    /// concurrent, and a source's gate lives exactly as long as it has a participant.
     ///
-    /// The map is SHARED (`Arc`): the production reconciler is rebuilt per transition
-    /// from the coordinator's fields, so the coordinator owns the one map and hands the
-    /// same `Arc` to every rebuilt reconciler — otherwise each per-call reconciler would
-    /// get a fresh (useless) map. Entries are never removed (bounded by the workspace's
-    /// carrier count), which also avoids the keyed-lock cleanup race (a removed-then-
-    /// reinserted gate would fail to serialize against an in-flight holder).
-    source_gates: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
+    /// The registry is SHARED (`Arc`): the production reconciler is rebuilt per
+    /// transition from the coordinator's fields, so the coordinator owns the one
+    /// registry and hands the same `Arc` to every rebuilt reconciler — otherwise each
+    /// per-call reconciler would serialize against nobody.
+    source_gates: Arc<SourceGates>,
 }
 
 impl MembershipReconciler {
@@ -669,7 +829,7 @@ impl MembershipReconciler {
         ledger: Arc<MembershipLedger>,
         provider: Arc<dyn TypeProvider>,
         committer: Arc<dyn CarrierMembershipCommitter>,
-        source_gates: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
+        source_gates: Arc<SourceGates>,
     ) -> Self {
         Self {
             ledger,
@@ -686,7 +846,7 @@ impl MembershipReconciler {
     pub fn new_store_only(
         ledger: Arc<MembershipLedger>,
         committer: Arc<dyn CarrierMembershipCommitter>,
-        source_gates: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
+        source_gates: Arc<SourceGates>,
     ) -> Self {
         Self {
             ledger,
@@ -696,17 +856,14 @@ impl MembershipReconciler {
         }
     }
 
-    /// The per-source serialization gate for `source` (created on first use). The
-    /// returned `Arc<AsyncMutex>` is independent of the `DashMap` shard lock — the
-    /// `entry` guard is dropped before this returns, so the caller `.lock().await`s
-    /// WITHOUT holding a shard lock across the await. See [`Self::source_gates`].
-    fn source_gate(&self, source: &str) -> Arc<AsyncMutex<()>> {
-        Arc::clone(
-            self.source_gates
-                .entry(source.to_string())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-                .value(),
-        )
+    /// Serialize behind `source`'s membership gate. The caller is a participant from
+    /// the moment this is called — while it waits, and while it holds the returned
+    /// guard — so the gate cannot retire under a waiter. Dropping the future while it
+    /// waits (cancellation) leaves the gate like a release does.
+    async fn serialize_source(&self, source: &CanonicalSource) -> SourceGateGuard {
+        SourceGates::join(&self.source_gates, source.as_str())
+            .hold()
+            .await
     }
 
     /// The shared membership ledger (the source-indexed advertisement authority).
@@ -775,11 +932,12 @@ impl MembershipReconciler {
         sources.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
         sources.dedup_by(|left, right| left.as_str() == right.as_str());
 
-        // `lock_owned` lets the guards retain their gate Arcs in this vector.
-        // Canonical ordering makes overlapping batch activations deadlock-free.
+        // Each guard owns its participation, so the vector keeps every gate live
+        // until activation finishes. Canonical ordering makes overlapping batch
+        // activations deadlock-free.
         let mut guards = Vec::with_capacity(sources.len());
         for source in &sources {
-            guards.push(self.source_gate(source.as_str()).lock_owned().await);
+            guards.push(self.serialize_source(source).await);
         }
 
         let current_session = self.ledger.current_session();
@@ -865,8 +1023,7 @@ impl MembershipReconciler {
         // it across `.await`s without holding the ledger lock, so an unserialized
         // concurrent peer could interleave into a torn/superseded advertisement. Held
         // across the whole transition; different sources take different gates.
-        let gate = self.source_gate(source.as_str());
-        let _gate = gate.lock().await;
+        let _gate = self.serialize_source(source).await;
 
         // A caller-authoritative terminal reason is an absent outcome on its own —
         // a deleted / compile-failed / conflict-removed source has no owner to
@@ -911,8 +1068,7 @@ impl MembershipReconciler {
         // Same per-source serialization as `reconcile_source_membership` — a removal is
         // a membership transition (store retract + provider close + ledger tombstone)
         // and must not interleave with a concurrent publish/removal of the same source.
-        let gate = self.source_gate(source.as_str());
-        let _gate = gate.lock().await;
+        let _gate = self.serialize_source(source).await;
         self.apply_absent(source, reason).await
     }
 
