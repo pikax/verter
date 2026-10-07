@@ -98,7 +98,7 @@ async fn analyze_file_tool_emits_mcp_audit_record_with_populated_payload() {
     // `[1, 64)` even after a handful of compile / analysis fan-out
     // calls fire.
     for rid in 1u64..64 {
-        if let Some(record) = host.take_audit_record(rid) {
+        if let Some(record) = host.host_audit_runtime().take_record(rid) {
             if let RequestKind::Mcp { tool } = &record.kind {
                 if tool == "analyze_file" {
                     found_analyze_file_record = Some(record);

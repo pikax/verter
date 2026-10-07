@@ -16,6 +16,8 @@ mod audit_helper_envelope_e2e;
 mod audit_observer_tls_propagation;
 #[path = "g_audit/audit_records_per_host_isolated.rs"]
 mod audit_records_per_host_isolated;
+#[path = "g_audit/audit_request_ids_share_one_host_key_space.rs"]
+mod audit_request_ids_share_one_host_key_space;
 #[path = "g_audit/audit_request_registration_active_variant_inserts_and_finalizes.rs"]
 mod audit_request_registration_active_variant_inserts_and_finalizes;
 #[path = "g_audit/audit_request_registration_survives_worker_tls_churn.rs"]

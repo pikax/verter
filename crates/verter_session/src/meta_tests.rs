@@ -31539,7 +31539,8 @@ defineEmits<{ e: [n: number] }>()
     );
     let lsp_debug = format!("{:?}{:?}", la, lt.into_lanes());
     let record = host
-        .take_audit_record(rid)
+        .host_audit_runtime()
+        .take_record(rid)
         .expect("the audited output entry produces the request audit record");
     assert_eq!(
         record.kind,
@@ -31563,7 +31564,8 @@ defineEmits<{ e: [n: number] }>()
         "the warm audited envelope equals the cold one"
     );
     let warm_record = host
-        .take_audit_record(warm_rid)
+        .host_audit_runtime()
+        .take_record(warm_rid)
         .expect("the warm audited hit synthesizes a from_cache record");
     assert!(warm_record.from_cache, "warm hit records from_cache");
 

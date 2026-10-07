@@ -1,0 +1,202 @@
+{
+  "schema": "ARH4LifecycleCutover",
+  "version": 1,
+  "contractNode": "ARH4",
+  "boundary": {
+    "path": "crates/verter_session/src/lib.rs",
+    "typeName": "VerterHost",
+    "note": "VerterHost and its session lifetime owners after the host construction root and engine ports landed; only residual source-management, observation and audit narrowing is in scope, and observer/route-memo/host-audit separation and request-substrate placement are not repeated"
+  },
+  "inventory": [
+    {
+      "concern": "construction",
+      "survivingOwner": {
+        "path": "crates/verter_session/src/host_construction.rs",
+        "typeName": "VerterHost"
+      },
+      "disposition": "no-residual",
+      "evidence": "every VerterHost constructor composes its services through the one construction root in host_construction.rs; the root mints the audit runtime, which now also mints the audit records store, so no constructor builds a second audit store"
+    },
+    {
+      "concern": "source management",
+      "survivingOwner": {
+        "path": "crates/verter_session/src/host_lifecycle.rs",
+        "typeName": "VerterHost"
+      },
+      "disposition": "no-residual",
+      "evidence": "the workspace is one Arc<RwLock<..>> slot shared with the scheduler's source loader (one lock, not a copy); set_workspace swaps that slot and attaches the construction root's WorkspaceServices; the session attachment holds only surface stores, the output lease and surface-claim authority, never a workspace copy"
+    },
+    {
+      "concern": "observation",
+      "survivingOwner": {
+        "path": "crates/verter_session/src/host_construction.rs",
+        "typeName": "VerterHost"
+      },
+      "disposition": "no-residual",
+      "evidence": "host metrics and component-meta provenance counters each have one host-owned field; request observers, route memos and host audit adapters are already separated, and the request substrate's audit and trace dependencies already sit beside it"
+    },
+    {
+      "concern": "resolver access",
+      "survivingOwner": {
+        "path": "crates/verter_session/src/resolver_core/request_bound.rs",
+        "typeName": "VerterHost"
+      },
+      "disposition": "no-residual",
+      "evidence": "resolver state, the project type store and the store-view manager are reached through the request-bound engine ports and the per-request resolver snapshot; no session-level host accessor survives"
+    },
+    {
+      "concern": "audit access",
+      "survivingOwner": {
+        "path": "crates/verter_session/src/host_audit_runtime.rs",
+        "typeName": "HostAuditRuntime"
+      },
+      "disposition": "narrowed",
+      "cutover": ["ARH4-CUT-1", "ARH4-CUT-2"]
+    },
+    {
+      "concern": "scheduler source-staging surface",
+      "survivingOwner": {
+        "path": "crates/verter_scheduler/src/scheduler.rs",
+        "typeName": "Scheduler"
+      },
+      "disposition": "narrowed",
+      "cutover": ["ARH4-CUT-3", "ARH4-CUT-4"]
+    }
+  ],
+  "cutover": [
+    {
+      "id": "ARH4-CUT-1",
+      "route": "VerterHost's second handle to the audit records store and its own drain/publish methods beside the audit runtime's",
+      "survivingOwner": {
+        "path": "crates/verter_session/src/host_audit_runtime.rs",
+        "typeName": "HostAuditRuntime",
+        "methods": ["new", "take_record", "publish_record"],
+        "constructorSignature": "pub fn new(config: AuditConfig) -> Self"
+      },
+      "callForms": ["host_audit_runtime().take_record(", "host_audit_runtime().publish_record("],
+      "consumers": [
+        "crates/verter_lsp/src/server/nav_features_hover_provenance.rs",
+        "crates/verter_session/src/audited_request.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry_resolution.rs",
+        "crates/verter_session/src/host_manage/component_meta_methods.rs",
+        "crates/verter_session/src/meta.rs"
+      ],
+      "deletion": "the VerterHost audit-records field, VerterHost::take_audit_record and VerterHost::finalize_request_audit_record are deleted; the runtime mints its store, so the host cannot hold an independent copy"
+    },
+    {
+      "id": "ARH4-CUT-2",
+      "route": "a process-wide component-meta audit request-id counter keying records into the per-host store beside the host's own counter",
+      "survivingOwner": {
+        "path": "crates/verter_session/src/host_manage/component_meta_entry.rs",
+        "typeName": "VerterHost",
+        "methods": ["next_request_id"]
+      },
+      "callForms": ["next_request_id()"],
+      "consumers": [
+        "crates/verter_session/src/host_manage/component_meta_entry.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry_resolution.rs",
+        "crates/verter_session/src/host_manage/component_meta_methods.rs",
+        "crates/verter_session/src/meta/output_api.rs"
+      ],
+      "deletion": "the process-wide counter and its meta_resolve re-export are deleted; every component-meta request context and unregistered record takes its id from the host"
+    },
+    {
+      "id": "ARH4-CUT-3",
+      "executesRegisterRow": "ARH1-CUT-2",
+      "route": "Scheduler.deferred_blocker_ids public field",
+      "survivingOwner": {
+        "path": "crates/verter_scheduler/src/scheduler.rs",
+        "typeName": "Scheduler",
+        "field": "deferred_blocker_ids",
+        "visibility": "pub(crate)"
+      },
+      "consumers": [],
+      "deletion": "the field's cross-crate visibility is removed; it has no consumer outside crates/verter_scheduler"
+    },
+    {
+      "id": "ARH4-CUT-4",
+      "executesRegisterRow": "ARH1-CUT-3",
+      "route": "Scheduler test_* hooks on the production surface",
+      "survivingOwner": {
+        "path": "crates/verter_scheduler/src/scheduler.rs",
+        "typeName": "Scheduler",
+        "gate": "cfg(any(test, feature = \"test-support\"))"
+      },
+      "consumers": [],
+      "deletion": "every hook the ARH1 contract narrows to test configuration carries the test-support gate; the hook population is read from the ARH1 contract, not repeated here"
+    }
+  ],
+  "ac2": {
+    "defect": "an independent mutable audit records store, or a second request-id authority keying records into the host's store, lets an unregistered record replace an audited record that shares its id, so a consumer draining by request id gets the wrong record or none",
+    "evidence": [
+      {
+        "file": "crates/verter_session/tests/cases/g_audit/audit_records_per_host_isolated.rs",
+        "test": "audit_records_per_host_isolated_two_hosts_dedicated_record_stores"
+      },
+      {
+        "file": "crates/verter_session/tests/cases/g_audit/audit_request_ids_share_one_host_key_space.rs",
+        "test": "unregistered_and_audited_records_share_one_host_minted_key_space"
+      }
+    ]
+  },
+  "ac3": {
+    "concerns": [
+      {
+        "concern": "fresh-versus-incremental equivalence",
+        "applicable": false,
+        "rationale": "no cache, query or map state is touched: audit records are per-request observations drained by id, never reused as a cached answer"
+      },
+      {
+        "concern": "edit/revert",
+        "applicable": false,
+        "rationale": "no source, workspace or derived state changes on an edit; the narrowed routes only publish and drain finished audit records"
+      },
+      {
+        "concern": "cancellation",
+        "applicable": true,
+        "evidence": [
+          {
+            "file": "crates/verter_session/tests/cases/g_audit/audit_dropped_registration_emits_no_record.rs",
+            "test": "dropping_active_registration_without_finalize_clears_active_map_and_emits_no_record"
+          },
+          {
+            "file": "crates/verter_session/tests/cases/g_audit/audit_dropped_registration_emits_no_record.rs",
+            "test": "finalize_then_drop_does_not_publish_a_second_record"
+          }
+        ]
+      },
+      {
+        "concern": "stale/partial rejection",
+        "applicable": false,
+        "rationale": "no admission or publication fence is touched; the runtime's publish route keeps the registration-first finalize and adds no warm or partial path"
+      },
+      {
+        "concern": "deterministic ordering under perturbed discovery or scheduling",
+        "applicable": true,
+        "evidence": [
+          {
+            "file": "crates/verter_session/tests/cases/g_audit/audit_request_ids_share_one_host_key_space.rs",
+            "test": "unregistered_and_audited_records_share_one_host_minted_key_space"
+          }
+        ]
+      }
+    ]
+  },
+  "ac4Rationale": "No VIM/DX product capability, permission or editor-visible behavior changes: the narrowed routes are Rust host APIs below the LSP, MCP, NAPI and WASM boundaries, whose audit wire surfaces read the same runtime store as before. The Rust API migration is recorded below and in docs/audit-footprint/api-reference.md and the audit-infrastructure skill; there is no DOC1 public example of these APIs to migrate.",
+  "migration": [
+    {
+      "from": "VerterHost::take_audit_record(request_id)",
+      "to": "host_audit_runtime().take_record(request_id)"
+    },
+    {
+      "from": "HostAuditRuntime::new(config, records)",
+      "to": "pub fn new(config: AuditConfig) -> Self"
+    }
+  ],
+  "ac5Rationale": "No latency, RSS or allocation budget is bound: the narrowed routes keep one atomic increment per minted request id and one locked insert or take per record, so work counts are unchanged, and the arh4-perf evidence run is not applicable and has no manifest.",
+  "evidenceRun": {
+    "id": "arh4-perf",
+    "manifest": "scripts/benchmark/evidence-runs/arh4-perf.json",
+    "applicable": false
+  }
+}

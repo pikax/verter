@@ -200,7 +200,8 @@ fn audit_mcp_tool_call_subrequest_records_mcp_request_as_parent_request_id() {
         .into_parts();
     let sub_request_id = sub_request_id.expect("component-meta resolution must stamp request_id");
     let sub_record = host
-        .take_audit_record(sub_request_id)
+        .host_audit_runtime()
+        .take_record(sub_request_id)
         .expect("component-meta sub-request must publish an audit record");
 
     // The MCP record's request_id must be the parent of the sub-request.

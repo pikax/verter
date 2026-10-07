@@ -456,13 +456,19 @@ fn output_failure_audited_entry_returns_the_real_stored_record_not_a_fabricated_
     // regression guards against.
     let base_host = host.inner.project.host();
     assert!(
-        base_host.audit_records.is_empty(),
+        base_host
+            .host_audit_runtime()
+            .audit_records_store()
+            .is_empty(),
         "no orphan audit record may remain in the store after the \
          audited error return; {} record(s) left behind",
-        base_host.audit_records.len(),
+        base_host.host_audit_runtime().audit_records_store().len(),
     );
     assert!(
-        base_host.take_audit_record(record.request_id).is_none(),
+        base_host
+            .host_audit_runtime()
+            .take_record(record.request_id)
+            .is_none(),
         "the returned record was drained (a second take yields None)"
     );
 }

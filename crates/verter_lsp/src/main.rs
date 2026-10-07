@@ -19,14 +19,10 @@ use verter_session::{HostConfig, VerterHost};
 /// process main thread, whose stack is whatever the platform's linker chose
 /// (1 MiB on Windows/MSVC). `verter_lsp::SERVE_THREAD_STACK_BYTES` documents
 /// the measured requirement this replaces that default with.
+/// `verter_lsp::serve_until_exit` documents why the process exits without
+/// tearing the runtime down.
 fn main() {
-    verter_lsp::run_on_serve_thread(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("multi-thread tokio runtime must build")
-            .block_on(serve());
-    });
+    verter_lsp::serve_until_exit(serve);
 }
 
 async fn serve() {

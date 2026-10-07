@@ -678,8 +678,8 @@ pub struct RequestContext {
     /// [`crate::host_audit_runtime::AuditRequestRegistration`] **before**
     /// installing this context into TLS, hands it to
     /// [`Self::install_audit_registration`], and the inner resolver
-    /// path finalises through it instead of calling
-    /// [`crate::VerterHost::finalize_request_audit_record`] directly. `None`
+    /// path finalises through it instead of publishing straight into
+    /// the host's records store. `None`
     /// when no audited entry-point is in scope (rare — direct callers
     /// of `resolve_component_meta` outside the audited path).
     pub audit_registration: std::sync::OnceLock<Arc<dyn RequestAuditFinalization>>,

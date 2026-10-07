@@ -577,27 +577,18 @@ pub struct VerterHost {
     /// `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
     pub(crate) project_type_store: Arc<crate::project_type_store::ProjectTypeStore>,
-    /// Monotonic request-id generator for component-meta requests.
+    /// Monotonic request-id generator: the one authority for the ids
+    /// this host's audit records and request contexts are keyed by.
     /// Zero is reserved for "not populated"; the counter
     /// starts at 0 and `next_request_id()` returns pre-increment + 1.
     pub(crate) request_id_counter: std::sync::atomic::AtomicU64,
-    /// Bounded insert-ordered store of finished audit records.
-    ///
-    /// Backing shape:
-    /// `Mutex<IndexMap<u64, RequestAuditRecord>>` with capacity 256 and
-    /// **FIFO eviction** via `shift_remove_index(0)` at capacity (verified
-    /// at `audit_records_store.rs:23–26, 49–56`). Different artifact type
-    /// than anything in `ProjectTypeStore`; the audit subsystem has its own
-    /// per-request lifecycle. Per-request inserts happen in
-    /// `emit_audit_trace`; consumers retrieve via
-    /// `take_audit_record(request_id)`.
-    pub(crate) audit_records: Arc<crate::component_meta_audit::AuditRecordsStore>,
-    /// Host-owned audit runtime — wraps [`crate::component_meta_audit::AuditRecordsStore`],
-    /// the [`verter_audit::AuditConfig`] snapshot, and the active-request
+    /// Host-owned audit runtime — the sole owner of this host's
+    /// [`crate::component_meta_audit::AuditRecordsStore`] (a bounded,
+    /// insert-ordered store with FIFO eviction), the
+    /// [`verter_audit::AuditConfig`] snapshot, and the active-request
     /// registry that [`crate::host_audit_runtime::AuditRequestRegistration`]
-    /// populates. The records store and this runtime share the same
-    /// `Arc<AuditRecordsStore>`, so writes through either surface land in
-    /// the same map.
+    /// populates. Records are keyed by ids from `request_id_counter`;
+    /// consumers drain them via `host_audit_runtime().take_record(id)`.
     pub(crate) host_audit_runtime: Arc<crate::host_audit_runtime::HostAuditRuntime>,
     /// Test-only host-CPU-pool identity token observed by
     /// `compile_one_in_batch`. `usize::MAX` means unobserved/not on a

@@ -21,7 +21,7 @@
 //! aggregates these signals into per-request atomics. This entry-point
 //! reads the atomics, assembles a [`verter_audit::CompilePayload`], and
 //! finalises through the registration so consumers via
-//! `take_audit_record(request_id)` work uniformly with the
+//! `take_record(request_id)` work uniformly with the
 //! component-meta path.
 //!
 //! Returns an [`verter_audit::AuditedResult<VerterCompileResult,
