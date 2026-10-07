@@ -1,6 +1,5 @@
 //! Relation storage — the payload read/write path over the family memo's
-//! `Relate` family, plus the payload-side relation-proof interners
-//! (design `.claude/skills/type-resolution/SKILL.md` Decision 4).
+//! `Relate` family.
 //!
 //! Writes land through the batched SCC member publish in
 //! [`super::scc_publish`] — the one store-owned admission path every
@@ -18,10 +17,11 @@
 //! (per-family cap, invalid-first / LRU eviction, the family
 //! `memo_budget` global bound, reverse-index drains).
 //!
-//! The proofs a payload references by [`crate::semantic_query::RelationProofId`]
-//! / [`crate::semantic_query::RelateKeyId`] live in the two store-owned
-//! append-only interners here — the payload-side `relation_proofs` table
-//! backing, OFF the type-values surface.
+//! The store retains no explanation of a relation: a payload names no proof
+//! and no co-discharged key, so a relation entry's residency is its memo
+//! candidate alone, and eviction or a document close leaves nothing behind.
+//! Explanations are optional request-owned capture
+//! (`project_semantic_dispatch::relation_explanation`).
 
 use super::*;
 
@@ -58,49 +58,6 @@ impl SemanticGraphStore {
             "binding relation roots use independently-owned cooperative flights"
         );
         self.begin_inline_member_flight(key.to_query_key())
-    }
-
-    /// Intern a relation proof, returning its opaque
-    /// [`crate::semantic_query::RelationProofId`] (deduplicated by value).
-    /// The proof rides the payload-side table — it is NOT a
-    /// validity oracle (warm-hit validity is decided SOLELY by the
-    /// `ReadSetSignature` rail).
-    pub fn intern_relation_proof(
-        &self,
-        proof: crate::semantic_query::RelationProof,
-    ) -> crate::semantic_query::RelationProofId {
-        self.relation_proof_table.lock().intern(proof)
-    }
-
-    /// Intern a COMPLETED full `Relate` key for a `CoinductiveCycle`
-    /// proof, returning its opaque [`crate::semantic_query::RelateKeyId`].
-    pub fn intern_relate_key(
-        &self,
-        key: crate::semantic_query::RelateMemoKey,
-    ) -> crate::semantic_query::RelateKeyId {
-        self.relate_key_table.lock().intern(key)
-    }
-
-    /// Read back a proof by id (test + future display surface). `None`
-    /// for an unknown id and for a slot a document release dropped.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn relation_proof_for(
-        &self,
-        id: crate::semantic_query::RelationProofId,
-    ) -> Option<crate::semantic_query::RelationProof> {
-        self.relation_proof_table.lock().get(id.0).cloned()
-    }
-
-    /// Read back a co-discharged key by id (test surface). `None` for an
-    /// unknown id and for a slot a document release dropped.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn relate_key_for_id(
-        &self,
-        id: crate::semantic_query::RelateKeyId,
-    ) -> Option<crate::semantic_query::RelateMemoKey> {
-        self.relate_key_table.lock().get(id.0).cloned()
     }
 
     /// Strict warm-hit read of a published relation payload for the full
@@ -341,47 +298,18 @@ impl SemanticGraphStore {
         );
     }
 
-    /// Test-support payload constructor: a decided outcome with a default
-    /// root-witness proof interned (fixtures that need a publishable
-    /// payload without driving the reducer).
+    /// Test-support payload constructor: a decided outcome with no
+    /// bindings (fixtures that need a publishable payload without driving
+    /// the reducer).
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn relation_payload_for_tests(
         &self,
         outcome: crate::semantic_query::RelationOutcome,
     ) -> crate::semantic_query::RelationPayload {
-        let proof = match &outcome {
-            crate::semantic_query::RelationOutcome::Assignable => {
-                crate::semantic_query::RelationProof::Assignable {
-                    witness: crate::semantic_query::DerivationTree {
-                        sub_derivations: Arc::from(Vec::new().into_boxed_slice()),
-                    },
-                }
-            }
-            crate::semantic_query::RelationOutcome::NotAssignable => {
-                crate::semantic_query::RelationProof::NotAssignable {
-                    reason: crate::semantic_query::RelationFailureCode::Structural,
-                    failing_sub: crate::semantic_query::SubRelationRef {
-                        source: crate::semantic_query::SemanticNodeId(u64::MAX),
-                        target: crate::semantic_query::SemanticNodeId(u64::MAX),
-                        position: crate::semantic_query::SubRelationPosition::Root,
-                    },
-                }
-            }
-            crate::semantic_query::RelationOutcome::BudgetExceeded(kind) => {
-                crate::semantic_query::RelationProof::BudgetExceeded {
-                    cap: crate::semantic_query::RecursionOrBudgetCap {
-                        kind: *kind,
-                        limit: 0,
-                    },
-                }
-            }
-        };
-        let relation_proof = self.intern_relation_proof(proof);
         crate::semantic_query::RelationPayload {
             outcome,
             bindings: Arc::from(Vec::new().into_boxed_slice()),
-            relation_proof,
             recursion: crate::semantic_query::RelationRecursionFootprint::default(),
         }
     }

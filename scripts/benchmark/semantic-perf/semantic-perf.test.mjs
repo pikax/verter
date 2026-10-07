@@ -1716,8 +1716,6 @@ const verterObservation = (text) => ({
 const RETENTION = {
   semanticNodes: 5,
   semanticMemoEntries: 4,
-  relationProofs: 0,
-  relateKeys: 0,
   unionViews: 1,
   shapeCacheEntries: 0,
   activeBytes: 0,
@@ -2184,7 +2182,7 @@ test("the observe arm's build carries semantic-observe, the production probe nev
   assert.equal(differs.state, "differs");
   assert.deepEqual(differs.fields, ["semanticNodes"]);
   assert.equal(
-    requiredStateComparison([a, { ...a, relateKeys: 2 }], [a]).state,
+    requiredStateComparison([a, { ...a, unionViews: 2 }], [a]).state,
     "nondeterministic",
   );
 });

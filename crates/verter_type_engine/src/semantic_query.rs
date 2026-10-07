@@ -6586,35 +6586,30 @@ pub struct DeclarationAnalysisValue {
     pub contributors: Arc<[SemanticNodeId]>,
 }
 
-/// The forward-declared value-domain payload of a [`SemanticQueryKey::Relate`]
-/// judgement — the carrier of [`SemanticQueryValue::Relation`].
+/// The value-domain payload of a [`SemanticQueryKey::Relate`] judgement — the
+/// carrier of [`SemanticQueryValue::Relation`].
 ///
-/// Final-state shape (design "Decision 4 — Relation-proof acceptance"). The
-/// payload carries the public relation [`RelationOutcome`], the inference
-/// [`InferBinding`]s a binding-producing relation deposited, and an opaque
-/// [`RelationProofId`] indexing the payload-side [`RelationProofTable`]: the
-/// derivation / failure / cycle witness rides that table BY ID — it is never
-/// embedded on the value itself. This Rust value-domain payload rides OFF the
-/// value / type-values surface: the proof witness is not a `GraphTypeNode` /
-/// structured-type value. Relation-proof WIRE exposure is a separate concern —
-/// the current proto `GraphTypeNode.relation_proof = 28` arm is pre-existing
-/// RI-2 debt, and the RI-2 end-state exposes proof detail via the payload-side
-/// `relation_proofs` table rather than embedding it in the value payload. The
-/// budget regime
-/// is FOLDED into the outcome as [`RelationOutcome::BudgetExceeded`] rather than
-/// carried as a separate field, so there is a single source of truth and an
-/// `Assignable`-with-exceeded-budget contradiction is unrepresentable. There is
-/// NO public `Unknown`: a deferred / opaque / undischarged relation has no
-/// `SemanticQueryValue::Relation` form and routes through `ReturnOnly` in the
-/// cold compute.
+/// The payload carries exactly what a consumer and the warm replay need: the
+/// public relation [`RelationOutcome`], the inference [`InferBinding`]s a
+/// binding-producing relation deposited, and the recursion footprint that
+/// decides where a warm read may replay. It names no explanation: a human
+/// derivation / failure / cycle explanation is OPTIONAL observation state,
+/// captured request-owned (and leasing its operands) only in a
+/// `semantic-observe` build — see
+/// `project_semantic_dispatch::relation_explanation`. A warm hit is
+/// usable on its own and never manufactures capture history. The budget
+/// regime is FOLDED into the outcome as [`RelationOutcome::BudgetExceeded`]
+/// rather than carried as a separate field, so there is a single source of
+/// truth and an `Assignable`-with-exceeded-budget contradiction is
+/// unrepresentable. There is NO public `Unknown`: a deferred / opaque /
+/// undischarged relation has no `SemanticQueryValue::Relation` form and routes
+/// through `ReturnOnly` in the cold compute.
 ///
 /// LIVE: the relation authority (`ProjectSemanticDispatch::execute_relate`
 /// → `execute(SemanticQueryKey::Relate)` → `build_relate`) populates this
-/// payload and interns its proof into the store's payload-side
-/// [`RelationProofTable`]-backing interner. Only a binary
-/// `Assignable`/`NotAssignable` outcome is warm-admitted; a
-/// `BudgetExceeded` payload is returned to the caller with admission
-/// suppressed (ReturnOnly-but-public).
+/// payload. Only a binary `Assignable`/`NotAssignable` outcome is
+/// warm-admitted; a `BudgetExceeded` payload is returned to the caller with
+/// admission suppressed (ReturnOnly-but-public).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationPayload {
     /// The public relation outcome — `Assignable`, `NotAssignable`, or
@@ -6625,12 +6620,6 @@ pub struct RelationPayload {
     /// for a pure non-binding assignability check and for a `BudgetExceeded`
     /// outcome.
     pub bindings: Arc<[InferBinding]>,
-    /// Opaque id into the payload-side [`RelationProofTable`]. The proof witness
-    /// lives OFF this value (off the value / type-values surface — not a
-    /// `GraphTypeNode`); a consumer that wants the derivation / failure / cycle
-    /// detail dereferences the table by id. (Wire exposure of proof detail is a
-    /// separate concern — see the type doc above.)
-    pub relation_proof: RelationProofId,
     /// What the relation's computation used of the checker's recursion
     /// bounds. A warm read replays the outcome only where the cold
     /// computation takes the same course.
@@ -6712,65 +6701,18 @@ impl RelationRecursionFootprint {
 /// warm-admitted.
 ///
 /// The outcome is the MINIMAL public discriminant. `NotAssignable` is
-/// FIELD-LESS by design (Decision 4): the failure reason and the failing
-/// structural sub-relation do NOT ride the outcome — they live OFF the value on
-/// the payload-side [`RelationProof::NotAssignable`] table entry
-/// ([`RelationFailureCode`] + content-free [`SubRelationRef`]). Keeping the
-/// reason off the outcome is load-bearing for the negative carve-out: a
-/// published `NotAssignable` proof is content-free and never leaks a transient
-/// `SessionId`.
+/// FIELD-LESS by design: no failure reason or failing sub-relation rides the
+/// outcome, so a published negative is content-free and never leaks a
+/// transient `SessionId`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationOutcome {
     /// The source relates to the target.
     Assignable,
-    /// The source provably does NOT relate to the target. FIELD-LESS: the
-    /// failure reason ([`RelationFailureCode`]) and failing structural
-    /// sub-relation ride the payload-side [`RelationProof::NotAssignable`] table
-    /// entry, never the outcome itself (design "Decision 4").
+    /// The source provably does NOT relate to the target. FIELD-LESS.
     NotAssignable,
     /// A budget / recursion cap stopped the relate before it decided.
     /// PUBLIC-but-never-warm: expressible and rendered, gated `ReturnOnly`.
     BudgetExceeded(BudgetExceededKind),
-}
-
-/// Forward-declared, reducer-extensible set of codes a relation provably fails
-/// with, in DETERMINISTIC PRIORITY ORDER: declaration order IS priority,
-/// fastest-reject / most-specific first.
-///
-/// When a relate fails for several reasons the relation engine selects the
-/// highest-priority (earliest-declared) code as the
-/// [`RelationProof::NotAssignable`] entry's `reason`. SHAPE only: the
-/// relation-inference reducer (not yet implemented) populates these and OWNS
-/// the taxonomy; the
-/// declared variants are the currently-known failure reasons and their order is
-/// the architectural priority contract consumers branch on. The enum is
-/// `#[non_exhaustive]` so the relation reducer can add further reasons without a
-/// breaking change for downstream crates — match arms outside this crate must
-/// carry a wildcard. This code rides ONLY the payload-side proof table — never
-/// the public [`RelationOutcome`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum RelationFailureCode {
-    /// Disagreeing primitive kinds (e.g. a string-literal `"a"` vs `number`).
-    PrimitiveKindMismatch,
-    /// Same primitive kind, different literal values.
-    LiteralValueMismatch,
-    /// The target requires a member the source lacks.
-    MissingProperty,
-    /// A member present on both sides has non-relating types.
-    PropertyTypeMismatch,
-    /// Call / construct signature parameter counts disagree.
-    SignatureArityMismatch,
-    /// A signature parameter (contravariant position) does not relate.
-    SignatureParameterMismatch,
-    /// A signature return (covariant position) does not relate.
-    SignatureReturnMismatch,
-    /// A generic type-argument violates its declared variance.
-    VarianceMismatch,
-    /// An excess property on a fresh object literal (excess-property check).
-    ExcessProperty,
-    /// A structural mismatch not captured by a more specific reason above.
-    Structural,
 }
 
 /// Which budget tripped a [`RelationOutcome::BudgetExceeded`] (design Decision 4
@@ -6787,95 +6729,9 @@ pub enum BudgetExceededKind {
     FlowSliceBudget,
 }
 
-/// Opaque index into a [`RelationProofTable`]. Content-free (R6): it identifies
-/// a proof slot, not any versioned content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RelationProofId(pub u32);
-
-/// Opaque id of a COMPLETED full `Relate` key that co-discharged a coinductive
-/// cycle. Content-free (R6): the durable cycle proof references co-discharged
-/// keys by this id rather than embedding a session-bearing [`RelateMemoKey`]
-/// directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RelateKeyId(pub u32);
-
-/// One entry of a payload-side [`RelationProofTable`], addressed by an opaque
-/// [`RelationProofId`]. FOUR shapes (design "Decision 4"). Populated LIVE by
-/// the relation authority at admission time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RelationProof {
-    /// Positive structural derivation: which sub-relations held, member by
-    /// member and across variance arms.
-    Assignable { witness: DerivationTree },
-    /// Negative: the failure reason plus the failing structural sub-relation.
-    /// CONTENT-FREE — [`SubRelationRef`] carries no session-bearing full
-    /// `Relate` key (no inference context, no `SessionId`, no `RelationContext`),
-    /// which is exactly what lets a NEGATIVE member publish on the identity-leak
-    /// axis (design §2.3).
-    NotAssignable {
-        reason: RelationFailureCode,
-        failing_sub: SubRelationRef,
-    },
-    /// The budget / recursion cap that stopped the relate (rides a
-    /// `ReturnOnly`-but-public [`RelationOutcome::BudgetExceeded`]).
-    BudgetExceeded { cap: RecursionOrBudgetCap },
-    /// The set of COMPLETED full `Relate` keys that co-discharged a coinductive
-    /// cycle, referenced by opaque [`RelateKeyId`] — never by [`RelateMemoKey`]
-    /// directly (design §4.1).
-    CoinductiveCycle { keys: Arc<[RelateKeyId]> },
-}
-
-/// The payload-side table of relation proofs. A [`RelationPayload`] references
-/// exactly one entry by [`RelationProofId`]; the table is the durable typed
-/// carrier the relation-inference reducer (not yet implemented) populates.
-/// SHAPE only — population is the reducer's job; this declares the carrier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelationProofTable {
-    pub proofs: Arc<[RelationProof]>,
-}
-
-/// Positive-derivation witness: the structural sub-relations that held to
-/// discharge a relation, in structural order.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DerivationTree {
-    pub sub_derivations: Arc<[SubRelationRef]>,
-}
-
-/// Content-free reference to a structural sub-relation: the source / target
-/// interned nodes plus the structural position they relate at. EXCLUDES any
-/// session-bearing full `Relate` key (no inference context, no `SessionId`, no
-/// `RelationContext`) — design §2.3 / Decision 4. SHAPE only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SubRelationRef {
-    pub source: SemanticNodeId,
-    pub target: SemanticNodeId,
-    pub position: SubRelationPosition,
-}
-
-/// The structural axis a [`SubRelationRef`] relates at. Forward-declared,
-/// reducer-extensible: the relation-inference reducer (not yet implemented)
-/// owns this taxonomy and the declared variants are the currently-known structural
-/// positions. The enum is `#[non_exhaustive]` so the reducer can add further
-/// positions without a breaking change for downstream crates — match arms
-/// outside this crate must carry a wildcard. SHAPE only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum SubRelationPosition {
-    /// The root obligation between two whole types.
-    Root,
-    /// A named member / property.
-    Member(Arc<str>),
-    /// A call / construct signature parameter at the given index.
-    Parameter(u32),
-    /// A call / construct signature return.
-    Return,
-    /// A generic type-argument at the given index.
-    TypeArgument(u32),
-}
-
-/// The budget / recursion cap that stopped a relate. Rides
-/// [`RelationProof::BudgetExceeded`]. SHAPE only: the relation-inference
-/// reducer (not yet implemented) owns the accounting.
+/// The budget / recursion cap that stopped a relate: the typed poison a
+/// budget edge carries through the relation frames to the public
+/// [`RelationOutcome::BudgetExceeded`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecursionOrBudgetCap {
     /// Which budget tripped.
@@ -9425,8 +9281,11 @@ pub enum UndecidedReason {
     /// whose SCC has not yet discharged — the scoped-assumption sentinel
     /// state. NEVER warm-admitted, NEVER the published proof: admission
     /// happens only at SCC-close (pure non-binding SCC / closure-clean
-    /// negative) or at the relevant session-close (deferred members).
-    OpenAssumption(RelateKeyId),
+    /// negative) or at the relevant session-close (deferred members). The
+    /// assumption's identity lives on the transaction's reentry stack (the
+    /// scoped [`crate::project_semantic_dispatch::dispatch_txn`] assumption
+    /// frame), never in a store-side key table.
+    OpenAssumption,
 }
 
 /// One element of a [`SemanticNodeData::Tuple`] shell.
@@ -11487,7 +11346,6 @@ mod tests {
                 SemanticQueryValue::Relation(RelationPayload {
                     outcome: RelationOutcome::Assignable,
                     bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-                    relation_proof: RelationProofId(0),
                     recursion: RelationRecursionFootprint::default(),
                 }),
                 SemanticQueryValueTag::Relation,
