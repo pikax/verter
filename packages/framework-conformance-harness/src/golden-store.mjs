@@ -30,15 +30,7 @@
 // own expectation. Readers return deep-frozen objects.
 
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export function sha256(text) {
@@ -85,47 +77,57 @@ function readIdentical(target, text) {
 
 /**
  * Renames `tmp` onto `target`. POSIX replaces atomically. Windows can refuse
- * while another publisher is renaming the same path (EPERM); retry, then
- * move the live file aside so the completed temp still becomes the commit.
+ * while another publisher is renaming the same path (EPERM, EEXIST, EBUSY);
+ * retry with backoff, then delete `tmp` and throw. Moving the live file aside
+ * first would leave no manifest: readers throw ENOENT, and a concurrent
+ * publisher treats that gap as a first publish.
  */
+const REPLACE_ATTEMPTS = 12;
+const REPLACE_BACKOFF_CAP_MS = 50;
+
 function pause(ms) {
-  const until = Date.now() + ms;
-  while (Date.now() < until) {
-    /* peer publisher is inside its own rename */
-  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function renameOnto(tmp, target) {
+  renameSync(tmp, target);
 }
 
 function renameOver(tmp, target) {
   let last;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < REPLACE_ATTEMPTS; attempt += 1) {
     try {
-      renameSync(tmp, target);
+      renameOnto(tmp, target);
       return;
     } catch (error) {
       last = error;
       if (!REPLACE_RETRY.has(error.code)) throw error;
-      pause(2 ** attempt);
+      pause(Math.min(REPLACE_BACKOFF_CAP_MS, 2 ** attempt));
     }
   }
-  const aside = `${target}.aside-${process.pid}`;
-  rmSync(aside, { force: true });
-  try {
-    renameSync(target, aside);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  try {
-    renameSync(tmp, target);
-  } catch (error) {
+  rmSync(tmp, { force: true });
+  throw last;
+}
+
+function readManifestText(target) {
+  return readFileSync(target, "utf8");
+}
+
+/** @returns {object | null} null only when the file is still absent */
+function readPreviousManifest(target) {
+  const readOnce = () => {
     try {
-      if (!existsSync(target) && existsSync(aside)) renameSync(aside, target);
-    } catch {
-      /* best-effort restore of the previous commit */
+      return JSON.parse(readManifestText(target));
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
     }
-    throw error;
-  }
-  rmSync(aside, { force: true });
-  return last;
+  };
+  const first = readOnce();
+  if (first !== null) return first;
+  // A concurrent replace can report ENOENT once. Confirm before treating
+  // the publish as the first one (generation reset, empty grace).
+  return readOnce();
 }
 
 export function serializeGoldenRecord(record) {
@@ -187,12 +189,7 @@ export function publishGoldenSet(goldensRoot, entries, meta = {}) {
   // everything its manifest lists (see the module header's reader-schedule
   // contract — two full generations of grace).
   const manifestTarget = goldenManifestPath(goldensRoot);
-  let previousManifest = null;
-  try {
-    previousManifest = JSON.parse(readFileSync(manifestTarget, "utf8"));
-  } catch {
-    /* first publish: no previous manifest, no grace set */
-  }
+  const previousManifest = readPreviousManifest(manifestTarget);
   const manifest = {
     schemaVersion: 2,
     generation: (previousManifest?.generation ?? 0) + 1,
