@@ -183,7 +183,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         forced: &ForcedSemanticOperand,
     ) -> Result<SemanticOperand, SemanticOperandMintError> {
         if forced.store_identity() != self.graph().operand_store_identity()
-            || forced.generation() != self.ctx.current_project_generation()
+            || forced.generation() != self.snapshot.current_project_generation()
         {
             return Err(SemanticOperandMintError::ForeignNode);
         }
@@ -238,7 +238,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        let generation = self.ctx.current_project_generation();
+        let generation = self.snapshot.current_project_generation();
         let store_identity = self.graph().operand_store_identity();
         let (substitution, substitution_evidence) =
             self.seal_substitution(&substitution, store_identity, generation)?;
@@ -1118,7 +1118,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if index.store_identity() != self.graph().operand_store_identity() {
                 return Err(QueryError::ForeignSemanticOperand);
             }
-            if index.generation() != self.ctx.current_project_generation() {
+            if index.generation() != self.snapshot.current_project_generation() {
                 return Err(QueryError::StaleSemanticOperand);
             }
             self.merge_operand_evidence(index.evidence())?;
@@ -1164,7 +1164,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if store_identity != self.graph().operand_store_identity() {
                     return QueryResult::Error(QueryError::ForeignSemanticOperand);
                 }
-                if generation != self.ctx.current_project_generation() {
+                if generation != self.snapshot.current_project_generation() {
                     return QueryResult::Error(QueryError::StaleSemanticOperand);
                 }
                 if let Err(error) = self.merge_operand_evidence(evidence) {
@@ -1200,7 +1200,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if store_identity != self.graph().operand_store_identity() {
                         return QueryResult::Error(QueryError::ForeignSemanticOperand);
                     }
-                    if generation != self.ctx.current_project_generation() {
+                    if generation != self.snapshot.current_project_generation() {
                         return QueryResult::Error(QueryError::StaleSemanticOperand);
                     }
                 }
@@ -1320,7 +1320,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 QueryResult::Value(ForcedSemanticOperand::minted(
                     self.graph().operand_store_identity(),
-                    self.ctx.current_project_generation(),
+                    self.snapshot.current_project_generation(),
                     node,
                     evidence,
                     SemanticOperandAuthority::mint_for_forcing_boundary(),

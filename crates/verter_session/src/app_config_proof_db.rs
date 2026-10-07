@@ -303,7 +303,7 @@ impl verter_type_engine::invalidation_domain::InvalidationByCanonical
 ///   `app_config_proof_overflow_refusals` advances.
 ///
 /// Resolver-tier producer that takes `&dyn ResolverContext` to stay
-/// inside the request-port contract (the six ports in
+/// inside the request-port contract (the five ports in
 /// `resolver_core::request_ports`, whose compile-contract fixtures prove a
 /// request cannot reach ambient host state). Integration tests reach this
 /// via the crate-public wrapper

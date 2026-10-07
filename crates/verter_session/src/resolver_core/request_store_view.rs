@@ -580,7 +580,7 @@ impl CanonicalCompletionOverlay {
     /// concrete `&VerterHost` and the base view, and can short-circuit
     /// before invoking this overlay write). Keeping `host` out of the
     /// resolver-tier API surface preserves the request-port boundary (the
-    /// six ports in `request_ports`, none of which returns a host handle).
+    /// five ports in `request_ports`, none of which returns a host handle).
     pub(crate) fn complete_route_canonical(
         &self,
         canonical: &str,
