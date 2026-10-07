@@ -9,8 +9,7 @@ validated before any number in it is read.
 This page records the harness's structure and contracts, not numbers. Results
 are machine-bound and belong to a run's own `results.md`. What a run may
 claim on which machine is fixed by the [measurement rule](#measurement-rule);
-named, repeatable runs will go through [evidence runs](#evidence-runs), a
-planned layer.
+named, repeatable runs go through [evidence runs](#evidence-runs).
 
 ## What it measures
 
@@ -462,7 +461,7 @@ claim depends on where it ran:
 The direct harness (`semantic-perf.mjs`) still records the times and memory
 it observes on any machine, labelled with that machine's provenance, for
 local investigation; those figures are evidence about that machine only.
-An evidence run will apply the rule to its summary's cells (see below).
+An evidence run applies the rule to its summary's cells (see below).
 
 ## Tiers
 
@@ -633,31 +632,36 @@ what is run and which cells must come back, so the same run can be repeated
 on the benchmark machine and its answer attached to the work that asked for
 it.
 
-The evidence-run layer **is planned and not yet in this repository**: no
-runner, self-tests, fixtures or shipped manifests exist yet, and the
-harness's entry point today is `semantic-perf.mjs` (see [Running
-it](#running-it)). This section is the contract that layer will implement
-when it lands: a thin wrapper that validates the manifest, drives
-`semantic-perf.mjs` with the manifest's options, validates the result with
-the same `validate.mjs`, and writes one machine-readable summary. It adds no
-second harness, classifier or validator. Its CLI will be:
+The evidence-run layer (`scripts/benchmark/evidence-run.mjs`) is a thin
+wrapper over the harness (see [Running it](#running-it)): it validates the
+manifest, drives `semantic-perf.mjs` with the manifest's options, validates
+the result with the same `validate.mjs`, and writes one machine-readable
+summary. It adds no second harness, classifier or validator. Its CLI:
 
 ```bash
 node scripts/benchmark/evidence-run.mjs --run <name> --dry-run   # validate the manifest, emit a summary skeleton
 node scripts/benchmark/evidence-run.mjs --run <name>             # execute it
+node scripts/benchmark/evidence-run.mjs --run <name> --worker <record.json> [--allow-sampled]
 ```
 
-`--dry-run` will run nothing: it loads and validates the manifest and writes
+`--worker` takes the worker record the Tama evidence job supplies, a JSON
+object with a string `id` and a list of string `tags` (any further identity
+fields are kept verbatim in the summary). `--allow-sampled` and
+`--supervisor <path>` pass through to the harness; nothing else about the
+invocation can be changed from the command line. Exit status: 0 passed (or a
+valid dry run), 1 the run failed, 2 a usage or manifest error.
+
+`--dry-run` runs nothing: it loads and validates the manifest and writes
 the summary skeleton — every required cell present, none measured — on any
 worker. Its self-tests (`scripts/benchmark/evidence-run.test.mjs`, with
-planted manifests under `scripts/benchmark/evidence-run-fixtures/`) will
-join `pnpm test:scripts`.
+planted manifests under `scripts/benchmark/evidence-run-fixtures/`) run in
+`pnpm test:scripts`.
 
 ### Manifests
 
-A manifest will be `scripts/benchmark/evidence-runs/<name>.json`. Each run
+A manifest is `scripts/benchmark/evidence-runs/<name>.json`. Each run
 name has exactly one owner: the change that needs the run adds its manifest,
-and no other change edits it. The first shipped manifest will be
+and no other change edits it. The first shipped manifest is
 `skr-perf0-structural`, the structural baseline run.
 
 | Field | Meaning |
@@ -666,15 +670,15 @@ and no other change edits it. The first shipped manifest will be
 | `description` | what the run is for, in one sentence |
 | `tier` | `quick`, `standard` or `stress` (see Tiers): the default scenario set, deadline and repetition counts |
 | `scenarios` | scenario ids or prefixes from the catalog (`scenarios.mjs`), as `--only` takes them; omitted means the tier's set |
-| `settings` | `strictNullChecks` × `noImplicitAny` setting ids (`strict`, `snc-off`, `nia-off`, `both-off`); omitted means the harness default |
+| `settings` | `strictNullChecks` × `noImplicitAny` setting ids (`strict`, `snc-off`, `nia-off`, `both-off`); the harness runs `strict` alone or all four, so any other subset is rejected; omitted means `strict` |
 | `arms` | arm ids from the harness's arm registry (`ARMS` in `semantic-perf/analyze.mjs`); an id the registry does not define is rejected |
-| `modes` | the workload modes measured (the harness's cold and warm demands); a mode the harness does not define is rejected |
-| `threads` | the thread counts each threaded arm runs at |
+| `modes` | the workload modes measured: `cold` (fresh-process demands) and `warm` (in-process repeats); a whole-program `tsc -p` arm has only `cold`; a mode the harness does not define is rejected |
+| `threads` | the thread counts the run's arms run at: `"default"` (the tool's own choice; every arm but one) or `1` (`tsc-cli-1`). The harness takes no thread option, so a cell naming another count for its arm is rejected |
 | `repeat`, `warmup`, `warmRepeats` | measured invocations, unmeasured warmups and in-process warm repeats per cell; omitted means the tier's defaults. `repeat` takes any count from 2 up, like `--repeat`: even counts balance arm order exactly, odd counts — the tier default is 3 — within one (see Schedule) |
 | `noise` | a reference to the noise methodology the run's figures are read under: a link to a section of this page (normally [Verdicts](#verdicts) and [Schedule](#schedule)) |
-| `requiredCells` | the cells the summary must contain: each names its scenario, setting, arm, mode, thread count and the metrics it must carry |
+| `requiredCells` | the cells the summary must contain: each names its scenario, setting, arm, mode, thread count and the metrics it must carry — for a probe arm's `cold` mode the harness's per-arm metrics (`firstTypeMs`, `coldMs`, `initMs`, `setupMs`, `engineStartMs`, `observeMs`, `teardownMs`, `cpuMs`, `peakBytes`, `retainedBytes`, `observePeakBytes`; `verter-counted` adds the work counts `coldAllocations` and `coldAllocatedBytes`), for `warm` `warmMs`, and for a `tsc -p` arm `wallMs`, `cpuMs`, `tscCheckMs`, `tscTotalMs`, `peakBytes`, `tscMemoryUsedBytes` |
 
-The loader will reject a manifest that is not valid JSON, carries an unknown
+The loader rejects a manifest that is not valid JSON, carries an unknown
 field, misses a required one, names anything the harness does not define, or
 lists a required cell outside the run's own scenarios, settings, arms, modes
 and threads. A run whose result lacks a required cell, or whose validation
@@ -682,8 +686,9 @@ fails (an invalid answer never counts as a win), fails.
 
 ### Summary
 
-Each run (and each dry run) will write one JSON summary into its output
-directory, beside the harness's `results.json`. It will hold:
+Each run (and each dry run) writes one JSON summary, `evidence-summary.json`,
+into its output directory (default `target/evidence-runs/<name>/<timestamp>`),
+beside the harness's output in `harness/`. It holds:
 
 - `run`: the manifest name and the digest of the manifest's bytes;
 - `dryRun`: whether anything executed;
@@ -701,7 +706,7 @@ directory, beside the harness's `results.json`. It will hold:
   a dry run) or `unavailable` (with the reason);
 - `validation`: the harness validation's verdict and problems.
 
-A Tama evidence job will run the manifest and attach this summary to the task
+A Tama evidence job runs the manifest and attach this summary to the task
 that requested it. The summary is the run's evidence; the raw records stay in
 the output directory for re-validation.
 
