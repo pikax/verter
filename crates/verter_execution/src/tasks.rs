@@ -79,13 +79,57 @@ struct TaskSlot {
 struct RegistryState {
     tasks: Vec<TaskSlot>,
     free_slots: Vec<usize>,
+    /// Waiter → the producer it waits on. A task waits on at most one.
     waits: FxHashMap<TaskId, TaskId>,
+    /// Producer → the waiters registered on it: the reverse side of
+    /// `waits`, changed in the same step, so retiring a task removes the
+    /// edges into it without scanning every edge.
+    waiters: FxHashMap<TaskId, FxHashSet<TaskId>>,
+}
+
+impl RegistryState {
+    fn link_wait(&mut self, waiter: TaskId, producer: TaskId) {
+        self.waits.insert(waiter, producer);
+        self.waiters.entry(producer).or_default().insert(waiter);
+    }
+
+    /// Remove `waiter`'s edge, returning the producer it waited on.
+    fn unlink_wait(&mut self, waiter: TaskId) -> Option<TaskId> {
+        let producer = self.waits.remove(&waiter)?;
+        if let Some(waiters) = self.waiters.get_mut(&producer) {
+            waiters.remove(&waiter);
+            if waiters.is_empty() {
+                self.waiters.remove(&producer);
+            }
+        }
+        Some(producer)
+    }
 }
 
 /// A task registry and its wait-for graph: one cycle authority.
 #[derive(Clone, Debug, Default)]
 pub struct TaskRegistry {
     state: Arc<Mutex<RegistryState>>,
+}
+
+/// Current occupancy of a registry's wait-for graph, read under one lock.
+/// Always available; every count is derived from the resident tables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitGraphOccupancy {
+    /// Registered `waiter -> producer` edges.
+    pub edges: usize,
+    /// Backing capacity of the waiter → producer table.
+    pub edges_capacity: usize,
+    /// Producers with at least one registered waiter.
+    pub producers: usize,
+    /// Waiter entries in the producer → waiters reverse index.
+    pub reverse_entries: usize,
+    /// Backing capacity of the producer → waiters reverse index.
+    pub reverse_capacity: usize,
+    /// Backing capacity summed over the per-producer waiter sets. A set
+    /// keeps its capacity while any waiter survives, so this can exceed
+    /// `reverse_entries`.
+    pub reverse_entries_capacity: usize,
 }
 
 /// A refused wait: registering it would close a cycle of waiting tasks (or
@@ -150,7 +194,7 @@ impl TaskRegistry {
             };
             cursor = next;
         }
-        state.waits.insert(waiter, producer);
+        state.link_wait(waiter, producer);
         Ok(WaitEdge {
             registry: self.clone(),
             waiter,
@@ -174,8 +218,10 @@ impl TaskRegistry {
             return;
         }
         slot.active = false;
-        state.waits.remove(&task);
-        state.waits.retain(|_, producer| *producer != task);
+        state.unlink_wait(task);
+        for waiter in state.waiters.remove(&task).unwrap_or_default() {
+            state.waits.remove(&waiter);
+        }
         state.free_slots.push(task.id);
     }
 
@@ -186,7 +232,7 @@ impl TaskRegistry {
             .get(&waiter)
             .is_some_and(|registered| *registered == producer)
         {
-            state.waits.remove(&waiter);
+            state.unlink_wait(waiter);
         }
     }
 
@@ -205,6 +251,19 @@ impl TaskRegistry {
     #[cfg(any(test, feature = "test-support"))]
     pub fn remove_wait_for_tests(&self, waiter: TaskId, producer: TaskId) {
         self.remove_wait(waiter, producer);
+    }
+
+    /// Current occupancy of the wait-for graph and its reverse index.
+    pub fn wait_graph_occupancy(&self) -> WaitGraphOccupancy {
+        let state = self.state.lock();
+        WaitGraphOccupancy {
+            edges: state.waits.len(),
+            edges_capacity: state.waits.capacity(),
+            producers: state.waiters.len(),
+            reverse_entries: state.waiters.values().map(FxHashSet::len).sum(),
+            reverse_capacity: state.waiters.capacity(),
+            reverse_entries_capacity: state.waiters.values().map(FxHashSet::capacity).sum(),
+        }
     }
 
     /// Whether `task` is registered and not retired.
@@ -227,7 +286,12 @@ impl TaskRegistry {
     /// How many wait-for edges are registered.
     #[cfg(any(test, feature = "test-support"))]
     pub fn wait_count_for_tests(&self) -> usize {
-        self.state.lock().waits.len()
+        let state = self.state.lock();
+        verter_debug_assert!(
+            state.waits.len() == state.waiters.values().map(FxHashSet::len).sum::<usize>(),
+            "both sides of every wait-for edge are registered",
+        );
+        state.waits.len()
     }
 }
 
@@ -423,5 +487,135 @@ impl Drop for ExecutionScope {
                 installed.remove(position);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reverse_index(registry: &TaskRegistry) -> FxHashMap<TaskId, FxHashSet<TaskId>> {
+        registry.state.lock().waiters.clone()
+    }
+
+    /// Retiring a producer removes exactly the edges into it, through the
+    /// reverse index, and leaves unrelated edges and no empty bucket.
+    #[test]
+    fn retiring_a_producer_removes_only_its_incoming_edges() {
+        let registry = TaskRegistry::default();
+        let producer = registry.register_task();
+        let other = registry.register_task();
+        let waiters: Vec<ExecutionTask> = (0..64).map(|_| registry.register_task()).collect();
+        let unrelated = registry.register_task();
+        let mut edges: Vec<WaitEdge> = waiters
+            .iter()
+            .map(|waiter| {
+                registry
+                    .register_wait(waiter.id(), producer.id())
+                    .expect("acyclic wait registers")
+            })
+            .collect();
+        let unrelated_edge = registry
+            .register_wait(unrelated.id(), other.id())
+            .expect("acyclic wait registers");
+        assert_eq!(registry.wait_count_for_tests(), 65);
+        let occupancy = registry.wait_graph_occupancy();
+        assert_eq!((occupancy.edges, occupancy.producers), (65, 2));
+        assert_eq!(occupancy.reverse_entries, 65);
+
+        let producer_id = producer.id();
+        drop(producer);
+        assert!(!registry.is_active_for_tests(producer_id));
+        assert_eq!(
+            registry.wait_count_for_tests(),
+            1,
+            "only the unrelated edge remains"
+        );
+        let index = reverse_index(&registry);
+        assert!(!index.contains_key(&producer_id));
+        assert_eq!(index.get(&other.id()).map(FxHashSet::len), Some(1));
+
+        // Stale edge drops after retirement are no-ops, and a waiter freed
+        // by the retirement can wait again.
+        edges.pop();
+        let rewait = registry
+            .register_wait(waiters[0].id(), other.id())
+            .expect("a released waiter can wait again");
+        assert_eq!(registry.wait_count_for_tests(), 2);
+        drop(rewait);
+        drop(unrelated_edge);
+        drop(edges);
+        assert_eq!(registry.wait_count_for_tests(), 0);
+        assert!(
+            reverse_index(&registry).is_empty(),
+            "the reverse index drains"
+        );
+        let drained = registry.wait_graph_occupancy();
+        assert_eq!(
+            (drained.edges, drained.producers, drained.reverse_entries),
+            (0, 0, 0),
+            "occupancy drains with the edges",
+        );
+        assert!(
+            drained.edges_capacity >= 65,
+            "backing capacity is reported separately from membership",
+        );
+    }
+
+    /// A producer's waiter set emptied down to one survivor still reports
+    /// the backing capacity its former waiters left behind, and retiring
+    /// the producer releases it.
+    #[test]
+    fn producer_waiter_set_capacity_is_reported_until_it_drains() {
+        let registry = TaskRegistry::default();
+        let producer = registry.register_task();
+        let waiters: Vec<ExecutionTask> = (0..64).map(|_| registry.register_task()).collect();
+        let mut edges: Vec<WaitEdge> = waiters
+            .iter()
+            .map(|waiter| {
+                registry
+                    .register_wait(waiter.id(), producer.id())
+                    .expect("acyclic wait registers")
+            })
+            .collect();
+        let populated = registry.wait_graph_occupancy();
+        assert_eq!((populated.producers, populated.reverse_entries), (1, 64));
+        assert!(populated.reverse_entries_capacity >= 64);
+
+        edges.truncate(1);
+        let shrunk = registry.wait_graph_occupancy();
+        assert_eq!((shrunk.producers, shrunk.reverse_entries), (1, 1));
+        assert_eq!(
+            shrunk.reverse_entries_capacity, populated.reverse_entries_capacity,
+            "the surviving set keeps the backing its former waiters used",
+        );
+
+        drop(producer);
+        let retired = registry.wait_graph_occupancy();
+        assert_eq!(
+            (
+                retired.producers,
+                retired.reverse_entries,
+                retired.reverse_entries_capacity
+            ),
+            (0, 0, 0),
+        );
+        drop(edges);
+    }
+
+    /// Retiring a waiter removes its own outgoing edge from both sides.
+    #[test]
+    fn retiring_a_waiter_unlinks_its_edge() {
+        let registry = TaskRegistry::default();
+        let producer = registry.register_task();
+        let waiter = registry.register_task();
+        let edge = registry
+            .register_wait(waiter.id(), producer.id())
+            .expect("acyclic wait registers");
+        drop(waiter);
+        assert_eq!(registry.wait_count_for_tests(), 0);
+        assert!(reverse_index(&registry).is_empty());
+        drop(edge);
+        assert_eq!(registry.wait_count_for_tests(), 0);
     }
 }

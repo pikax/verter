@@ -175,6 +175,22 @@ pub struct ProviderSurfaceStamp {
     /// identity: a `map_hash` change invalidates every cached MAPPED result keyed
     /// by the old map. `[0; 16]` when the surface carries no source map.
     pub map_hash: Hash16,
+    /// The path's content epoch: equal across records of one path exactly while
+    /// the provider bytes, the carrier source and the map identity all stay the
+    /// same. An identical re-record keeps it; any change mints a fresh one from
+    /// the session-monotonic sequence, so a surface that changes and changes
+    /// back (A→B→A) never returns to the epoch it started from.
+    pub content_epoch: u64,
+    /// The path's surface incarnation: kept by every record of a live path and
+    /// minted fresh by the first record after the path was absent or closing,
+    /// so a close and identical reopen is a distinct incarnation.
+    pub incarnation: u64,
+    /// The path's project-owner epoch: kept while successive records name the
+    /// same owning project and minted fresh whenever the owner changes, so an
+    /// owner that changes and changes back (A→B→A) never returns to the epoch
+    /// it started from. Independent of [`Self::content_epoch`]: an owner move
+    /// with identical bytes keeps the content epoch.
+    pub owner_epoch: u64,
 }
 
 /// An immutable, fully self-contained capture of one synced provider surface.
@@ -663,6 +679,41 @@ impl ProviderSurfaceStore {
         // mutation (see LINEARIZATION above).
         let generation = lifecycle.next_epoch;
         lifecycle.next_epoch += 1;
+        // The content epoch and incarnation continue from the snapshot this
+        // record displaces, read under the same write lock, so two racing
+        // records cannot both inherit from one predecessor.
+        let displaced_snapshot = match lifecycle.paths.get(&provider_path) {
+            Some(ProviderPathState::Current {
+                generation: current,
+            }) => self
+                .inner
+                .snapshots
+                .get(&(Arc::clone(&provider_path), *current))
+                .map(|entry| Arc::clone(entry.value())),
+            Some(ProviderPathState::Closing { .. }) | None => None,
+        };
+        let (content_epoch, incarnation, owner_epoch) = match displaced_snapshot {
+            Some(displaced) => {
+                let same_content = displaced.kind == surface.kind
+                    && *displaced.source_canonical == *surface.source_canonical
+                    && displaced.stamp.content_hash == payload.content_hash
+                    && displaced.stamp.source_hash == payload.source_hash
+                    && displaced.stamp.map_hash == surface.map_hash
+                    && displaced.source_map.is_some() == payload.source_map.is_some();
+                let content_epoch = if same_content {
+                    displaced.stamp.content_epoch
+                } else {
+                    generation
+                };
+                let owner_epoch = if displaced.project_owner == surface.project_owner {
+                    displaced.stamp.owner_epoch
+                } else {
+                    generation
+                };
+                (content_epoch, displaced.stamp.incarnation, owner_epoch)
+            }
+            None => (generation, generation, generation),
+        };
 
         let snapshot = Arc::new(ProviderSurfaceSnapshot {
             stamp: ProviderSurfaceStamp {
@@ -671,6 +722,9 @@ impl ProviderSurfaceStore {
                 content_hash: payload.content_hash,
                 source_hash: payload.source_hash,
                 map_hash: surface.map_hash,
+                content_epoch,
+                incarnation,
+                owner_epoch,
             },
             kind: surface.kind,
             source_canonical,
@@ -994,6 +1048,27 @@ impl ProviderSurfaceStore {
             || (current.stamp.content_hash == captured.stamp.content_hash
                 && current.stamp.source_hash == captured.stamp.source_hash
                 && current.stamp.map_hash == captured.stamp.map_hash)
+    }
+
+    /// Whether the path's CURRENT surface is still `captured`'s content epoch,
+    /// incarnation and project owner — the bracket a foreground request closes
+    /// around every surface whose provider answer it decodes, at that decode
+    /// and again at settlement.
+    ///
+    /// Stricter than [`Self::captured_snapshot_still_honored`]: the content and
+    /// owner epochs move on every change and never return, so a surface whose
+    /// content or owner changed and changed back during the request fails the
+    /// bracket even though it ends where it began. An identical re-record keeps
+    /// both epochs and passes.
+    #[must_use]
+    pub fn captured_surface_is_current(&self, captured: &ProviderSurfaceSnapshot) -> bool {
+        self.current_snapshot(&captured.stamp.provider_path)
+            .is_some_and(|current| {
+                current.stamp.content_epoch == captured.stamp.content_epoch
+                    && current.stamp.incarnation == captured.stamp.incarnation
+                    && current.stamp.owner_epoch == captured.stamp.owner_epoch
+                    && current.project_owner == captured.project_owner
+            })
     }
 
     /// The owning configured project (tsconfig URI) of `provider_path`'s CURRENT

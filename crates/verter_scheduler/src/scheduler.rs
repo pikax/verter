@@ -1058,6 +1058,12 @@ impl Scheduler {
         &self.counters
     }
 
+    /// Current occupancy of the DAG's dependency-edge and blocker
+    /// reference tables, read under one DAG lock.
+    pub fn dependency_occupancy(&self) -> crate::dag::DependencyOccupancy {
+        self.dag.lock().dependency_occupancy()
+    }
+
     // ── Sync Fast-Path Reads ──
 
     /// Get current source snapshot if generation-coherent.
@@ -5719,7 +5725,7 @@ mod tests {
         // live publication hold, WITHOUT the supersede sweep. This
         // isolates the permit-release responsibility on
         // `surface_stage_panic_as_failed`: there is no other code
-        // path (no `cancel_matching` from supersede) that could
+        // path (no node cancel from supersede) that could
         // release the permit on its behalf. A generation-mismatch
         // early return would leave the permit parked forever in
         // this configuration.

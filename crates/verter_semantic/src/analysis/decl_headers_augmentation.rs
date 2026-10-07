@@ -442,7 +442,7 @@ fn index_augmentation_class_value(
             kind: ValueDeclKind::Class,
             span: verter_span::Span::new(cls.span.start, cls.span.end),
             name_span: verter_span::Span::new(id.span.start, id.span.end),
-            object_member_headers: Vec::new(),
+            object_member_headers: MemberHeaderList::new(),
             contributors: Vec::new(),
         });
     entry.kind = ValueDeclKind::Class;

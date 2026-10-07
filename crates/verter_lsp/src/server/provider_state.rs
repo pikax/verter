@@ -131,7 +131,8 @@ impl VerterLanguageServer {
     /// Resolve the merge-time mapping context for a FOREIGN carrier IDE
     /// location from the pinned set `captured`
     /// ([`Self::capture_foreign_carrier_ide_set`]), fail-closed: an uncaptured
-    /// path, a no-longer-honored surface, or a drifted foreign open document
+    /// path, a surface whose content, map, incarnation or owner moved (even back),
+    /// or a drifted foreign open document
     /// drops the location. Closed imported carriers use their captured
     /// source/map generation and remain navigable.
     pub(super) fn foreign_ide_context(
@@ -1495,22 +1496,29 @@ impl VerterLanguageServer {
     }
 
     /// Post-await validation for a virtual-file provider query: the captured
-    /// surface is still honored AND the virtual document still byte-matches
-    /// the captured provider content. `false` ⇒ the provider response was
-    /// produced against a surface that no longer matches the virtual tab —
-    /// the branch must DROP the provider contribution (fail closed).
+    /// surface is still current (content epoch, incarnation, owner) AND the
+    /// virtual document still byte-matches the captured provider content.
+    /// `false` ⇒ the provider response was produced against a surface that no
+    /// longer matches the virtual tab — the branch must DROP the provider
+    /// contribution (fail closed). `true` keeps the surface bracketed until the
+    /// enclosing foreground request settles.
     pub(super) fn virtual_request_surface_still_valid(
         &self,
         uri: &Uri,
         ctx: &VirtualFileContext,
     ) -> bool {
-        self.documents
+        let valid = self
+            .documents
             .provider_surfaces()
-            .captured_snapshot_still_honored(&ctx.snapshot)
+            .captured_surface_is_current(&ctx.snapshot)
             && self
                 .documents
                 .get(uri)
-                .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content)
+                .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content);
+        if valid {
+            crate::documents::ForegroundRequest::bracket_decoded_surface(&ctx.snapshot);
+        }
+        valid
     }
 }
 

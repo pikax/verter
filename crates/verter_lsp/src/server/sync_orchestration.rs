@@ -146,12 +146,18 @@ impl VerterLanguageServer {
         }
         let (after_host_revision, after_freshness) =
             self.imported_child_contract_provenance(canonical_id)?;
-        (after_host_revision == host_revision
+        let current = after_host_revision == host_revision
             && after_freshness == freshness
             && snapshot
                 .publication_witness
-                .is_current(&self.documents.host()))
-        .then_some(snapshot.contract)
+                .is_current(&self.documents.host());
+        if current {
+            crate::documents::ForegroundRequest::bracket_dependency(canonical_id, host_revision);
+            crate::documents::ForegroundRequest::bracket_contract_publication(
+                &snapshot.publication_witness,
+            );
+        }
+        current.then_some(snapshot.contract)
     }
 
     fn cached_child_public_contract_failure(
@@ -215,7 +221,7 @@ impl VerterLanguageServer {
             return None;
         }
         let after_freshness = self.imported_child_contract_freshness_key()?;
-        (after_freshness == freshness
+        let current = after_freshness == freshness
             && self.import_identity_is_current(parent_canonical_id, &snapshot.identity)
             && self
                 .documents
@@ -224,8 +230,17 @@ impl VerterLanguageServer {
                 == Some(snapshot.terminal_host_revision)
             && snapshot
                 .publication_witness
-                .is_current(&self.documents.host()))
-        .then_some(snapshot.contract)
+                .is_current(&self.documents.host());
+        if current {
+            crate::documents::ForegroundRequest::bracket_dependency(
+                &snapshot.terminal_canonical_id,
+                snapshot.terminal_host_revision,
+            );
+            crate::documents::ForegroundRequest::bracket_contract_publication(
+                &snapshot.publication_witness,
+            );
+        }
+        current.then_some(snapshot.contract)
     }
 
     pub(super) fn publish_barrel_component_route(
@@ -438,7 +453,7 @@ impl VerterLanguageServer {
             canonical_id.to_string(),
             super::ChildPublicContractSnapshot {
                 contract: projection.contract,
-                publication_witness,
+                publication_witness: Arc::new(publication_witness),
                 host_revision,
                 freshness: freshness.clone(),
             },
@@ -1470,7 +1485,38 @@ impl VerterLanguageServer {
     ///
     /// **With resolver snapshot**: owner-aware IDE sync.
     /// **Without snapshot**: pre-snapshot blocker hydration + unresolved IDE sync.
+    ///
+    /// The repair runs as its own task and the caller awaits its completion.
+    /// A caller that is cancelled — a foreground request the client abandons
+    /// after the repair's provider write reached the engine — drops only its
+    /// wait: the write still settles and records its surface, so the next
+    /// repair finds it applied instead of leaving the provider in a state no
+    /// one recorded.
+    ///
+    /// The caller's request deadline travels with the repair: its provider
+    /// writes are bounded by the instant the caller is bounded by, never by
+    /// an un-deadlined task the deadline did not reach.
     pub(super) async fn ensure_current_file_synced(&self, uri: &Uri) {
+        let server = self.clone();
+        let uri = uri.clone();
+        let deadline = verter_type_runtime::deadline::current();
+        let repair = tokio::spawn(async move {
+            let repair = server.repair_current_file(&uri);
+            match deadline {
+                Some(at) => verter_type_runtime::deadline::with_deadline_at(at, repair).await,
+                None => repair.await,
+            }
+        });
+        if let Err(error) = repair.await {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+        }
+    }
+
+    /// The body of [`Self::ensure_current_file_synced`], run on the repair's
+    /// own task.
+    async fn repair_current_file(&self, uri: &Uri) {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return;
         };
@@ -2501,28 +2547,36 @@ impl VerterLanguageServer {
         crate::provider_surface_store::ContentHash::of(&doc.source) == snapshot.source_hash
     }
 
-    /// Whether a captured request surface is STILL valid — the post-await
-    /// validation gate every provider-backed handler runs before mapping or
+    /// Whether a captured request surface is STILL valid — the provider-surface
+    /// bracket every provider-backed handler closes before mapping or
     /// publishing a provider response. Both halves are required:
-    /// - `captured_snapshot_still_honored`: the store's current generation for
-    ///   the path still agrees with the captured one (a mid-request re-sync
-    ///   advancing the surface, or a close retiring it, invalidates);
+    /// - `captured_surface_is_current`: the path's current surface still has
+    ///   the captured content epoch, incarnation and owner (a mid-request
+    ///   content or map change — including one that changes back — or a close
+    ///   retiring the path invalidates; an identical re-record does not);
     /// - the open document source still byte-matches the captured carrier
-    ///   source (a mid-request edit invalidates even while the surface
-    ///   generation is unchanged).
+    ///   source (a mid-request edit invalidates even while the surface is
+    ///   unchanged).
     ///
     /// `false` ⇒ the provider response was produced against a surface that no
     /// longer matches the live state; mapping it would be WRONG (not merely
-    /// stale) — the caller must DROP the provider contribution.
+    /// stale) — the caller must DROP the provider contribution. `true` keeps
+    /// the surface bracketed until the enclosing foreground request settles, so
+    /// a change after this decode still supersedes the answer built from it.
     pub(super) fn provider_request_surface_still_valid(
         &self,
         uri: &Uri,
-        snapshot: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+        snapshot: &Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
     ) -> bool {
-        self.documents
+        let valid = self
+            .documents
             .provider_surfaces()
-            .captured_snapshot_still_honored(snapshot)
-            && self.request_surface_matches_live_source(uri, snapshot)
+            .captured_surface_is_current(snapshot)
+            && self.request_surface_matches_live_source(uri, snapshot);
+        if valid {
+            crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
+        }
+        valid
     }
 
     /// Post-await validation for a [`TypeProviderContext`]-carrying handler:

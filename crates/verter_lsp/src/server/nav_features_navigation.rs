@@ -175,6 +175,26 @@ pub(super) async fn handle_goto_definition(
         position.character
     );
 
+    // One admission covers the native leg, the provider leg and every early
+    // return: an edit that commits anywhere between them is a revision change
+    // of this request, so a native answer can never ride into a provider
+    // answer computed on a later revision.
+    server
+        .answer_foreground(
+            crate::documents::ForegroundRoute::Definition,
+            uri,
+            handle_goto_definition_attempt(server, uri, position),
+        )
+        .await
+}
+
+/// The unsettled definition computation; [`handle_goto_definition`] owns its
+/// admission and settlement.
+async fn handle_goto_definition_attempt(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    position: &Position,
+) -> Result<Option<GotoDefinitionResponse>> {
     // Capture-only readiness: a miss enqueues/coalesces background dependency
     // publication, but definition never joins it and still queries the provider
     // immediately against the project state already available. The handler must
@@ -184,9 +204,6 @@ pub(super) async fn handle_goto_definition(
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = server.type_provider.as_ref() {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
-            let settlement =
-                crate::documents::ForegroundSettlement::capture(&server.documents, uri);
-            let settle = |response| settlement.settle(&server.documents, uri, response);
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
@@ -194,7 +211,7 @@ pub(super) async fn handle_goto_definition(
                     // Post-await validation (fail closed): a response produced
                     // against a superseded surface must not be mapped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
-                        return settle(None);
+                        return Ok(None);
                     }
                     let encoding = server.position_encoding.read().clone();
                     let locations: Vec<Location> = type_defs
@@ -239,11 +256,11 @@ pub(super) async fn handle_goto_definition(
                         })
                         .collect();
                     if !locations.is_empty() {
-                        return settle(Some(GotoDefinitionResponse::Array(locations)));
+                        return Ok(Some(GotoDefinitionResponse::Array(locations)));
                     }
                 }
             }
-            return settle(None);
+            return Ok(None);
         }
     }
 
@@ -477,48 +494,19 @@ pub(super) async fn handle_goto_definition(
     // try_component_contract_definition. The old separate resolve_component_event_definition
     // and resolve_component_prop_definition calls are subsumed by it.
 
-    // Prepare once before capturing the basis; partial syntax may remain repairable.
-    let before_repair = server.documents.snapshot_identity(uri);
+    // Repair once before capturing the provider surface; partial syntax may
+    // remain repairable. A revision change during the repair supersedes the
+    // admitted request at settlement.
     let prepared_ctx = if server.type_provider.is_some() {
         server.repaired_type_provider_context(uri).await
     } else {
         None
     };
-    if before_repair
-        .as_ref()
-        .is_some_and(|before| !server.documents.snapshot_identity_is_current(uri, before))
-    {
-        return Err(tower_lsp_server::jsonrpc::Error::new(
-            tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-        ));
-    }
-    // The provider leg settles against a basis captured after that repair. A
-    // diagnostics-generation-only move during its await (a background sync,
-    // or an importer re-armed by a dependency's settled edit) recomputes it
-    // against a fresh basis instead of answering `ContentModified`; the
-    // native result above was already accepted against such a basis and is
-    // reused. An edit, close/reopen or workspace change still fails closed.
-    let mut prepared_ctx = Some(prepared_ctx);
-    server
-        .settle_request_with_generation_retry(uri, || {
-            let prepared_ctx = prepared_ctx.take();
-            let verter_result = verter_result.clone();
-            async move {
-                let ctx = match prepared_ctx {
-                    Some(ctx) => ctx,
-                    None if server.type_provider.is_some() => {
-                        server.repaired_type_provider_context(uri).await
-                    }
-                    None => None,
-                };
-                definition_provider_attempt(server, uri, position, verter_result, ctx).await
-            }
-        })
-        .await
+    definition_provider_attempt(server, uri, position, verter_result, prepared_ctx).await
 }
 
-/// The provider leg of one definition attempt; [`handle_goto_definition`]
-/// owns its settlement.
+/// The provider leg of a definition request; [`handle_goto_definition`] owns
+/// its admission and settlement.
 async fn definition_provider_attempt(
     server: &VerterLanguageServer,
     uri: &Uri,

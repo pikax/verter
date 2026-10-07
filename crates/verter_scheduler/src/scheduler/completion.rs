@@ -842,11 +842,12 @@ impl Scheduler {
         //     out via `fanout_source_failure_to_analysis_waiters`).
         //
         //     The fan-out runs BEFORE cancel so the cancel's
-        //     `self.waiters.remove(&dep_key)` observes an empty
-        //     reverse-index entry — the fan-out drained it. Without
-        //     this ordering, cancel would strip the `DepKey` from
-        //     each waiter's `deps_remaining` first, leaving no
-        //     marker for the chokepoint to fire on.
+        //     `dep_edges.take(&dep_key)` finds no edge in the
+        //     dependency-edge store — the fan-out already took them
+        //     and recorded each marker. Without this ordering, cancel
+        //     would take the edges and strip the `DepKey` from each
+        //     waiter's `deps_remaining` first, leaving no marker for
+        //     the chokepoint to fire on.
         let mut stranded = Vec::new();
         if matches!(task_kind, TaskKind::Analysis) {
             let analysis_stranded = guard.fanout_analysis_failure_to_waiters(

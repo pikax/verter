@@ -266,6 +266,10 @@ mod inner {
             std::sync::Arc<tokio::sync::Notify>,
             std::sync::Arc<tokio::sync::Notify>,
         )>,
+        /// The ambient request deadline each `open_file` / `update_file` was
+        /// issued under, in call order: the bound the engine would apply to
+        /// that write.
+        write_deadlines: Vec<(String, Option<tokio::time::Instant>)>,
         /// Test seam matching `close_block`, but for a one-shot `update_file`.
         /// It lets concurrency tests pause an edit after the document registry
         /// has accepted new source while the provider refresh is still in flight.
@@ -737,6 +741,19 @@ mod inner {
             self.state.lock().unwrap().calls.clone()
         }
 
+        /// The ambient request deadline every `open_file` / `update_file` of
+        /// `path` was issued under, in call order.
+        pub fn write_deadlines(&self, path: &str) -> Vec<Option<tokio::time::Instant>> {
+            self.state
+                .lock()
+                .unwrap()
+                .write_deadlines
+                .iter()
+                .filter(|(written, _)| written == path)
+                .map(|(_, deadline)| *deadline)
+                .collect()
+        }
+
         /// Get only file sync calls (open/load/update/close).
         pub fn file_sync_calls(&self) -> Vec<MockCall> {
             self.calls()
@@ -1135,6 +1152,9 @@ mod inner {
             // even returned, which is the realistic mid-pass ordering.
             let (fail, on_open, block) = {
                 let mut state = self.state.lock().unwrap();
+                state
+                    .write_deadlines
+                    .push((path.to_string(), verter_type_runtime::deadline::current()));
                 state.calls.push(MockCall::OpenFile {
                     path: path.to_string(),
                     content: content.to_string(),
@@ -1249,6 +1269,9 @@ mod inner {
                     path: path.to_string(),
                     content: content.to_string(),
                 });
+                state
+                    .write_deadlines
+                    .push((path.to_string(), verter_type_runtime::deadline::current()));
                 let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
                 let block = match &state.update_block {
                     Some((armed_path, _, _)) if armed_path == path => state

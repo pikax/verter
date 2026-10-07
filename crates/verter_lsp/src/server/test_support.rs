@@ -12,16 +12,15 @@ use super::VerterLanguageServer;
 /// provider passes all four without a per-route hook.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RequestBarrier {
-    /// A settlement basis was just captured; the attempt has not yet looked up
-    /// the surface it will query (the generation-read/snapshot-lookup interval).
+    /// The request was just admitted; its computation has not yet looked up
+    /// the surface it will query.
     Capture,
     /// The provider received the query and has not produced its answer.
     ProviderDispatch,
     /// The provider's answer is ready and the handler has not mapped it.
     ProviderDecode,
-    /// An attempt's answer is computed and its settlement has not yet read the
-    /// basis's generation; where the settlement first checks the document and
-    /// workspace, this is the interval between its two currency reads.
+    /// The answer is computed and its disposition has not yet read the
+    /// request's admitted inputs back.
     Settlement,
 }
 
