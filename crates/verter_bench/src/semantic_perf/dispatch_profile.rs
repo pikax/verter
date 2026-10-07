@@ -145,7 +145,8 @@ pub fn profile_scenario(dir: &Path) -> Result<LaneProfile, JobError> {
     init.map_err(JobError)?;
     phases.push(p);
     for name in ["cold", "warm"] {
-        let (_answer, p) = phase(&host, name, || resolve(&host, &scenario_id, "__Probe"));
+        let (answer, p) = phase(&host, name, || resolve(&host, &scenario_id, "__Probe"));
+        answer.map_err(JobError)?;
         phases.push(p);
     }
     let source = super::read(dir, "scenario.ts")?;
@@ -155,7 +156,8 @@ pub fn profile_scenario(dir: &Path) -> Result<LaneProfile, JobError> {
     });
     phases.push(p);
     for name in ["edit-cold", "edit-warm"] {
-        let (_answer, p) = phase(&host, name, || resolve(&host, &scenario_id, "__Probe"));
+        let (answer, p) = phase(&host, name, || resolve(&host, &scenario_id, "__Probe"));
+        answer.map_err(JobError)?;
         phases.push(p);
     }
     let lane = dir
@@ -191,7 +193,10 @@ export {};
 "#;
 
 /// Profile demands answered through unannotated function return types.
-pub fn profile_flow_return() -> LaneProfile {
+///
+/// `Err` when any phase's probe resolves nothing: an unanswered lane is a
+/// failed measurement run, never a cheap-looking near-zero row.
+pub fn profile_flow_return() -> Result<LaneProfile, JobError> {
     let (_workspace, host) = fresh_host();
     let canonical = format!("{PROJECT_ROOT}/flow.ts");
     let mut phases = Vec::new();
@@ -215,15 +220,13 @@ pub fn profile_flow_return() -> LaneProfile {
         ("warm", "__Probe"),
     ] {
         let (answer, p) = phase(&host, name, || resolve(&host, &canonical, alias));
-        if let Err(err) = answer {
-            eprintln!("flow-return {name}: {err}");
-        }
+        answer.map_err(JobError)?;
         phases.push(p);
     }
-    LaneProfile {
+    Ok(LaneProfile {
         lane: "flow-return".into(),
         phases,
-    }
+    })
 }
 
 const SFC_FIXTURES: &[(&str, &str)] = &[
@@ -261,7 +264,10 @@ const SFC_FIXTURES: &[(&str, &str)] = &[
 const SFC_COMPONENTS: &[&str] = &["table.vue", "tabs.vue", "editor_toolbar.vue"];
 
 /// Profile component metadata over the vendored SFC fixtures.
-pub fn profile_component_meta() -> LaneProfile {
+///
+/// `Err` when any demanded component yields no metadata: an unanswered lane
+/// is a failed measurement run, never a cheap-looking near-zero row.
+pub fn profile_component_meta() -> Result<LaneProfile, JobError> {
     let (_workspace, host) = fresh_host();
     let id = |name: &str| format!("{PROJECT_ROOT}/{name}");
     let components: Vec<String> = SFC_COMPONENTS.iter().map(|name| id(name)).collect();
@@ -278,15 +284,17 @@ pub fn profile_component_meta() -> LaneProfile {
         }
     });
     phases.push(p);
-    let all_meta = |host: &VerterHost| {
+    let all_meta = |host: &VerterHost| -> Result<(), String> {
         for component in &components {
             if host.get_component_meta(component).is_none() {
-                eprintln!("component-meta: no metadata for {component}");
+                return Err(format!("no component metadata for `{component}`"));
             }
         }
+        Ok(())
     };
     for name in ["cold", "warm"] {
-        let ((), p) = phase(&host, name, || all_meta(&host));
+        let (answer, p) = phase(&host, name, || all_meta(&host));
+        answer.map_err(JobError)?;
         phases.push(p);
     }
     let (types_name, types_source) = SFC_FIXTURES[1];
@@ -301,13 +309,14 @@ pub fn profile_component_meta() -> LaneProfile {
     });
     phases.push(p);
     for name in ["edit-cold", "edit-warm"] {
-        let ((), p) = phase(&host, name, || all_meta(&host));
+        let (answer, p) = phase(&host, name, || all_meta(&host));
+        answer.map_err(JobError)?;
         phases.push(p);
     }
-    LaneProfile {
+    Ok(LaneProfile {
         lane: "component-meta".into(),
         phases,
-    }
+    })
 }
 
 /// Entry point of the `resolver_dispatch_profile` example.
@@ -332,8 +341,15 @@ pub fn main() -> std::process::ExitCode {
             }
         }
     }
-    lanes.push(profile_flow_return());
-    lanes.push(profile_component_meta());
+    for lane in [profile_flow_return(), profile_component_meta()] {
+        match lane {
+            Ok(lane) => lanes.push(lane),
+            Err(err) => {
+                eprintln!("{err}");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
     let json = serde_json::to_string_pretty(&lanes).expect("profile serialises");
     match out {
         Some(path) => {

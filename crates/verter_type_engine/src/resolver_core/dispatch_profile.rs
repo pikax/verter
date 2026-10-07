@@ -98,20 +98,28 @@ mod enabled {
 
     /// Every method called since the last [`reset`], with its count, sorted
     /// by method name. Methods not called since the reset are omitted.
+    ///
+    /// One counter exists per macro expansion site, and a port implemented
+    /// through a shared macro can expand the same `"Port::method"` label in
+    /// several impls, so several live counters can carry one label. Rows are
+    /// summed by label: the snapshot reports one count per method, not per
+    /// expansion site.
     pub fn snapshot() -> Vec<MethodCallCount> {
         let registry = REGISTRY
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut counts: Vec<MethodCallCount> = registry
-            .iter()
-            .map(|counter| MethodCallCount {
-                method: counter.method,
-                calls: counter.calls.load(Ordering::Relaxed),
-            })
-            .filter(|count| count.calls > 0)
-            .collect();
-        counts.sort_by(|a, b| a.method.cmp(b.method));
-        counts
+        let mut by_method: std::collections::BTreeMap<&'static str, u64> =
+            std::collections::BTreeMap::new();
+        for counter in registry.iter() {
+            let calls = counter.calls.load(Ordering::Relaxed);
+            if calls > 0 {
+                *by_method.entry(counter.method).or_insert(0) += calls;
+            }
+        }
+        by_method
+            .into_iter()
+            .map(|(method, calls)| MethodCallCount { method, calls })
+            .collect()
     }
 
     /// Zero every counter.
@@ -154,6 +162,37 @@ mod enabled {
             assert_eq!(tally("ProfileTest::a"), 0);
             probe_a();
             assert_eq!(tally("ProfileTest::a"), 1);
+        }
+
+        /// The macro declares its counter inside the method body, so two
+        /// impls sharing one label own two private counters. A snapshot
+        /// reports one row per label with the SUM, not one row per counter
+        /// (and a consumer folding rows into a map would silently drop all
+        /// but the last).
+        #[test]
+        fn counters_sharing_one_label_are_summed_into_one_row() {
+            fn first_impl() {
+                crate::count_resolver_context_call!("ProfileTest::shared");
+            }
+            fn second_impl() {
+                crate::count_resolver_context_call!("ProfileTest::shared");
+            }
+            reset();
+            for _ in 0..3 {
+                first_impl();
+            }
+            second_impl();
+            let rows = snapshot();
+            let shared: Vec<_> = rows
+                .iter()
+                .filter(|count| count.method == "ProfileTest::shared")
+                .collect();
+            assert_eq!(
+                shared.len(),
+                1,
+                "one row per method label regardless of how many impls carry it: {rows:?}"
+            );
+            assert_eq!(shared[0].calls, 4);
         }
     }
 }
