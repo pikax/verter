@@ -21,13 +21,8 @@ error[E0624]: method `output_lease` is private
   |     pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
   |     ---------------------------------------------------------------------- private method defined here
 
-error[E0624]: method `output_lease` is private
+error[E0599]: no method named `output_lease` found for reference `&Arc<ProjectTypeStore>` in the current scope
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_recoverable_from_query_access.rs
   |
   |     host.project_type_store().output_lease().authority()
-  |                               ^^^^^^^^^^^^ private method
-  |
- ::: $WORKSPACE/crates/verter_session/src/project_type_store.rs
-  |
-  |     pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
-  |     ---------------------------------------------------------------------- private method defined here
+  |                               ^^^^^^^^^^^^ method not found in `&Arc<ProjectTypeStore>`

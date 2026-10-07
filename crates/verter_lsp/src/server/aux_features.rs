@@ -41,7 +41,7 @@ pub(super) async fn handle_document_symbol(
     server: &VerterLanguageServer,
     params: DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
-    let _hg = HandlerGuard::new("document_symbol");
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_symbol");
     let uri = &params.text_document.uri;
 
     let symbols = (|| {
@@ -91,7 +91,7 @@ pub(super) async fn handle_folding_range(
     server: &VerterLanguageServer,
     params: FoldingRangeParams,
 ) -> Result<Option<Vec<FoldingRange>>> {
-    let _hg = HandlerGuard::new("folding_range");
+    let _hg = HandlerGuard::new(&server.handler_activity, "folding_range");
     let uri = &params.text_document.uri;
 
     let ranges = (|| {
@@ -113,7 +113,7 @@ pub(super) async fn handle_selection_range(
     server: &VerterLanguageServer,
     params: SelectionRangeParams,
 ) -> Result<Option<Vec<SelectionRange>>> {
-    let _hg = HandlerGuard::new("selection_range");
+    let _hg = HandlerGuard::new(&server.handler_activity, "selection_range");
     let uri = &params.text_document.uri;
 
     let result = (|| {
@@ -197,7 +197,7 @@ async fn handle_document_highlight_attempt(
     server: &VerterLanguageServer,
     params: &DocumentHighlightParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
-    let _hg = HandlerGuard::new("document_highlight");
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_highlight");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -302,7 +302,7 @@ pub(super) async fn handle_signature_help(
     server: &VerterLanguageServer,
     params: SignatureHelpParams,
 ) -> Result<Option<SignatureHelp>> {
-    let _hg = HandlerGuard::new("signature_help");
+    let _hg = HandlerGuard::new(&server.handler_activity, "signature_help");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -369,7 +369,7 @@ async fn handle_code_action_attempt(
     server: &VerterLanguageServer,
     params: &CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
-    let _hg = HandlerGuard::new("code_action");
+    let _hg = HandlerGuard::new(&server.handler_activity, "code_action");
     let uri = &params.text_document.uri;
     let range = &params.range;
 
@@ -796,7 +796,7 @@ async fn handle_semantic_tokens_full_attempt(
     server: &VerterLanguageServer,
     params: &SemanticTokensParams,
 ) -> Result<Option<SemanticTokensResult>> {
-    let _hg = HandlerGuard::new("semantic_tokens");
+    let _hg = HandlerGuard::new(&server.handler_activity, "semantic_tokens");
     let uri = &params.text_document.uri;
 
     // Skip TSGO while typing — serial TSGO pipeline must stay clear
@@ -870,7 +870,7 @@ pub(super) async fn handle_code_lens(
     server: &VerterLanguageServer,
     params: CodeLensParams,
 ) -> Result<Option<Vec<CodeLens>>> {
-    let _hg = HandlerGuard::new("code_lens");
+    let _hg = HandlerGuard::new(&server.handler_activity, "code_lens");
     let uri = &params.text_document.uri;
 
     let lenses = (|| {
@@ -901,7 +901,7 @@ async fn handle_inlay_hint_attempt(
     server: &VerterLanguageServer,
     params: &InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>> {
-    let _hg = HandlerGuard::new("inlay_hint");
+    let _hg = HandlerGuard::new(&server.handler_activity, "inlay_hint");
     let uri = &params.text_document.uri;
     let range = &params.range;
 
@@ -1092,7 +1092,7 @@ pub(super) async fn handle_linked_editing_range(
     server: &VerterLanguageServer,
     params: LinkedEditingRangeParams,
 ) -> Result<Option<LinkedEditingRanges>> {
-    let _hg = HandlerGuard::new("linked_editing");
+    let _hg = HandlerGuard::new(&server.handler_activity, "linked_editing");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -1109,7 +1109,7 @@ pub(super) async fn handle_document_link(
     server: &VerterLanguageServer,
     params: DocumentLinkParams,
 ) -> Result<Option<Vec<DocumentLink>>> {
-    let _hg = HandlerGuard::new("document_link");
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_link");
     let uri = &params.text_document.uri;
 
     let links = (|| {
@@ -1131,7 +1131,7 @@ pub(super) async fn handle_document_color(
     server: &VerterLanguageServer,
     params: DocumentColorParams,
 ) -> Result<Vec<ColorInformation>> {
-    let _hg = HandlerGuard::new("document_color");
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_color");
     let uri = &params.text_document.uri;
 
     let colors = (|| {
@@ -1150,10 +1150,10 @@ pub(super) async fn handle_document_color(
 }
 
 pub(super) async fn handle_color_presentation(
-    _server: &VerterLanguageServer,
+    server: &VerterLanguageServer,
     params: ColorPresentationParams,
 ) -> Result<Vec<ColorPresentation>> {
-    let _hg = HandlerGuard::new("color_presentation");
+    let _hg = HandlerGuard::new(&server.handler_activity, "color_presentation");
     Ok(color_info::color_presentations(&params.color))
 }
 
@@ -1161,7 +1161,7 @@ pub(super) async fn handle_formatting(
     server: &VerterLanguageServer,
     params: DocumentFormattingParams,
 ) -> Result<Option<Vec<TextEdit>>> {
-    let _hg = HandlerGuard::new("formatting");
+    let _hg = HandlerGuard::new(&server.handler_activity, "formatting");
     let uri = &params.text_document.uri;
 
     let edits = (|| {
@@ -1208,7 +1208,7 @@ pub(super) async fn handle_on_type_formatting(
     server: &VerterLanguageServer,
     params: DocumentOnTypeFormattingParams,
 ) -> Result<Option<Vec<TextEdit>>> {
-    let _hg = HandlerGuard::new("on_type_formatting");
+    let _hg = HandlerGuard::new(&server.handler_activity, "on_type_formatting");
     let uri = &params.text_document_position.text_document.uri;
     let position = &params.text_document_position.position;
 
@@ -1254,7 +1254,7 @@ pub(super) async fn handle_symbol(
     server: &VerterLanguageServer,
     params: WorkspaceSymbolParams,
 ) -> Result<Option<WorkspaceSymbolResponse>> {
-    let _hg = HandlerGuard::new("workspace_symbol");
+    let _hg = HandlerGuard::new(&server.handler_activity, "workspace_symbol");
     let symbols = workspace_symbols(&server.documents.host(), &params.query);
     Ok(if symbols.is_empty() {
         None
@@ -1267,7 +1267,7 @@ pub(super) async fn handle_prepare_call_hierarchy(
     server: &VerterLanguageServer,
     params: CallHierarchyPrepareParams,
 ) -> Result<Option<Vec<CallHierarchyItem>>> {
-    let _hg = HandlerGuard::new("prepare_call_hierarchy");
+    let _hg = HandlerGuard::new(&server.handler_activity, "prepare_call_hierarchy");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -1292,7 +1292,7 @@ pub(super) async fn handle_incoming_calls(
     server: &VerterLanguageServer,
     params: CallHierarchyIncomingCallsParams,
 ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
-    let _hg = HandlerGuard::new("incoming_calls");
+    let _hg = HandlerGuard::new(&server.handler_activity, "incoming_calls");
     let uri = &params.item.uri;
 
     let calls = (|| {
@@ -1317,7 +1317,7 @@ pub(super) async fn handle_outgoing_calls(
     server: &VerterLanguageServer,
     params: CallHierarchyOutgoingCallsParams,
 ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-    let _hg = HandlerGuard::new("outgoing_calls");
+    let _hg = HandlerGuard::new(&server.handler_activity, "outgoing_calls");
     let uri = &params.item.uri;
 
     let calls = (|| {

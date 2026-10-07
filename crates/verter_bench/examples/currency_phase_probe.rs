@@ -665,7 +665,8 @@ fn run_meta_mode() {
             &ViteConfigOptions::default(),
         );
         ws.set_project_graph(graph.graph);
-        let meta_host = ComponentMetaHost::new(HostConfig::default(), Arc::new(ws));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), Arc::new(ws)));
+        let meta_host = ComponentMetaHost::new_shared_host(Arc::clone(&host));
         let session = meta_host.open_session().unwrap();
         let c_ms = ms(t0.elapsed());
 
@@ -686,7 +687,7 @@ fn run_meta_mode() {
         }
         let r_ms = ms(t0.elapsed());
 
-        let c = counters_of(meta_host.host());
+        let c = counters_of(&host);
 
         let t0 = Instant::now();
         drop(session);

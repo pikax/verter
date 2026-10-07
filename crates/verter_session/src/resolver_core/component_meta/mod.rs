@@ -439,11 +439,16 @@ pub(crate) fn component_meta_resolved_macros(
         );
     }
 
-    let is_svelte = ctx
+    // The Svelte surface delegate runs exactly when the owner's snapshot
+    // carries the Svelte TYPED carrier — the same carrier read the delegate
+    // itself performs — never on an adapter-identity comparison.
+    let opens_svelte_carrier = ctx
         .ensure_indexed_ready_serve(owner_canonical)
-        .and_then(|serve| serve.indexed.file_language.adapter_id().cloned())
-        .is_some_and(|adapter| adapter.is_svelte());
-    if is_svelte {
+        .and_then(|serve| ctx.framework_parse_artifact(&serve.indexed))
+        .is_some_and(|artifact| {
+            crate::typeinfo::adapters::svelte::svelte_parse(&artifact).is_some()
+        });
+    if opens_svelte_carrier {
         use crate::typeinfo::framework_surface::SvelteSurfaceSource;
 
         let native_index = snapshot_macros.len();

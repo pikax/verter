@@ -37,21 +37,28 @@ use crate::features::cursor_context::{
 #[allow(unused_imports)]
 use crate::type_provider::merge;
 
-// ── Handler tracking for freeze diagnosis ──────────────────────────────
-// Moved to `handler_guard.rs`. Imported here so the
+// ── Handler activity and blocking guard ─────────────────────────────────
+// Lives in `handler_guard.rs`. Imported here so the
 // `#[path = "../background_init.rs"]` sibling (which references
-// ACTIVE_HANDLERS and block_in_place_if_available via `use super::*`
-// or implicit module-level lookup) compiles.
+// block_in_place_if_available via `use super::*` or implicit module-level
+// lookup) compiles.
 mod handler_guard;
 #[allow(unused_imports)]
-use self::handler_guard::{block_in_place_if_available, ACTIVE_HANDLERS};
+use self::handler_guard::block_in_place_if_available;
+// The server-scoped admission activity reaches the separate
+// integration-test binary through the default-off `test-support` seam —
+// the same pattern as every other item the consolidated test target
+// drives. Default builds (and any dependent) still see only the
+// crate-internal path below.
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use self::handler_guard::HandlerActivity;
+#[cfg(any(test, feature = "test-support"))]
+pub use self::handler_guard::{HandlerActivity, HandlerGuard};
 // Re-export the runtime-flavor-guarded blocking helper so sibling top-level
 // modules (e.g. the background `sync_coordinator` / `background_init` diagnostic
 // publish paths) can route VFS source reads through the same guard the server
 // handlers use, instead of an unguarded `tokio::task::block_in_place`.
 pub(crate) use self::handler_guard::block_in_place_if_available as block_in_place_guarded;
-pub(crate) use self::handler_guard::wait_for_handlers_idle;
-pub(crate) use self::handler_guard::wait_for_handlers_quiet;
 
 // Provider-sync state CRUD + context helpers. Inherent-impl
 // extension methods on `VerterLanguageServer` covering MRU bookkeeping,
@@ -615,6 +622,10 @@ pub struct ServerCore {
     /// init task. Background tasks check this before committing results to discard
     /// stale work when a newer init supersedes them.
     init_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// This server's interactive-handler activity: every request handler
+    /// holds a guard on it, and the background scanner and heartbeat read
+    /// it. Owned per server, so no other server in the process shares it.
+    handler_activity: Arc<HandlerActivity>,
     /// Generation fence joining the provider's configured-owner authority to the
     /// atomically published workspace root. Provider-backed consumers capture a
     /// witness before awaiting and revalidate it before using the response.
@@ -1345,6 +1356,7 @@ impl VerterLanguageServer {
             request_barriers: Arc::default(),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            handler_activity: Arc::new(HandlerActivity::default()),
             ownership_generation_fence: Arc::new(
                 crate::configured_owner::OwnershipGenerationFence::default(),
             ),
@@ -1416,6 +1428,16 @@ impl VerterLanguageServer {
     /// The outbound transport this server sends through.
     pub fn outbound(&self) -> &Outbound {
         &self.client
+    }
+
+    /// This server's interactive-handler activity — the ONE activity its
+    /// handlers hold guards on and its background scanner waits behind.
+    /// Test-support seam for the consolidated integration-test binary,
+    /// which proves the server-scoped admission wiring; the field itself
+    /// stays server-private so no caller can substitute another activity.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handler_activity(&self) -> &std::sync::Arc<HandlerActivity> {
+        &self.handler_activity
     }
 }
 

@@ -39,14 +39,13 @@ impl VerterHost {
     /// The scheduler's `SourceLoader` shares the same `Arc<RwLock>`, so
     /// it automatically reads through the new workspace after this call.
     ///
-    /// Re-applies `HostConfig::resolve_extensions` to the new workspace
-    /// so reverse-dep stem stripping continues to honour the host's
-    /// configured extension list across LSP/test workspace swaps.
+    /// Attaches the host's workspace-scoped services to the new workspace
+    /// through the same route construction used, so reverse-dep stem
+    /// stripping keeps honouring the configured extension list and the
+    /// resolution state keeps charging the one retention adapter across
+    /// LSP/test workspace swaps.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
-        workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
-        workspace.install_resolution_retention(Arc::new(
-            verter_session_query::retention::ResolutionRetention::process_local(),
-        ));
+        self.workspace_services.attach(workspace.as_ref());
         *self.workspace.write() = workspace;
         // SWAP-FIRST, then clear — the order is load-bearing. Clearing
         // before the swap would be unsound: a concurrent reader could

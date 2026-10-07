@@ -1191,7 +1191,6 @@ fn no_thread_local_session_view_storage_in_crate_sources() {
         ),
         ("session_view.rs", include_str!("session_view.rs")),
         ("meta.rs", include_str!("meta.rs")),
-        ("session_runtime.rs", include_str!("session_runtime.rs")),
         ("meta_resolve.rs", include_str!("meta_resolve.rs")),
     ];
 

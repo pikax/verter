@@ -2491,11 +2491,16 @@ pub(crate) fn build_style_analyses_for_artifact(
     _provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Vec<verter_session_query::analysis::style::StyleBlockAnalysis> {
     framework_parse.map_or_else(Vec::new, |artifact| {
+        // Style semantics follow the TYPED carrier the artifact opens as —
+        // the same carrier dispatch the snapshot builders use — never an
+        // adapter-identity comparison: SFC scoped/`v-bind()` semantics apply
+        // exactly when the artifact is the Vue SFC carrier.
+        let sfc_style_semantics = crate::typeinfo::adapters::vue::vue_parse(artifact).is_some();
         build_style_analyses_from_inventory(
             artifact.inventory(),
             source,
             canonical_id,
-            artifact.adapter_id().is_vue(),
+            sfc_style_semantics,
         )
         .0
     })
