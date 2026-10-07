@@ -521,6 +521,7 @@
           "wait_batch",
           "account_batch_submission",
           "counters",
+          "dependency_occupancy",
           "try_get_source",
           "try_get_witnessed_source",
           "try_get_source_for_witness",
