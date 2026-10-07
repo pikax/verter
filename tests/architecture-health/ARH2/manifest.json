@@ -58,7 +58,7 @@
         "route-without-pins",
         "route-surface-drift (the scheduler field items, the pub fn test_* hook names, and the ARH1-CUT-4 bulk retainedTypes/retainedAssocItems/consumersAffected join the ARH1 narrowing populations exactly)",
         "route-surface-not-live (a characterized narrowed field must still be a live pub field: the surface is characterized BEFORE narrowing)",
-        "route-required-witness-missing (the ARH1-CUT-2 scheduler field route pins every incarnation-rejection, removal-drain, generation-floor and deferred-blocker witness; a pin may carry more, never fewer)",
+        "route-required-witness-missing (the ARH1-CUT-2 scheduler field route pins every incarnation-rejection, removal-drain, source-witness and deferred-blocker witness; a pin may carry more, never fewer)",
         "ac3-concern-missing",
         "ac3-concern-without-evidence",
         "ac3-concern-invented"

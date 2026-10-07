@@ -49,6 +49,7 @@ impl StageExecutor for HashingExecutor {
         _file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
+        _incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         // FNV-1a over the content, splatted into both hash slots. Only
         // distinguishability matters here, not the production digest.
@@ -65,6 +66,7 @@ impl StageExecutor for HashingExecutor {
             whole_hash: whole,
             semantic_hash: whole,
             generation,
+            incarnation: 0,
             data: Arc::new(crate::node::EmptyData),
         })
     }
