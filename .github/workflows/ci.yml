@@ -630,8 +630,11 @@ jobs:
             node scripts/run-cached.mjs -- 'cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
           fi
       # Fail closed before upload if a selector has gone stale, overlaps another
-      # lane, or would leave a provider lane empty.
+      # lane, or would leave a provider lane empty. The script bounds the
+      # listing itself and prints the still-running binaries when it trips;
+      # the step limit is the backstop above that bound and its diagnostics.
       - name: Verify the provider CI partition
+        timeout-minutes: 20
         run: node scripts/provider-ci.mjs verify --archive-file artifacts/rust-nextest-archive.tar.zst
       - name: Upload the shared Rust test archive
         uses: actions/upload-artifact@v6
@@ -671,7 +674,12 @@ jobs:
         with:
           name: rust-nextest-archive
           path: artifacts
+      # nextest bounds each test (slow-timeout), but not the `--list` pass every
+      # binary runs first; the step limit keeps a binary that never returns
+      # from it from spending the whole job budget. A shard runs in about
+      # three minutes.
       - name: Run core Rust tests from the shared archive
+        timeout-minutes: 30
         env:
           NEXTEST_PROFILE: ci
         run: |

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -12,7 +14,7 @@ import {
   buildProviderLaneFilterExpr,
   verifyProviderCiPartition,
 } from "./provider-ci-internals.mjs";
-import { providerCargoInvocations } from "./provider-ci.mjs";
+import { providerCargoInvocations, verifyArchive } from "./provider-ci.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -80,6 +82,72 @@ test("real-provider module tests require explicit provider ownership", () => {
   );
 });
 
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+// A test binary that never returns from `--list` must fail the verify step
+// within its bound, name the condition, and leave no descendant running.
+test("verify fails at its listing bound and reaps a listing that never returns", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "provider-ci-list-"));
+  const pidFile = join(dir, "listing.pids");
+  const neverExits = "setInterval(() => {}, 1 << 30);";
+  // The grandchild is detached so that it outlives its parent unless the
+  // reaper itself ends it: it leaves the parent's job object on Windows and
+  // its process group on POSIX.
+  const fakeCargo =
+    `const { spawn } = require("node:child_process");` +
+    `const child = spawn(process.execPath, ["-e", ${JSON.stringify(neverExits)}], ` +
+    `{ detached: true, stdio: "ignore" });` +
+    `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, process.pid + " " + child.pid);` +
+    neverExits;
+  const listingPids = () => readFileSync(pidFile, "utf8").split(" ").map(Number);
+  const reapListing = () => {
+    for (const pid of listingPids()) if (isAlive(pid)) process.kill(pid, "SIGKILL");
+  };
+  let output = "";
+  const backstop = new AbortController();
+  try {
+    const listing = verifyArchive(["--archive-file", join(dir, "archive.tar.zst")], {
+      cargo: process.execPath,
+      cargoArgsPrefix: ["-e", fakeCargo],
+      listTimeoutMs: 3000,
+      write: (text) => {
+        output += text;
+      },
+    });
+    // Without the bound the listing never settles; end it here so the
+    // failure is reported instead of holding the test process open.
+    const outcome = await Promise.race([
+      listing,
+      sleep(120_000, "unbounded", { signal: backstop.signal }).catch(() => "aborted"),
+    ]);
+    if (outcome === "unbounded") {
+      reapListing();
+      await listing;
+      assert.fail("verify did not end at its listing bound");
+    }
+    assert.equal(outcome, 124);
+    assert.match(output, /did not return from --list within 3s/);
+    const [, grandchild] = listingPids();
+    if (process.platform === "linux") assert.match(output, new RegExp(`\\b${grandchild}\\b`));
+    const deadline = Date.now() + 10_000;
+    while (isAlive(grandchild) && Date.now() < deadline) await sleep(100);
+    assert.equal(isAlive(grandchild), false, "the listing's descendants must be reaped");
+  } finally {
+    backstop.abort();
+    try {
+      reapListing();
+    } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("provider runners use serial libtest commands instead of nextest", () => {
   for (const lane of ["tsserver", "tsgo"]) {
     const invocations = providerCargoInvocations(lane);
@@ -104,6 +172,15 @@ test("CI builds one provider-free archive and runs providers serially in their o
 
   assert.match(build, /cargo nextest archive --workspace/);
   assert.match(build, /node scripts\/provider-ci\.mjs verify --archive-file/);
+  // Each step that lists the archive carries its own bound below the job's.
+  assert.match(
+    build,
+    /- name: Verify the provider CI partition\r?\n\s+timeout-minutes: \d+\r?\n\s+run: node scripts\/provider-ci\.mjs verify/,
+  );
+  assert.match(
+    core,
+    /- name: Run core Rust tests from the shared archive\r?\n\s+timeout-minutes: \d+\r?\n/,
+  );
   assert.match(build, /name:\s*rust-nextest-archive/);
   assert.doesNotMatch(build, /--(?:build-)?jobs\b|-j\s*\d|--test-threads\b|max-threads/);
   assert.match(success, /^\s*- rust-test-build\s*$/m);
