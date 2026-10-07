@@ -16536,7 +16536,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Always pin the project-generation so the fence catches
         // workspace-wide changes that could invalidate the lowering
         // basis (mirrors `dep_signature_for` semantics).
-        let project_gen = self.ctx.current_project_generation();
+        let project_gen = self.snapshot.current_project_generation();
         local_fence.push((
             Arc::clone(&owner.defining_canonical),
             crate::semantic_query::DepVersion::ProjectGeneration(project_gen),

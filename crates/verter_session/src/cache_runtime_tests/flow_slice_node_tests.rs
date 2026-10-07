@@ -33,6 +33,7 @@ use verter_session_query::function_program::FunctionProgramKey;
 use verter_type_engine::cache_runtime::flow_slice_node::*;
 use verter_type_engine::project_semantic_dispatch::flow_slice_driver::FlowBodySkeletonSource;
 use verter_type_engine::project_semantic_dispatch::flow_slice_driver::FlowSliceDriver;
+use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::SemanticQueryApi as _;
 use verter_type_expr::facts::FunctionPartIdentity;
@@ -362,7 +363,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
 
     // The exact key serves.
     assert!(
-        FlowSliceDriver::new(stores, ctx)
+        FlowSliceDriver::new(stores, ctx, ctx.request_flags())
             .skeleton_for(&key)
             .is_some(),
         "the key whose source axes match the served artifact is served"
@@ -403,7 +404,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         ..key.clone()
     };
     assert!(
-        FlowSliceDriver::new(stores, ctx)
+        FlowSliceDriver::new(stores, ctx, ctx.request_flags())
             .skeleton_for(&foreign_parse_key)
             .is_none(),
         "a parse key the serving artifact does not carry is a typed miss"
@@ -415,7 +416,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         ..key.clone()
     };
     assert!(
-        FlowSliceDriver::new(stores, ctx)
+        FlowSliceDriver::new(stores, ctx, ctx.request_flags())
             .skeleton_for(&foreign_language)
             .is_none(),
         "a language row the serving artifact does not carry is a typed miss"
@@ -501,7 +502,7 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
         (&foreign_toolchain, "toolchain fingerprint"),
     ] {
         assert!(
-            FlowSliceDriver::new(stores, ctx)
+            FlowSliceDriver::new(stores, ctx, ctx.request_flags())
                 .skeleton_for(foreign)
                 .is_none(),
             "a key whose {axis} the serving artifact does not carry is a typed miss"
@@ -514,7 +515,7 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
     // The matching key still serves, and the refusals left it unbuilt.
     assert!(stores.graphs().peek(&key).is_none());
     assert!(
-        FlowSliceDriver::new(stores, ctx)
+        FlowSliceDriver::new(stores, ctx, ctx.request_flags())
             .skeleton_for(&key)
             .is_some(),
         "the key whose every source axis matches the served artifact is served"
@@ -588,7 +589,8 @@ impl Rig {
         &'a self,
         ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     ) -> FlowSliceDriver<'a> {
-        FlowSliceDriver::new(&self.stores, ctx).with_fixture(self.source.as_ref())
+        FlowSliceDriver::new(&self.stores, ctx, ctx.request_flags())
+            .with_fixture(self.source.as_ref())
     }
 }
 
@@ -740,6 +742,7 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     let built = FlowSliceDriver::new(
         &stores,
         &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        host.request_flags(),
     )
     .with_fixture(source.as_ref())
     .skeleton_for(&key)
@@ -1180,11 +1183,11 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
     let (ir, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
         &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || {
-            let outcome = FlowSliceDriver::new(stores, ctx)
+            let outcome = FlowSliceDriver::new(stores, ctx, ctx.request_flags())
                 .lookup_hash(key.clone())
                 .expect("hash lookup");
             let slice_hash = planned(outcome);
-            FlowSliceDriver::new(stores, ctx)
+            FlowSliceDriver::new(stores, ctx, ctx.request_flags())
                 .lookup_lowered(FlowSliceLoweredKey {
                     hash_key: key.clone(),
                     slice_hash,

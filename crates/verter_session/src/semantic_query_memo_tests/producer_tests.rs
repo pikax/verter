@@ -8,6 +8,7 @@ use super::producer::{Claim, Joined, ReadCapture, Recursion};
 use super::*;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
 use verter_type_engine::semantic_query::{PrimitiveKind, ResolveDeclKey, ScopeId};
 use verter_type_expr::TopLevelOwnerId;
 
@@ -74,10 +75,11 @@ fn claim<'s>(
     task: &verter_execution::tasks::ExecutionTask,
 ) -> (Claim<'s>, super::producer::ClaimAttempt) {
     let mut capture = ReadCapture::default();
-    let Ok(mut attempt) = store.begin_query_claim(host, key(), &mut capture) else {
+    let flags = host.request_flags();
+    let Ok(mut attempt) = store.begin_query_claim(host, flags, key(), &mut capture) else {
         panic!("a cold key has no warm answer");
     };
-    let claim = store.claim_query(host, &mut attempt, task, &mut capture);
+    let claim = store.claim_query(host, flags, &mut attempt, task, &mut capture);
     (claim, attempt)
 }
 
@@ -111,11 +113,12 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
         scope
             .spawn(|| {
                 let mut capture = ReadCapture::default();
-                let Ok(mut settled) = lease.settle(&host, keyed_output(&store, hash)) else {
+                let flags = host.request_flags();
+                let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash)) else {
                     panic!("an uncancelled producer settles");
                 };
                 settled
-                    .admit(&host, &mut capture)
+                    .admit(&host, flags, &mut capture)
                     .expect("an uncancelled producer is admitted");
                 settled.complete(&host, &mut capture)
             })
@@ -127,7 +130,12 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
     };
 
     let mut capture = ReadCapture::default();
-    match subscription.wait(&host, &mut second_attempt, &mut capture) {
+    match subscription.wait(
+        &host,
+        host.request_flags(),
+        &mut second_attempt,
+        &mut capture,
+    ) {
         Joined::Read(read) => assert!(
             matches!(read.value, QueryResult::Value(joined) if joined == value),
             "the subscriber reads the producer's value"
@@ -209,7 +217,13 @@ fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
         let claimant = scope.spawn(|| {
             let mut execution = None;
             let mut capture = ReadCapture::default();
-            match store.acquire_query(&host, key(), &mut execution, &mut capture) {
+            match store.acquire_query(
+                &host,
+                host.request_flags(),
+                key(),
+                &mut execution,
+                &mut capture,
+            ) {
                 super::producer::Acquired::Produce(_) => "produce",
                 super::producer::Acquired::Read(_) => "read",
                 super::producer::Acquired::Recursive(_) => "recursive",

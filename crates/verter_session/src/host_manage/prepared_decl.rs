@@ -1227,7 +1227,7 @@ impl VerterHost {
         // `complete_canonical_inner`'s
         // `host.current_store_view_epoch() != base.mutation_epoch()`
         // short-circuit — but the resolver-tier `StoreView` trait
-        // cannot take `&VerterHost` (the six request ports in
+        // cannot take `&VerterHost` (the five request ports in
         // `resolver_core::request_ports` return owned records or typed
         // demands, never a host handle). The materialiser publishes
         // unconditionally; a superseded view will be detected by

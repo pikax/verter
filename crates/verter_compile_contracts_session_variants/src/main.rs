@@ -22,7 +22,7 @@ fn main() {
     tests.compile_fail(fixture_root.join("instantiate_key_context_not_extractable.rs"));
     // The raw compiler entry must be absent without verter_compiler/test-support.
     tests.compile_fail(fixture_root.join("scanners_replacement_raw_parser_public.rs"));
-    // These contracts exercise the actual six request ports and their owned outputs.
+    // These contracts exercise the actual five request ports and their owned outputs.
     tests.pass(fixture_root.join("engine_ports_actual_host_positive.rs"));
     tests.compile_fail(fixture_root.join("engine_ports_indexed_input_no_worker.rs"));
     tests.compile_fail(fixture_root.join("engine_ports_owned_lowering_no_memo.rs"));

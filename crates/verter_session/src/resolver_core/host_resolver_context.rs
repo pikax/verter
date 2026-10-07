@@ -13,6 +13,9 @@ use verter_type_engine::resolver_core::resolver_context::ResolverContext;
 pub struct HostRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
     view: RequestStoreView<'a>,
+    snapshot: verter_type_engine::resolver_core::RequestSnapshot<
+        crate::resolver_store::WorkspaceSlotClocks,
+    >,
 }
 
 /// Request-bound base-host context.
@@ -32,6 +35,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
     ) -> Self {
         Self(HostRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new(base, overlay),
         })
     }
@@ -44,6 +48,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
     ) -> Self {
         Self(HostRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new(base.view(), overlay),
         })
     }
@@ -56,6 +61,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
     ) -> Self {
         Self(HostRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
         })
     }
@@ -70,6 +76,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
     ) -> Self {
         Self(HostRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new_cold_seed(base, overlay, is_current),
         })
     }
@@ -82,6 +89,14 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn request_view(&self) -> &RequestStoreView<'_> {
         &self.view
+    }
+
+    fn request_snapshot(
+        &self,
+    ) -> &verter_type_engine::resolver_core::RequestSnapshot<
+        crate::resolver_store::WorkspaceSlotClocks,
+    > {
+        &self.snapshot
     }
 
     fn session_view(&self) -> Option<&dyn crate::session_view::SessionView> {

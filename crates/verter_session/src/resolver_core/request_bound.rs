@@ -14,7 +14,7 @@ use verter_session_query::inputs::indexed::IndexedInputServe;
 use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 use verter_type_engine::resolver_core::request_ports::{
-    Cancellation, ExecutionSubmission, IndexedInputs, RouteLookup,
+    ExecutionSubmission, IndexedInputs, RouteLookup,
 };
 use verter_type_engine::resolver_core::resolver_context::*;
 
@@ -501,8 +501,6 @@ impl crate::VerterHost {
     }
 }
 
-impl Cancellation for crate::VerterHost {}
-
 #[cfg(any(test, feature = "test-support"))]
 impl ExecutionSubmission for crate::VerterHost {
     type MacroMirrors = super::request_inputs::MacroMirrorSelector;
@@ -547,6 +545,13 @@ pub(crate) trait RequestBoundLifecycle {
     /// The request-bound view (base view chained behind the request's
     /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)).
     fn request_view(&self) -> &crate::resolver_core::RequestStoreView<'_>;
+
+    /// The snapshot captured when this request was admitted.
+    fn request_snapshot(
+        &self,
+    ) -> &verter_type_engine::resolver_core::RequestSnapshot<
+        crate::resolver_store::WorkspaceSlotClocks,
+    >;
 
     /// The active session view, if this lifecycle carries one.
     fn session_view(&self) -> Option<&dyn crate::session_view::SessionView>;
@@ -678,7 +683,7 @@ pub struct RequestBoundAdapter<L>(pub(super) L);
 /// surface — which gives engine-tier code no path to the carrier at all. The
 /// lifecycle this carrier wraps DOES expose
 /// [`RequestBoundLifecycle::host`], and the adapter's port impls call it: the
-/// host stays on the session side of the adapter, behind the six ports.
+/// host stays on the session side of the adapter, behind the five ports.
 #[cfg(test)]
 mod adapter_field_set_witness {
     use super::RequestBoundAdapter;
@@ -732,6 +737,7 @@ where
     fn operand_env_epoch(
         &self,
     ) -> verter_type_engine::resolver_core::request_ports::OperandEnvEpoch {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::operand_env_epoch");
         let w = self.0.host().workspace();
         verter_type_engine::resolver_core::request_ports::OperandEnvEpoch::new(
             w.published_root(),
@@ -742,6 +748,9 @@ where
         &self,
         canonical: &str,
     ) -> Option<verter_session_query::resolution::ProjectStableKey> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::project_stable_key_for_canonical"
+        );
         self.0
             .host()
             .workspace()
@@ -751,44 +760,68 @@ where
         &self,
         canonical: &str,
     ) -> crate::file_artifact_store::ProjectIdentity {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::captured_project_identity_for"
+        );
         self.0.request_view().base().project_identity_for(canonical)
     }
     fn host_view_env_hashes(&self) -> crate::session_view::EnvHashes {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::host_view_env_hashes");
         self.0.host().host_view_env_hashes()
     }
     fn host_view_env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::host_view_env_hashes_for");
         self.0.host().host_view_env_hashes_for(canonical)
     }
     fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::host_view_project_identity"
+        );
         self.0.host().host_view_project_identity()
     }
     fn host_view_project_identity_for(
         &self,
         canonical: &str,
     ) -> crate::file_artifact_store::ProjectIdentity {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::host_view_project_identity_for"
+        );
         self.0.host().host_view_project_identity_for(canonical)
     }
     fn semantic_compiler_options_for(
         &self,
         canonical: &str,
     ) -> verter_session_query::resolution::SemanticCompilerOptions {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::semantic_compiler_options_for"
+        );
         self.0.host().semantic_compiler_options_for(canonical)
     }
     fn resolve_project_for_canonical(
         &self,
         canonical: &str,
     ) -> Option<verter_session_query::resolution::ProjectId> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::resolve_project_for_canonical"
+        );
         self.0.host().resolve_project_for_canonical(canonical)
     }
     fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::declaration_sequence_rank"
+        );
         self.0.host().declaration_sequence_rank(canonical)
     }
 
     fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::engine_policy");
         engine_policy_for(&self.0.host().config)
     }
 
     fn normalized_analysis_canonical(&self, raw_canonical: &str) -> String {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::normalized_analysis_canonical"
+        );
         self.0
             .host()
             .normalized_analysis_canonical(raw_canonical)
@@ -797,11 +830,13 @@ where
 
     #[inline]
     fn is_request_bound(&self) -> bool {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::is_request_bound");
         true
     }
 
     #[inline]
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>> {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::prepared_decl_bundle");
         self.0
             .prepared_decl_bundle(self, canonical_id)
             .map(|bundle| {
@@ -815,6 +850,9 @@ where
 
     #[inline]
     fn ensure_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::ensure_indexed_ready_serve"
+        );
         let result = self.0.materialize_indexed_ready_serve(canonical_id);
         if result.is_some() {
             // Eager canonical completion, idempotent + epoch-guarded.
@@ -835,6 +873,7 @@ where
     /// at an overlay candidate.
     #[inline]
     fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::base_indexed_ready_serve");
         crate::VerterHost::ensure_indexed_ready_serve(self.0.host(), canonical_id).map(|serve| {
             self.0
                 .request_view()
@@ -846,6 +885,7 @@ where
 
     #[inline]
     fn ensure_loaded(&self, canonical_id: &str) -> bool {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::ensure_loaded");
         let loaded = self.0.load(canonical_id);
         if loaded {
             self.0.complete_canonical(canonical_id);
@@ -855,6 +895,7 @@ where
 
     #[inline]
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::shallow_file_state");
         self.0.shallow_file_state(self, canonical_id).map(|state| {
             self.0
                 .request_view()
@@ -870,21 +911,31 @@ where
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<DeclarationId> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::local_type_declaration_id"
+        );
         crate::VerterHost::local_type_declaration_id(self.0.host(), canonical_source, resolved_name)
     }
 
     #[inline]
     fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::get_whole_hash");
         crate::VerterHost::get_whole_hash(self.0.host(), canonical)
     }
 
     #[inline]
     fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::authoritative_current_content_hash"
+        );
         self.0.authoritative_current_content_hash(canonical)
     }
 
     #[inline]
     fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedInputRecord>> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::indexed_for_current_content"
+        );
         self.0
             .indexed_for_current_content(canonical)
             .map(|indexed| {
@@ -905,16 +956,25 @@ where
         &self,
         canonical: &str,
     ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::artifact_key_for_current_content"
+        );
         self.0.artifact_key_for_current_content(canonical)
     }
 
     #[inline]
     fn observe_materialize_scope(&self, canonical: &str) -> Option<MaterializeScopeObservation> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::observe_materialize_scope"
+        );
         self.0.observe_materialize_scope(self, canonical)
     }
 
     #[inline]
     fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
+        verter_type_engine::count_resolver_context_call!(
+            "IndexedInputs::get_raw_analysis_snapshot"
+        );
         crate::VerterHost::get_raw_analysis_snapshot(self.0.host(), canonical)
     }
 }
@@ -924,9 +984,15 @@ where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String> {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::reverse_dependency_canonicals"
+        );
         self.0.host().workspace().reverse_deps_for(canonical)
     }
     fn observe_owner_import_route_witness(&self, canonical: &str) {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::observe_owner_import_route_witness"
+        );
         self.0.host().observe_owner_import_route_witness(canonical);
     }
 
@@ -936,6 +1002,7 @@ where
         dep_canonical: &str,
         imported_name: &str,
     ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
+        verter_type_engine::count_resolver_context_call!("RouteLookup::resolve_imported_type_root");
         // The context-bound shim validates the cached imported-root entry
         // against this request's view instead of rebuilding a snapshot.
         self.0.host().resolve_imported_type_root_with_context(
@@ -955,6 +1022,9 @@ where
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::resolve_imported_type_root_with_facts"
+        );
         self.0
             .host()
             .resolve_imported_type_root_with_facts_with_context(
@@ -971,6 +1041,9 @@ where
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::resolve_named_type_export_target_shallow"
+        );
         self.0
             .host()
             .resolve_named_type_export_target_shallow_with_store_view(
@@ -987,6 +1060,9 @@ where
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::resolve_owner_direct_import"
+        );
         self.0.host().resolve_owner_direct_import_with_store_view(
             self,
             self.0.session_view(),
@@ -1002,12 +1078,16 @@ where
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::resolve_type_dependency_canonical"
+        );
         self.0
             .resolve_type_dependency_canonical(owner_canonical, import_source)
     }
 
     #[inline]
     fn routed_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
+        verter_type_engine::count_resolver_context_call!("RouteLookup::routed_shallow_state");
         self.0
             .host()
             .routed_shallow_state_with_view(canonical_id, self.0.session_view())
@@ -1027,6 +1107,9 @@ where
         owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::resolve_type_declaration_for_dep"
+        );
         // The walker constructed inside binds to this request-bound context.
         crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
             self.0.host(),
@@ -1043,6 +1126,9 @@ where
         dep_canonical_id: &str,
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::resolve_value_export_target"
+        );
         crate::VerterHost::resolve_value_export_target(
             self.0.host(),
             dep_canonical_id,
@@ -1056,6 +1142,7 @@ where
         consumer_project: ProjectStableKey,
         symbol: &str,
     ) -> Option<AmbientSymbolHit> {
+        verter_type_engine::count_resolver_context_call!("RouteLookup::lookup_ambient_symbol");
         self.0
             .host()
             .workspace()
@@ -1064,6 +1151,7 @@ where
 
     #[inline]
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str) {
+        verter_type_engine::count_resolver_context_call!("RouteLookup::record_ambient_dependency");
         self.0
             .host()
             .workspace()
@@ -1072,13 +1160,11 @@ where
 
     #[inline]
     fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "RouteLookup::workspace_is_package_backed"
+        );
         self.0.host().workspace().is_package_backed(canonical_id)
     }
-}
-
-impl<L: RequestBoundLifecycle> Cancellation for RequestBoundAdapter<L> where
-    Self: sealed::Sealed + sealed::RequestBoundSealed
-{
 }
 
 impl<L: RequestBoundLifecycle> ExecutionSubmission for RequestBoundAdapter<L>
@@ -1089,6 +1175,7 @@ where
     fn attach_engine(
         &self,
     ) -> verter_type_engine::project_semantic_dispatch::EngineBinding<Self::MacroMirrors> {
+        verter_type_engine::count_resolver_context_call!("ExecutionSubmission::attach_engine");
         self.0.host().project_type_store().bind_engine(
             self.0.host().engine_observers(),
             self.0
@@ -1110,6 +1197,7 @@ where
 {
     type HostAttachment = crate::session_attachment::SessionAttachment;
     fn host_attachment(&self) -> &Self::HostAttachment {
+        verter_type_engine::count_resolver_context_call!("HostAttachmentPort::host_attachment");
         self.0.host().session_attachment()
     }
 }
@@ -1247,28 +1335,31 @@ impl<L: RequestBoundLifecycle>
     for RequestBoundAdapter<L>
 {
     type Clocks = crate::resolver_store::WorkspaceSlotClocks;
-    fn aggregate_clock_reader(
+    fn request_snapshot(
         &self,
-    ) -> verter_session_query::facts::clocks::AggregateClockReader<Self::Clocks> {
-        self.0.host().aggregate_clock_reader()
+    ) -> &verter_type_engine::resolver_core::RequestSnapshot<Self::Clocks> {
+        verter_type_engine::count_resolver_context_call!("LiveFactValidation::request_snapshot");
+        self.0.request_snapshot()
     }
 }
 
 impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn current_external_supersession_fingerprint(&self) -> u64 {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::current_external_supersession_fingerprint"
+        );
         self.0.host().current_external_supersession_fingerprint()
     }
     fn source_environment(
         &self,
         key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> verter_session_query::source::env_identity::SourceEnvIdentity {
+        verter_type_engine::count_resolver_context_call!("FactValidation::source_environment");
         crate::resolver_store::live_source_env_identity(self.0.host(), key)
     }
-    fn current_project_generation(&self) -> u64 {
-        self.0
-            .host()
-            .project_type_store()
-            .current_project_generation()
+    fn request_flags(&self) -> &verter_type_engine::resolver_core::RequestFlags {
+        verter_type_engine::count_resolver_context_call!("FactValidation::request_flags");
+        self.0.request_snapshot().flags()
     }
     fn complete_graph_signature(
         &self,
@@ -1281,6 +1372,9 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
         verter_audit::NonAdmissionReason,
     > {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::complete_graph_signature"
+        );
         verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
             self.0.request_view(),
             roots,
@@ -1288,6 +1382,9 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         )
     }
     fn record_signature_overflow(&self) {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::record_signature_overflow"
+        );
         self.0
             .host()
             .signature_overflow_at_install
@@ -1295,6 +1392,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     }
     #[cfg(any(test, feature = "test-support"))]
     fn tracer_forcing(&self) -> (bool, usize) {
+        verter_type_engine::count_resolver_context_call!("FactValidation::tracer_forcing");
         (
             self.0
                 .host()
@@ -1317,24 +1415,39 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         canonical: &str,
         tracked_deps: &BTreeSet<String>,
     ) -> Vec<FactVersionRef> {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::current_dependency_fact_versions"
+        );
         crate::VerterHost::current_dependency_fact_versions(self.0.host(), canonical, tracked_deps)
     }
     fn compat_token(&self) -> StoreViewCompatToken {
+        verter_type_engine::count_resolver_context_call!("FactValidation::compat_token");
         self.0.request_view().compat_token()
     }
     fn validates(&self, fact: &FactVersionRef) -> bool {
+        verter_type_engine::count_resolver_context_call!("FactValidation::validates");
         self.0.request_view().validates(fact)
     }
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
+        verter_type_engine::count_resolver_context_call!("FactValidation::validates_parse_domain");
         self.0.request_view().validates_parse_domain(fact)
     }
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_resolve_imports_domain"
+        );
         self.0.request_view().validates_resolve_imports_domain(fact)
     }
     fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_route_surface_domain"
+        );
         self.0.request_view().validates_route_surface_domain(fact)
     }
     fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_program_analysis_domain"
+        );
         self.0
             .request_view()
             .validates_program_analysis_domain(fact)
@@ -1346,6 +1459,9 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_file_source_env"
+        );
         self.0.request_view().validates_file_source_env(
             canonical_id,
             parse_env_hash,
@@ -1354,6 +1470,9 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         )
     }
     fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_self_root_whole_hash"
+        );
         self.0
             .request_view()
             .validates_self_root_whole_hash(canonical_id, hash)
@@ -1361,9 +1480,15 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn strict_self_root_world_identity(
         &self,
     ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::strict_self_root_world_identity"
+        );
         self.0.request_view().strict_self_root_world_identity()
     }
     fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::strict_self_root_is_witnessable"
+        );
         self.0
             .request_view()
             .strict_self_root_is_witnessable(canonical_id)
@@ -1372,9 +1497,13 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         &self,
         roots: &[(&str, ResolverHash16)],
     ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::mint_strict_self_root_world"
+        );
         self.0.request_view().mint_strict_self_root_world(roots)
     }
     fn tracks_file(&self, canonical_id: &str) -> bool {
+        verter_type_engine::count_resolver_context_call!("FactValidation::tracks_file");
         self.0.request_view().tracks_file(canonical_id)
     }
     fn derived_hash_for(
@@ -1382,12 +1511,17 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         canonical_id: &str,
         kind: DerivedFactKind,
     ) -> Option<ResolverHash16> {
+        verter_type_engine::count_resolver_context_call!("FactValidation::derived_hash_for");
         self.0.request_view().derived_hash_for(canonical_id, kind)
     }
     fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
+        verter_type_engine::count_resolver_context_call!("FactValidation::aggregate_basis_seed");
         self.0.request_view().aggregate_basis_seed()
     }
     fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_fact_signature"
+        );
         self.0.request_view().validates_fact_signature(sig)
     }
     fn validate_fact_signature(
@@ -1395,6 +1529,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         sig: &[FactVersionRef],
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
+        verter_type_engine::count_resolver_context_call!("FactValidation::validate_fact_signature");
         self.0
             .request_view()
             .validate_fact_signature(sig, self_root_canonicals)
@@ -1404,6 +1539,9 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         sig: &[FactVersionRef],
         self_root_canonicals: &[&str],
     ) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_fact_signature_with_self_roots"
+        );
         self.0
             .request_view()
             .validates_fact_signature_with_self_roots(sig, self_root_canonicals)
@@ -1414,6 +1552,9 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         whole_hash: verter_session_query::analysis::types::Hash16,
         route_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::promote_route_completion"
+        );
         self.0
             .request_view()
             .promote_route_completion(canonical, whole_hash, route_hash)

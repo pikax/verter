@@ -205,7 +205,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 enum BasisAuthority<'h, W> {
     Bound {
         port: &'h dyn crate::resolver_core::fact_validation_port::FactValidation,
-        clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
+        clocks: &'h verter_session_query::facts::clocks::AggregateClockReader<W>,
     },
     Unbound {
         overflow: &'h std::sync::atomic::AtomicU64,
@@ -293,24 +293,43 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     /// Seed from a request-bound resolver context.
     ///
     /// The seed is a BORROW of the view the request boundary already
-    /// bound, so this costs one virtual call and no store-view read. This
+    /// bound, and the live clocks are borrowed from the request snapshot the
+    /// host captured at admission, so this costs no store-view read and
+    /// builds no clock reader. This
     /// is the constructor every producer that holds a context should use:
     /// a request-bound scope detects movement in the two composite
     /// domains, and an unbound one cannot.
     ///
     /// It reads the seed through
     /// [`ResolverContext::aggregate_basis_seed`](crate::resolver_core::ResolverContext::aggregate_basis_seed)
-    /// rather than re-deriving it from the view. This keeps the context
+    /// rather than re-deriving it from the view. The seed is not part of the
+    /// snapshot: it follows the request's canonical-completion state, which
+    /// advances mid-request. This keeps the context
     /// projection as the one compaction-basis authority and lets test doubles
     /// explicitly represent an unbound basis.
     #[must_use]
     pub fn from_ctx(
         ctx: &'h dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
     ) -> Self {
+        Self::from_ctx_and_snapshot(
+            ctx,
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx),
+        )
+    }
+
+    /// Seed from a request-bound context whose request snapshot the caller
+    /// already borrowed (the dispatch borrows it once at request admission),
+    /// so opening a scope samples the live clocks as a plain field read
+    /// instead of re-fetching the snapshot through the port.
+    #[must_use]
+    pub fn from_ctx_and_snapshot(
+        ctx: &'h dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+        snapshot: &'h crate::resolver_core::resolver_context::RequestSnapshot<W>,
+    ) -> Self {
         Self {
             authority: BasisAuthority::Bound {
                 port: ctx,
-                clocks: ctx.aggregate_clock_reader(),
+                clocks: snapshot.clocks(),
             },
             seed: ctx.aggregate_basis_seed(),
         }

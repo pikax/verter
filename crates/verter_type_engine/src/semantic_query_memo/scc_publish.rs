@@ -405,7 +405,7 @@ impl SemanticGraphStore {
                 .any(|entry| entry.admission_seq == required_root.admission_seq)
         });
         let cancelled = self.force_cold_abort_sweep.load(Ordering::Relaxed)
-            || ctx.is_some_and(|ctx| ctx.is_cancelled());
+            || ctx.is_some_and(|ctx| ctx.request_flags().is_cancelled());
         if cancelled {
             for member in &staged {
                 member.flight.mark_aborted();
