@@ -121,4 +121,23 @@ impl FrameSpan {
     pub fn contains(self, other: Self) -> bool {
         self.start <= other.start && self.end >= other.end
     }
+
+    /// Nesting order: by start, and at an equal start the WIDER span
+    /// first, so a span precedes every span it contains.
+    #[must_use]
+    pub fn nesting_cmp(self, other: Self) -> std::cmp::Ordering {
+        self.start.cmp(&other.start).then(other.end.cmp(&self.end))
+    }
+
+    /// Whether this span starts strictly before `other` starts.
+    #[must_use]
+    pub fn starts_before(self, other: Self) -> bool {
+        self.start < other.start
+    }
+
+    /// Whether this span starts strictly after `other` ends.
+    #[must_use]
+    pub fn starts_after_end_of(self, other: Self) -> bool {
+        self.start > other.end
+    }
 }

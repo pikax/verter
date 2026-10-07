@@ -1371,6 +1371,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             yield_sites: Arc::from(self.yield_sites.into_boxed_slice()),
             writes: Arc::from(self.writes.into_boxed_slice()),
             closure_assignments: Arc::from([]),
+            span_index: Default::default(),
         }
     }
 }

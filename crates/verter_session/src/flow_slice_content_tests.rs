@@ -6288,3 +6288,250 @@ fn a_local_function_read_visits_a_fixed_number_of_nodes() {
         );
     }
 }
+
+/// The lowered slice of `name` with the skeleton its loop dependencies name
+/// bindings in, and the span-index entries its lowering inspected.
+fn loop_lowering(
+    source: &str,
+    name: &str,
+) -> (
+    Arc<SliceContent>,
+    Arc<verter_session_query::flow::skeleton::FunctionBodySkeleton>,
+    usize,
+) {
+    use std::sync::atomic::Ordering;
+    let memo = memo_for(source);
+    let index = memo.function_program_index().value;
+    let entry = entry_of(&index, name);
+    let (selection, bound) = selection_for(&memo, entry, &[]);
+    memo.lowering_work
+        .span_index_visits
+        .store(0, Ordering::Relaxed);
+    let content = memo
+        .flow_slice_content(
+            entry,
+            selection,
+            &bound,
+            verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+                &Default::default(),
+            ),
+        )
+        .expect("slice content must build for an indexed function");
+    let visits = memo.lowering_work.span_index_visits.load(Ordering::Relaxed);
+    (content, Arc::clone(bound.bundle().skeleton()), visits)
+}
+
+/// Every lowered loop of `region`, outermost first.
+fn lowered_loops(region: &SliceRegion) -> Vec<&verter_session_query::flow::slice::SliceLoop> {
+    let mut loops = Vec::new();
+    for statement in region.statements.iter() {
+        if let SliceStatement::Loop(lowered) = statement {
+            loops.push(lowered.as_ref());
+            loops.extend(lowered_loops(&lowered.body));
+        }
+    }
+    loops
+}
+
+/// A loop's dependencies by binding name: each write with what its value
+/// reads, then each inferred declaration with what its initializer reads.
+type NamedLoopDependencies = (Vec<(String, Vec<String>)>, Vec<(String, Vec<String>)>);
+
+fn named_loop_dependencies(
+    lowered: &verter_session_query::flow::slice::SliceLoop,
+    skeleton: &verter_session_query::flow::skeleton::FunctionBodySkeleton,
+) -> NamedLoopDependencies {
+    use verter_session_query::flow::binding::FlowBindingRef;
+    let local = |binding: verter_session_query::flow::skeleton::SkeletonBindingId| {
+        skeleton.name(skeleton.binding(binding).name).to_owned()
+    };
+    let named = |binding: &FlowBindingRef| match binding {
+        FlowBindingRef::Local(binding) => local(*binding),
+        FlowBindingRef::Captured(identity) => format!("^{}", identity.name),
+    };
+    (
+        lowered
+            .writes
+            .iter()
+            .map(|write| {
+                (
+                    named(&write.binding),
+                    write.reads.iter().map(named).collect(),
+                )
+            })
+            .collect(),
+        lowered
+            .inferred
+            .iter()
+            .map(|inferred| {
+                (
+                    local(inferred.binding),
+                    inferred.reads.iter().copied().map(local).collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn strings(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+const LOOP_DEPENDENCY_FIXTURE: &str = "export {};\n\
+function ld(n: number, m: number) {\n\
+  let a = 0;\n\
+  let b = \"\";\n\
+  let c = 0;\n\
+  let after = 0;\n\
+  while (n > 0) {\n\
+    const t = a + n;\n\
+    let typed: number = c;\n\
+    a = t;\n\
+    const f = (k: number) => k + a;\n\
+    const g = () => { after = m; };\n\
+    b = String(f(n)) + b;\n\
+    for (let i = 0; i < m; i++) {\n\
+      const inner = i + c;\n\
+      c = inner + (a, b.length);\n\
+    }\n\
+    n--;\n\
+  }\n\
+  after = a;\n\
+  return a + c + after;\n\
+}\n";
+
+/// A loop's dependencies are exactly the writes and inferred declarations
+/// its span contains, each with the bindings its own value sites read
+/// (inferred reads in binding order): a
+/// nested function's write is the nested frame's, never this loop's; an
+/// annotated declaration is not inferred; a write outside the loop is not
+/// the loop's; a nested loop's dependencies belong to both loops; and a
+/// value whose sites hold other sites (a call around a call, a comma
+/// list) reads what every site under it reads.
+#[test]
+fn loop_dependencies_follow_contained_writes_and_their_value_reads() {
+    let (content, skeleton, _) = loop_lowering(LOOP_DEPENDENCY_FIXTURE, "ld");
+    let loops = lowered_loops(&content.body);
+    let [outer, inner] = loops.as_slice() else {
+        panic!("the outer and the inner loop lower: {:?}", content.body);
+    };
+    let inner_writes = vec![
+        ("i".to_owned(), strings(&["i"])),
+        ("c".to_owned(), strings(&["inner", "a", "b"])),
+    ];
+    let inner_inferred = vec![
+        ("i".to_owned(), Vec::new()),
+        ("inner".to_owned(), strings(&["c", "i"])),
+    ];
+    let (writes, inferred) = named_loop_dependencies(outer, &skeleton);
+    let mut expected_writes = vec![
+        ("a".to_owned(), strings(&["t"])),
+        ("b".to_owned(), strings(&["f", "n", "b"])),
+    ];
+    expected_writes.extend(inner_writes.iter().cloned());
+    expected_writes.push(("n".to_owned(), strings(&["n"])));
+    assert_eq!(writes, expected_writes);
+    // A callable's initializer reads what it captures; `g` only writes
+    // `after`, which is its own frame's write.
+    let mut expected_inferred = vec![
+        ("t".to_owned(), strings(&["n", "a"])),
+        ("f".to_owned(), strings(&["a"])),
+        ("g".to_owned(), strings(&["m"])),
+    ];
+    expected_inferred.extend(inner_inferred.iter().cloned());
+    assert_eq!(inferred, expected_inferred);
+    assert_eq!(
+        named_loop_dependencies(inner, &skeleton),
+        (inner_writes, inner_inferred)
+    );
+}
+
+/// The loop dependencies of a function are a property of its own content:
+/// an edit above it that moves every absolute offset, and adds a function
+/// with a same-shaped loop of its own, leaves them unchanged.
+#[test]
+fn loop_dependencies_match_after_an_edit_above_the_function() {
+    let dependencies = |source: &str| {
+        let (content, skeleton, _) = loop_lowering(source, "ld");
+        lowered_loops(&content.body)
+            .into_iter()
+            .map(|lowered| named_loop_dependencies(lowered, &skeleton))
+            .collect::<Vec<_>>()
+    };
+    let fresh = dependencies(LOOP_DEPENDENCY_FIXTURE);
+    let edited = LOOP_DEPENDENCY_FIXTURE.replacen(
+        "export {};\n",
+        "export {};\nfunction other(q: number) { let z = 0; while (q > 0) { z = z + q; q--; } return z; }\n\n",
+        1,
+    );
+    assert_eq!(dependencies(&edited), fresh);
+    assert_eq!(fresh.len(), 2);
+}
+
+/// `writes` loop-carried writes among `writes` inferred declarations, with
+/// sites proportional to them.
+fn proportional_loop_source(writes: usize) -> String {
+    let mut source = String::from("export {};\nfunction lw(n: number) {\n");
+    for slot in 0..writes {
+        source.push_str(&format!("  let a{slot} = 0;\n"));
+    }
+    source.push_str("  while (n > 0) {\n");
+    for slot in 0..writes {
+        source.push_str(&format!(
+            "    const t{slot} = a{slot} + n;\n    a{slot} = t{slot} + (n, a{slot});\n"
+        ));
+    }
+    source.push_str("    n--;\n  }\n  return a0;\n}\n");
+    source
+}
+
+/// A loop's writes and inferred declarations find their sites through the
+/// prepared span index: lowering N of each among proportional sites
+/// inspects index entries linear in N — each question looks at what starts
+/// inside the span it asks about, never the whole frame.
+#[test]
+fn loop_dependency_sites_cost_linear_index_work() {
+    let visits = [128, 256, 512, 1024].map(|writes| {
+        let (content, skeleton, visits) = loop_lowering(&proportional_loop_source(writes), "lw");
+        let loops = lowered_loops(&content.body);
+        let [lowered] = loops.as_slice() else {
+            panic!("the loop lowers: {:?}", content.body);
+        };
+        let (dependencies, inferred) = named_loop_dependencies(lowered, &skeleton);
+        assert_eq!(
+            dependencies.len(),
+            writes + 1,
+            "every write is a dependency"
+        );
+        assert_eq!(inferred.len(), writes, "every declaration is inferred");
+        assert_eq!(
+            dependencies[writes - 1],
+            (
+                format!("a{}", writes - 1),
+                vec![
+                    format!("t{}", writes - 1),
+                    "n".to_owned(),
+                    format!("a{}", writes - 1)
+                ]
+            )
+        );
+        visits
+    });
+    assert!(
+        visits[0] >= 128 * 4,
+        "the lowering asks the index for each write and declaration: {visits:?}"
+    );
+    assert_eq!(
+        [
+            visits[1] - visits[0],
+            visits[2] - visits[1],
+            visits[3] - visits[2]
+        ],
+        [
+            visits[1] - visits[0],
+            2 * (visits[1] - visits[0]),
+            4 * (visits[1] - visits[0])
+        ],
+        "each doubling of the writes doubles the index work: {visits:?}"
+    );
+}
