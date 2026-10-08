@@ -1834,7 +1834,8 @@ fn classify_ignores_live_mutation_after_capture_for_current_path() {
     builder.add_token(api_line, api_col, 1, want_utf16_col, Some(source_id), None);
     let source_map_json = builder.into_sourcemap().to_json_string();
 
-    let store = ProviderSurfaceStore::new();
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, api);
     store.record(RecordSurface::carrier_api_legacy(
         VPATH.to_string(),
         CANONICAL.to_string(),
@@ -2734,4 +2735,89 @@ fn an_identical_re_record_inherits_the_acknowledgement_without_a_ledger_read() {
 
     ledger.serve(VPATH, ServingDelivery::NotApplied);
     assert_eq!(store.delivery_of(&again), SurfaceDelivery::DeliveryLost);
+}
+
+/// A mapped carrier-API surface recorded at `VPATH` over a fixed carrier: its
+/// source map sends the API `foo` token to the carrier's `foo`.
+fn mapped_api_record(api: &str) -> RecordSurface {
+    let carrier =
+        "<script setup lang=\"ts\">\nconst foo = defineProps<{ foo: string }>();\n</script>\n";
+    let api_foo = api.find("foo").expect("the API spells foo") as u32;
+    let line1 = carrier.lines().nth(1).unwrap();
+    let carrier_col = line1.find("foo").unwrap() as u32;
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Child.vue", carrier);
+    builder.add_token(0, api_foo, 1, carrier_col, Some(source_id), None);
+    let source_map_json = builder.into_sourcemap().to_json_string();
+    RecordSurface::carrier_api_legacy(
+        VPATH.to_string(),
+        CANONICAL.to_string(),
+        Arc::from(api),
+        Some(
+            crate::documents::provider_projection::ProviderPositionMapper::source_map(
+                crate::documents::position_map::PositionMapper::from_json(&source_map_json)
+                    .unwrap(),
+            ),
+        ),
+        Arc::from(carrier),
+    )
+}
+
+/// The captured API classifier decodes a foreign API answer only through a
+/// surface the serving provider holds at that decode: a mapped surface recorded
+/// ahead of its delivery, or one whose delivery was lost or overtaken before
+/// the decode, is known virtual but unmappable. A matching delivery makes the
+/// same capture mappable at the next decode, with no new record.
+#[test]
+fn the_captured_api_classifier_decodes_only_through_delivered_surfaces() {
+    use crate::type_provider::merge::ApiSurfaceResolution;
+    use tower_lsp_server::ls_types::PositionEncodingKind;
+    let classify = |captured: &ProviderQuerySnapshot| {
+        classify_captured_api_surface(captured, VPATH, PositionEncodingKind::UTF16)
+    };
+    let api_a = "declare const Child: { new(props?: { foo: string }): {} }\n";
+    let api_b = "declare const Child: { new(props?: { bar: number; foo: string }): {} }\n";
+
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, api_a);
+    store.record(mapped_api_record(api_a));
+    assert!(matches!(
+        classify(&store.capture_current_carrier_api_set()),
+        ApiSurfaceResolution::Vouched(_)
+    ));
+
+    // B is recorded while the engine still holds A.
+    store.record(mapped_api_record(api_b));
+    let captured = store.capture_current_carrier_api_set();
+    assert!(
+        matches!(classify(&captured), ApiSurfaceResolution::VirtualDrop),
+        "B's map would decode an answer the engine produced against A"
+    );
+
+    // B's delivery lands: the same capture now decodes through B.
+    ledger.apply(VPATH, api_b);
+    assert!(matches!(
+        classify(&captured),
+        ApiSurfaceResolution::Vouched(_)
+    ));
+
+    // The delivery is lost, or overtaken by other bytes, before the decode.
+    ledger.serve(VPATH, ServingDelivery::NotApplied);
+    assert!(matches!(
+        classify(&captured),
+        ApiSurfaceResolution::VirtualDrop
+    ));
+    ledger.apply(VPATH, api_a);
+    assert!(matches!(
+        classify(&captured),
+        ApiSurfaceResolution::VirtualDrop
+    ));
+
+    // A store with no serving ledger proves nothing about delivery.
+    let unwitnessed = ProviderSurfaceStore::new();
+    unwitnessed.record(mapped_api_record(api_a));
+    assert!(matches!(
+        classify(&unwitnessed.capture_current_carrier_api_set()),
+        ApiSurfaceResolution::VirtualDrop
+    ));
 }

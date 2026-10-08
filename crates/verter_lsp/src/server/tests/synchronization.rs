@@ -974,6 +974,7 @@ async fn svelte_recovered_script_prop_facts_fail_closed_to_provider() {
         &initial_ide.code,
         initial_ide.source_map.as_deref(),
     );
+    stamp_seeded_ide_publication(server, &canonical_id, &ide_path);
     let ctx = server
         .type_provider_context(&app_uri)
         .expect("current provider surface without foreground compile");
@@ -5546,11 +5547,13 @@ const msg = 'hello'
         "open unresolved current-file sync should stay queued for future owner reconciliation"
     );
 
-    // Positive: interactive type-provider lookups still resolve from committed
-    // state (hover keeps working).
+    // Negative: tsserver never receives an unowned carrier's IDE companion —
+    // no receipt fingerprints the bytes it would read at the live path — so
+    // the provider contributes nothing until an owner publishes the surface.
     assert!(
-        server.type_provider_context(&uri).is_some(),
-        "open unresolved Vue file must keep a live type-provider context for hover"
+        server.type_provider_context(&uri).is_none(),
+        "an open unresolved carrier on tsserver must not yield a provider context from path \
+         liveness alone"
     );
 
     let calls = provider.file_sync_calls();

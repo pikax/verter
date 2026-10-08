@@ -1262,34 +1262,8 @@ impl ProviderSurfaceStore {
     /// verdict re-reads what the serving incarnation holds now.
     #[must_use]
     pub fn delivery_of(&self, surface: &ProviderSurfaceSnapshot) -> SurfaceDelivery {
-        let Some(witness) = self.inner.witness.read().clone() else {
-            return SurfaceDelivery::Unwitnessed;
-        };
-        let cell = &surface.payload.delivery;
-        let unproven = |acknowledged: bool, lost: SurfaceDelivery| {
-            if acknowledged {
-                lost
-            } else {
-                SurfaceDelivery::AwaitingDelivery
-            }
-        };
-        match witness.serving_delivery(surface) {
-            ServingDelivery::Applied(bytes) if str_eq(&bytes, &surface.provider_content) => {
-                cell.acknowledge(DeliveryCell::APPLIED);
-                SurfaceDelivery::Delivered
-            }
-            ServingDelivery::Published => {
-                cell.acknowledge(DeliveryCell::PUBLISHED);
-                SurfaceDelivery::Delivered
-            }
-            ServingDelivery::Applied(_) => {
-                unproven(cell.acknowledged(), SurfaceDelivery::EngineDiverged)
-            }
-            ServingDelivery::NotApplied | ServingDelivery::Unpublished => {
-                unproven(cell.acknowledged(), SurfaceDelivery::DeliveryLost)
-            }
-            ServingDelivery::Uncertified => SurfaceDelivery::Unwitnessed,
-        }
+        let witness = self.inner.witness.read().clone();
+        delivery_verdict(witness.as_deref(), surface)
     }
 
     /// The owning configured project (tsconfig URI) of `provider_path`'s CURRENT
@@ -1429,7 +1403,9 @@ impl ProviderSurfaceStore {
     /// `record`/`forget`/`finalize_close` never changes what it resolves to.
     #[must_use]
     pub fn capture_lifecycle_root(&self) -> ProviderLifecycleRoot {
-        self.inner.lifecycle.read().root.clone()
+        let mut root = self.inner.lifecycle.read().root.clone();
+        root.witness = self.inner.witness.read().clone();
+        root
     }
 
     /// The captured carrier-API view of every tracked path — the immutable
@@ -1530,6 +1506,10 @@ static KNOWN_NON_MAPPABLE: CapturedPathState = CapturedPathState::KnownNonMappab
 #[derive(Clone, Default)]
 pub struct ProviderLifecycleRoot {
     by_identity: imbl::HashMap<InjectedPathKey, IdentitySpellings>,
+    /// The serving provider's delivery ledger, bound to a CAPTURED root so a
+    /// decode through it observes delivery like every other capture does.
+    /// Never set on the store's own published root.
+    witness: Option<Arc<dyn ProviderDeliveryWitness>>,
 }
 
 /// Every raw spelling tracked under one filesystem identity, with its state.
@@ -1615,11 +1595,57 @@ impl ProviderQuerySnapshot {
         }
     }
 
+    /// The typed delivery state of a surface this view captured, read fresh
+    /// from the serving provider's ledger bound at capture — a local read,
+    /// never a provider round trip. Only [`SurfaceDelivery::Delivered`] may
+    /// decode a provider answer through the surface.
+    #[must_use]
+    pub fn delivery_of(&self, surface: &ProviderSurfaceSnapshot) -> SurfaceDelivery {
+        delivery_verdict(self.root.witness.as_deref(), surface)
+    }
+
     /// Whether the captured set is empty (no tracked path at all — neither a
     /// mappable `Current` surface nor a known-non-mappable one).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.root.by_identity.is_empty()
+    }
+}
+
+/// The typed delivery state of `surface` under `witness` — the one verdict
+/// [`ProviderSurfaceStore::delivery_of`] and a captured
+/// [`ProviderQuerySnapshot::delivery_of`] both answer with.
+fn delivery_verdict(
+    witness: Option<&dyn ProviderDeliveryWitness>,
+    surface: &ProviderSurfaceSnapshot,
+) -> SurfaceDelivery {
+    let Some(witness) = witness else {
+        return SurfaceDelivery::Unwitnessed;
+    };
+    let cell = &surface.payload.delivery;
+    let unproven = |acknowledged: bool, lost: SurfaceDelivery| {
+        if acknowledged {
+            lost
+        } else {
+            SurfaceDelivery::AwaitingDelivery
+        }
+    };
+    match witness.serving_delivery(surface) {
+        ServingDelivery::Applied(bytes) if str_eq(&bytes, &surface.provider_content) => {
+            cell.acknowledge(DeliveryCell::APPLIED);
+            SurfaceDelivery::Delivered
+        }
+        ServingDelivery::Published => {
+            cell.acknowledge(DeliveryCell::PUBLISHED);
+            SurfaceDelivery::Delivered
+        }
+        ServingDelivery::Applied(_) => {
+            unproven(cell.acknowledged(), SurfaceDelivery::EngineDiverged)
+        }
+        ServingDelivery::NotApplied | ServingDelivery::Unpublished => {
+            unproven(cell.acknowledged(), SurfaceDelivery::DeliveryLost)
+        }
+        ServingDelivery::Uncertified => SurfaceDelivery::Unwitnessed,
     }
 }
 

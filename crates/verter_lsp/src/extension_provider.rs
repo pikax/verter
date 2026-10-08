@@ -51,11 +51,12 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Files that have been sent to the extension via `open` command.
     opened_files: Arc<Mutex<HashSet<String>>>,
-    /// The bytes the extension's language service ACKNOWLEDGED per file — its
-    /// application receipt. The contents cache above runs ahead of the
-    /// extension (it is written before the request is sent, and a `load_file`
-    /// never sends anything), so it is not evidence of what the service holds.
-    applied: Arc<parking_lot::Mutex<HashMap<String, Arc<str>>>>,
+    /// The extension language service's application receipts: per file, the
+    /// bytes it acknowledged and the newest delivery issued to it. The contents
+    /// cache above runs ahead of the extension (it is written before the
+    /// request is sent, and a `load_file` never sends anything), so it is not
+    /// evidence of what the service holds.
+    applied: Arc<parking_lot::Mutex<DeliveryLedger>>,
     /// Workspace root path (forward slashes).
     workspace_root: String,
     /// Per-project roots for per-file `projectRootPath` matching.
@@ -64,6 +65,91 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
     /// exact workspace snapshot is built. Until then only the editor's
     /// workspace folders are known.
     ownership: Arc<parking_lot::RwLock<Option<Arc<dyn ConfiguredOwnerAuthority>>>>,
+}
+
+/// The extension language service's application receipts.
+///
+/// Every content delivery is issued a ticket from one monotonic sequence, and
+/// only the acknowledgement of a file's NEWEST issued delivery certifies bytes:
+/// an older acknowledgement landing after a newer write was issued certifies
+/// nothing, even when its bytes equal the newest ones, and that newer write
+/// settles the receipt itself. Issuing different bytes withdraws the receipt at
+/// once — from the moment the write may reach the service its bytes are
+/// unknown — so a delivery whose future is dropped before it settles leaves no
+/// receipt behind. The newest-delivery check and the receipt publication are
+/// one critical section.
+#[derive(Default)]
+struct DeliveryLedger {
+    /// The last ticket issued, across every file.
+    issued: u64,
+    files: HashMap<String, FileReceipt>,
+}
+
+/// One file's application receipt.
+struct FileReceipt {
+    /// The newest delivery issued for the file.
+    newest: u64,
+    /// The bytes the service acknowledged, while no delivery of other bytes is
+    /// unsettled.
+    applied: Option<Arc<str>>,
+}
+
+/// One issued content delivery, settled once the extension answers it.
+struct DeliveryTicket {
+    file: String,
+    seq: u64,
+    content: Arc<str>,
+}
+
+impl DeliveryLedger {
+    /// Issue a delivery of `content` for `file`. The receipt survives only when
+    /// it already certifies exactly these bytes: the service holds them whether
+    /// or not this delivery lands.
+    fn issue(&mut self, file: &str, content: &Arc<str>) -> DeliveryTicket {
+        self.issued += 1;
+        let seq = self.issued;
+        let receipt = self.files.entry(file.to_string()).or_insert(FileReceipt {
+            newest: seq,
+            applied: None,
+        });
+        receipt.newest = seq;
+        if receipt
+            .applied
+            .as_ref()
+            .is_some_and(|applied| applied != content)
+        {
+            receipt.applied = None;
+        }
+        DeliveryTicket {
+            file: file.to_string(),
+            seq,
+            content: Arc::clone(content),
+        }
+    }
+
+    /// Settle `ticket`. An acknowledgement certifies its bytes only while it is
+    /// the file's newest delivery; a failed delivery leaves the service's bytes
+    /// unknown, so it withdraws the receipt.
+    fn settle(&mut self, ticket: DeliveryTicket, acknowledged: bool) {
+        let Some(receipt) = self.files.get_mut(&ticket.file) else {
+            return;
+        };
+        if !acknowledged {
+            receipt.applied = None;
+        } else if receipt.newest == ticket.seq {
+            receipt.applied = Some(ticket.content);
+        }
+    }
+
+    /// Forget `file`: a closed file holds nothing, and no delivery issued
+    /// before the close can certify bytes after it.
+    fn close(&mut self, file: &str) {
+        self.files.remove(file);
+    }
+
+    fn applied(&self, file: &str) -> Option<&Arc<str>> {
+        self.files.get(file)?.applied.as_ref()
+    }
 }
 
 impl ExtensionTypeProvider<LspTsQueryTransport> {
@@ -81,7 +167,7 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
             transport,
             contents: Arc::new(Mutex::new(HashMap::new())),
             opened_files: Arc::new(Mutex::new(HashSet::new())),
-            applied: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            applied: Arc::new(parking_lot::Mutex::new(DeliveryLedger::default())),
             workspace_root: verter_span::path::canonicalize_path(workspace_root),
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             ownership: Arc::new(parking_lot::RwLock::new(None)),
@@ -106,28 +192,10 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
         verter_span::path::canonicalize_path(path)
     }
 
-    /// Settle the application receipt for one content delivery of `file`. An
-    /// acknowledged delivery certifies `content` only while it is still the
-    /// newest content issued for the file: an older acknowledgement landing
-    /// after a newer write was issued certifies nothing, and that newer write
-    /// settles the receipt itself. A failed delivery leaves the service's bytes
-    /// unknown, so it withdraws the receipt.
-    async fn settle_delivery(&self, file: &str, content: &Arc<str>, acknowledged: bool) {
-        if !acknowledged {
-            self.applied.lock().remove(file);
-            return;
-        }
-        let newest = self
-            .contents
-            .lock()
-            .await
-            .get(file)
-            .is_some_and(|issued| issued == content);
-        if newest {
-            self.applied
-                .lock()
-                .insert(file.to_string(), Arc::clone(content));
-        }
+    /// Issue one content delivery of `file` to the extension; settle it with
+    /// [`DeliveryLedger::settle`] once the extension answers.
+    fn issue_delivery(&self, file: &str, content: &Arc<str>) -> DeliveryTicket {
+        self.applied.lock().issue(file, content)
     }
 
     /// Share the contents-cache handle so a scripted transport can simulate a
@@ -147,7 +215,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
     /// The bytes the extension's language service acknowledged for `path`.
     fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
         use verter_type_runtime::traits::AppliedContent;
-        match self.applied.lock().get(&Self::normalize_path(path)) {
+        match self.applied.lock().applied(&Self::normalize_path(path)) {
             Some(bytes) => AppliedContent::Applied(Arc::clone(bytes)),
             None => AppliedContent::NotApplied,
         }
@@ -174,6 +242,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 .await
                 .insert(file.clone(), Arc::clone(&issued));
             opened_files.lock().await.insert(file.clone());
+            let ticket = self.issue_delivery(&file, &issued);
             let delivered = self
                 .query(
                     "open",
@@ -189,8 +258,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     }),
                 )
                 .await;
-            self.settle_delivery(&file, &issued, delivered.is_ok())
-                .await;
+            self.applied.lock().settle(ticket, delivered.is_ok());
             delivered?;
             Ok(())
         })
@@ -226,6 +294,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 .insert(file.clone(), Arc::clone(&issued));
 
             let mut opened = opened_files.lock().await;
+            let ticket = self.issue_delivery(&file, &issued);
             let delivered = if opened.contains(&file) {
                 drop(opened);
                 if let Some(end_line) = old_line_count {
@@ -280,8 +349,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await
             };
-            self.settle_delivery(&file, &issued, delivered.is_ok())
-                .await;
+            self.applied.lock().settle(ticket, delivered.is_ok());
             delivered?;
             Ok(())
         })
@@ -295,7 +363,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         Box::pin(async move {
             contents_cache.lock().await.remove(&file);
             opened_files.lock().await.remove(&file);
-            applied.lock().remove(&file);
+            applied.lock().close(&file);
             self.query("close", serde_json::json!({ "file": file }))
                 .await?;
             Ok(())

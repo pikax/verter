@@ -798,6 +798,75 @@ fn an_api_surface_recorded_ahead_of_its_publication_is_not_delivered() {
     assert!(store.captured_surface_is_current(&b));
 }
 
+/// On the membership-only topology an UNRESOLVED carrier is never published to
+/// the engine: it has no receipt, so nothing fingerprints the IDE bytes the
+/// engine reads at its path. A live, background-loaded committed path with a
+/// recorded IDE surface is path liveness only, and never delivery evidence.
+#[test]
+fn an_unresolved_carriers_live_ide_path_is_not_membership_delivery() {
+    use crate::provider_surface_store::SurfaceDelivery;
+    let canonical = "/workspace/src/App.vue";
+    let ide_path = "/workspace/src/App.vue.tsx";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from("<script setup lang=\"ts\">\nconst a = 1;\n</script>\n"),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+    let states: Arc<DashMap<String, ProviderSyncState>> = Arc::new(DashMap::new());
+    store.bind_delivery_witness(Arc::new(
+        crate::provider_sync::ProviderSyncDeliveryWitness::new(
+            crate::type_provider::project_sync::ProjectSync::new_with_kind(
+                Arc::new(MockTypeProvider::new()),
+                crate::ProjectSyncMode::FullProject,
+                crate::TypeProviderKind::Tsserver,
+            ),
+            Arc::clone(&states),
+        ),
+    ));
+    let mut companions = vec![CarrierCompanion::carrier_ide(
+        Arc::from(ide_path),
+        crate::carrier_provider_projection::expect_admitted(
+            crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                None,
+                canonical,
+                "const a = 1;\n",
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "no workspace resolution is needed",
+        ),
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+    )];
+    crate::provider_surface_store::record_and_version_carrier_companions(
+        &store,
+        None,
+        &host,
+        canonical,
+        &mut companions,
+        None,
+    );
+    let surface = store
+        .current_snapshot(ide_path)
+        .expect("the publish path records the IDE surface");
+    let mut unresolved = ProviderSyncState::unresolved(ide_path.to_string());
+    unresolved.ide_background_loaded = true;
+    assert!(unresolved.is_unresolved());
+    states.insert(canonical.to_string(), unresolved);
+
+    assert_eq!(
+        store.delivery_of(&surface),
+        SurfaceDelivery::AwaitingDelivery
+    );
+    assert!(
+        !store.captured_surface_is_current(&surface),
+        "no receipt attests the IDE bytes the engine reads at this live path"
+    );
+}
+
 #[test]
 fn unresolved_state_authorizes_any_ide_surface_without_a_stamp() {
     // An UNRESOLVED (editor-liveness) carrier records its IDE surface only AFTER a

@@ -1573,30 +1573,267 @@ async fn applied_content_certifies_only_acknowledged_deliveries() {
     );
 }
 
-/// An acknowledgement certifies its bytes only while they are still the newest
-/// issued for the file: an older delivery acknowledged after a newer write was
-/// issued says nothing about what the service holds now.
-#[tokio::test]
-async fn an_overtaken_acknowledgement_certifies_nothing() {
-    use verter_type_runtime::traits::AppliedContent;
-    let transport = ScriptedTsQueryTransport::new();
-    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/ws");
-    let file = "/ws/src/App.vue.tsx";
-    transport.push_response("open", json!({}));
-    // A newer write is issued while the open is in flight.
-    transport.push_cache_mutation(
-        "open",
-        file,
-        "export const newer = 1;\n",
-        provider.contents_handle_for_test(),
-    );
-    provider
-        .open_file(file, "export const older = 1;\n")
+/// A `$/verter/tsQuery` transport whose every request is held until the test
+/// answers it: each arrival is observable, and its acknowledgement or failure
+/// is released on the test's schedule.
+#[derive(Clone, Default)]
+struct HeldTsQueryTransport {
+    arrivals: Arc<Mutex<VecDeque<HeldQuery>>>,
+    arrived: Arc<tokio::sync::Notify>,
+}
+
+/// One request held by [`HeldTsQueryTransport`].
+struct HeldQuery {
+    command: String,
+    content: Option<String>,
+    reply: tokio::sync::oneshot::Sender<Result<Value, TypeProviderError>>,
+}
+
+impl HeldQuery {
+    fn acknowledge(self) {
+        let _ = self.reply.send(Ok(json!(true)));
+    }
+
+    fn refuse(self) {
+        let _ = self
+            .reply
+            .send(Err(TypeProviderError::new("refused".to_string())));
+    }
+}
+
+impl HeldTsQueryTransport {
+    /// The next request to arrive, once it has reached the transport.
+    async fn next_arrival(&self) -> HeldQuery {
+        loop {
+            let notified = self.arrived.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(query) = self.arrivals.lock().unwrap().pop_front() {
+                return query;
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), notified)
+                .await
+                .expect("the provider never sent the expected request");
+        }
+    }
+}
+
+impl TsQueryTransport for HeldTsQueryTransport {
+    fn ts_query(
+        &self,
+        params: TsQueryParams,
+    ) -> impl Future<Output = Result<Value, TypeProviderError>> + Send + '_ {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let content = params
+            .arguments
+            .get("fileContent")
+            .or_else(|| {
+                params
+                    .arguments
+                    .pointer("/changedFiles/0/textChanges/0/newText")
+            })
+            .or_else(|| params.arguments.pointer("/openFiles/0/fileContent"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.arrivals.lock().unwrap().push_back(HeldQuery {
+            command: params.command,
+            content,
+            reply,
+        });
+        self.arrived.notify_waiters();
+        async move {
+            answer
+                .await
+                .unwrap_or_else(|_| Err(TypeProviderError::new("dropped".to_string())))
+        }
+    }
+}
+
+/// Open `file` with `content` through a held transport and acknowledge it.
+async fn open_acknowledged(
+    provider: &Arc<ExtensionTypeProvider<HeldTsQueryTransport>>,
+    transport: &HeldTsQueryTransport,
+    file: &str,
+    content: &str,
+) {
+    let opening = {
+        let provider = Arc::clone(provider);
+        let (file, content) = (file.to_string(), content.to_string());
+        tokio::spawn(async move { provider.open_file(&file, &content).await })
+    };
+    transport.next_arrival().await.acknowledge();
+    opening
         .await
-        .expect("the extension acknowledges the open");
+        .expect("the open task completes")
+        .expect("the extension acknowledged the open");
+}
+
+/// Start an update of `file` to `content` and return its task once the
+/// request has reached the extension.
+async fn update_in_flight(
+    provider: &Arc<ExtensionTypeProvider<HeldTsQueryTransport>>,
+    transport: &HeldTsQueryTransport,
+    file: &str,
+    content: &str,
+) -> (
+    tokio::task::JoinHandle<Result<(), TypeProviderError>>,
+    HeldQuery,
+) {
+    let updating = {
+        let provider = Arc::clone(provider);
+        let (file, content) = (file.to_string(), content.to_string());
+        tokio::spawn(async move { provider.update_file(&file, &content).await })
+    };
+    let held = transport.next_arrival().await;
+    assert_eq!(held.command, "updateOpen");
+    assert_eq!(held.content.as_deref(), Some(content));
+    (updating, held)
+}
+
+/// A delivery that reached the extension and was then dropped before its
+/// answer settled leaves the service's bytes unknown: the receipt for the
+/// bytes acknowledged before it is withdrawn, not kept.
+#[tokio::test]
+async fn a_cancelled_delivery_withdraws_the_earlier_receipt() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let file = "/ws/src/App.vue.tsx";
+    open_acknowledged(&provider, &transport, file, "export const a = 1;\n").await;
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const a = 1;\n"))
+    );
+
+    // The extension applies B and holds its answer; the write is cancelled.
+    let (updating, held) =
+        update_in_flight(&provider, &transport, file, "export const b = 2;\n").await;
+    updating.abort();
+    assert!(updating
+        .await
+        .expect_err("the write was cancelled")
+        .is_cancelled());
+    drop(held);
     assert_eq!(
         provider.applied_content(file),
         AppliedContent::NotApplied,
-        "the open's bytes were overtaken before its acknowledgement settled"
+        "the service may hold B: the receipt for A must not survive the cancelled write"
     );
+}
+
+/// Re-issuing the bytes the receipt already certifies leaves it standing: the
+/// service holds them whether or not the repeat lands.
+#[tokio::test]
+async fn an_identical_redelivery_keeps_the_receipt_while_in_flight() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let file = "/ws/src/App.vue.tsx";
+    open_acknowledged(&provider, &transport, file, "export const a = 1;\n").await;
+    let (updating, held) =
+        update_in_flight(&provider, &transport, file, "export const a = 1;\n").await;
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const a = 1;\n"))
+    );
+    held.acknowledge();
+    updating.await.unwrap().unwrap();
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const a = 1;\n"))
+    );
+}
+
+/// An acknowledgement certifies its bytes only while its delivery is the
+/// file's newest: an older delivery acknowledged after a newer one settled
+/// never overwrites the newer receipt.
+#[tokio::test]
+async fn an_overtaken_acknowledgement_never_overwrites_a_newer_receipt() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let file = "/ws/src/App.vue.tsx";
+    open_acknowledged(&provider, &transport, file, "export const a = 0;\n").await;
+    let (first, a) = update_in_flight(&provider, &transport, file, "export const a = 1;\n").await;
+    let (second, b) = update_in_flight(&provider, &transport, file, "export const b = 2;\n").await;
+    b.acknowledge();
+    second.await.unwrap().unwrap();
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const b = 2;\n"))
+    );
+    a.acknowledge();
+    first.await.unwrap().unwrap();
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const b = 2;\n")),
+        "the overtaken acknowledgement of A must not replace the receipt for B"
+    );
+}
+
+/// An acknowledgement is tied to its own delivery, not to equal bytes: with
+/// A, B and A again issued, the FIRST A's late acknowledgement certifies
+/// nothing — the service may hold B until the second A lands.
+#[tokio::test]
+async fn an_equal_bytes_acknowledgement_of_an_older_delivery_certifies_nothing() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let file = "/ws/src/App.vue.tsx";
+    open_acknowledged(&provider, &transport, file, "export const z = 0;\n").await;
+    let (first_a, a1) =
+        update_in_flight(&provider, &transport, file, "export const a = 1;\n").await;
+    let (then_b, b) = update_in_flight(&provider, &transport, file, "export const b = 2;\n").await;
+    let (second_a, a2) =
+        update_in_flight(&provider, &transport, file, "export const a = 1;\n").await;
+
+    b.acknowledge();
+    then_b.await.unwrap().unwrap();
+    a1.acknowledge();
+    first_a.await.unwrap().unwrap();
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::NotApplied,
+        "neither the overtaken B nor the first A proves what the service holds"
+    );
+
+    a2.acknowledge();
+    second_a.await.unwrap().unwrap();
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const a = 1;\n"))
+    );
+}
+
+/// A refused newest delivery withdraws the receipt, and an older delivery's
+/// late acknowledgement cannot restore it.
+#[tokio::test]
+async fn a_refused_newest_delivery_is_not_masked_by_an_older_acknowledgement() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let file = "/ws/src/App.vue.tsx";
+    open_acknowledged(&provider, &transport, file, "export const z = 0;\n").await;
+    let (first, a) = update_in_flight(&provider, &transport, file, "export const a = 1;\n").await;
+    let (second, b) = update_in_flight(&provider, &transport, file, "export const b = 2;\n").await;
+    b.refuse();
+    assert!(second.await.unwrap().is_err());
+    a.acknowledge();
+    first.await.unwrap().unwrap();
+    assert_eq!(provider.applied_content(file), AppliedContent::NotApplied);
 }

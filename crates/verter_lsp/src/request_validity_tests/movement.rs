@@ -147,6 +147,13 @@ impl Handles {
     }
 
     async fn resync_identical_carrier(&self) {
+        self.resync_carrier().await;
+    }
+
+    /// Deliver the carrier's current document through the background drain,
+    /// as production re-syncs a carrier: it compiles the live source, records
+    /// its IDE surface and writes it to the engine.
+    pub(super) async fn resync_carrier(&self) {
         let server = &self.server;
         let workspace = server
             .vfs_workspace

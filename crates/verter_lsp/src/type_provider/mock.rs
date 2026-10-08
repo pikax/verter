@@ -173,13 +173,15 @@ mod inner {
         )>,
         /// Bytes this engine accepted. Absent means not applied.
         applied: std::collections::HashMap<String, Arc<str>>,
-        /// While `true`, file writes succeed but never reach the engine: each
-        /// delivery stays pending and `applied` keeps the earlier bytes.
-        hold_deliveries: bool,
-        /// For each interactive query, in order: its path and the bytes the
+        /// The serving engine incarnation: replacing the engine advances it.
+        /// A query answer is bound to the incarnation that selected it, and a
+        /// file write to the incarnation it was issued to.
+        incarnation: Arc<std::sync::atomic::AtomicU64>,
+        /// For each interactive query, in order: its path, the bytes the
         /// engine held there at the moment it selected the answer — the bytes
-        /// the answer was evaluated against.
-        evaluations: Vec<(String, Option<Arc<str>>)>,
+        /// the answer was evaluated against — and the incarnation that held
+        /// them.
+        evaluations: Vec<(String, Option<Arc<str>>, u64)>,
         calls: Vec<MockCall>,
         /// When `true`, the file-op methods (`open_file`/`load_file`/
         /// `update_file`/`close_file`) RECORD their call and then return
@@ -361,7 +363,9 @@ mod inner {
         /// the engine holds there at this instant.
         fn note_evaluation(&mut self, path: &str) {
             let bytes = self.applied.get(path).cloned();
-            self.evaluations.push((path.to_string(), bytes));
+            let incarnation = self.incarnation.load(std::sync::atomic::Ordering::SeqCst);
+            self.evaluations
+                .push((path.to_string(), bytes, incarnation));
         }
     }
 
@@ -380,6 +384,9 @@ mod inner {
         /// Interactive queries still owed a scripted delivery failure, for
         /// every query kind alike.
         failed_deliveries: Arc<std::sync::atomic::AtomicUsize>,
+        /// The serving engine incarnation, shared with `state` and readable
+        /// without its lock.
+        incarnation: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl Default for MockTypeProvider {
@@ -390,11 +397,14 @@ mod inner {
 
     impl MockTypeProvider {
         pub fn new() -> Self {
+            let state = MockState::default();
+            let incarnation = Arc::clone(&state.incarnation);
             Self {
-                state: Arc::new(Mutex::new(MockState::default())),
+                state: Arc::new(Mutex::new(state)),
                 call_recorded: Arc::new(tokio::sync::Notify::new()),
                 request_barriers: Arc::new(Mutex::new(None)),
                 failed_deliveries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                incarnation,
             }
         }
 
@@ -417,6 +427,11 @@ mod inner {
         ) -> ProviderFuture<'a, T> {
             let barriers = self.request_barriers.lock().unwrap().clone();
             let failed_deliveries = Arc::clone(&self.failed_deliveries);
+            // The answer was selected by the incarnation serving now. Like the
+            // provider hub's retired-result fence, an answer whose engine was
+            // replaced before it settled is refused.
+            let incarnation = Arc::clone(&self.incarnation);
+            let selected_by = incarnation.load(std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
                 if let Some(barriers) = &barriers {
                     barriers.reach(RequestBarrier::ProviderDispatch).await;
@@ -434,6 +449,14 @@ mod inner {
                     ))
                 } else {
                     answer.await
+                };
+                let result = if incarnation.load(std::sync::atomic::Ordering::SeqCst) == selected_by
+                {
+                    result
+                } else {
+                    Err(TypeProviderError::new(
+                        "the engine incarnation that evaluated this query was retired".to_string(),
+                    ))
                 };
                 if let Some(barriers) = &barriers {
                     barriers.reach(RequestBarrier::ProviderDecode).await;
@@ -734,9 +757,17 @@ mod inner {
             (arrived, release)
         }
 
-        fn accept_applied(&self, path: &str, content: &str) {
+        /// The incarnation a file write issued now is delivered to.
+        fn serving_incarnation(&self) -> u64 {
+            self.incarnation.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Accept `content` at `path` for a write issued to `issued_to`. A
+        /// write issued to a retired incarnation reaches nothing the
+        /// replacement holds.
+        fn accept_applied(&self, path: &str, content: &str, issued_to: u64) {
             let mut state = self.state.lock().unwrap();
-            if state.hold_deliveries {
+            if self.serving_incarnation() != issued_to {
                 return;
             }
             state.applied.insert(path.to_string(), Arc::from(content));
@@ -752,13 +783,21 @@ mod inner {
             self.state.lock().unwrap().applied.clear();
         }
 
-        /// Model the serving engine retiring while it holds a query, and a
-        /// replacement incarnation taking over: the replacement holds none of
-        /// the bytes the retired engine accepted, and the held query's answer
-        /// never settles.
-        pub fn replace_engine_holding_query(&self) {
-            self.forget_applied_content();
-            self.fail_next_deliveries(1);
+        /// Model the serving engine retiring and a replacement incarnation
+        /// taking over: the replacement holds none of the bytes the retired
+        /// engine accepted, an answer the retired engine selected never
+        /// settles, and a write issued to the retired engine never reaches the
+        /// replacement.
+        pub fn replace_engine(&self) {
+            let mut state = self.state.lock().unwrap();
+            self.incarnation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            state.applied.clear();
+        }
+
+        /// The serving engine incarnation.
+        pub(crate) fn incarnation(&self) -> u64 {
+            self.serving_incarnation()
         }
 
         /// Model a delivery of `path` the engine lost: it no longer holds the
@@ -767,18 +806,11 @@ mod inner {
             self.drop_applied(path);
         }
 
-        /// Hold every later file write: each succeeds without reaching the
-        /// engine, so the engine keeps the bytes it held and the delivery stays
-        /// pending.
-        pub fn hold_file_deliveries(&self) {
-            self.state.lock().unwrap().hold_deliveries = true;
-        }
-
         /// Model a delivery of `content` under `path` that reached the engine
         /// through another writer, before any surface describing it was
         /// recorded: the engine now holds those bytes.
         pub fn accept_unrecorded_delivery(&self, path: &str, content: &str) {
-            self.accept_applied(path, content);
+            self.accept_applied(path, content, self.serving_incarnation());
         }
 
         /// Get all recorded calls.
@@ -833,8 +865,21 @@ mod inner {
                 .evaluations
                 .iter()
                 .rev()
-                .find(|(evaluated, _)| evaluated == path)
-                .map(|(_, bytes)| bytes.clone())
+                .find(|(evaluated, _, _)| evaluated == path)
+                .map(|(_, bytes, _)| bytes.clone())
+        }
+
+        /// The engine incarnation that evaluated the most recent interactive
+        /// query at `path`, if any reached it.
+        pub(crate) fn last_evaluating_incarnation(&self, path: &str) -> Option<u64> {
+            self.state
+                .lock()
+                .unwrap()
+                .evaluations
+                .iter()
+                .rev()
+                .find(|(evaluated, _, _)| evaluated == path)
+                .map(|(_, _, incarnation)| *incarnation)
         }
 
         /// Make every subsequent file-op (`open_file`/`load_file`/
@@ -1245,13 +1290,14 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 fail_or_ok(fail, "open_file")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1283,9 +1329,10 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 fail_or_ok(fail, "load_file")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1312,13 +1359,14 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 fail_or_ok(fail, "open_file_background")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1347,13 +1395,14 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 fail_or_ok(fail, "update_file")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1443,11 +1492,12 @@ mod inner {
             let this = self.clone();
             let companion = companion_path.to_string();
             let bytes = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some(gate) = block {
                     gate.notified().await;
                 }
-                this.accept_applied(&companion, &bytes);
+                this.accept_applied(&companion, &bytes, issued_to);
                 Ok(())
             })
         }

@@ -657,6 +657,16 @@ impl ProviderSyncState {
         }
     }
 
+    /// Whether the committed publication attests a carrier IDE surface with the given
+    /// content / source-map identity: the exact IDE bytes the last receipt-gated commit
+    /// published at `ide_path`. Unlike [`Self::authorizes_carrier_ide_capture`], an
+    /// UNRESOLVED carrier attests nothing — it carries no receipt fingerprint.
+    pub fn attests_committed_ide_surface(&self, content_hash: Hash16, map_hash: Hash16) -> bool {
+        self.committed_ide_surface
+            .as_ref()
+            .is_some_and(|stamp| stamp.content_hash == content_hash && stamp.map_hash == map_hash)
+    }
+
     /// Whether the committed publication attests a carrier public-API surface with the
     /// given content / source-map identity: the exact API bytes the last receipt-gated
     /// commit published at `api_path`. A surface recorded ahead of its publication, or
@@ -1567,8 +1577,13 @@ impl ProviderSyncDeliveryWitness {
                         && committed.background_loaded_for_kind(kind)
                 });
                 live && match surface.kind {
+                    // Only the receipt's own fingerprint attests membership
+                    // content: an unresolved carrier has no receipt, so the
+                    // engine was never handed its IDE bytes through the
+                    // publication, however live its path is.
                     ProviderSurfaceKind::CarrierIde => {
-                        committed.authorizes_carrier_ide_capture(content_hash, map_hash)
+                        committed.ide_path.as_deref() == Some(path)
+                            && committed.attests_committed_ide_surface(content_hash, map_hash)
                     }
                     ProviderSurfaceKind::CarrierApi => {
                         committed.api_path.as_deref() == Some(path)

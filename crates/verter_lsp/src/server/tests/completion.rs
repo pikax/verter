@@ -5363,6 +5363,7 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
         virtual_content,
         None,
     );
+    stamp_seeded_ide_publication(server, "/workspace/src/App.vue", tsx_path);
 
     // Open the virtual document (`verter-virtual://...?sourceUri=<vue-uri>`).
     let virtual_uri_str = format!(
