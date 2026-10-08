@@ -526,6 +526,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             finalise,
             &CarrierNormalizationPrelude::none(),
             None,
+            &frame.key,
         );
         let lease = frame
             .lease

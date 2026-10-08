@@ -3915,10 +3915,6 @@ pub struct HostRetentionSnapshot {
     pub semantic_memo_entries: usize,
     /// Semantic-graph `unresolved_reach` entries.
     pub unresolved_reach: usize,
-    /// Interned relation proofs.
-    pub relation_proofs: usize,
-    /// Interned co-discharged relate keys.
-    pub relate_keys: usize,
     /// Resident union member views (one per distinct union built, released
     /// with the union's document).
     pub union_views: usize,

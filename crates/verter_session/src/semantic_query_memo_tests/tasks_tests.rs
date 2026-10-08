@@ -91,7 +91,7 @@ fn run_real_singleflight_cycle(task_count: usize) {
                             _,
                         > = (nested.value, nested.dep_signature).into();
                         output.cache_suppress = nested.cache_suppress;
-                        output.result_is_partial = nested.result_is_partial;
+                        output.set_partial(nested.result_is_partial);
                         output
                     },
                 )

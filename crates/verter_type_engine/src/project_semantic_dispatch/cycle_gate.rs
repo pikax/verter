@@ -406,7 +406,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let Some(fallback) = outcome.fallback_reasons() {
             output.cache_suppress = true;
             if fallback.any_partial() {
-                output.result_is_partial = true;
+                output.mark_partial();
             }
         }
         output

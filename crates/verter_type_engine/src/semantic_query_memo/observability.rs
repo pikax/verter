@@ -74,21 +74,6 @@ impl SemanticGraphStore {
         self.unresolved_reach.lock().len()
     }
 
-    /// Number of LIVE interned relation proofs (retention observability),
-    /// which is exactly what the table stores: a proof
-    /// [`Self::release_canonical`] dropped leaves no entry.
-    #[must_use]
-    pub fn relation_proof_count(&self) -> usize {
-        self.relation_proof_table.lock().len()
-    }
-
-    /// Number of LIVE interned co-discharged relate keys (retention
-    /// observability), exactly what the table stores.
-    #[must_use]
-    pub fn relate_key_count(&self) -> usize {
-        self.relate_key_table.lock().len()
-    }
-
     /// Retention breakdown of [`Self::memo_entry_count`] by family name
     /// (the `FamilyKey` variant label), sorted by name. Lets a churn
     /// measurement name the family whose entries survive a release.

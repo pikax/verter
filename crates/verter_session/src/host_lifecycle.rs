@@ -863,11 +863,6 @@ impl VerterHost {
                 .project_type_store
                 .semantic_graph()
                 .unresolved_reach_count(),
-            relation_proofs: self
-                .project_type_store
-                .semantic_graph()
-                .relation_proof_count(),
-            relate_keys: self.project_type_store.semantic_graph().relate_key_count(),
             union_views: self.project_type_store.semantic_graph().union_view_count(),
             stable_key_classes: self
                 .project_type_store
