@@ -14126,23 +14126,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         input: crate::semantic_query::IntersectionInputRef,
         _purpose: crate::semantic_query::IntersectionPurpose,
-        _context: crate::semantic_query::SemanticContextId,
+        context: crate::semantic_query::SemanticContextId,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         verter_audit::attribute!(ReduceIntersection);
         if let Some(steps) = input.as_steps() {
             let mut members: Vec<SemanticNodeId> = Vec::with_capacity(steps.len());
             for step in steps.iter() {
-                match *step {
-                    crate::semantic_query::IntersectionTerm::Value(id) => members.push(id),
+                match step {
+                    crate::semantic_query::IntersectionTerm::Value(id) => members.push(*id),
                     crate::semantic_query::IntersectionTerm::EvaluateSubgroup {
                         input: nested,
                         purpose,
                     } => {
                         let nested_key =
                             crate::semantic_query::SemanticQueryKey::ReduceIntersection {
-                                input: nested,
-                                purpose,
-                                context: _context,
+                                input: nested.clone(),
+                                purpose: *purpose,
+                                context: context.clone(),
                             };
                         match self.execute_read(nested_key).value {
                             crate::semantic_query::QueryResult::Value(node) => members.push(node),

@@ -55,6 +55,7 @@ mod family_retention;
 mod flow_return_memo;
 mod hash_cons_memos;
 pub mod inflight;
+pub(crate) mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
 pub(crate) mod nodes;

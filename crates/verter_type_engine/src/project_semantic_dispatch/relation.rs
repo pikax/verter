@@ -5915,7 +5915,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     policy: top.policy,
                     source_freshness: top.source_freshness,
                     inference_context,
-                    context: top.context,
+                    context: top.context.clone(),
                 }
             }
             None => self.relate_key_for(source, target),

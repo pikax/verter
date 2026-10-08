@@ -2117,16 +2117,13 @@ fn build_union_view(graph: &SemanticGraphStore, union: SemanticNodeId) -> Arc<[S
     }
 }
 
-/// Project a view from a context id when the interned context is available.
+/// Project a view from a context id.
 pub fn semantic_union_members_for_id(
     graph: &SemanticGraphStore,
     union: SemanticNodeId,
-    ctx: SemanticContextId,
+    ctx: &SemanticContextId,
 ) -> Arc<[SemanticNodeId]> {
-    match ctx.lookup() {
-        Some(context) => semantic_union_members(graph, union, &context),
-        None => build_union_view(graph, union),
-    }
+    semantic_union_members(graph, union, ctx.context())
 }
 
 pub fn order_policy_of(ctx: &SemanticContext) -> SemanticOrderPolicyId {

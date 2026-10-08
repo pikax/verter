@@ -7744,7 +7744,7 @@ pub enum ContextualInferenceMode {
 /// fields ARE real env hashes (e.g. `project_identity` is the live
 /// [`verter_session_query::resolution::ProjectIdentity`] hash), but isolation is at
 /// workspace-env granularity, not per-judgement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelationContext {
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
@@ -7917,7 +7917,7 @@ impl RelateMemoKey {
             policy: self.policy,
             source_freshness: self.source_freshness,
             inference_context: self.inference_context.clone(),
-            context: self.context,
+            context: self.context.clone(),
         }
     }
 
@@ -7942,7 +7942,7 @@ impl RelateMemoKey {
                 policy: *policy,
                 source_freshness: *source_freshness,
                 inference_context: inference_context.clone(),
-                context: *context,
+                context: context.clone(),
             },
             other => panic!(
                 "RelateMemoKey::from_query_key expects SemanticQueryKey::Relate, got {other:?}"
