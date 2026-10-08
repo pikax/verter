@@ -135,6 +135,12 @@ impl FrameSpan {
         self.start < other.start
     }
 
+    /// Whether this span ends strictly after `other` ends.
+    #[must_use]
+    pub fn ends_after_end_of(self, other: Self) -> bool {
+        self.end > other.end
+    }
+
     /// Whether this span starts strictly after `other` ends.
     #[must_use]
     pub fn starts_after_end_of(self, other: Self) -> bool {

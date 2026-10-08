@@ -51,6 +51,8 @@ pub struct SkeletonSpanIndex {
     bindings: Arc<[(FrameSpan, SkeletonBindingId)]>,
     reads: Arc<[IndexedRead]>,
     read_groups: Arc<FxHashMap<FlowBindingRef, (u32, u32)>>,
+    /// Indices into `reads`, ordered by site end within each group's range.
+    reads_by_end: Arc<[u32]>,
 }
 
 impl SkeletonSpanIndex {
@@ -118,12 +120,23 @@ impl SkeletonSpanIndex {
             );
             start = end;
         }
+        let reads: Arc<[IndexedRead]> = keyed.into_iter().map(|(_, read)| read).collect();
+        let mut reads_by_end: Vec<u32> = (0..reads.len() as u32).collect();
+        for &(start, end) in read_groups.values() {
+            reads_by_end[start as usize..end as usize].sort_by(|&left, &right| {
+                end_cmp(
+                    reads[left as usize].site_span,
+                    reads[right as usize].site_span,
+                )
+            });
+        }
         Self {
             sites,
             writes,
             bindings: binding_spans,
-            reads: keyed.into_iter().map(|(_, read)| read).collect(),
+            reads,
             read_groups: Arc::new(read_groups),
+            reads_by_end: Arc::from(reads_by_end.into_boxed_slice()),
         }
     }
 
@@ -178,17 +191,26 @@ impl SkeletonSpanIndex {
         binding: &FlowBindingRef,
         span: FrameSpan,
     ) -> impl Iterator<Item = &'a IndexedRead> + 'a {
-        let group = self
+        let (start, end) = self
             .read_groups
             .get(binding)
-            .map_or(&[][..], |&(start, end)| {
-                &self.reads[start as usize..end as usize]
-            });
-        let first = group.partition_point(|read| read.site_span <= span);
-        group[first..]
+            .map_or((0, 0), |&(start, end)| (start as usize, end as usize));
+        let group = &self.reads[start..end];
+        // Reads starting past the span's end are all after it and never
+        // inside it; the interior reads are not walked.
+        let tail = group.partition_point(|read| !read.site_span.starts_after_end_of(span));
+        // A read that starts inside the span but ends past it is not
+        // contained: the end-ordered suffix finds those.
+        let by_end = &self.reads_by_end[start..end];
+        let wide =
+            by_end.partition_point(|&read| !group[read as usize].site_span.ends_after_end_of(span));
+        group[tail..]
             .iter()
+            .chain(by_end[wide..].iter().filter_map(move |&read| {
+                let read = &group[read as usize];
+                (!read.site_span.starts_after_end_of(span) && read.site_span > span).then_some(read)
+            }))
             .inspect(|_| record_visits(1))
-            .filter(move |read| !span.contains(read.site_span))
     }
 }
 
@@ -197,6 +219,15 @@ fn canonical(bindings: &FlowBindingMap, binding: &FlowBindingRef) -> FlowBinding
     match binding {
         FlowBindingRef::Local(local) => FlowBindingRef::Local(bindings.canonical_local(*local)),
         captured @ FlowBindingRef::Captured(_) => captured.clone(),
+    }
+}
+
+/// Order by end alone.
+fn end_cmp(left: FrameSpan, right: FrameSpan) -> std::cmp::Ordering {
+    match (left.ends_after_end_of(right), right.ends_after_end_of(left)) {
+        (true, _) => std::cmp::Ordering::Greater,
+        (_, true) => std::cmp::Ordering::Less,
+        _ => std::cmp::Ordering::Equal,
     }
 }
 

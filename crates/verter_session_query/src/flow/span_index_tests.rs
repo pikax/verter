@@ -56,3 +56,57 @@ fn nesting_order_puts_a_container_before_what_it_contains() {
     let order: Vec<u32> = entries.iter().map(|&(_, id)| id).collect();
     assert_eq!(order, vec![1, 2, 3, 0]);
 }
+
+fn read_index(sites: &[(u32, u32)]) -> (SkeletonSpanIndex, FlowBindingRef) {
+    let binding = FlowBindingRef::Local(SkeletonBindingId(0));
+    let mut reads: Vec<IndexedRead> = sites
+        .iter()
+        .map(|&(start, end)| IndexedRead {
+            site_span: span(start, end),
+            path: Arc::from(Vec::new().into_boxed_slice()),
+        })
+        .collect();
+    reads.sort_by_key(|read| read.site_span);
+    let mut reads_by_end: Vec<u32> = (0..reads.len() as u32).collect();
+    reads_by_end
+        .sort_by(|&l, &r| end_cmp(reads[l as usize].site_span, reads[r as usize].site_span));
+    let mut groups = FxHashMap::default();
+    groups.insert(binding.clone(), (0, reads.len() as u32));
+    let index = SkeletonSpanIndex {
+        reads: Arc::from(reads.into_boxed_slice()),
+        read_groups: Arc::new(groups),
+        reads_by_end: Arc::from(reads_by_end.into_boxed_slice()),
+        ..SkeletonSpanIndex::default()
+    };
+    (index, binding)
+}
+
+#[test]
+fn reads_after_keeps_overlapping_reads_and_skips_interior_ones() {
+    let sites = [
+        (2, 6),
+        (10, 20),
+        (11, 14),
+        (12, 25),
+        (18, 30),
+        (20, 20),
+        (21, 22),
+        (10, 40),
+    ];
+    let (index, binding) = read_index(&sites);
+    for &(start, end) in &[(10, 20), (11, 14), (0, 50), (12, 12), (30, 31)] {
+        let target = span(start, end);
+        let mut expected: Vec<FrameSpan> = sites
+            .iter()
+            .map(|&(s, e)| span(s, e))
+            .filter(|read| *read > target && !target.contains(*read))
+            .collect();
+        let mut actual: Vec<FrameSpan> = index
+            .reads_after(&binding, target)
+            .map(|read| read.site_span)
+            .collect();
+        expected.sort();
+        actual.sort();
+        assert_eq!(actual, expected, "reads after {start}..{end}");
+    }
+}
