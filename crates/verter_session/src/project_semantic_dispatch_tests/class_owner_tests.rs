@@ -346,3 +346,27 @@ fn a_member_read_through_this_lowers_only_the_elements_declaring_it() {
     );
     assert_eq!(narrow, wide, "40 unrelated members add no lowering");
 }
+
+/// A class expression extending a value with several construct signatures
+/// inherits the FIRST signature's instance, as the class declaration of the
+/// same base does.
+///
+/// Measured on TypeScript 7.0.2 (`--noEmit`): over `KO`,
+/// `InstanceType<typeof C>['o']` is `"str"` for the class expression and for
+/// `class D extends KO`.
+#[test]
+fn a_class_expression_extending_overloaded_constructors_inherits_the_first_signature() {
+    let source = "\
+declare const KO: { new (a: string): { o: 'str' }; new (a: number): { o: 'num' } };
+const C = class extends KO { p = 1 };
+class D extends KO { p = 1 }
+";
+    let failures = mismatches(
+        source,
+        &[
+            ("InstanceType<typeof C>['o']", "\"str\""),
+            ("InstanceType<typeof D>['o']", "\"str\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -4816,8 +4816,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (declaration, Some(debt))
             }
             PreparedTypeDeclResolution::Missing => {
+                // A name only the value space declares, read where a class
+                // instance is composed (a class expression's `extends`):
+                // the base instance of that value's constructor, by the
+                // same first-construct-signature rule a class declaration's
+                // heritage follows.
+                let value_instance = (!is_non_file_base
+                    && self.heritage_names_value_only(decl_canonical, decl_owner, decl_name))
+                .then(|| {
+                    self.class_value_base(decl_canonical, decl_owner, decl_name, args, context)
+                })
+                .flatten()
+                .and_then(|value_base| value_base.instance);
                 let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                    QueryResult::Value(self.opaque(QueryError::Miss)),
+                    QueryResult::Value(
+                        value_instance.unwrap_or_else(|| self.opaque(QueryError::Miss)),
+                    ),
                     empty_signature(),
                 ));
                 out.cache_suppress = true;

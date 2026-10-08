@@ -4307,7 +4307,6 @@ fn lower_class_expression_value(
         .value_decls
         .into_iter()
         .find(|decl| decl.name == name)?;
-    let instance = value_base_instance(instance, class);
     let named_instance = TypeExpr::named(name.to_string());
     let retarget = |return_type: &mut Option<Arc<TypeExpr>>| {
         if return_type.as_deref() == Some(&named_instance) {
@@ -4322,37 +4321,6 @@ fn lower_class_expression_value(
     value.kind = kind;
     value.signatures = Vec::new();
     Some(value)
-}
-
-/// A class expression's instance, its `extends` base read as the instance
-/// of the base VALUE (`InstanceType<typeof Base>`): the class expression
-/// declares no type, and the base it extends may be a value only (another
-/// `const`-held class expression), which a type reference to its name does
-/// not reach. The base arm stays first and the own body last, so own
-/// members still shadow inherited ones.
-fn value_base_instance(instance: TypeExpr, class: &Class<'_>) -> TypeExpr {
-    let TypeExpr::Intersection(arms) = &instance else {
-        return instance;
-    };
-    let (Some(heritage), [TypeExpr::Ref { type_arguments, .. }, own]) =
-        (class.heritage.as_ref(), &arms[..])
-    else {
-        return instance;
-    };
-    let Some(base_name) = heritage_expression_name(&heritage.expression) else {
-        return instance;
-    };
-    if heritage.type_arguments.is_some() || !type_arguments.is_empty() {
-        return instance;
-    }
-    let constructor = TypeExpr::TypeOf(ValueRef {
-        path: base_name.split('.').map(str::to_string).collect(),
-        type_args: Vec::new(),
-    });
-    TypeExpr::intersection(vec![
-        TypeExpr::named_with_args("InstanceType", vec![constructor]),
-        own.clone(),
-    ])
 }
 
 /// The value declarations one declarator makes: the binding identifier's,

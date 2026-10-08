@@ -213,6 +213,11 @@ fn build_function_program_index_impl<'ast>(
             let served = served_spans(ctx);
             // Folding each served body's hashes records the classes inside it.
             hash_entries(ctx, &served);
+            crate::analysis::class_index::collect_top_level_classes(
+                &program.body,
+                &served,
+                &mut ctx.classes,
+            );
         },
     );
     resolve_captures(&mut ctx.entries);
@@ -1433,7 +1438,6 @@ fn discover_statement<'ast>(
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
-    ctx.classes.record_statement(stmt);
     match stmt {
         Statement::FunctionDeclaration(func) => {
             discover_function_declaration(

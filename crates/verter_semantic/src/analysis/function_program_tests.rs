@@ -1705,23 +1705,26 @@ fn the_class_index_records_every_class_discovery_reaches_once_in_source_order() 
     assert_eq!(recorded, every_class_span(source));
     assert_eq!(recorded.len(), 15);
 
-    let unreached = "declare function use(x: unknown): void;\n\
-                     use(class CallArg { k() { return class Served {}; } });\n\
-                     { class Block {} }\n\
-                     namespace NS { export class N {} }\n\
-                     class F { static s = class Field {}; static { class SB {} } }\n\
-                     export const arr = [class InArray {}];\n";
-    let index = index_of(unreached);
+    let reached = "declare function use(x: unknown): void;\n\
+                   use(class CallArg { k() { return class Served {}; } });\n\
+                   { class Block {} }\n\
+                   namespace NS { export class N {} }\n\
+                   class F { static s = class Field {}; static { class SB {} } }\n\
+                   export const arr = [class InArray {}];\n";
+    let index = index_of(reached);
     let names: Vec<&str> = index
         .classes()
         .records()
         .iter()
-        .map(|record| &unreached[record.span.start as usize..record.span.end as usize])
+        .map(|record| {
+            let text = &reached[record.span.start as usize..record.span.end as usize];
+            text.split([' ', '{']).nth(1).unwrap_or(text)
+        })
         .collect();
     assert_eq!(
         names,
-        ["class F { static s = class Field {}; static { class SB {} } }"],
-        "only the class declaration discovery visits is indexed"
+        ["CallArg", "Served", "Block", "N", "F", "Field", "SB", "InArray"],
+        "every class is indexed in source order"
     );
 }
 
