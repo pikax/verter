@@ -223,27 +223,23 @@
       "id": "U05",
       "subblock": 2,
       "outcome": "A project profile overlays semantic profiles through generic roles, realms and generated facts; it never selects a TypeScript program, owns resolution, mutates an identity, or runs when inapplicable",
-      "owner": "COX0",
+      "owner": "PPR0T",
       "contractOwner": "PPR0",
-      "successorPath": ["UAK1", "CAT0", "DEM0", "COX0"],
-      "receivingAcceptance": "COX0-AC2",
-      "implementationOwnerStatus": "default-pending-ruling",
+      "successorPath": ["UAK1", "CAT0", "PPR0", "PPR0T"],
+      "receivingAcceptance": "PPR0T-AC1",
       "verifier": "PPR1",
-      "verifierAcceptance": "PPR1-AC2",
-      "openQuestion": "uak1-project-profile-implementation-owner"
+      "verifierAcceptance": "PPR1-AC2"
     },
     {
       "id": "U06",
       "subblock": 3,
       "outcome": "Public results carry one typed outcome vocabulary (success, partial, ambiguous, NeedInputs, unsupported, not-applicable, cancelled, stale) across Rust, NAPI, WASM, LSP, MCP and CLI; no surface reports empty success for missing inputs",
-      "owner": "LSO0",
+      "owner": "PUB0T",
       "contractOwner": "PUB0",
-      "successorPath": ["UAK1", "ENC0", "FMK0", "UAP0", "LSO0"],
-      "receivingAcceptance": "LSO0-AC-OUTCOMES",
-      "implementationOwnerStatus": "default-pending-ruling",
+      "successorPath": ["UAK1", "ENC0", "PUB0", "PUB0T"],
+      "receivingAcceptance": "PUB0T-AC1",
       "verifier": "UAP0",
-      "verifierAcceptance": "UAP0-AC-R2",
-      "openQuestion": "uak1-public-outcome-implementation-owner"
+      "verifierAcceptance": "UAP0-AC-R2"
     },
     {
       "id": "U07",
@@ -402,8 +398,8 @@
     },
     {
       "obligation": "Typed public outcomes and capability truth across surfaces",
-      "receiver": "LSO0",
-      "receivingAcceptance": "LSO0-AC-OUTCOMES"
+      "receiver": "PUB0T",
+      "receivingAcceptance": "PUB0T-AC1"
     },
     {
       "obligation": "Cross-family check of no global release join and no undefined owner",
@@ -412,14 +408,10 @@
     }
   ],
   "layerAssignmentRule": "Every workspace crate is assigned to exactly one layer above, or is a named role-shared crate whose halves are listed separately (verter_compiler: L3 + LC). The UAM0 structural check reads cargo metadata and fails on a crate in no layer.",
-  "firewallCutoverNode": {
-    "id": "FWC1",
-    "status": "awaiting-controller-creation",
-    "ruling": "uak1-kernel-compiler-edge-owner",
-    "role": "production delivery",
-    "scope": "removes the verter_session -> verter_compiler crate edge and its transitive reach into compiler backends, moves vertical shim assets out of the kernel crate, relocates their consumers, retires the K01-K04 exceptions",
-    "predecessors": ["CPF1"],
-    "successors": ["UAI0", "UAM0"],
-    "acceptance": { "FWC1-AC1": "K01", "FWC1-AC2": "K02", "FWC1-AC3": "K03", "FWC1-AC4": "K04" }
+  "graphValidation": {
+    "prerequisiteOwner": "UAG0",
+    "receivingAcceptance": ["UAG0-AC1", "UAG0-AC2", "UAG0-AC3", "UAG0-AC4"],
+    "consumptionAcceptance": "UAK1-AC1",
+    "requirement": "Before acceptance, consume the controller-recorded executable proof of acyclicity, independent vertical/product release terminals and non-gating soak joins; check these owner bindings against the applied graph. This inventory is contract data, not a graph-validation receipt."
   }
 }

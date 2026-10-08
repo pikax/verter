@@ -21,8 +21,12 @@ The reviewed contract data lives in `tests/kernel/UAK1/products/`:
 | `constitution-inventory.v1.json` | Layers `L0`–`LR`, firewall rules `F01`–`F05`, constitution outcomes `U01`–`U12`, the UAK0 outcomes this decision relies on, consumers `K-C01`–`K-C04`, empty populations and transferred obligations |
 | `firewall-route-ledger.v1.json` | Firewall breaches at the described head (`K01`–`K04`) with one deletion owner each, plus UAK0's `D01`–`D19` mapped to the rule each one breaches |
 
-Every owner is an existing plan node. Every `successorPath` starts at UAK1 and
-follows predecessor edges in the controller-owned DAG at dispatch. The UAK0
+Every owner must exist in the controller-owned plan before acceptance. The
+receiving contracts below include the ratified additions FWC1, PPR0T and PUB0T;
+their creation and edges are part of the controller ruling, not this repository.
+Every `successorPath` starts at UAK1 and follows predecessor edges. UAG0 supplies
+the executable graph-validation method and result that UAK1 must consume before
+acceptance. The UAK0
 rows (`B..`, `O..`, `C..`, `S..`, `D..`) keep their UAK0 owners; UAK1 only
 references them.
 
@@ -100,7 +104,10 @@ ARH1 contracts in `architecture_dependencies.rs`.
   realms and generated facts. It never selects a TypeScript program (that is
   the project-bound external-TS contract), never owns resolution (PM), never
   mutates a carrier or semantic identity, and does no work when inapplicable.
-  Verifier: PPR1 (`PPR1-AC2`; contract PPR0). PPR1 adds no profile semantics, so the generic overlay boundary is implemented by COX0 (`U05`, `COX0-AC2`), pending operator ruling `uak1-project-profile-implementation-owner`. Derived project identity is
+  Owner: PPR0T (`U05`, `PPR0T-AC1`), after PPR0 and BR0 and before NUX0/SKT0.
+  It implements generic role/realm/generated-fact snapshots, applicability and
+  invalidation. COX0 retains participation; PPR1 remains the paired verifier
+  (`PPR1-AC2`; contract PPR0). Derived project identity is
   UAK0 `O10`.
 
 Each layer depends only on the one before it. No universal framework IR sits
@@ -111,8 +118,11 @@ between them, and no single parser implementation is required.
 - Every public result carries one typed outcome: success, partial, ambiguous,
   NeedInputs, unsupported, not-applicable, cancelled or stale. The vocabulary
   is the same on Rust, NAPI, WASM, LSP, MCP and CLI. A surface that lacks
-  inputs reports NeedInputs, never empty success. Verifier: UAP0 (`U06`,
-  `UAP0-AC-R2`; contract PUB0). UAP0 and PUB0 are docs-only contract locks, so the cross-surface vocabulary is implemented by LSO0 (`LSO0-AC-OUTCOMES`), pending operator ruling `uak1-public-outcome-implementation-owner`.
+  inputs reports NeedInputs, never empty success. Owner: PUB0T (`U06`,
+  `PUB0T-AC1`), after PUB0 and BR0. It implements the shared Rust envelope,
+  the Rust/FFI/NAPI/WASM/LSP/MCP/CLI adapters and duplicate-envelope retirement.
+  UAP0 remains the contract verifier (`UAP0-AC-R2`); LSO0 defines operation
+  contracts without implementing this public boundary.
 - The per-surface capability/maturity matrix is generated from manifests and
   freshness-checked. There are no boolean capability lies and no registered
   no-op handlers. Owner: VIM1 (`U07`, `VIM1-AC1`).
@@ -175,7 +185,14 @@ landing. No identity-bound receipt is recorded.
 | `K04` | Vue macro and framework semantics (`verter_semantic` `analysis::{macros,component_meta,classify}`, `analyzers::reactive_flow`) sit in the kernel semantic crate, so kernel consumers of `verter_semantic` import a vertical. | `F01` | FWC1 (`FWC1-AC4`) |
 | `D01`–`D19` | UAK0 routes, each mapped in the ledger to the rule it breaches | `F01`, `F02`, `F04`, `U05`, `U06` | UAK0 owners |
 
-Operator ruling `uak1-kernel-compiler-edge-owner`: CPF1 can complete frontend/backend registration and carrier-route migration while the compiler dependency and vertical assets remain, so a dedicated firewall-cutover node `FWC1` follows CPF1. It removes the crate edge and any transitive kernel reach into compiler backends, moves vertical assets and the carrier frontend/semantic code out of the kernel crates, relocates their consumers, and retires `K01`–`K04`. It is a predecessor of UAI0 and UAM0 and carries explicit acceptance `FWC1-AC1`–`FWC1-AC4`. `FWC1` does not exist in the plan yet: the controller must create it, and until then the inventory validator rejects it as an unknown owner. Production extraction stays outside UAK1.
+CPF1 owns frontend/backend registration and carrier-route migration. FWC1 owns
+the subsequent atomic production firewall cutover: remove direct and transitive
+kernel reach into compiler backends, relocate vertical assets and their consumers,
+and move carrier frontend and framework semantics out of kernel owners. Its
+`FWC1-AC1`–`FWC1-AC4` accept `K01`–`K04` respectively, including retirement of
+their exceptions. UAI0 and UAM0 wait for FWC1. The parser-free engine closure and
+single session-owned instances remain invariant. UAM0 retains the general
+inventory and firewall validators; production extraction stays outside UAK1.
 
 Empty populations at this head:
 
@@ -207,12 +224,16 @@ Evidence selection: the change adds contract text and data only, so existing
 coverage and bounded inspection discriminate it. The diff adds no test.
 
 - **AC1 — ownership contract.** The two product files bind every constitution
-  outcome, consumer and firewall breach to one existing node, a successor
+  outcome, consumer and firewall breach to one receiving node, a successor
   path from UAK1 and a receiving acceptance ID. UAK0's rows are referenced,
   not re-owned, so no route has two owners. The executable validator and its
-  negative controls are UAM0's (`UAM0-AC-R1`). Acyclicity and the absence of a
-  global release join are properties of the controller-owned DAG, which this
-  repository does not carry.
+  negative controls are UAM0's (`UAM0-AC-R1`). UAG0 owns the prerequisite
+  executable validation and controller-recorded result for acyclicity,
+  independent vertical/product release terminals and non-gating soak joins
+  (`UAG0-AC1`–`UAG0-AC4`). UAK1 must consume that result and verify its owner
+  bindings against the applied graph before acceptance. This candidate does
+  not claim that the prerequisite has passed. No repository DAG or validator
+  is introduced.
 - **AC2 — positive contract.** The named boundaries' identity, provenance and
   ordering behaviour is pinned by the coverage UAK0 cites. The dependency
   directions are already held in part by `workspace_dependency_layers`, by the
