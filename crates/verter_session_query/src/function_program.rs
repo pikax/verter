@@ -8,7 +8,12 @@ use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::facts::{FunctionReturnSource, ProgramExpressionIdentity};
 use verter_type_expr::span_origins::DeclContributorAnchor;
 
+mod capture_summary;
 mod class_index;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+pub use capture_summary::CaptureSummaryCounts;
+pub use capture_summary::{CaptureBindings, CapturedReads, FunctionCaptures, NestedCaptures};
+use capture_summary::{CaptureSummaries, FrameCaptureHandle};
 pub use class_index::{
     ClassBase, ClassBaseMatch, ClassIndex, ClassIndexMatch, ClassSyntaxDiscovery, ClassSyntaxRecord,
 };
@@ -672,17 +677,6 @@ pub struct FunctionParameterCallableCaptures {
     pub reads: Arc<[FunctionCapturedRead]>,
 }
 
-/// Exact closure subjects and read dependencies of one immediately nested callable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionNestedCaptures {
-    pub function: FunctionProgramKey,
-    pub span: verter_span::Span,
-    pub bindings: CanonicalCaptureIdentity,
-    pub reads: Arc<[FunctionCapturedRead]>,
-    /// The child's [`FunctionProgramEntry::captures_exhaustive`].
-    pub exhaustive: bool,
-}
-
 /// The control-region kind of one skeleton region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionControlKind {
@@ -820,10 +814,6 @@ pub struct FunctionProgramDiscovery {
     /// lexical scope and joins the defining frame's
     /// [`Self::descendant_assignments`] (this frame's own included).
     pub unserved_assignments: Arc<[FunctionReferenceRecord]>,
-    /// Own and transitively nested captured reads, excluding this frame's locals.
-    pub captured_reads: Arc<[FunctionCapturedRead]>,
-    /// Immediate child creation sites and their retained read-path dependencies.
-    pub nested_captures: Arc<[FunctionNestedCaptures]>,
     /// The references each parameter-list callable makes to names it does
     /// not declare, by the callable's span: resolved with the frame's own
     /// references into [`Self::parameter_callable_captures`].
@@ -872,14 +862,16 @@ pub struct FunctionProgramDiscovery {
     /// initializer arrow. It is the lexical name a bare-identifier call in
     /// the parent frame binds to.
     pub nested_declaration_name: Option<Arc<str>>,
-    /// The content-free capture environment (empty for a top-level
-    /// position).
-    pub captures: CanonicalCaptureIdentity,
-    /// Whether [`Self::captures`] is EXHAUSTIVE. `false` when this frame,
-    /// or any callable nested in it, creates a callable no entry serves —
-    /// a class (its constructor, member bodies and field initializers) or
-    /// a callable in a parameter list. A cell retained there is named by
-    /// no record, so `captures` is then only a lower bound.
+    /// Whether THIS frame creates no callable no entry serves — a class
+    /// (its constructor, member bodies and field initializers) or a
+    /// callable in a parameter list. A cell retained there is named by no
+    /// record. Sealing folds it over the nested frames into
+    /// [`FunctionProgramEntry::captures_exhaustive`].
+    ///
+    /// The transitive captures themselves are not discovery data: sealing
+    /// derives them once for the whole file from the resolved
+    /// [`Self::references`], [`Self::writes`] and [`Self::lexical_parent`]
+    /// links ([`FunctionProgramEntry::captures`]).
     pub captures_exhaustive: bool,
     /// The whole-function stable hash (structural content only — the
     /// parser / language / parse-env identity folds in at the artifact
@@ -946,8 +938,6 @@ pub struct FunctionProgramEntry {
     descendant_writes: Arc<[FlowBindingIdentity]>,
     descendant_assignments: Arc<[FlowBindingIdentity]>,
     unserved_assignments: Arc<[FunctionReferenceRecord]>,
-    captured_reads: Arc<[FunctionCapturedRead]>,
-    nested_captures: Arc<[FunctionNestedCaptures]>,
     parameter_callable_references: ParameterCallableReferences,
     parameter_callable_captures: Arc<[FunctionParameterCallableCaptures]>,
     effects: Arc<[FunctionEffectRecord]>,
@@ -958,8 +948,8 @@ pub struct FunctionProgramEntry {
     lexical_parent: Option<Box<FunctionProgramKey>>,
     class_member: bool,
     nested_declaration_name: Option<Arc<str>>,
-    captures: CanonicalCaptureIdentity,
-    captures_exhaustive: bool,
+    /// This position's place in the file's shared capture summary.
+    captures: FrameCaptureHandle,
     flow_body_stable_hash: Hash16,
     flow_body_exact_hash: Option<Hash16>,
 }
@@ -987,8 +977,6 @@ impl FunctionProgramEntry {
             descendant_writes: entry.descendant_writes,
             descendant_assignments: entry.descendant_assignments,
             unserved_assignments: entry.unserved_assignments,
-            captured_reads: entry.captured_reads,
-            nested_captures: entry.nested_captures,
             parameter_callable_references: entry.parameter_callable_references,
             parameter_callable_captures: entry.parameter_callable_captures,
             effects: entry.effects,
@@ -999,15 +987,15 @@ impl FunctionProgramEntry {
             lexical_parent: entry.lexical_parent,
             class_member: entry.class_member,
             nested_declaration_name: entry.nested_declaration_name,
-            captures: entry.captures,
-            captures_exhaustive: entry.captures_exhaustive,
+            captures_exhaustive: entry.captures.own_exhaustive(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
             flow_body_exact_hash: entry.flow_body_exact_hash,
         }
     }
 
-    /// Seal one discovery record. Every field MOVES: no payload is cloned.
-    fn seal(discovery: FunctionProgramDiscovery) -> Self {
+    /// Seal one discovery record at its place in the file's capture
+    /// summary. Every field MOVES: no payload is cloned.
+    fn seal(discovery: FunctionProgramDiscovery, captures: FrameCaptureHandle) -> Self {
         let FunctionProgramDiscovery {
             key,
             span,
@@ -1024,8 +1012,6 @@ impl FunctionProgramEntry {
             descendant_writes,
             descendant_assignments,
             unserved_assignments,
-            captured_reads,
-            nested_captures,
             parameter_callable_references,
             parameter_callable_captures,
             effects,
@@ -1036,8 +1022,7 @@ impl FunctionProgramEntry {
             lexical_parent,
             class_member,
             nested_declaration_name,
-            captures,
-            captures_exhaustive,
+            captures_exhaustive: _,
             flow_body_stable_hash,
             flow_body_exact_hash,
         } = discovery;
@@ -1057,8 +1042,6 @@ impl FunctionProgramEntry {
             descendant_writes,
             descendant_assignments,
             unserved_assignments,
-            captured_reads,
-            nested_captures,
             parameter_callable_references,
             parameter_callable_captures,
             effects,
@@ -1070,7 +1053,6 @@ impl FunctionProgramEntry {
             class_member,
             nested_declaration_name,
             captures,
-            captures_exhaustive,
             flow_body_stable_hash,
             flow_body_exact_hash,
         }
@@ -1166,16 +1148,18 @@ impl FunctionProgramEntry {
         &self.unserved_assignments
     }
 
-    /// See [`FunctionProgramDiscovery::captured_reads`].
+    /// Own and transitively nested captured reads, excluding this frame's
+    /// locals: each binding and static path once, in source order.
     #[must_use]
-    pub fn captured_reads(&self) -> &Arc<[FunctionCapturedRead]> {
-        &self.captured_reads
+    pub fn captured_reads(&self) -> CapturedReads<'_> {
+        self.captures.view().reads()
     }
 
-    /// See [`FunctionProgramDiscovery::nested_captures`].
+    /// The functions nested directly in this one — their creation sites —
+    /// with their captures and captured reads.
     #[must_use]
-    pub fn nested_captures(&self) -> &Arc<[FunctionNestedCaptures]> {
-        &self.nested_captures
+    pub fn nested_captures(&self) -> NestedCaptures<'_> {
+        self.captures.view().nested()
     }
 
     /// See [`FunctionProgramDiscovery::parameter_callable_references`].
@@ -1238,16 +1222,38 @@ impl FunctionProgramEntry {
         self.nested_declaration_name.as_ref()
     }
 
-    /// See [`FunctionProgramDiscovery::captures`].
+    /// The content-free capture environment: every binding this function
+    /// or a function nested in it references from an enclosing frame,
+    /// write-only ones included, each once in first-reference source
+    /// order (a nested function's at its start). Empty for a top-level
+    /// position.
     #[must_use]
-    pub fn captures(&self) -> &CanonicalCaptureIdentity {
-        &self.captures
+    pub fn captures(&self) -> CaptureBindings<'_> {
+        self.captures.view().bindings()
     }
 
-    /// See [`FunctionProgramDiscovery::captures_exhaustive`].
+    /// Whether [`Self::captures`] is EXHAUSTIVE. `false` when this frame,
+    /// or any callable nested in it, creates a callable no entry serves
+    /// ([`FunctionProgramDiscovery::captures_exhaustive`]): `captures` is
+    /// then only a lower bound.
     #[must_use]
     pub fn captures_exhaustive(&self) -> bool {
-        self.captures_exhaustive
+        self.captures.view().exhaustive()
+    }
+
+    /// The physical records of the capture summary this entry's file
+    /// shares, for measurement.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    #[must_use]
+    pub fn capture_summary_counts(&self) -> CaptureSummaryCounts {
+        self.captures.counts()
+    }
+
+    /// Whether `other` reads the same capture summary allocation.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    #[must_use]
+    pub fn shares_capture_summary(&self, other: &Self) -> bool {
+        self.captures.summary_ptr() == other.captures.summary_ptr()
     }
 
     /// See [`FunctionProgramDiscovery::flow_body_stable_hash`].
@@ -1369,6 +1375,8 @@ impl FunctionProgramIndex {
     /// Seal one file's discovered inventory: the entries in source order,
     /// the indexed expressions (sorted by start) and the authored classes
     /// with their resolved bases ([`ClassIndex::from_discovery`]).
+    /// The file's transitive closure captures freeze here once into one
+    /// summary every entry shares ([`FunctionProgramEntry::captures`]).
     /// The keyed lookups are derived here from the entries, so every way out
     /// of the index stays consistent with what discovery recorded.
     ///
@@ -1388,9 +1396,13 @@ impl FunctionProgramIndex {
         let mut by_key = rustc_hash::FxHashMap::default();
         let mut value_functions = ValueFunctionLookup::default();
         let mut nested = rustc_hash::FxHashMap::default();
+        let summary = Arc::new(CaptureSummaries::freeze(&entries));
         let entries: Vec<FunctionProgramEntry> = entries
             .into_iter()
-            .map(FunctionProgramEntry::seal)
+            .enumerate()
+            .map(|(ordinal, discovery)| {
+                FunctionProgramEntry::seal(discovery, FrameCaptureHandle::new(&summary, ordinal))
+            })
             .collect();
         for (ordinal, entry) in entries.iter().enumerate() {
             by_key.entry(entry.key.clone()).or_insert(ordinal);
