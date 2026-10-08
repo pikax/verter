@@ -125,6 +125,19 @@ pub enum TypeParamVisibility {
     },
 }
 
+/// The stable identity of a class member name in a
+/// [`TypeBodyPathStep::ClassMembersNamed`] step (64-bit FNV-1a over the
+/// UTF-8 name).
+#[must_use]
+pub fn class_member_name_hash(name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// A producer-emitted step from a decl body toward an authored sub-position.
 /// Named positions / small indices only — never a byte span, never a `TypeExpr`.
 /// The arm set is a closed schema; adding an arm is a reviewed schema event.
@@ -150,6 +163,21 @@ pub enum TypeBodyPathStep {
     /// reference path so the argument ordinal participates in authored
     /// binder identity and structural locator navigation.
     TypeArgument { ordinal: u32 },
+    /// Into the instance members of a class declaration's body whose static
+    /// name hashes to `name_hash` ([`class_member_name_hash`]): every
+    /// overload, accessor and field of the name, plus the constructor
+    /// parameter properties of it. Valid ONLY as the first path step of a
+    /// class declaration's body. Deref lowers only the class elements
+    /// declaring those members, selected from the retained parse, and
+    /// positions on an object holding exactly them in source order, so a
+    /// following [`Self::Member`] ordinal counts within that selection. A
+    /// name that collides selects its colliding members too; the reader
+    /// still matches by key.
+    ClassMembersNamed { name_hash: u64 },
+    /// Into the `extends` base reference of a class declaration's body (its
+    /// lowered `Ref`, with any heritage type arguments). Valid ONLY as the
+    /// first path step; a class with no `extends` clause is a TYPED miss.
+    ClassHeritage,
     /// Into the object / interface member at this ordinal.
     Member { ordinal: u32 },
     /// Into the computed key expression of the current member.

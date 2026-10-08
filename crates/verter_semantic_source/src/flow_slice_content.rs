@@ -1159,6 +1159,7 @@ pub(crate) fn build_flow_slice_content(
         break_targets: Vec::new(),
         loop_direct_labels: Vec::new(),
         pending_loop_labels: Vec::new(),
+        lowering_local_classes: Vec::new(),
         continue_targets: Vec::new(),
         break_target_followed_by_return: Vec::new(),
         current_statement_followed_by_return: SuffixReturn::NotGuaranteed,
@@ -4256,6 +4257,10 @@ struct Lowerer<'a> {
     /// lower — the loop takes them as the names a labeled `continue`
     /// targets it by.
     pending_loop_labels: Vec<Arc<str>>,
+    /// The local class declarations whose value is lowering, by span start:
+    /// a read of one inside its own lowering (its `extends` value or a
+    /// static initializer naming it, a circular `extends`) is unmodelled.
+    lowering_local_classes: Vec<u32>,
     /// The loops whose bodies are currently being lowered (innermost
     /// last), each with the labels naming it: an unlabeled `continue`
     /// targets the innermost one, a labeled one the loop its label names.
@@ -13000,9 +13005,10 @@ impl<'a> Lowerer<'a> {
                 captured: true,
             },
             // A local function declaration is the function value it
-            // declares.
+            // declares, and a local class declaration the class.
             NameBinding::NestedFunction | NameBinding::Unmodeled => self
                 .lower_local_function_declaration(identifier.span)
+                .or_else(|| self.lower_local_class_declaration(identifier.span))
                 .unwrap_or(SliceExpr::UnmodeledBinding),
             // A free `undefined` is not a declaration the owner scope can
             // answer: its value IS the `undefined` type (the shared shallow
@@ -14097,6 +14103,46 @@ impl<'a> Lowerer<'a> {
         Some(self.lower_declared_function_value(function, &gate, own_frame))
     }
 
+    /// The value a read of a class this frame DECLARES is (`class L {}`
+    /// then `new L()`): the class the declaration composes, lowered as the
+    /// class value a class expression of the same name is — the checker's
+    /// `typeof L`. A class an enclosing frame declares is not read here: its
+    /// body names that frame's bindings, which this frame does not lower.
+    fn lower_local_class_declaration(&mut self, span: oxc_span::Span) -> Option<SliceExpr> {
+        use verter_session_query::flow::binding::FlowBindingOccurrence;
+        let FlowBindingOccurrence::Resolved(FlowBindingRef::Local(local)) =
+            self.bindings.occurrence(self.rebase(span))
+        else {
+            return None;
+        };
+        let fact = self.frame_gate.skeleton().binding(*local);
+        if fact.kind != SkeletonBindingKind::Class {
+            return None;
+        }
+        let Some(LocalDeclaration::Class(class)) =
+            self.local_declaration_node(fact.span.to_absolute(self.frame_gate.anchor()))
+        else {
+            return None;
+        };
+        let name = class.id.as_ref()?.name.as_str();
+        if self.lowering_local_classes.contains(&class.span.start) {
+            return None;
+        }
+        self.lowering_local_classes.push(class.span.start);
+        let value = self.lower_class_expression(class, Some(name));
+        self.lowering_local_classes.pop();
+        Some(value)
+    }
+
+    /// The function or class DECLARATION whose name is at `name`: the walk
+    /// descends only into the nodes that contain the name.
+    fn local_declaration_node(&self, name: verter_span::Span) -> Option<LocalDeclaration<'a>> {
+        let mut finder = LocalDeclarationFinder { name, found: None };
+        self.walks
+            .with_node_stack(self.program.span, || finder.visit_program(self.program));
+        finder.found
+    }
+
     /// The local function DECLARATION the name at `span` binds, with the
     /// frame that declares it and whether that frame is this one.
     fn local_function_declaration(
@@ -14130,54 +14176,6 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         let own_frame = Arc::ptr_eq(&gate, &self.frame_gate);
-        // The declaration node, found by its name: the walk descends only
-        // into nodes that contain it.
-        struct Finder<'a> {
-            name: verter_span::Span,
-            found: Option<&'a oxc_ast::ast::Function<'a>>,
-        }
-        impl<'a> Visit<'a> for Finder<'a> {
-            fn visit_statement(&mut self, statement: &Statement<'a>) {
-                #[cfg(any(test, feature = "test-support"))]
-                lowering_probe::declaration_lookup_visit();
-                let span = statement.span();
-                if self.found.is_none()
-                    && span.start <= self.name.start
-                    && span.end >= self.name.end
-                {
-                    walk::walk_statement(self, statement);
-                }
-            }
-            fn visit_expression(&mut self, expression: &Expression<'a>) {
-                #[cfg(any(test, feature = "test-support"))]
-                lowering_probe::declaration_lookup_visit();
-                let span = expression.span();
-                if self.found.is_none()
-                    && span.start <= self.name.start
-                    && span.end >= self.name.end
-                {
-                    walk::walk_expression(self, expression);
-                }
-            }
-            fn visit_function(
-                &mut self,
-                function: &oxc_ast::ast::Function<'a>,
-                flags: oxc_syntax::scope::ScopeFlags,
-            ) {
-                if self.found.is_some() {
-                    return;
-                }
-                if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration
-                    && function.id.as_ref().is_some_and(|id| {
-                        id.span.start == self.name.start && id.span.end == self.name.end
-                    })
-                {
-                    self.found = Some(self.alloc(function));
-                    return;
-                }
-                walk::walk_function(self, function, flags);
-            }
-        }
         // The occurrence's own declaration, else the last function
         // declaration of its runtime variable: a body declaration of a
         // function expression's own name is the value the name reads.
@@ -14193,13 +14191,9 @@ impl<'a> Lowerer<'a> {
             if fact.kind != SkeletonBindingKind::NestedFunction {
                 continue;
             }
-            let mut finder = Finder {
-                name: fact.span.to_absolute(gate.anchor()),
-                found: None,
-            };
-            self.walks
-                .with_node_stack(self.program.span, || finder.visit_program(self.program));
-            if let Some(function) = finder.found {
+            if let Some(LocalDeclaration::Function(function)) =
+                self.local_declaration_node(fact.span.to_absolute(gate.anchor()))
+            {
                 // An overloaded function is called through its overload
                 // signatures, never its implementation's (the checker's
                 // `getSignaturesOfSymbol` drops the implementation when
@@ -15784,6 +15778,78 @@ impl<'a> ArmEntered<'a> {
                 }
             }
         }
+    }
+}
+
+/// A function or class DECLARATION a frame's name binds.
+#[derive(Clone, Copy)]
+enum LocalDeclaration<'a> {
+    Function(&'a oxc_ast::ast::Function<'a>),
+    Class(&'a oxc_ast::ast::Class<'a>),
+}
+
+/// Finds the function or class declaration whose name is at `name`,
+/// descending only into the nodes that contain it.
+struct LocalDeclarationFinder<'a> {
+    name: verter_span::Span,
+    found: Option<LocalDeclaration<'a>>,
+}
+
+impl LocalDeclarationFinder<'_> {
+    fn names(&self, id: Option<&oxc_ast::ast::BindingIdentifier<'_>>) -> bool {
+        id.is_some_and(|id| id.span.start == self.name.start && id.span.end == self.name.end)
+    }
+
+    fn contains(&self, span: oxc_span::Span) -> bool {
+        self.found.is_none() && span.start <= self.name.start && span.end >= self.name.end
+    }
+}
+
+impl<'a> Visit<'a> for LocalDeclarationFinder<'a> {
+    fn visit_statement(&mut self, statement: &Statement<'a>) {
+        #[cfg(any(test, feature = "test-support"))]
+        lowering_probe::declaration_lookup_visit();
+        if self.contains(statement.span()) {
+            walk::walk_statement(self, statement);
+        }
+    }
+
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        #[cfg(any(test, feature = "test-support"))]
+        lowering_probe::declaration_lookup_visit();
+        if self.contains(expression.span()) {
+            walk::walk_expression(self, expression);
+        }
+    }
+
+    fn visit_function(
+        &mut self,
+        function: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        if self.found.is_some() {
+            return;
+        }
+        if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration
+            && self.names(function.id.as_ref())
+        {
+            self.found = Some(LocalDeclaration::Function(self.alloc(function)));
+            return;
+        }
+        walk::walk_function(self, function, flags);
+    }
+
+    fn visit_class(&mut self, class: &oxc_ast::ast::Class<'a>) {
+        if self.found.is_some() {
+            return;
+        }
+        if class.r#type == oxc_ast::ast::ClassType::ClassDeclaration
+            && self.names(class.id.as_ref())
+        {
+            self.found = Some(LocalDeclaration::Class(self.alloc(class)));
+            return;
+        }
+        walk::walk_class(self, class);
     }
 }
 

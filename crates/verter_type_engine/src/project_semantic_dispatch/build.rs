@@ -4816,8 +4816,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (declaration, Some(debt))
             }
             PreparedTypeDeclResolution::Missing => {
+                // A name only the value space declares, read where a class
+                // instance is composed (a class expression's `extends`):
+                // the base instance of that value's constructor, by the
+                // same first-construct-signature rule a class declaration's
+                // heritage follows.
+                let value_instance = (!is_non_file_base
+                    && self.heritage_names_value_only(decl_canonical, decl_owner, decl_name))
+                .then(|| {
+                    self.class_value_base(decl_canonical, decl_owner, decl_name, args, context)
+                })
+                .flatten()
+                .and_then(|value_base| value_base.instance);
                 let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                    QueryResult::Value(self.opaque(QueryError::Miss)),
+                    QueryResult::Value(
+                        value_instance.unwrap_or_else(|| self.opaque(QueryError::Miss)),
+                    ),
                     empty_signature(),
                 ));
                 out.cache_suppress = true;
@@ -7821,9 +7835,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `args`) reads from, found without lowering the class's other
     /// members: an object of the class's OWN members of that name, each
     /// lowered from its own member position, else the `extends` arm that
-    /// supplies it. A member body reading its own class (`this.v`) reads a
-    /// sibling this way; lowering the whole class body would lower the
-    /// reading member's own body-derived return and re-enter it.
+    /// supplies it. The class body is never lowered whole: the declaration
+    /// body is re-borrowed from the retained parse only for the class
+    /// elements declaring `name` (`ClassMembersNamed`) and the `extends`
+    /// reference (`ClassHeritage`). A member body reading its own class
+    /// (`this.v`) reads a sibling this way; lowering the whole class body
+    /// would lower the reading member's own body-derived return and
+    /// re-enter it.
     pub(super) fn class_member_source(
         &self,
         canonical: &str,
@@ -7840,7 +7858,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let body_slot = prepared.body_facts.body_slot.clone();
         let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
-        let body = super::raise::deref_slot_body(self.ctx, &body_slot)?;
+        let members_step = verter_type_expr::locators::TypeBodyPathStep::ClassMembersNamed {
+            name_hash: verter_type_expr::locators::class_member_name_hash(name),
+        };
+        let member_slot = verter_type_expr::locators::TypeBodySlot {
+            anchor: body_slot.anchor.clone(),
+            path: Arc::from(vec![members_step].into_boxed_slice()),
+        };
+        // The demanded members, selected from the retained parse; a class
+        // the selective route cannot serve (a merged declaration) is no
+        // source.
+        let members = super::raise::deref_slot_body(self.ctx, &member_slot)?;
+        let TypeExpr::Object(ref members) = members else {
+            return None;
+        };
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(canonical),
             owner,
@@ -7890,34 +7921,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     None,
                 )
             };
-        // The class body is its own members, over its `extends` arm when it
-        // has one.
-        let arms: Vec<(Vec<verter_type_expr::locators::TypeBodyPathStep>, &TypeExpr)> = match &body
-        {
-            TypeExpr::Intersection(arms) => arms
-                .iter()
-                .enumerate()
-                .map(|(ordinal, arm)| {
-                    (
-                        vec![
-                            verter_type_expr::locators::TypeBodyPathStep::IntersectionArm {
-                                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                            },
-                        ],
-                        arm,
-                    )
-                })
-                .collect(),
-            other => vec![(Vec::new(), other)],
-        };
         let mut own: Vec<SurfaceEntry> = Vec::new();
-        let mut heritage: Vec<Vec<verter_type_expr::locators::TypeBodyPathStep>> = Vec::new();
-        for (prefix, arm) in &arms {
-            let TypeExpr::Object(object) = arm else {
-                heritage.push(prefix.clone());
-                continue;
-            };
-            for (raw_index, member) in object.properties.iter().enumerate() {
+        {
+            for (raw_index, member) in members.properties.iter().enumerate() {
                 let (member_key, optional, readonly, method_kind, has_body, visibility) =
                     match member {
                         ObjectMember::Property(property) => (
@@ -7941,11 +7947,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if member_key.as_ref() != Some(&key) {
                     continue;
                 }
-                let mut path = prefix.clone();
-                path.push(verter_type_expr::locators::TypeBodyPathStep::Member {
-                    ordinal: u32::try_from(raw_index).unwrap_or(u32::MAX),
-                });
-                path.push(verter_type_expr::locators::TypeBodyPathStep::MemberValue);
+                let path = vec![
+                    members_step,
+                    verter_type_expr::locators::TypeBodyPathStep::Member {
+                        ordinal: u32::try_from(raw_index).unwrap_or(u32::MAX),
+                    },
+                    verter_type_expr::locators::TypeBodyPathStep::MemberValue,
+                ];
                 let value = lower_at(
                     path,
                     &mut substitutions,
@@ -7976,8 +7984,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // An inherited member reads off the base the class extends: its
         // `extends` arm lowers to a lazy reference, which binds no `this`, so
         // the member keeps the polymorphic `this` the reading receiver binds.
-        let prefix = heritage.into_iter().next()?;
-        Some(lower_at(prefix, &mut substitutions, context))
+        let heritage_slot = verter_type_expr::locators::TypeBodySlot {
+            anchor: body_slot.anchor.clone(),
+            path: Arc::from(
+                vec![verter_type_expr::locators::TypeBodyPathStep::ClassHeritage]
+                    .into_boxed_slice(),
+            ),
+        };
+        super::raise::deref_slot_body(self.ctx, &heritage_slot)?;
+        Some(lower_at(
+            vec![verter_type_expr::locators::TypeBodyPathStep::ClassHeritage],
+            &mut substitutions,
+            context,
+        ))
     }
 
     /// Whether the object surface `node` declares a member spelled `name`.

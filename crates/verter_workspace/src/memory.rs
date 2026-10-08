@@ -612,6 +612,10 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         self.engine.last_content_transition_generation(canonical_id)
     }
 
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        Some(self.engine.freshness_readers())
+    }
+
     fn record_content_transition(&self, canonical_id: &str) {
         self.engine.record_content_transition(canonical_id);
     }

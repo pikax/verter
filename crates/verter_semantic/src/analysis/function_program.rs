@@ -19,17 +19,17 @@
 //! structure keeps the hash; a property key, free name, literal, operator,
 //! control, parameter-annotation, or default-initializer edit changes it.
 use verter_session_query::function_program::{
-    canonical_runtime_binding_slots, CanonicalCaptureIdentity, ClassSyntaxRecord,
-    FlowBindingIdentity, FunctionBindingKind, FunctionBindingRecord, FunctionBodyLocator,
-    FunctionCallArgLiteralMode, FunctionCallArgRecord, FunctionCallSiteRecord,
-    FunctionCapturedRead, FunctionControlKind, FunctionControlRegion, FunctionDeclarationRef,
-    FunctionDescent, FunctionDescentStep, FunctionDirectCall, FunctionEffectCallee,
-    FunctionEffectRecord, FunctionNestedCaptures, FunctionParamRecord,
-    FunctionParameterCallableCaptures, FunctionProgramDiscovery, FunctionProgramIndex,
-    FunctionProgramKey, FunctionProgramTypeParam, FunctionReadRole, FunctionReferenceBinding,
-    FunctionReferenceRecord, FunctionReturnSite, FunctionSourceTypeQuery, FunctionTypeQuery,
-    FunctionTypeQueryPosition, FunctionWriteKind, FunctionWriteRecord, FunctionWriteTarget,
-    ProgramExpressionCallKind, ProgramExpressionRecord, ProgramExpressionSource,
+    canonical_runtime_binding_slots, CanonicalCaptureIdentity, FlowBindingIdentity,
+    FunctionBindingKind, FunctionBindingRecord, FunctionBodyLocator, FunctionCallArgLiteralMode,
+    FunctionCallArgRecord, FunctionCallSiteRecord, FunctionCapturedRead, FunctionControlKind,
+    FunctionControlRegion, FunctionDeclarationRef, FunctionDescent, FunctionDescentStep,
+    FunctionDirectCall, FunctionEffectCallee, FunctionEffectRecord, FunctionNestedCaptures,
+    FunctionParamRecord, FunctionParameterCallableCaptures, FunctionProgramDiscovery,
+    FunctionProgramIndex, FunctionProgramKey, FunctionProgramTypeParam, FunctionReadRole,
+    FunctionReferenceBinding, FunctionReferenceRecord, FunctionReturnSite, FunctionSourceTypeQuery,
+    FunctionTypeQuery, FunctionTypeQueryPosition, FunctionWriteKind, FunctionWriteRecord,
+    FunctionWriteTarget, ProgramExpressionCallKind, ProgramExpressionRecord,
+    ProgramExpressionSource,
 };
 
 use std::sync::Arc;
@@ -58,50 +58,6 @@ pub(crate) mod access;
 #[path = "function_program_tests.rs"]
 mod function_program_tests;
 
-/// Collects every class of one parsed file, in source order.
-#[derive(Default)]
-struct ClassSyntaxCollector {
-    classes: Vec<ClassSyntaxRecord>,
-}
-
-impl<'a> Visit<'a> for ClassSyntaxCollector {
-    fn visit_class(&mut self, class: &Class<'a>) {
-        let mut members = Vec::with_capacity(class.body.body.len());
-        for element in &class.body.body {
-            members.push(verter_span::Span::new(
-                element.span().start,
-                element.span().end,
-            ));
-            if let oxc_ast::ast::ClassElement::MethodDefinition(method) = element {
-                if method.kind == MethodDefinitionKind::Constructor {
-                    members.extend(
-                        method
-                            .value
-                            .params
-                            .items
-                            .iter()
-                            .filter(|parameter| {
-                                parameter.accessibility.is_some()
-                                    || parameter.readonly
-                                    || parameter.r#override
-                            })
-                            .map(|parameter| {
-                                verter_span::Span::new(parameter.span.start, parameter.span.end)
-                            }),
-                    );
-                }
-            }
-        }
-        self.classes.push(ClassSyntaxRecord {
-            span: verter_span::Span::new(class.span.start, class.span.end),
-            expression: class.r#type == oxc_ast::ast::ClassType::ClassExpression,
-            has_heritage: class.heritage.is_some(),
-            members: Arc::from(members.into_boxed_slice()),
-        });
-        walk::walk_class(self, class);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Discovery walk
 // ---------------------------------------------------------------------------
@@ -128,6 +84,8 @@ struct DiscoveryCtx<'source, 'ast> {
     /// nested function declarations and call-argument function values)
     /// across the file.
     next_nested_ordinal: u32,
+    /// The classes the discovery walks meet.
+    classes: crate::analysis::class_index::ClassCollector,
 }
 
 impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
@@ -238,13 +196,13 @@ fn build_function_program_index_impl<'ast>(
         hashed_nodes: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
+        classes: crate::analysis::class_index::ClassCollector::default(),
     };
     let mut overload_tracker = OverloadTracker::default();
     // Discovery walks every function of the program, each walk sized for
     // what it walks: they all run inside one containment sized for the
     // program, which a walk of any node in it cannot exceed, rather than
     // each taking a stack segment of its own.
-    let mut classes = ClassSyntaxCollector::default();
     verter_parser::oxc_parse::ProgramWalkStack::within(
         &mut ctx,
         |ctx| &ctx.walks,
@@ -252,9 +210,17 @@ fn build_function_program_index_impl<'ast>(
             for (contributor_index, stmt) in program.body.iter().enumerate() {
                 discover_statement(stmt, contributor_index, None, &mut overload_tracker, ctx);
             }
-            ctx.walks
-                .with_node_stack(program.span, || classes.visit_program(program));
-            hash_entries(ctx);
+            let served = served_spans(ctx);
+            // Folding each served body's hashes records the classes inside it.
+            hash_entries(ctx, &served);
+            let classes = &mut ctx.classes;
+            ctx.walks.with_node_stack(program.span, || {
+                crate::analysis::class_index::collect_top_level_classes(
+                    &program.body,
+                    &served,
+                    classes,
+                );
+            });
         },
     );
     resolve_captures(&mut ctx.entries);
@@ -263,10 +229,24 @@ fn build_function_program_index_impl<'ast>(
     resolve_direct_calls(&mut ctx.entries);
     link_callback_return_sources(&ctx.canonical_id, &mut ctx.entries, &mut ctx.expressions);
     ctx.expressions.sort_by_key(|record| record.span.start);
+    let classes = std::mem::take(&mut ctx.classes).finish(&ctx.entries);
     (
-        FunctionProgramIndex::from_discovery(ctx.entries, ctx.expressions, classes.classes),
+        FunctionProgramIndex::from_discovery(ctx.entries, ctx.expressions, classes),
         ctx.nodes,
     )
+}
+
+/// The span of every served function whose body the hash fold walks
+/// ([`hash_entries`]).
+fn served_spans(ctx: &DiscoveryCtx<'_, '_>) -> rustc_hash::FxHashSet<(u32, u32)> {
+    ctx.hashed_nodes
+        .iter()
+        .filter(|(_, node)| node.body().is_some())
+        .map(|(_, node)| {
+            let span = node.span();
+            (span.start, span.end)
+        })
+        .collect()
 }
 
 /// Fold every entry's stable and exact hashes, the functions nested in a
@@ -279,7 +259,7 @@ fn build_function_program_index_impl<'ast>(
 /// directly in it replaced by that function's exact hash and length: equal
 /// exactly when the function's text is (a function with none nested hashes
 /// its text).
-fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
+fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>, served: &rustc_hash::FxHashSet<(u32, u32)>) {
     use crate::analysis::function_program_hash::{hash_function_body, NestedHashes};
     let mut nested: NestedHashes = rustc_hash::FxHashMap::default();
     // The exact hash and span of each hashed function, and the functions
@@ -311,6 +291,8 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
             let entry = &ctx.entries[ordinal];
             (Arc::clone(&entry.params), entry.span.start)
         };
+        ctx.classes
+            .enter_frame(crate::analysis::class_index::ClassFrame::Entry(ordinal));
         let (stable, part) = hash_function_body(
             &ctx.walks,
             ctx.source,
@@ -319,7 +301,17 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
             function_start,
             node,
             &nested,
+            &mut ctx.classes,
         );
+        let classes = &mut ctx.classes;
+        ctx.walks.with_node_stack(node.span(), || {
+            crate::analysis::class_index::collect_parameter_decorator_classes(
+                node.param_items(),
+                served,
+                classes,
+            );
+        });
+        ctx.classes.exit_frame();
         let span = node.span();
         nested.insert((span.start, span.end), part);
         let span: verter_span::Span = verter_span::Span::new(span.start, span.end);
@@ -745,7 +737,7 @@ fn resolve_nested_capture_reads(entries: &mut [FunctionProgramDiscovery]) {
 }
 
 #[derive(Clone, Copy)]
-enum LexicalBinding {
+pub(super) enum LexicalBinding {
     Modeled(u32),
     UnmodeledLocal,
 }
@@ -760,12 +752,12 @@ struct LexicalScope {
 /// Scope intervals are laminar. A binary lookup finds the innermost possible
 /// scope, then only lexical ancestors are visited; sibling declarations never
 /// participate in one another's name lookup.
-struct LexicalScopeIndex {
+pub(super) struct LexicalScopeIndex {
     scopes: Vec<LexicalScope>,
 }
 
 impl LexicalScopeIndex {
-    fn build(entry: &FunctionProgramDiscovery) -> Self {
+    pub(super) fn build(entry: &FunctionProgramDiscovery) -> Self {
         let mut tables =
             rustc_hash::FxHashMap::<_, rustc_hash::FxHashMap<Arc<str>, LexicalBinding>>::default();
         tables.entry(entry.span).or_default();
@@ -813,7 +805,7 @@ impl LexicalScopeIndex {
         Self { scopes }
     }
 
-    fn resolve(&self, name: &str, site: verter_span::Span) -> Option<LexicalBinding> {
+    pub(super) fn resolve(&self, name: &str, site: verter_span::Span) -> Option<LexicalBinding> {
         let mut index = self
             .scopes
             .partition_point(|scope| scope.span.start <= site.start)

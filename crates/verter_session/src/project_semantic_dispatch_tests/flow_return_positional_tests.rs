@@ -62,7 +62,7 @@ export function objectWithUnmodeledLocal() {
 
 // ── the same rule over the OTHER positional variant ──────────────────
 export function objectWithUnmodeledBinding() {
-  class Local { readonly k = 1; }
+  enum Local { K = 1 }
   return { label: "x", made: Local };
 }
 

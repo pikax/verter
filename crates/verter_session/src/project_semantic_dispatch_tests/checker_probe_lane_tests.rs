@@ -175,6 +175,14 @@ pub(super) fn with_probe_outcome_on_host<R>(
 /// The degradation the body-derived return of `function` in a module of
 /// `source`, checked in `project`, carries — `Err(())` when it produced
 /// no value.
+/// Whether `function`'s flow return degrades as an unmodelled position.
+pub(super) fn is_unmodelled_in(project: ProbeProject<'_>, source: &str, function: &str) -> bool {
+    degradation_in(project, source, function)
+        == Ok(Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition,
+        ))
+}
+
 pub(super) fn degradation_in(
     project: ProbeProject<'_>,
     source: &str,

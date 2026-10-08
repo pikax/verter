@@ -2138,6 +2138,70 @@ fn a_repeated_byteless_content_transition_is_strictly_newer_each_time() {
     );
 }
 
+/// Byte-less transitions on many distinct canonicals are history like any
+/// other: once the view that capped retirement leaves, they drain. A marker
+/// recorded ahead of the live content generation could never retire, because
+/// the floor never passes the live generation.
+#[test]
+fn byteless_transition_churn_drains_once_readers_leave() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let readers = WorkspaceRead::freshness_readers(&ws).expect("the engine keeps a history");
+    let view = readers.lease_view(ws.content_generation());
+    let total = crate::freshness::DEFAULT_RETIRE_TRIGGER + 64;
+    for index in 0..total {
+        WorkspaceRead::record_content_transition(&ws, &format!("/marker/{index}.vue"));
+    }
+    let pinned = ws.resource_snapshot().freshness_history;
+    assert_eq!(
+        pinned.exact_entries, total,
+        "a live view keeps every marker above its captured generation"
+    );
+
+    drop(view);
+    let drained = ws.resource_snapshot().freshness_history;
+    assert_eq!(drained.exact_entries, 0, "{drained:?}");
+    assert_eq!(drained.queued_entries, 0, "{drained:?}");
+    let current = ws.content_generation();
+    for index in [0, total - 1] {
+        let answer =
+            WorkspaceRead::last_content_transition_generation(&ws, &format!("/marker/{index}.vue"));
+        assert!(
+            answer > 0 && answer <= current,
+            "a retired marker still answers past its transition and never past \
+             the live generation ({answer} vs {current})"
+        );
+    }
+}
+
+/// One bulk upsert larger than the retirement trigger records every path at
+/// the batch's single generation. A retirement pass that raises the floor to
+/// that generation mid-batch must not push the batch's later records past it:
+/// an artifact built at the completed batch's generation is fresh for every
+/// path, and the batch's records retire without another mutation.
+#[test]
+fn a_bulk_upsert_past_the_retirement_trigger_records_no_future_revision() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let trigger = crate::freshness::DEFAULT_RETIRE_TRIGGER;
+    let records: Vec<(String, Arc<str>)> = (0..2 * trigger + 64)
+        .map(|index| (format!("/bulk/{index}.ts"), Arc::from("export {};")))
+        .collect();
+    ws.notify_upsert_many(&records);
+
+    let completed = ws.content_generation();
+    for (path, _) in &records {
+        assert_eq!(
+            WorkspaceRead::last_content_transition_generation(&ws, path),
+            completed,
+            "{path} must answer the batch's own generation"
+        );
+    }
+    let residency = ws.resource_snapshot().freshness_history;
+    assert!(
+        residency.exact_entries <= 64 && residency.queued_entries <= 64,
+        "the batch's records must retire as the queue reaches the trigger: {residency:?}"
+    );
+}
+
 /// The in-memory twin of the filesystem sibling regressions: twelve sibling
 /// owners' resolutions of the same `./types`, one landing before every
 /// admission attempt of the demanded resolution, cost it no restart and no
