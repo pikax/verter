@@ -20,9 +20,9 @@ use rustc_hash::{FxHashSet, FxHasher};
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
     CanonicalTypeSubstitution, IncompleteReason, LiteralValue, ProjectionReductionContext,
-    QueryOutcome, Ready, ResolveOverloadSetConsumer, ResultEvaluationContextId, SemanticContext,
-    SemanticContextId, SemanticNodeData, SemanticNodeId, SignatureKind as GraphSignatureKind,
-    CONTEXT_FREE_EVALUATION, CONTEXT_FREE_EVIDENCE,
+    QueryOutcome, Ready, ResolveOverloadSetConsumer, ResultEvaluationContextId, SemanticContextId,
+    SemanticNodeData, SemanticNodeId, SignatureKind as GraphSignatureKind, CONTEXT_FREE_EVALUATION,
+    CONTEXT_FREE_EVIDENCE,
 };
 use crate::signature_kernel::{
     heritage_signatures, intersection_signatures, merged_declaration_signatures, publish_signature,
@@ -268,8 +268,7 @@ fn unsupported<T>() -> Result<T, DiscoveryError> {
 struct Walk<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> {
     types: &'w GraphTypes<'a, 'd, C>,
     kind: GraphSignatureKind,
-    context_id: SemanticContextId,
-    context: Option<SemanticContext>,
+    context: SemanticContextId,
     visiting: FxHashSet<SemanticNodeId>,
     /// The authored node each leaf candidate was published from, first
     /// publication wins within this walk.
@@ -283,8 +282,9 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
 
     fn strict_null(&self) -> bool {
         self.context
-            .as_ref()
-            .is_none_or(|c| c.effective_semantic_options.strict_null_checks)
+            .context()
+            .effective_semantic_options
+            .strict_null_checks
     }
 
     fn discover(&mut self, node: SemanticNodeId) -> Found {
@@ -356,12 +356,10 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             }
             SemanticNodeData::Union(_) => {
                 drop(data);
-                let context = self
-                    .context
-                    .clone()
-                    .unwrap_or_else(SemanticContext::production);
                 let arms = crate::semantic_query::stable_key::semantic_union_members(
-                    graph, node, &context,
+                    graph,
+                    node,
+                    self.context.context(),
                 );
                 let mut lists = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
@@ -885,12 +883,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut walk = Walk {
             types: &types,
             kind,
-            context_id: context,
-            context: context.lookup(),
+            context,
             visiting: FxHashSet::default(),
             authored: rustc_hash::FxHashMap::default(),
         };
-        let _ = walk.context_id;
         let found = walk.discover(subject);
         #[cfg(any(test, feature = "test-support"))]
         signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Discovered);
@@ -2385,7 +2381,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let fence = self.project_generation_signature();
         let store = self.graph().signature_store();
         let began = store.epoch();
-        let mut outcome = self.signatures_of_type_with_authored(store, subject, kind, context);
+        let mut outcome =
+            self.signatures_of_type_with_authored(store, subject, kind, context.clone());
         // A kernel-epoch replacement landing mid-walk retires what the walk
         // interned (it fails, or answers in the retired epoch): that walk is
         // a miss, run once more in the current epoch.
@@ -2427,7 +2424,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             key.call_substitution,
             key.projection,
             key.evaluation,
-            key.semantic_context,
+            key.semantic_context.clone(),
         ) {
             QueryOutcome::Ready(Ready { value, .. }) => {
                 let return_node = store

@@ -184,7 +184,7 @@ pub(crate) fn intern_test_context(project_identity: [u8; 16]) -> SemanticContext
     SemanticContext {
         effective_semantic_options: SemanticCompilerOptions::default(),
         resolver_library_project_environment: EnvHashes::default(),
-        policy_set: SemanticPolicySet::production().intern(),
+        policy_set: SemanticPolicySet::production().id(),
         project_identity,
     }
     .intern()

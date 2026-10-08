@@ -868,6 +868,8 @@ impl VerterHost {
                 .project_type_store
                 .semantic_graph()
                 .stable_key_class_count(),
+            identity_indexes:
+                verter_type_engine::semantic_query_memo::IdentityIndexSnapshot::capture(),
             deferred_releases: self.project_type_store.deferred_release_count(),
             resolved_import_facts: self
                 .project_type_store

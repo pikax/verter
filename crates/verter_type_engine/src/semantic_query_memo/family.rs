@@ -801,9 +801,10 @@ impl FamilyKey {
     ///
     /// Topology only, for the document-close release sweep: a family whose
     /// key names a released node can never be looked up again (the id is
-    /// never re-minted), so its candidates are pure retention. Node ids
-    /// that live behind an opaque interned handle (an intersection recipe
-    /// id, a signature descriptor id) are NOT reached — those families are
+    /// never re-minted), so its candidates are pure retention. Every
+    /// operand of an intersection recipe is reached through the recipe the
+    /// key owns, descending into each nested subgroup. Node ids behind a
+    /// signature descriptor id are NOT reached — those families are
     /// reclaimed by the reverse index and the family budget instead. Every
     /// id held inline is visited, however deep: a computed index in a path,
     /// both sides of a substitution binding or a pending conditional pair,
@@ -811,8 +812,7 @@ impl FamilyKey {
     /// variant must be dispositioned here.
     pub(super) fn for_each_node_id(&self, mut visit: impl FnMut(SemanticNodeId)) {
         use crate::semantic_query::{
-            authored_property_key_child, CallArgKey, CanonicalTypeSubstitution,
-            IntersectionInputRef, PathSegment,
+            authored_property_key_child, CallArgKey, CanonicalTypeSubstitution, PathSegment,
         };
         fn path_nodes(path: &[PathSegment], visit: &mut impl FnMut(SemanticNodeId)) {
             for segment in path {
@@ -914,14 +914,7 @@ impl FamilyKey {
                     .into_iter()
                     .for_each(visit);
             }
-            FamilyKey::ReduceIntersection { input, .. } => match input {
-                IntersectionInputRef::Empty | IntersectionInputRef::Recipe(_) => {}
-                IntersectionInputRef::Unary(node) => visit(*node),
-                IntersectionInputRef::Binary(left, right) => {
-                    visit(*left);
-                    visit(*right);
-                }
-            },
+            FamilyKey::ReduceIntersection { input, .. } => input.for_each_operand(&mut visit),
             FamilyKey::ProjectObjectSpread { identity } => visit(identity.program),
             FamilyKey::ResolveOverloadSet {
                 callee, type_args, ..
@@ -2088,9 +2081,9 @@ pub fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             context,
         } => (
             FamilyKey::ReduceIntersection {
-                input: *input,
+                input: input.clone(),
                 purpose: *purpose,
-                context: *context,
+                context: context.clone(),
             },
             ModeSlot::Single,
         ),
@@ -2161,7 +2154,7 @@ pub fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                         policy: *policy,
                         source_freshness: *source_freshness,
                         inference_context: inference_context.clone(),
-                        context: *context,
+                        context: context.clone(),
                     },
                 ),
             },
@@ -2427,12 +2420,12 @@ pub fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             FamilyKey::SignaturesOfType {
                 subject: *subject,
                 kind: *kind,
-                context: *context,
+                context: context.clone(),
             },
             ModeSlot::Single,
         ),
         SemanticQueryKey::ReadSignatureResult(key) => (
-            FamilyKey::ReadSignatureResult { key: *key },
+            FamilyKey::ReadSignatureResult { key: key.clone() },
             ModeSlot::Single,
         ),
     }
