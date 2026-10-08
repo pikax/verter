@@ -224,3 +224,35 @@ fn a_deep_extends_chain_answers_the_inherited_read() {
     let failures = mismatches(&source, &[("ReturnType<typeof r>", "\"deep\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A chain deeper than the selective read follows
+/// (`MAX_CLASS_MEMBER_INHERITANCE_DEPTH`) still answers, through the
+/// whole-surface read of the class where the walk stopped.
+#[test]
+fn an_extends_chain_past_the_follow_bound_still_answers() {
+    let depth = 257;
+    let mut source = String::from(
+        "class C0 { a = 'deep' as const }
+",
+    );
+    for i in 1..=depth {
+        source.push_str(&format!(
+            "class C{i} extends C{} {{}}
+",
+            i - 1
+        ));
+    }
+    source.push_str(&format!(
+        "function r(x: C{depth}) {{ return x.a }}
+"
+    ));
+    let failures = mismatches(&source, &[("ReturnType<typeof r>", "\"deep\"")]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
