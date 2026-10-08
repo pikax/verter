@@ -6072,6 +6072,8 @@ impl<'a> Lowerer<'a> {
             })
             .collect();
         // A write with no value site (`x++`) reads what its own site does.
+        // Writes sharing a value site (a `for…of` head's targets) share its reads.
+        let mut site_reads: FxHashMap<_, Arc<[FlowBindingRef]>> = FxHashMap::default();
         let writes: Vec<SliceLoopWrite> = index
             .writes_within(loop_span)
             .into_iter()
@@ -6081,7 +6083,11 @@ impl<'a> Lowerer<'a> {
                 (write.path.is_empty() || self.is_evolving_binding(binding)).then(|| {
                     SliceLoopWrite {
                         binding: self.canonical_binding_ref(binding),
-                        reads: self.site_reads(write.value.unwrap_or(write.site)),
+                        reads: Arc::clone(
+                            site_reads
+                                .entry(write.value.unwrap_or(write.site))
+                                .or_insert_with_key(|site| self.site_reads(*site)),
+                        ),
                     }
                 })
             })
