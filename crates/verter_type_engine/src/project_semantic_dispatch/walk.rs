@@ -268,19 +268,17 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// [`crate::semantic_query::CacheRead::cache_suppress`]. Gates memo
     /// admission only; NOT the partial-result signal.
     pub cache_suppress: bool,
-    /// **Partial-result signal** — see
-    /// [`crate::semantic_query::CacheRead::result_is_partial`]. Set at the
+    /// **The completeness this build's read observed** — the stored
+    /// authority for partiality and its classes (see
+    /// [`crate::semantic_query::CacheRead::result_is_partial`] /
+    /// [`crate::semantic_query::CacheRead::partial_reasons`]). Set at the
     /// budget exits and the walker fatal/pathological paths; folded
     /// through nested reads. Gates the component-meta + shape/materialize
-    /// warm caches.
-    pub result_is_partial: bool,
-    /// **The classes behind [`Self::result_is_partial`]** — see
-    /// [`crate::semantic_query::CacheRead::partial_reasons`]. Empty when
-    /// the build is complete; the union of the observed classes otherwise.
-    /// The shared cold-build helper copies this onto the returned
-    /// `CacheRead` so a partial's CLASS survives the query/build boundary
-    /// instead of being re-lifted as the unclassified bridge.
-    pub partial_reasons: crate::semantic_query::PartialReasonSet,
+    /// warm caches. The shared cold-build helper copies it onto the
+    /// returned `CacheRead` so a partial's CLASS survives the query/build
+    /// boundary. [`Self::projection_fact`] reads it directly: the typed
+    /// fact is derived from this field, never from a parallel flag.
+    pub completeness: crate::semantic_query::ResultCompleteness,
     /// The §18 provenance taint of this build's value: how trustworthy the
     /// inputs that produced it were. Defaults to
     /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean).
@@ -373,8 +371,7 @@ impl<T> From<(QueryResult<T>, DepSignature)> for QueryBuildOutput<T> {
             dep_signature,
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
-            result_is_partial: false,
-            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+            completeness: crate::semantic_query::ResultCompleteness::Complete,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: None,
@@ -402,8 +399,7 @@ impl From<QueryBuildOutput<SemanticNodeId>>
             dep_signature: output.dep_signature,
             walker_diagnostics: output.walker_diagnostics,
             cache_suppress: output.cache_suppress,
-            result_is_partial: output.result_is_partial,
-            partial_reasons: output.partial_reasons,
+            completeness: output.completeness,
             taint: output.taint,
             observed_self_roots: output.observed_self_roots,
             graph_carrier: output.graph_carrier,
@@ -416,6 +412,82 @@ impl From<QueryBuildOutput<SemanticNodeId>>
 }
 
 impl<T> QueryBuildOutput<T> {
+    /// Whether this build's result is a partial.
+    #[inline]
+    #[must_use]
+    pub fn result_is_partial(&self) -> bool {
+        self.completeness.is_partial()
+    }
+
+    /// The classes behind a partial (empty when complete).
+    #[inline]
+    #[must_use]
+    pub fn partial_reasons(&self) -> crate::semantic_query::PartialReasonSet {
+        self.completeness.reasons()
+    }
+
+    /// The completeness this build observed.
+    #[inline]
+    #[must_use]
+    pub fn completeness(&self) -> crate::semantic_query::ResultCompleteness {
+        self.completeness
+    }
+
+    /// Mark the build partial without naming a class (a genuine
+    /// unclassified partial). Existing classes are kept.
+    #[inline]
+    pub fn mark_partial(&mut self) {
+        self.merge_completeness(crate::semantic_query::ResultCompleteness::Partial(
+            crate::semantic_query::PartialReasonSet::empty(),
+        ));
+    }
+
+    /// Mark the build partial and union `reasons` into its classes.
+    #[inline]
+    pub fn mark_partial_with(&mut self, reasons: crate::semantic_query::PartialReasonSet) {
+        self.merge_completeness(crate::semantic_query::ResultCompleteness::Partial(reasons));
+    }
+
+    /// Fold another observed completeness in (`Partial` dominates).
+    #[inline]
+    pub fn merge_completeness(&mut self, other: crate::semantic_query::ResultCompleteness) {
+        self.completeness = self.completeness.merge(other);
+    }
+
+    /// Set partiality from a flag, keeping the classes already recorded
+    /// when it stays partial (a recomputed verdict).
+    #[inline]
+    pub fn set_partial(&mut self, partial: bool) {
+        self.completeness = if partial {
+            crate::semantic_query::ResultCompleteness::Partial(self.completeness.reasons())
+        } else {
+            crate::semantic_query::ResultCompleteness::Complete
+        };
+    }
+
+    /// Fold a nested partiality flag in (never clears).
+    #[inline]
+    pub fn fold_partial(&mut self, partial: bool) {
+        if partial {
+            self.mark_partial();
+        }
+    }
+
+    /// Union `reasons` into the classes; a non-empty set makes the build
+    /// partial (a class exists only on a partial).
+    #[inline]
+    pub fn add_partial_reasons(&mut self, reasons: crate::semantic_query::PartialReasonSet) {
+        if !reasons.is_empty() {
+            self.mark_partial_with(reasons);
+        }
+    }
+
+    /// Replace the observed completeness outright (a recomputed verdict).
+    #[inline]
+    pub fn set_completeness(&mut self, completeness: crate::semantic_query::ResultCompleteness) {
+        self.completeness = completeness;
+    }
+
     pub fn map_result<U>(
         self,
         map: impl FnOnce(QueryResult<T>) -> QueryResult<U>,
@@ -425,8 +497,7 @@ impl<T> QueryBuildOutput<T> {
             dep_signature: self.dep_signature,
             walker_diagnostics: self.walker_diagnostics,
             cache_suppress: self.cache_suppress,
-            result_is_partial: self.result_is_partial,
-            partial_reasons: self.partial_reasons,
+            completeness: self.completeness,
             taint: self.taint,
             observed_self_roots: self.observed_self_roots,
             graph_carrier: self.graph_carrier,
@@ -1046,21 +1117,20 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// nested Instantiate dispatch produced a fatal `QueryError`. The
     /// memo refuses insertion when this is true.
     pub(super) cache_suppress: bool,
-    /// `true` when the walker's result is a PARTIAL — the
+    /// The completeness of the walker's result. A partial — the
     /// pathological-input cap fired or a nested Instantiate dispatch
-    /// produced a fatal `QueryError`. Distinct from [`Self::cache_suppress`]
-    /// (which is also set by benign non-cacheability upstream): this is the
-    /// signal the component-meta + shape/materialize warm gates key on. Set
-    /// in lock-step with `cache_suppress` at the walker fatal/pathological
-    /// paths.
-    pub(super) result_is_partial: bool,
-    /// The classes behind [`Self::result_is_partial`] — see
-    /// [`crate::semantic_query::CacheRead::partial_reasons`]. The walker's
-    /// OWN fatal/pathological stops name no class (they are genuine
-    /// unclassified partials and stay so); this accumulates the classes
-    /// nested reads carried up, so a named class is not laundered into the
-    /// anonymous bridge on its way out of the walk.
-    pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
+    /// produced a fatal `QueryError` — is distinct from
+    /// [`Self::cache_suppress`] (which is also set by benign
+    /// non-cacheability upstream): this is the signal the component-meta +
+    /// shape/materialize warm gates key on. Set in lock-step with
+    /// `cache_suppress` at the walker fatal/pathological paths.
+    ///
+    /// The classes behind a partial: the walker's OWN fatal/pathological
+    /// stops name no class (they are genuine unclassified partials and
+    /// stay so); the classes accumulate from nested reads, so a named
+    /// class is not laundered into the anonymous bridge on its way out of
+    /// the walk. One field is the authority for both facts.
+    pub(super) completeness: crate::semantic_query::ResultCompleteness,
     /// `true` when any nested contribution during this walk was an open /
     /// multi-alternative construction program (or a failed program
     /// projection) — see [`ShallowDiagnostic::OpenSpreadProgram`]. The
@@ -1406,6 +1476,14 @@ enum MappedKeyAdmission {
 }
 
 impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C> {
+    /// Mark the walk partial and union `reasons` into its classes (an
+    /// empty set is a genuine unclassified partial).
+    fn mark_partial_with(&mut self, reasons: crate::semantic_query::PartialReasonSet) {
+        self.completeness = self
+            .completeness
+            .merge(crate::semantic_query::ResultCompleteness::Partial(reasons));
+    }
+
     pub(super) fn new(
         dispatch: &'a ProjectSemanticDispatch<'b, C>,
         context: crate::semantic_query::ProjectionReductionContext,
@@ -1421,8 +1499,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             intermediate_nodes: Vec::new(),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
-            result_is_partial: false,
-            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+            completeness: crate::semantic_query::ResultCompleteness::Complete,
             open_spread_partial: false,
             original_path_non_empty: false,
             origin_file: None,
@@ -2265,8 +2342,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> QueryResult<SemanticNodeId> {
         let read = self.dispatch.execute_read(key);
         if read.result_is_partial {
-            self.result_is_partial = true;
-            self.partial_reasons = self.partial_reasons.union(read.partial_reason_classes());
+            self.mark_partial_with(read.partial_reason_classes());
         }
         read.value
     }
@@ -2712,13 +2788,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             QueryResult::Value(formula) => formula,
                             QueryResult::Recursive(node) => {
                                 self.cache_suppress = true;
-                                self.result_is_partial = true;
+                                self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
                                 results.push(node);
                                 return;
                             }
                             QueryResult::Error(_) => {
                                 self.cache_suppress = true;
-                                self.result_is_partial = true;
+                                self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
                                 results.push(self.dispatch.opaque(QueryError::OpenSurface));
                                 return;
                             }
@@ -6145,7 +6221,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 self.walker_diagnostics
                     .push(ShallowDiagnostic::PathologicalInput { root: node });
                 self.cache_suppress = true;
-                self.result_is_partial = true;
+                self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
                 break;
             }
             match frame {
@@ -6523,18 +6599,15 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// is never a complete answer and must never warm a candidate a later
     /// reader could take as one.
     fn mark_cancelled_partial(&mut self) {
-        self.result_is_partial = true;
         self.cache_suppress = true;
-        self.partial_reasons = self
-            .partial_reasons
-            .union(crate::semantic_query::PartialReasonSet::CANCELLED);
+        self.mark_partial_with(crate::semantic_query::PartialReasonSet::CANCELLED);
     }
 
     /// Flag the read partial + uncacheable and record the explicit
     /// open-spread diagnostic — the shared honesty channel for every
     /// program root / arm that cannot materialise a closed surface.
     fn mark_open_spread_partial(&mut self, node: SemanticNodeId) {
-        self.result_is_partial = true;
+        self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
         self.cache_suppress = true;
         self.open_spread_partial = true;
         self.walker_diagnostics
@@ -6875,7 +6948,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     QueryResult::Error(error) => {
                         if is_fatal_query_error(&error) {
                             self.cache_suppress = true;
-                            self.result_is_partial = true;
+                            self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
                         }
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
@@ -6968,7 +7041,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     QueryResult::Error(error) => {
                         if is_fatal_query_error(&error) {
                             self.cache_suppress = true;
-                            self.result_is_partial = true;
+                            self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
                         }
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
@@ -7954,9 +8027,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         // class instead of re-lifting as the anonymous
                         // `PROPAGATED` bridge no consumer lane contains.
                         if !source_partial_classes.is_empty() {
-                            self.result_is_partial = true;
-                            self.partial_reasons =
-                                self.partial_reasons.union(source_partial_classes);
+                            self.mark_partial_with(source_partial_classes);
                         }
                         if !members.is_empty() {
                             keys =

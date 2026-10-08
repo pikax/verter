@@ -645,6 +645,7 @@
           "crates/verter_session/src/typeinfo/resolve_named_symbol.rs",
           "crates/verter_session/src/typeinfo/shallow_surface.rs",
           "crates/verter_session/src/typeinfo/surface.rs",
+          "crates/verter_session/src/typeinfo/surface_resolution.rs",
           "crates/verter_session/src/typeinfo/tests.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/declaration_merge.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_substrate.rs",

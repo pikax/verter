@@ -407,15 +407,16 @@ impl VerterHost {
         // to the synthesized instance members, so the structural
         // `published(Shallow)` context is correct. An INCOMPLETE projection
         // records its typed reason before surfacing the miss.
-        crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
-            &host_ctx,
-            &dispatch,
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
+        crate::typeinfo::surface_resolution::adopt_surface(
+            crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+                &host_ctx,
+                &dispatch,
+                base,
+                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+                None,
+            ),
         )
-        .recorded()
     }
 
     /// Resolve a `.vue` macro's type-argument surface to its span-rich
