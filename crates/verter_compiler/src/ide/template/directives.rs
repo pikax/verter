@@ -341,7 +341,7 @@ fn resolve_iterable_segments(
             bindings,
             ..Default::default()
         }),
-        ide_recovery_scope: Vec::new(),
+        ide_recovery_scope: None,
         dynamism: Dynamism::Dynamic,
     };
     build_prefixed_expr_segments(iterable, iterable_start, &parsed, resolver, &[])
@@ -812,7 +812,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
         OxcParsedElement {
@@ -821,7 +821,7 @@ mod tests {
             v_slot: None,
             props: vec![],
             prop_lookup: vec![],
-            provided_locals: None,
+            props_scope: crate::template::oxc::types::LexicalScopeId::ROOT,
             expression_flag: ExpressionFlag::empty(),
         }
     }
@@ -938,7 +938,7 @@ mod tests {
             v_slot: None,
             props: Vec::new(),
             prop_lookup: Vec::new(),
-            provided_locals: None,
+            props_scope: crate::template::oxc::types::LexicalScopeId::ROOT,
             expression_flag: ExpressionFlag::empty(),
         }
     }
@@ -1050,7 +1050,7 @@ mod tests {
             v_slot: None,
             props: Vec::new(),
             prop_lookup: Vec::new(),
-            provided_locals: None,
+            props_scope: crate::template::oxc::types::LexicalScopeId::ROOT,
             expression_flag: ExpressionFlag::empty(),
         }
     }

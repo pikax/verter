@@ -237,7 +237,14 @@ fn walk_node<'a, 'alloc>(
                 OxcNodeData::Interpolation(expr) => Some(expr),
                 _ => None,
             };
-            visit_interpolation(interp, oxc_expr, ctx.source, ctx.out, ctx.resolver);
+            visit_interpolation(
+                interp,
+                oxc_expr,
+                &ctx.oxc_ast.scopes,
+                ctx.source,
+                ctx.out,
+                ctx.resolver,
+            );
         }
         AstNodeKind::Comment(comment) => {
             visit_comment(comment, ctx.out, ctx.options);
@@ -2237,6 +2244,7 @@ fn visit_text(text: &TextNode, source: &str, out: &mut CodeGenOutput<'_>) {
 fn visit_interpolation<'alloc>(
     interp: &InterpolationNode,
     oxc_expr: Option<&crate::template::oxc::types::OxcParsedExpression<'alloc>>,
+    scopes: &crate::template::oxc::types::LexicalScopes<'alloc>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
@@ -2252,7 +2260,7 @@ fn visit_interpolation<'alloc>(
                 interp.inner_start,
                 out,
                 resolver,
-                &expr.ide_recovery_scope,
+                expr.ide_recovery_scope.map(|scope| (scopes, scope)),
             );
         } else if let Some(ref bindings) = expr.bindings {
             // Apply binding prefixes to expression identifiers for valid expressions.
@@ -2290,7 +2298,10 @@ fn recover_broken_interpolation_expr<'alloc>(
     expr_start: u32,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
-    scope_locals: &[&str],
+    recovery_scope: Option<(
+        &crate::template::oxc::types::LexicalScopes<'_>,
+        crate::template::oxc::types::LexicalScopeId,
+    )>,
 ) {
     let bytes = raw_expr.as_bytes();
     let mut recovered = Vec::new();
@@ -2307,9 +2318,8 @@ fn recover_broken_interpolation_expr<'alloc>(
                 i += 1;
             }
             let ident = &raw_expr[start..i];
-            let is_scoped_local = scope_locals
-                .iter()
-                .any(|local| *local == ident || local.starts_with(ident));
+            let is_scoped_local = recovery_scope
+                .is_some_and(|(scopes, scope)| scopes.declares_completion_of(scope, ident));
             let provider_resolved = resolver.resolve_simple_expr(ident);
             let is_passthrough_keyword_or_global = provider_resolved == ident
                 && (crate::utils::oxc::bindings::keywords::is_keyword(ident.as_bytes())

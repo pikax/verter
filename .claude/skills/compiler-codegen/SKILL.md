@@ -58,6 +58,7 @@ script/
 template/
 +-- oxc/                  # OXC expression parsing for template bindings
 |   +-- mod.rs            # parse_template_expressions()
+|   +-- scope.rs          # LexicalScopes frames, LexicalScopeId handles, ActiveScope
 |   +-- types.rs          # OxcParsedAst, OxcParsedElement, OxcParsedExpression
 +-- code_gen/             # Render function codegen
     +-- mod.rs            # generate_template() entry point
@@ -119,6 +120,33 @@ pub struct AstNode {
 - `children_flag`: Bitset of children characteristics (has text, elements, v-if, etc.)
 - `children_mode`: Enum for codegen branching (Empty, TextOnly, SingleElement, Mixed, etc.)
 - Cached directives: `v_condition`, `v_for`, `v_slot`, `v_once`, `v_ref`
+
+## Template Lexical Scopes (`template/oxc/scope.rs`)
+
+`parse_template_expressions` is the ONE producer of template lexical scope, built
+in its existing forward pass over the node arena:
+
+- Each `v-for` alias list and each `v-slot` parameter list opens one persistent
+  frame in `OxcParsedAst::scopes` (`LexicalScopes`) holding ONLY the names that
+  list declares, linked to its enclosing frame. A list that declares nothing
+  opens no frame.
+- Every node gets a `LexicalScopeId` handle: `OxcParsedAst::children_scope(id)`
+  is what the node's children see; `scope_of(id, ast)` (the parent's children
+  scope) is what the node itself sits in; `OxcParsedElement::props_scope` is the
+  element's props / dynamic slot name / `v-slot` value scope (own `v-for` aliases
+  visible, own slot params NOT). `ide_recovery_scope` on a broken IDE expression
+  is a handle too.
+- While parsing, expressions resolve names through `ActiveScope`, a multiset the
+  pass moves between frames incrementally (leave/enter only the frames that
+  differ). `BindingContext::within` and the `v-for` / `v-slot` binding helpers
+  read it in place through `verter_parser`'s `EnclosingScope` trait.
+
+Receiving rules: query names through a handle (`LexicalScopes::declares`,
+`declares_completion_of`, `own_names`) or the shared `EnclosingScope`; never
+flatten a handle's inherited names into a per-element / per-expression list, never
+copy a parent's aliases into a nested `v-for` scope, and never walk ancestors to
+rediscover a node's scope. Exact lexical identity and order are the frames'
+(source order within a frame, innermost frame first along a chain).
 
 ## CodeTransform (Deferred Mutations)
 
