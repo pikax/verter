@@ -10864,45 +10864,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// relation build's self-roots here: an edit to an ancestor's file
     /// retracts the answer.
     fn class_derives_from(&self, source: &ClassOwner, target: &ClassOwner) -> Option<bool> {
-        match (source, target) {
-            (ClassOwner::Declared(source), ClassOwner::Declared(target)) => {
-                if super::build::same_class_identity(source, target) {
-                    return Some(true);
-                }
-                let ancestry = self.class_heritage_ancestry(source);
-                self.deposit_operand_self_roots(&ancestry.observed);
-                if ancestry
-                    .ancestors
-                    .iter()
-                    .any(|ancestor| super::build::same_class_identity(ancestor, target))
-                {
-                    Some(true)
-                } else {
-                    ancestry.decided.then_some(false)
-                }
+        let target_link = target.links.first()?;
+        let mut undecided = false;
+        for link in &source.links {
+            if link.same_class(target_link) {
+                return Some(true);
             }
-            (ClassOwner::Declared(source), ClassOwner::Syntactic { .. }) => {
-                let ancestry = self.class_heritage_ancestry(source);
+            if let ClassLink::Declared(identity) = link {
+                let ancestry = self.class_heritage_ancestry(identity);
                 self.deposit_operand_self_roots(&ancestry.observed);
-                ancestry.decided.then_some(false)
-            }
-            (ClassOwner::Syntactic { file, span, base }, target) => {
-                if let ClassOwner::Syntactic {
-                    file: target_file,
-                    span: target_span,
-                    ..
-                } = target
-                {
-                    if file == target_file && span == target_span {
+                if let ClassLink::Declared(target) = target_link {
+                    if ancestry
+                        .ancestors
+                        .iter()
+                        .any(|ancestor| super::build::same_class_identity(ancestor, target))
+                    {
                         return Some(true);
                     }
                 }
-                match base {
-                    SyntacticBase::None => Some(false),
-                    SyntacticBase::Class(base) => self.class_derives_from(base, target),
-                    SyntacticBase::Unresolved => None,
-                }
+                undecided |= !ancestry.decided;
             }
+        }
+        match source.end {
+            ChainEnd::Unresolved => None,
+            ChainEnd::Closed => (!undecided).then_some(false),
         }
     }
 
@@ -12013,28 +11998,56 @@ enum MemberOwner {
     Undecided,
 }
 
-/// The class that declares a member directly.
-enum ClassOwner {
-    /// A file-scope class, by its declaration identity.
+/// The class that declares a member directly, with the bases its `extends`
+/// clauses name as a flat chain (never nested, so a long chain costs no
+/// stack).
+struct ClassOwner {
+    /// The class itself first, then each base the class index resolved.
+    links: Vec<ClassLink>,
+    /// What the last link's `extends` clause leaves undecided.
+    end: ChainEnd,
+}
+
+/// One class of a [`ClassOwner`] chain.
+enum ClassLink {
+    /// A file-scope class, by its declaration identity. The class-heritage
+    /// ancestry authority reads its file-scope ancestry; a class-expression
+    /// base it cannot name continues as the next link.
     Declared(crate::semantic_query::DeclIdentity),
     /// Any other class — a class expression, a class declared inside a
     /// body — by its node in the file's syntactic class index.
     Syntactic {
         file: Arc<str>,
         span: verter_span::Span,
-        /// What its `extends` clause names.
-        base: SyntacticBase,
     },
 }
 
-/// What a [`ClassOwner::Syntactic`] class's `extends` clause names.
-enum SyntacticBase {
-    /// No `extends` clause: the class derives from itself alone.
-    None,
-    /// A class this file authors, which the class index resolved lexically.
-    Class(Box<ClassOwner>),
-    /// Anything else: derivation is undecided.
+/// How a [`ClassOwner`] chain ends.
+enum ChainEnd {
+    /// The last link derives from nothing further the chain names; a
+    /// declared link's own ancestry still decides.
+    Closed,
+    /// The last link's `extends` clause names something undecided: a base
+    /// that is not a class this file authors, or a circular chain.
     Unresolved,
+}
+
+impl ClassLink {
+    fn same_class(&self, other: &ClassLink) -> bool {
+        match (self, other) {
+            (ClassLink::Declared(a), ClassLink::Declared(b)) => {
+                super::build::same_class_identity(a, b)
+            }
+            (
+                ClassLink::Syntactic { file, span },
+                ClassLink::Syntactic {
+                    file: other_file,
+                    span: other_span,
+                },
+            ) => file == other_file && span == other_span,
+            _ => false,
+        }
+    }
 }
 
 /// The owner a member's declaring `class` names: a file-scope class
@@ -12051,36 +12064,45 @@ fn class_owner(
 ) -> ClassOwner {
     use verter_session_query::declarations::TypeDeclKind;
     use verter_session_query::function_program::ClassBaseMatch;
-    let record = class.record();
-    let file_scope = (!record.expression && !class.is_enclosed())
-        .then(|| {
-            headers.type_headers.iter().find(|(_, header)| {
-                header.kind == TypeDeclKind::Class
-                    && header.span.start <= record.span.start
-                    && record.span.end <= header.span.end
+    let mut links = Vec::new();
+    let mut current = class;
+    let mut remaining = remaining;
+    let end = loop {
+        let record = current.record();
+        let file_scope = (!record.expression && !current.is_enclosed())
+            .then(|| {
+                headers.type_headers.iter().find(|(_, header)| {
+                    header.kind == TypeDeclKind::Class
+                        && header.span.start <= record.span.start
+                        && record.span.end <= header.span.end
+                })
             })
-        })
-        .flatten();
-    if let Some((key, _)) = file_scope {
-        return ClassOwner::Declared(crate::semantic_query::DeclIdentity {
-            canonical_id: Arc::clone(file),
-            owner: key.owner,
-            whole_hash,
-            decl_name: Arc::clone(&key.name),
+            .flatten();
+        let declared = file_scope.is_some();
+        links.push(match file_scope {
+            Some((key, _)) => ClassLink::Declared(crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::clone(file),
+                owner: key.owner,
+                whole_hash,
+                decl_name: Arc::clone(&key.name),
+            }),
+            None => ClassLink::Syntactic {
+                file: Arc::clone(file),
+                span: record.span,
+            },
         });
-    }
-    let base = match class.base() {
-        ClassBaseMatch::None => SyntacticBase::None,
-        ClassBaseMatch::Class(base) if remaining > 0 => SyntacticBase::Class(Box::new(
-            class_owner(file, whole_hash, headers, base, remaining - 1),
-        )),
-        ClassBaseMatch::Class(_) | ClassBaseMatch::Unresolved => SyntacticBase::Unresolved,
+        match current.base() {
+            ClassBaseMatch::Class(base) if remaining > 0 => {
+                remaining -= 1;
+                current = base;
+            }
+            ClassBaseMatch::None => break ChainEnd::Closed,
+            // A declared class's other bases are its ancestry authority's.
+            _ if declared => break ChainEnd::Closed,
+            _ => break ChainEnd::Unresolved,
+        }
     };
-    ClassOwner::Syntactic {
-        file: Arc::clone(file),
-        span: record.span,
-        base,
-    }
+    ClassOwner { links, end }
 }
 
 fn template_literal_kind_verdict(
