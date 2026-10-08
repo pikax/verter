@@ -1992,7 +1992,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None
         };
         if let Some(receipt) = &receipt {
-            self.connected_demand.record_prerequisite(receipt, 0);
+            self.connected_demand
+                .record_prerequisite(receipt, super::cost_receipt::Nesting::InPlace);
         }
         if let (true, false, Some(receipt)) = (complete, frame.cache_suppress, receipt) {
             self.graph().evaluate_deferred_memo_publish(

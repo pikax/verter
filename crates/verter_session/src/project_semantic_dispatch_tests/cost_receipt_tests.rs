@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use super::cost_receipt::{
-    BudgetProfile, BudgetProfileSpec, CostIdentity, DemandCostReceipt, LogicalUsage, ReplayRefusal,
-    COST_MODEL_REVISION,
+    BudgetProfile, BudgetProfileSpec, CostIdentity, DemandCostReceipt, LogicalUsage, Nesting,
+    ReplayRefusal, COST_MODEL_REVISION,
 };
 use super::ProjectSemanticDispatch;
 use crate::{HostConfig, VerterHost};
@@ -41,11 +41,11 @@ fn diamond(levels: usize) -> Vec<Arc<DemandCostReceipt>> {
                 vec![
                     super::cost_receipt::CostDependency {
                         receipt: Arc::clone(below),
-                        nesting: 1,
+                        nesting: Nesting::Entered,
                     },
                     super::cost_receipt::CostDependency {
                         receipt: Arc::clone(below),
-                        nesting: 1,
+                        nesting: Nesting::Entered,
                     },
                 ]
             })
@@ -80,7 +80,7 @@ fn a_diamond_replays_in_linear_cost() {
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
         .connected_demand()
-        .replay_admit(top, None)
+        .replay_admit(top, None, Nesting::Entered)
         .expect("21 units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
     assert_eq!(dispatch.connected_demand().bytes_used_for_tests(), 210);
@@ -89,7 +89,7 @@ fn a_diamond_replays_in_linear_cost() {
     }
     dispatch
         .connected_demand()
-        .replay_admit(top, None)
+        .replay_admit(top, None, Nesting::Entered)
         .expect("a paid closure costs nothing more");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
 }
@@ -105,12 +105,12 @@ fn a_partly_paid_diamond_charges_the_rest_once() {
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[10], None)
+        .replay_admit(&receipts[10], None, Nesting::Entered)
         .expect("11 units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 11);
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[20], None)
+        .replay_admit(&receipts[20], None, Nesting::Entered)
         .expect("10 more units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
 }
@@ -134,16 +134,16 @@ fn a_cold_diamond_records_exclusive_costs() {
         ledger.charge_units(3).expect("T0's own units");
         ledger.reserve_bytes(30).expect("T0's own bytes");
         let t0 = ledger.seal_cost_scope(None).expect("T0 seals");
-        ledger.record_prerequisite(&t0, 1);
+        ledger.record_prerequisite(&t0, Nesting::Entered);
         assert!(
             ledger.is_paid(t0.identity()),
             "a sealed computation is paid"
         );
         // The second read of T0 finds it paid and records it again.
-        ledger.record_prerequisite(&t0, 1);
+        ledger.record_prerequisite(&t0, Nesting::Entered);
         let t1 = ledger.seal_cost_scope(None).expect("T1 seals");
-        ledger.record_prerequisite(&t1, 1);
-        ledger.record_prerequisite(&t1, 1);
+        ledger.record_prerequisite(&t1, Nesting::Entered);
+        ledger.record_prerequisite(&t1, Nesting::Entered);
         let t2 = ledger.seal_cost_scope(None).expect("T2 seals");
         assert_eq!(t0.exclusive(), usage(3, 30));
         assert_eq!(t1.exclusive(), usage(2, 0));
@@ -157,7 +157,9 @@ fn a_cold_diamond_records_exclusive_costs() {
         !ledger.is_paid(top.identity()),
         "a new connected demand has paid nothing"
     );
-    ledger.replay_admit(&top, None).expect("six units fit");
+    ledger
+        .replay_admit(&top, None, Nesting::Entered)
+        .expect("six units fit");
     assert_eq!(
         ledger.work_used_for_tests(),
         cold_work,
@@ -179,7 +181,7 @@ fn a_refused_replay_charges_and_marks_nothing() {
     assert_eq!(
         dispatch
             .connected_demand()
-            .replay_admit(&receipts[20], None),
+            .replay_admit(&receipts[20], None, Nesting::Entered),
         Err(ReplayRefusal::Work)
     );
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 0);
@@ -188,7 +190,7 @@ fn a_refused_replay_charges_and_marks_nothing() {
         .all(|receipt| !dispatch.connected_demand().is_paid(receipt.identity())));
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[9], None)
+        .replay_admit(&receipts[9], None, Nesting::Entered)
         .expect("ten units fit exactly");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 10);
 }
@@ -206,18 +208,18 @@ fn a_paid_receipt_still_answers_to_the_depth_rail() {
     assert_eq!(
         dispatch
             .connected_demand()
-            .replay_admit(&receipts[20], None),
+            .replay_admit(&receipts[20], None, Nesting::Entered),
         Err(ReplayRefusal::Depth),
         "a depth-20 receipt does not fit a depth-10 rail"
     );
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[10], None)
+        .replay_admit(&receipts[10], None, Nesting::Entered)
         .expect("depth 10 fits");
     assert_eq!(
         dispatch
             .connected_demand()
-            .replay_admit(&receipts[20], None),
+            .replay_admit(&receipts[20], None, Nesting::Entered),
         Err(ReplayRefusal::Depth),
         "paying part of the closure does not waive the depth"
     );
@@ -240,7 +242,7 @@ fn a_lattice_of_shared_results_replays_each_once() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let dependency = |receipt: &Arc<DemandCostReceipt>| super::cost_receipt::CostDependency {
         receipt: Arc::clone(receipt),
-        nesting: 0,
+        nesting: Nesting::InPlace,
     };
     let mut level: Vec<Arc<DemandCostReceipt>> = ["A0", "B0"]
         .into_iter()
@@ -266,7 +268,7 @@ fn a_lattice_of_shared_results_replays_each_once() {
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
         .connected_demand()
-        .replay_admit(&top, None)
+        .replay_admit(&top, None, Nesting::Entered)
         .expect("43 units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 43);
 }
@@ -317,7 +319,7 @@ fn a_recomputation_is_charged_as_the_work_it_is() {
         ledger.reserve_bytes(8).expect("C's own bytes");
         let run = ledger.seal_cost_scope(None).expect("C seals");
         assert_eq!(run.exclusive(), usage(4, 8), "each run's receipt costs C");
-        ledger.record_prerequisite(&run, 1);
+        ledger.record_prerequisite(&run, Nesting::Entered);
     }
     let parent = ledger.seal_cost_scope(None).expect("P seals");
     assert_eq!(ledger.work_used_for_tests(), 8, "both runs are charged");
@@ -342,11 +344,11 @@ fn consume(
     let receipt = match delivery {
         Delivery::Fresh(receipt) => receipt,
         Delivery::Replayed(receipt) => {
-            ledger.replay_admit(receipt, None)?;
+            ledger.replay_admit(receipt, None, Nesting::Entered)?;
             receipt
         }
     };
-    ledger.record_prerequisite(receipt, 1);
+    ledger.record_prerequisite(receipt, Nesting::Entered);
     Ok(())
 }
 
@@ -400,7 +402,7 @@ fn a_wide_fan_out_keeps_each_prerequisite_once() {
         .chain(leaves.iter())
         .map(|leaf| super::cost_receipt::CostDependency {
             receipt: Arc::clone(leaf),
-            nesting: 0,
+            nesting: Nesting::InPlace,
         })
         .collect();
     let wide = DemandCostReceipt::new(identity("W"), usage(1, 0), prerequisites);
@@ -422,7 +424,7 @@ fn a_deep_receipt_chain_drops_in_constant_stack() {
                     usage(1, 0),
                     vec![super::cost_receipt::CostDependency {
                         receipt: top,
-                        nesting: 0,
+                        nesting: Nesting::InPlace,
                     }],
                 );
             }
@@ -457,14 +459,14 @@ fn a_replay_spends_request_operations_once_per_request() {
     {
         let (_guard, _) = dispatch.enter_connected_demand(false);
         ledger
-            .replay_admit(&first, Some(&request))
+            .replay_admit(&first, Some(&request), Nesting::Entered)
             .expect("three operations fit five");
     }
     assert_eq!(request.projection_ops_executed_count(), 3);
     {
         let (_guard, _) = dispatch.enter_connected_demand(false);
         ledger
-            .replay_admit(&first, Some(&request))
+            .replay_admit(&first, Some(&request), Nesting::Entered)
             .expect("a paid computation spends no operations again");
         assert_eq!(
             ledger.work_used_for_tests(),
@@ -475,7 +477,7 @@ fn a_replay_spends_request_operations_once_per_request() {
     assert_eq!(request.projection_ops_executed_count(), 3);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     assert_eq!(
-        ledger.replay_admit(&operations("B", 3), Some(&request)),
+        ledger.replay_admit(&operations("B", 3), Some(&request), Nesting::Entered),
         Err(ReplayRefusal::Operations),
         "three more operations do not fit the two left"
     );

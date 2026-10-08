@@ -28,8 +28,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use super::cost_receipt::{
-    BudgetProfile, BudgetProfileSpec, CostDependency, CostIdentity, CostScope, DemandCostReceipt,
-    LogicalUsage, ReplayRefusal, COST_MODEL_REVISION,
+    BudgetProfileSpec, CostDependency, CostIdentity, CostScope, DemandCostReceipt, LogicalUsage,
+    Nesting, ReplayRefusal, COST_MODEL_REVISION,
 };
 
 use crate::semantic_query::PartialReasonSet;
@@ -227,6 +227,19 @@ pub struct ConnectedDemandLedger<'a> {
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
     paid: RefCell<FxHashSet<CostIdentity>>,
+    /// What this connected demand itself did to its request: the request
+    /// operations it spent and the computations it was first to pay.
+    request_effects: Cell<RequestEffects>,
+}
+
+/// What one connected demand did to its request
+/// ([`ConnectedDemandLedger::request_effects`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RequestEffects {
+    /// The request operations the demand spent.
+    pub(crate) operations: usize,
+    /// The computations the demand added to the request's paid set.
+    pub(crate) paid: usize,
 }
 
 impl std::fmt::Debug for ConnectedDemandLedger<'_> {
@@ -274,13 +287,8 @@ impl<'a> ConnectedDemandLedger<'a> {
             scopes: RefCell::new(Vec::new()),
             scope_open: Cell::new(false),
             paid: RefCell::new(FxHashSet::default()),
+            request_effects: Cell::new(RequestEffects::default()),
         }
-    }
-
-    /// The tail steps one conditional tail run may take
-    /// ([`MAX_CONNECTED_TAIL_STEPS`]).
-    pub(crate) fn tail_steps_budget(&self) -> u32 {
-        self.tail_steps_limit
     }
 
     /// Whether an instantiation nested `depth` deep on the continuation
@@ -288,6 +296,23 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// ([`MAX_CONNECTED_INSTANTIATION_DEPTH`]).
     pub(crate) fn instantiation_within_budget(&self, depth: u32) -> bool {
         depth <= self.instantiation_depth_limit
+    }
+
+    /// Take one more step of the tail run `tail` under this demand's tail
+    /// budget, recording the steps the run has taken on the open recording:
+    /// its receipt then names the tail allowance its cold run needed.
+    pub(crate) fn tail_step(
+        &self,
+        tail: &mut crate::semantic_query::checker_policy::ConditionalTail,
+        operation: crate::semantic_query::CheckerDiagnosticOperation,
+    ) -> Result<(), crate::semantic_query::checker_policy::OperationRefusal> {
+        tail.step(self.tail_steps_limit, operation)?;
+        if self.scope_open.get() {
+            if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+                scope.tail_steps = scope.tail_steps.max(tail.steps());
+            }
+        }
+        Ok(())
     }
 
     /// Join the active connected demand, or install a fresh one when this is
@@ -304,6 +329,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             self.work_used.set(0);
             self.bytes_used.set(0);
             self.paid.borrow_mut().clear();
+            self.request_effects.set(RequestEffects::default());
             self.scopes.borrow_mut().clear();
             self.scope_open.set(false);
             self.query_depth.set(0);
@@ -577,6 +603,7 @@ impl ConnectedDemandLedger<'_> {
             identity,
             exclusive: LogicalUsage::default(),
             prerequisites: Vec::new(),
+            tail_steps: 0,
         });
     }
 
@@ -602,22 +629,53 @@ impl ConnectedDemandLedger<'_> {
         self.sync_top(&scopes);
     }
 
-    /// Record one request operation spent by the computation on top: the
-    /// per-request projection fuse admitted one more operator build.
-    pub(crate) fn accrue_operation(&self) {
-        if !self.scope_open.get() {
-            return;
+    /// Spend one of `request`'s operations for the computation on top: the
+    /// per-request projection fuse admits one more operator build. `true`
+    /// when the request has now passed its cap.
+    pub(crate) fn spend_request_operation(
+        &self,
+        request: &crate::request_budget::RequestBudget,
+    ) -> bool {
+        self.note_request_effects(1, 0);
+        if self.scope_open.get() {
+            if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+                scope.exclusive.operations = scope.exclusive.operations.saturating_add(1);
+            }
         }
-        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-            scope.exclusive.operations = scope.exclusive.operations.saturating_add(1);
-        }
+        request.check_projection_op_count()
+    }
+
+    /// Record `operations` request operations this demand spent and `paid`
+    /// computations it was first to pay in its request.
+    pub(crate) fn note_request_effects(&self, operations: usize, paid: usize) {
+        let effects = self.request_effects.get();
+        self.request_effects.set(RequestEffects {
+            operations: effects.operations.saturating_add(operations),
+            paid: effects.paid.saturating_add(paid),
+        });
+    }
+
+    /// What this connected demand itself has done to its request.
+    pub(crate) fn request_effects(&self) -> RequestEffects {
+        self.request_effects.get()
+    }
+
+    /// Mark `identity` paid in `request`, counting it as this demand's
+    /// effect when the demand is the first to pay it there.
+    fn mark_request_paid(
+        &self,
+        request: &crate::request_budget::RequestBudget,
+        identity: CostIdentity,
+    ) {
+        let added = request.mark_operations_paid(std::iter::once(identity));
+        self.note_request_effects(0, added);
     }
 
     /// Record that the open computation consumed the result `receipt`
-    /// costs, at `nesting` (1 when entered as a nested demand, 0 when read
-    /// in place). Recorded however the result arrived — computed, served
-    /// or already paid — so the receipt being built owes it in full.
-    pub fn record_prerequisite(&self, receipt: &Arc<DemandCostReceipt>, nesting: u16) {
+    /// costs, the way `nesting` names. Recorded however the result arrived
+    /// — computed, served or already paid — so the receipt being built owes
+    /// it in full.
+    pub fn record_prerequisite(&self, receipt: &Arc<DemandCostReceipt>, nesting: Nesting) {
         if !self.scope_open.get() {
             return;
         }
@@ -640,13 +698,20 @@ impl ConnectedDemandLedger<'_> {
         let scope = self.suspend_cost_scope()?;
         self.paid.borrow_mut().insert(scope.identity.clone());
         if let Some(request) = request {
-            request.mark_operations_paid(std::iter::once(scope.identity.clone()));
+            self.mark_request_paid(request, scope.identity.clone());
         }
-        Some(DemandCostReceipt::new(
+        Some(DemandCostReceipt::with_tail_steps(
             scope.identity,
             scope.exclusive,
             scope.prerequisites,
+            scope.tail_steps,
         ))
+    }
+
+    /// How many computations are recording: the depth of the open
+    /// recording on top.
+    pub(crate) fn recording_depth(&self) -> usize {
+        self.scopes.borrow().len()
     }
 
     /// Drop the open computation's recording without a receipt: it did not
@@ -665,6 +730,7 @@ impl ConnectedDemandLedger<'_> {
         if let Some(consumer) = self.scopes.borrow_mut().last_mut() {
             consumer.exclusive = consumer.exclusive.saturating_add(scope.exclusive);
             consumer.prerequisites.extend(scope.prerequisites);
+            consumer.tail_steps = consumer.tail_steps.max(scope.tail_steps);
         }
     }
 
@@ -674,12 +740,12 @@ impl ConnectedDemandLedger<'_> {
     }
 
     /// The allowances this ledger answers to under `request`'s operation
-    /// allowance, as one interned profile.
-    pub(crate) fn profile(
+    /// allowance: the spec its interned profile names.
+    pub(crate) fn profile_spec(
         &self,
         request: Option<&crate::request_budget::RequestBudget>,
-    ) -> BudgetProfile {
-        BudgetProfile::intern(BudgetProfileSpec {
+    ) -> BudgetProfileSpec {
+        BudgetProfileSpec {
             work: self.work_limit.get(),
             bytes: self.bytes_limit.get(),
             query_depth: self.query_depth_limit.get(),
@@ -689,33 +755,62 @@ impl ConnectedDemandLedger<'_> {
                 .map_or(0, |request| request.effective_projection_op_budget()),
             relation_comparisons: crate::semantic_query::checker_policy::relation_comparisons(),
             cost_model_revision: COST_MODEL_REVISION,
-        })
+        }
     }
 
-    /// Admit serving the result `receipt` costs without computing it:
-    /// charge, in one admission, the exclusive usage of every computation
-    /// in its closure this demand has not paid (and the request operations
-    /// of every one `request` has not paid), and mark them paid. The
-    /// receipt's nesting is checked against the remaining query depth even
-    /// when it is paid. A refusal charges and marks nothing, and leaves the
-    /// stored result untouched: this caller receives plain resource
-    /// incompleteness, never a checker diagnostic, and another demand with
-    /// room may still serve it. Replayed charges belong to no open recording
-    /// — the consumer records the receipt as a prerequisite instead.
+    /// Admit serving the result `receipt` costs without computing it, read
+    /// the way `nesting` names: charge, in one admission, the exclusive
+    /// usage of every computation in its closure this demand has not paid
+    /// (and the request operations of every one `request` has not paid),
+    /// and mark them paid. The receipt's footprint is checked against the
+    /// reader's allowances even when its cost is paid: its nesting against
+    /// the remaining query depth, its instantiation frames against the
+    /// instantiation allowance at the reader's frame depth, its tail runs
+    /// against the tail allowance. A refusal charges and marks nothing,
+    /// and leaves the stored result untouched: this caller computes the
+    /// result itself, and another demand with room may still serve it.
+    /// Construction bytes are charged but never refuse: a complete result
+    /// is not rejected at handoff for the bytes it took to build. Replayed
+    /// charges belong to no open recording — the consumer records the
+    /// receipt as a prerequisite instead.
     pub fn replay_admit(
         &self,
         receipt: &Arc<DemandCostReceipt>,
         request: Option<&crate::request_budget::RequestBudget>,
+        nesting: Nesting,
     ) -> Result<(), ReplayRefusal> {
         let tripped = self.tripped.get();
         if !tripped.is_empty() || self.cancellation.is_cancelled() {
             return Err(ReplayRefusal::Tripped);
         }
-        if u32::from(self.query_depth.get()) + u32::from(receipt.depth())
+        let footprint = receipt.footprint();
+        if u32::from(self.query_depth.get()) + u32::from(footprint.query_depth)
             > u32::from(self.query_depth_limit.get())
         {
             return Err(ReplayRefusal::Depth);
         }
+        let first_frame = match nesting {
+            Nesting::Frame { depth } => Some(depth),
+            Nesting::Drive => Some(1),
+            Nesting::InPlace | Nesting::Entered => None,
+        };
+        if footprint.instantiation_required > self.instantiation_depth_limit
+            || first_frame.is_some_and(|depth| {
+                depth.saturating_add(u32::from(footprint.instantiation_height))
+                    > self.instantiation_depth_limit
+            })
+        {
+            return Err(ReplayRefusal::InstantiationDepth);
+        }
+        if footprint.tail_steps >= self.tail_steps_limit && footprint.tail_steps > 0 {
+            return Err(ReplayRefusal::TailSteps);
+        }
+        let work_room = self.work_limit.get().saturating_sub(self.work_used.get()) as u64;
+        let operation_room = request.map_or(u64::MAX, |request| {
+            request
+                .effective_projection_op_budget()
+                .saturating_sub(request.projection_ops_executed_count()) as u64
+        });
         let operations_paid = request.map(|request| request.operations_paid());
         let (unpaid, unpaid_operations, total) = {
             let paid = self.paid.borrow();
@@ -744,6 +839,13 @@ impl ConnectedDemandLedger<'_> {
                     },
                 };
                 total = total.checked_add(owed).ok_or(ReplayRefusal::Work)?;
+                // The rest of the closure can only add to what is owed.
+                if total.work > work_room {
+                    return Err(ReplayRefusal::Work);
+                }
+                if total.operations > operation_room {
+                    return Err(ReplayRefusal::Operations);
+                }
                 if !demand_paid {
                     unpaid.push(identity);
                 }
@@ -763,15 +865,8 @@ impl ConnectedDemandLedger<'_> {
                 total,
             )
         };
-        let work_room = self.work_limit.get().saturating_sub(self.work_used.get()) as u64;
-        if total.work > work_room {
-            return Err(ReplayRefusal::Work);
-        }
-        let byte_room = self.bytes_limit.get().saturating_sub(self.bytes_used.get()) as u64;
-        if total.bytes > byte_room {
-            return Err(ReplayRefusal::Bytes);
-        }
         if let (Some(request), Some(operations_paid)) = (request, operations_paid) {
+            let newly_paid = unpaid_operations.len();
             if !request.admit_replayed_operations(
                 total.operations,
                 operations_paid,
@@ -779,13 +874,109 @@ impl ConnectedDemandLedger<'_> {
             ) {
                 return Err(ReplayRefusal::Operations);
             }
+            self.note_request_effects(
+                usize::try_from(total.operations).unwrap_or(usize::MAX),
+                newly_paid,
+            );
         }
         self.work_used
             .set(self.work_used.get() + total.work as usize);
         self.bytes_used
-            .set(self.bytes_used.get() + total.bytes as usize);
+            .set(self.bytes_used.get().saturating_add(total.bytes as usize));
         self.paid.borrow_mut().extend(unpaid);
         Ok(())
+    }
+}
+
+impl<'a> ConnectedDemandLedger<'a> {
+    /// Begin recording the materialized prefixes of the computation
+    /// recording at `depth`: what it charged before now stays its own, and
+    /// each [`PrefixRecording::seal_prefix`] seals what it charged since
+    /// the previous prefix as that prefix's receipt. `None` when no
+    /// computation is recording at `depth`.
+    pub(crate) fn record_prefixes(&self, depth: usize) -> Option<PrefixRecording<'_, 'a>> {
+        let mut scopes = self.scopes.borrow_mut();
+        if depth == 0 || scopes.len() != depth {
+            return None;
+        }
+        let scope = scopes.last_mut()?;
+        let held = CostScope {
+            identity: scope.identity.clone(),
+            exclusive: std::mem::take(&mut scope.exclusive),
+            prerequisites: std::mem::take(&mut scope.prerequisites),
+            tail_steps: std::mem::take(&mut scope.tail_steps),
+        };
+        Some(PrefixRecording {
+            ledger: self,
+            depth,
+            held: Some(held),
+        })
+    }
+}
+
+/// The prefixes one computation materializes on its way to its result,
+/// each sealed as a receipt of its own ([`ConnectedDemandLedger::record_prefixes`]).
+/// What the computation charged before the first prefix stays its own, and
+/// is put back on its recording when this ends, however it ends.
+pub(crate) struct PrefixRecording<'l, 'a> {
+    ledger: &'l ConnectedDemandLedger<'a>,
+    depth: usize,
+    held: Option<CostScope>,
+}
+
+impl PrefixRecording<'_, '_> {
+    /// Seal what the computation charged since the previous prefix — with
+    /// that prefix's receipt as its prerequisite — as the receipt of the
+    /// prefix `identity` it just materialized, paid for this demand and
+    /// `request` exactly as a computed result is; the computation goes on
+    /// with that receipt as its prerequisite. `None` when the computation
+    /// is no longer the recording on top.
+    pub(crate) fn seal_prefix(
+        &self,
+        identity: CostIdentity,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> Option<Arc<DemandCostReceipt>> {
+        let ledger = self.ledger;
+        let receipt = {
+            let mut scopes = ledger.scopes.borrow_mut();
+            if scopes.len() != self.depth {
+                return None;
+            }
+            let scope = scopes.last_mut()?;
+            let receipt = DemandCostReceipt::with_tail_steps(
+                identity.clone(),
+                std::mem::take(&mut scope.exclusive),
+                std::mem::take(&mut scope.prerequisites),
+                std::mem::take(&mut scope.tail_steps),
+            );
+            scope.prerequisites.push(CostDependency {
+                receipt: Arc::clone(&receipt),
+                nesting: Nesting::InPlace,
+            });
+            receipt
+        };
+        ledger.paid.borrow_mut().insert(identity.clone());
+        if let Some(request) = request {
+            ledger.mark_request_paid(request, identity);
+        }
+        Some(receipt)
+    }
+}
+
+impl Drop for PrefixRecording<'_, '_> {
+    fn drop(&mut self) {
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        let mut scopes = self.ledger.scopes.borrow_mut();
+        if let Some(scope) = scopes
+            .get_mut(self.depth - 1)
+            .filter(|scope| scope.identity == held.identity)
+        {
+            scope.exclusive = scope.exclusive.saturating_add(held.exclusive);
+            scope.prerequisites.extend(held.prerequisites);
+            scope.tail_steps = scope.tail_steps.max(held.tail_steps);
+        }
     }
 }
 

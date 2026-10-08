@@ -537,6 +537,15 @@ impl SemanticGraphStore {
     > {
         use verter_session_query::retention::{ChargeClass, RetentionAdmission};
         let account = self.retention_account();
+        // Each member's receipt is charged once, for as long as it lives.
+        for entry in members {
+            if let Err(refusal) = entry.cost_receipt.reserve_retention(account) {
+                crate::cache_runtime::admission::propagate_non_admission(
+                    refusal.non_admission_reason(),
+                );
+                return Err(refusal);
+            }
+        }
         // The published root already owns the SCC carrier and self-root
         // allocations. The member batch therefore reserves only each
         // member's distinct allocation; including the first member's

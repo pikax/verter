@@ -3265,6 +3265,13 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                             ),
                         key: backfill_w,
                         node: child_node,
+                        cost_receipt: Some(verter_type_engine::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+                                verter_type_engine::project_semantic_dispatch::cost_receipt::CostIdentity::new(
+                                    b"prefix".to_vec(),
+                                ),
+                                Default::default(),
+                                Vec::new(),
+                            )),
                     }],
                     satisfied_projection:
                         verter_type_engine::semantic_query::demand::MaterializedSet::empty(),
@@ -4643,6 +4650,15 @@ fn prefix_backfill_carries_traced_facts() {
     let parent_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
         Arc::clone(&parent_traced_facts),
     );
+    // What the walk sealed for the prefix as it reached it.
+    let prefix_receipt =
+        verter_type_engine::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+            verter_type_engine::project_semantic_dispatch::cost_receipt::CostIdentity::new(
+                b"prefix".to_vec(),
+            ),
+            Default::default(),
+            Vec::new(),
+        );
     let _ = store.execute_cooperative(
         &host,
         parent_key.clone(),
@@ -4660,6 +4676,7 @@ fn prefix_backfill_carries_traced_facts() {
             pending_prefix_backfills: vec![PrefixBackfill {
                 key: prefix_key.clone(),
                 node: prefix_node,
+                cost_receipt: Some(Arc::clone(&prefix_receipt)),
                 satisfied_projection:
                     verter_type_engine::semantic_query::demand::MaterializedSet::single(
                         super::family::requested_point_for_key(&prefix_key),
@@ -4696,8 +4713,8 @@ fn prefix_backfill_carries_traced_facts() {
          the parent's path-precise facts.",
         facts = prefix_carrier.facts.as_ref()
     );
-    // The prefix is a product of the parent's build: a read of it pays
-    // what that build cost, never nothing.
+    // A read of the prefix pays what reaching the prefix cost, never the
+    // whole parent build it was materialized on the way to.
     let receipt_of = |key: &SemanticQueryKey| {
         store
             .published_carrier_for_tests(key)
@@ -4705,8 +4722,12 @@ fn prefix_backfill_carries_traced_facts() {
             .cost_receipt
     };
     assert!(
-        Arc::ptr_eq(&receipt_of(&prefix_key), &receipt_of(&parent_key)),
-        "the backfilled prefix carries the publishing build's receipt"
+        Arc::ptr_eq(&receipt_of(&prefix_key), &prefix_receipt),
+        "the backfilled prefix carries its own receipt"
+    );
+    assert!(
+        !Arc::ptr_eq(&receipt_of(&prefix_key), &receipt_of(&parent_key)),
+        "not the publishing build's"
     );
 }
 

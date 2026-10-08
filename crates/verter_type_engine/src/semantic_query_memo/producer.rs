@@ -158,7 +158,10 @@ pub struct ClaimAttempt {
     /// The claimant could not pay for the stored result: it computes the
     /// key itself rather than read it warm again, so it trips where a cold
     /// evaluation would. The stored candidate stays for any claimant that
-    /// can pay.
+    /// can pay. A recomputing claim produces on a flight of its own: a
+    /// concurrent producer's result is one more result it may not be able
+    /// to pay for, and waiting on it would move its trip to wherever that
+    /// producer happens to be.
     recompute: bool,
 }
 
@@ -167,6 +170,13 @@ impl ClaimAttempt {
     /// claimant was refused the stored result's receipt.
     pub(crate) fn recompute(&mut self) {
         self.recompute = true;
+        self.independent = true;
+    }
+
+    /// Produce the key on a flight of this claim's own: the result another
+    /// producer delivered answers that producer's demand, not this one.
+    fn produce_alone(&mut self) {
+        self.independent = true;
     }
 
     /// Whether the claim computes the key rather than reads it warm.
@@ -409,7 +419,9 @@ impl SemanticGraphStore {
     }
 
     /// Begin one logical claim of `key` that computes it rather than read
-    /// it warm: the claimant was refused the stored result's receipt.
+    /// it warm: the claimant was refused the stored result's receipt. The
+    /// claim produces on a flight of its own and never subscribes to
+    /// another producer of the key.
     /// `Err` is the cancellation read.
     pub fn begin_query_recompute(
         &self,
@@ -419,16 +431,9 @@ impl SemanticGraphStore {
         if flags.is_cancelled() {
             return Err(cancelled_cache_read());
         }
-        let independent = matches!(
-            &key,
-            SemanticQueryKey::Relate {
-                inference_context: Some(_),
-                ..
-            }
-        );
         Ok(ClaimAttempt {
             prepared: PreparedKeyHandle::prepare(key),
-            independent,
+            independent: true,
             miss_recorded: false,
             retries: 0,
             recompute: true,
@@ -665,6 +670,19 @@ impl Subscription<'_> {
         let cost_receipt = state.cost_receipt.clone();
         // Release the flight lock before any tracer fan-out.
         drop(state);
+
+        // An incomplete result without a receipt is where the PRODUCER's
+        // demand stopped — its allowance, its request's fuse, its
+        // cancellation — not a fact about the key. A subscriber under its
+        // own allowance is answered by its own evaluation, which stops
+        // where that evaluation would alone, and pays what it computes.
+        if result_is_partial
+            && cost_receipt.is_none()
+            && !matches!(result, QueryResult::Recursive(_))
+        {
+            attempt.produce_alone();
+            return Joined::Retry;
+        }
 
         // View validation. A subscriber is not guaranteed to run under the
         // producer's view: two requests can carry the same key under
@@ -976,6 +994,11 @@ impl SettledProducer<'_> {
             // this loop skips the rest.
             if published {
                 for backfill in std::mem::take(&mut self.pending_prefix_backfills) {
+                    // A prefix is served only with the receipt of its own
+                    // computation; one the walk sealed none for is not kept.
+                    let Some(prefix_receipt) = backfill.cost_receipt else {
+                        continue;
+                    };
                     self.admission_linearized |= store.warm_publish_one_if_absent(
                         ctx,
                         flags,
@@ -985,7 +1008,7 @@ impl SettledProducer<'_> {
                         self.dep_signature.clone(),
                         Arc::clone(&self.self_root_canonicals),
                         backfill.satisfied_projection,
-                        Arc::clone(&cost_receipt),
+                        prefix_receipt,
                         &self.inflight,
                         self.admission_linearized,
                     );

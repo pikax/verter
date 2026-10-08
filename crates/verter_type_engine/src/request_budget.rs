@@ -97,29 +97,31 @@ impl PaidOperations {
         self.set.contains(identity)
     }
 
-    pub(crate) fn insert(&mut self, identity: CostIdentity) {
+    /// Add `identity`: `true` when it was not paid yet.
+    pub(crate) fn insert(&mut self, identity: CostIdentity) -> bool {
         let hash = identity.hash_value();
         if self.set.insert(identity.clone()) {
             self.order.push(identity);
             self.digest = self.digest.wrapping_add(spread(hash));
+            true
+        } else {
+            false
         }
     }
 
-    pub(crate) fn extend(&mut self, identities: impl IntoIterator<Item = CostIdentity>) {
-        for identity in identities {
-            self.insert(identity);
-        }
+    /// Add `identities`: how many were not paid yet.
+    pub(crate) fn extend(&mut self, identities: impl IntoIterator<Item = CostIdentity>) -> usize {
+        identities
+            .into_iter()
+            .filter(|identity| self.insert(identity.clone()))
+            .count()
     }
 }
 
 /// Mix one identity hash before it joins the set digest, so the digest of
 /// a set is not the plain sum of its members' hashes.
 fn spread(hash: u64) -> u64 {
-    let mut x = hash ^ (hash >> 33);
-    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    x ^ (x >> 33)
+    xxhash_rust::xxh3::xxh3_64(&hash.to_le_bytes())
 }
 
 /// What a request had spent when a demand entered it: the operations, and
@@ -132,15 +134,25 @@ pub struct RequestEntryState {
     paid_digest: u64,
 }
 
-/// A request's spent state in full: what a sealed refusal's evaluation
-/// entered at, and what it left behind.
+/// What one evaluation did to a request it ran in alone: the state it
+/// entered the request at, and its own effects from there — the operations
+/// it spent and the computations it paid.
 #[derive(Debug, Clone)]
 pub struct RequestSpent {
     pub(crate) entry: RequestEntryState,
     /// The computations paid when the evaluation entered.
     pub(crate) entry_paid: Box<[CostIdentity]>,
+    /// The operations the evaluation spent.
     pub(crate) operations: usize,
+    /// The computations the evaluation paid, in the order it paid them.
     pub(crate) paid: Box<[CostIdentity]>,
+}
+
+impl RequestSpent {
+    /// The computations it names, entered at and paid.
+    pub(crate) fn identities(&self) -> usize {
+        self.entry_paid.len() + self.paid.len()
+    }
 }
 
 impl RequestBudget {
@@ -162,8 +174,12 @@ impl RequestBudget {
     }
 
     /// Record `identities` as paid: their computations ran in this request.
-    pub(crate) fn mark_operations_paid(&self, identities: impl IntoIterator<Item = CostIdentity>) {
-        self.operations_paid.lock().extend(identities);
+    /// Returns how many were not paid yet.
+    pub(crate) fn mark_operations_paid(
+        &self,
+        identities: impl IntoIterator<Item = CostIdentity>,
+    ) -> usize {
+        self.operations_paid.lock().extend(identities)
     }
 
     /// Admit a replay that owes `operations` for the computations `unpaid`:
@@ -207,55 +223,75 @@ impl RequestBudget {
         }
     }
 
-    /// Whether the request is now exactly where `spent`'s evaluation
-    /// entered it: the same operations spent and the same computations
-    /// paid. The digest rejects in constant time; equal digests compare the
-    /// sets in full.
-    pub(crate) fn is_at(&self, spent: &RequestSpent) -> bool {
-        let entry = &spent.entry;
+    /// What the evaluation that entered at `entry` and itself did `effects`
+    /// left the request at — `None` unless the request is exactly `entry`
+    /// plus those effects: anything else that spent in the request while
+    /// the evaluation ran (a sibling root, a worker of the same request)
+    /// makes where the evaluation stopped depend on it, so it is not the
+    /// evaluation's alone.
+    pub(crate) fn spent_alone_since(
+        &self,
+        entry: RequestEntryState,
+        effects: crate::project_semantic_dispatch::connected_demand::RequestEffects,
+    ) -> Option<RequestSpent> {
         let paid = self.operations_paid.lock();
-        self.projection_ops_executed.load(Ordering::Relaxed) == entry.operations
-            && paid.set.len() == entry.paid_len
-            && paid.digest == entry.paid_digest
-            && spent.entry_paid.len() == paid.set.len()
-            && spent
+        let alone = self.projection_ops_executed.load(Ordering::Relaxed)
+            == entry.operations.checked_add(effects.operations)?
+            && paid.order.len() == entry.paid_len.checked_add(effects.paid)?;
+        alone.then(|| RequestSpent {
+            entry_paid: paid.order[..entry.paid_len].iter().cloned().collect(),
+            paid: paid.order[entry.paid_len..].iter().cloned().collect(),
+            entry,
+            operations: effects.operations,
+        })
+    }
+
+    /// Leave this request as `spent`'s evaluation left it — its operations
+    /// spent and its computations paid — if the request is exactly where
+    /// that evaluation entered it: the same operations spent and the same
+    /// computations paid. The check and the application are one step under
+    /// the paid set's lock, with the operation counter moved by a
+    /// compare-exchange from the entered value, so no spending between them
+    /// can be absorbed: `false`, changing nothing, when the request is
+    /// anywhere else. The digest rejects in constant time; equal digests
+    /// compare the sets in full.
+    pub(crate) fn apply_refusal(&self, spent: &RequestSpent) -> bool {
+        let entry = &spent.entry;
+        let mut paid = self.operations_paid.lock();
+        if paid.set.len() != entry.paid_len
+            || paid.digest != entry.paid_digest
+            || spent.entry_paid.len() != entry.paid_len
+            || !spent
                 .entry_paid
                 .iter()
                 .all(|identity| paid.contains(identity))
-    }
-
-    /// What the request spent since `entry`: the evaluation that entered at
-    /// `entry`, and what it left the request at.
-    pub(crate) fn spent_since(&self, entry: RequestEntryState) -> RequestSpent {
-        let paid = self.operations_paid.lock();
-        RequestSpent {
-            entry_paid: paid.order[..entry.paid_len.min(paid.order.len())]
-                .iter()
-                .cloned()
-                .collect(),
-            entry,
-            operations: self.projection_ops_executed.load(Ordering::Relaxed),
-            paid: paid.order.iter().cloned().collect(),
+        {
+            return false;
         }
-    }
-
-    /// Leave this request as a sealed refusal's evaluation left it: its
-    /// operations spent and its computations paid.
-    pub(crate) fn restore(&self, spent: &RequestSpent) {
-        self.projection_ops_executed
-            .fetch_max(spent.operations, Ordering::Relaxed);
-        self.operations_paid
-            .lock()
-            .extend(spent.paid.iter().cloned());
+        let Some(left) = entry.operations.checked_add(spent.operations) else {
+            return false;
+        };
+        if self
+            .projection_ops_executed
+            .compare_exchange(entry.operations, left, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        paid.extend(spent.paid.iter().cloned());
+        true
     }
 
     /// Spend the rest of the request's operations: a replay this request
     /// could not pay for ends it as the operation that passed the cap
-    /// would have, so every later entry sees the fuse tripped.
-    pub(crate) fn exhaust(&self) {
+    /// would have, so every later entry sees the fuse tripped. Returns the
+    /// operations it spent.
+    pub(crate) fn exhaust(&self) -> usize {
         let tripped = self.effective_projection_op_budget().saturating_add(1);
-        self.projection_ops_executed
+        let before = self
+            .projection_ops_executed
             .fetch_max(tripped, Ordering::Relaxed);
+        tripped.saturating_sub(before)
     }
 
     /// Increment the projection-op counter and return `true` when the

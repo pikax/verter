@@ -250,6 +250,10 @@ pub enum ShallowDiagnostic {
 pub struct PrefixBackfill {
     pub key: crate::semantic_query::SemanticQueryKey,
     pub node: SemanticNodeId,
+    /// What computing the prefix cost: the hops up to it, sealed as the
+    /// walk reached it. A prefix without one is never published.
+    pub cost_receipt:
+        Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
     /// The §3.4 materialised-record set for this prefix hop — a single
     /// `Demand::navigate(prefix_path)` point (intermediate hops run
     /// `Navigate`, §3.5). Recorded by the walk, NOT the nominal request:
@@ -1074,6 +1078,15 @@ pub(super) fn is_canonical_index_digits(key: &str) -> bool {
     }
 }
 
+/// The prefix receipts a path walk seals as it materializes each linear
+/// prefix ([`PathWalker::record_prefix_receipts`]).
+struct WalkPrefixes<'a, 'b> {
+    recording: crate::project_semantic_dispatch::connected_demand::PrefixRecording<'a, 'b>,
+    base: SemanticNodeId,
+    path: Arc<[PathSegment]>,
+    receipts: Vec<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
+}
+
 pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabilities> {
     dispatch: &'a ProjectSemanticDispatch<'b, C>,
     /// The walker carries the full [`ProjectionReductionContext`]
@@ -1108,6 +1121,10 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// skips those positions because the per-arm result is not the
     /// canonical answer for `(base, path[..k], mode)`.
     pub(super) intermediate_nodes: Vec<Option<SemanticNodeId>>,
+    /// The receipts of the linear prefixes this walk materializes, sealed
+    /// as it reaches each one ([`Self::record_prefix_receipts`]). `None`
+    /// when the walk records no prefixes.
+    prefixes: Option<WalkPrefixes<'a, 'b>>,
     /// Diagnostics produced by the shallow-mode terminal-surface
     /// synthesiser. Empty for `Identity` / `Navigate` / `Expanded` /
     /// `Skeleton` walks. Drained by `build_project_path` into the
@@ -1484,6 +1501,77 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .merge(crate::semantic_query::ResultCompleteness::Partial(reasons));
     }
 
+    /// Seal a receipt for each linear prefix of `path` from `base` this
+    /// walk materializes, as it reaches it: the prefix's receipt costs the
+    /// hops up to it, with the previous prefix's as its prerequisite, so a
+    /// prefix the walk backfills is charged what computing it alone would
+    /// charge, never the whole walk. Recorded on the computation recording
+    /// on top — the path build running this walk; nothing is recorded when
+    /// none is, or when the path has no prefix shorter than itself.
+    pub(super) fn record_prefix_receipts(
+        &mut self,
+        base: SemanticNodeId,
+        path: &Arc<[PathSegment]>,
+    ) {
+        if path.len() < 2 {
+            return;
+        }
+        let ledger = &self.dispatch.connected_demand;
+        self.prefixes = ledger
+            .record_prefixes(ledger.recording_depth())
+            .map(|recording| WalkPrefixes {
+                recording,
+                base,
+                path: Arc::clone(path),
+                receipts: Vec::new(),
+            });
+    }
+
+    /// The receipts of the prefixes this walk materialized, in path order,
+    /// ending the recording: what the build charged outside the prefixes
+    /// is its own again.
+    pub(super) fn take_prefix_receipts(
+        &mut self,
+    ) -> Vec<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>> {
+        self.prefixes
+            .take()
+            .map(|prefixes| prefixes.receipts)
+            .unwrap_or_default()
+    }
+
+    /// Record the node the walk reached after consuming one more segment
+    /// (`None` at an arm split), sealing its prefix's receipt while the
+    /// walk is still on its linear run.
+    fn record_intermediate(&mut self, node: Option<SemanticNodeId>) {
+        let index = self.intermediate_nodes.len();
+        self.intermediate_nodes.push(node);
+        let Some(prefixes) = self.prefixes.as_mut() else {
+            return;
+        };
+        // The linear run ends at the first arm split, and the terminal is
+        // the build's own result, not a prefix.
+        if node.is_none() || index + 1 >= prefixes.path.len() || prefixes.receipts.len() != index {
+            self.prefixes = None;
+            return;
+        }
+        let key = SemanticQueryKey::ProjectPath {
+            base: prefixes.base,
+            path: Arc::from(prefixes.path[..=index].to_vec().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
+        };
+        let identity = crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
+            crate::semantic_query_memo::prepared::PreparedKeyHandle::prepare(key)
+                .as_task_producer(),
+        );
+        let request = crate::request_context::current_request_budget();
+        match prefixes.recording.seal_prefix(identity, request.as_deref()) {
+            Some(receipt) => prefixes.receipts.push(receipt),
+            None => self.prefixes = None,
+        }
+    }
+
     pub(super) fn new(
         dispatch: &'a ProjectSemanticDispatch<'b, C>,
         context: crate::semantic_query::ProjectionReductionContext,
@@ -1497,6 +1585,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             visited_nodes: rustc_hash::FxHashSet::default(),
             arm_probes: Vec::new(),
             intermediate_nodes: Vec::new(),
+            prefixes: None,
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: crate::semantic_query::ResultCompleteness::Complete,
@@ -1899,7 +1988,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             meta,
             Arc::clone(self.fence),
         );
-        self.intermediate_nodes.push(Some(value));
+        self.record_intermediate(Some(value));
         value
     }
 
@@ -2885,7 +2974,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     );
                     current = member_value;
                     index += 1;
-                    self.intermediate_nodes.push(Some(current));
+                    self.record_intermediate(Some(current));
                 }
                 SemanticNodeData::Object(surface) => {
                     let known_key = match segment {
@@ -3101,7 +3190,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             // Record the linear member-step
                             // intermediate. `intermediate_nodes[i]` is the
                             // node reached after consuming path[..i+1].
-                            self.intermediate_nodes.push(Some(current));
+                            self.record_intermediate(Some(current));
                         }
                         None => {
                             // A key no property names reads, in the
@@ -3255,7 +3344,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                     // Arm-split — backfill cannot publish a
                     // single canonical answer for `path[..k]` here.
-                    self.intermediate_nodes.push(None);
+                    self.record_intermediate(None);
                     return;
                 }
                 SemanticNodeData::Intersection(arms) => {
@@ -3363,7 +3452,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                     // Arm-split — backfill cannot publish a
                     // single canonical answer for `path[..k]` here.
-                    self.intermediate_nodes.push(None);
+                    self.record_intermediate(None);
                     return;
                 }
                 SemanticNodeData::Conditional {
@@ -3447,7 +3536,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // `path[..k]` here (the wrapper Conditional is the
                     // terminal result for the rest of the path, not an
                     // intermediate hop the prefix peek can reuse).
-                    self.intermediate_nodes.push(None);
+                    self.record_intermediate(None);
                     return;
                 }
                 SemanticNodeData::KeyOf { base } => {
@@ -3744,7 +3833,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             );
                             current = narrowed;
                             index += 1;
-                            self.intermediate_nodes.push(Some(current));
+                            self.record_intermediate(Some(current));
                             continue;
                         }
                     }
@@ -4100,7 +4189,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         index += 1;
                         // Record the per-segment intermediate node —
                         // the linear member-step backfill contract.
-                        self.intermediate_nodes.push(Some(current));
+                        self.record_intermediate(Some(current));
                         continue;
                     }
                     // Fallback: whole-surface MappedType resolution.
@@ -4231,7 +4320,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             }
                         };
                         index += 1;
-                        self.intermediate_nodes.push(Some(current));
+                        self.record_intermediate(Some(current));
                         continue;
                     }
                     current = resolved;
@@ -4488,7 +4577,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             );
                             current = member_node;
                             index += 1;
-                            self.intermediate_nodes.push(Some(current));
+                            self.record_intermediate(Some(current));
                             continue;
                         }
                     }
@@ -4597,7 +4686,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                         current = length;
                         index += 1;
-                        self.intermediate_nodes.push(Some(current));
+                        self.record_intermediate(Some(current));
                         continue;
                     }
                     if member.is_some() {
@@ -4701,7 +4790,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             );
                             current = value;
                             index += 1;
-                            self.intermediate_nodes.push(Some(current));
+                            self.record_intermediate(Some(current));
                         }
                         None => {
                             results.push(self.opaque_miss());
@@ -4765,7 +4854,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             );
                             current = element;
                             index += 1;
-                            self.intermediate_nodes.push(Some(current));
+                            self.record_intermediate(Some(current));
                         }
                         None => {
                             results.push(self.opaque_miss());

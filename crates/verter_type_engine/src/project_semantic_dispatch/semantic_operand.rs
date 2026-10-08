@@ -601,7 +601,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(budget) = crate::request_context::current_request_budget() else {
             return Ok(());
         };
-        if !budget.check_projection_op_count() {
+        if !self.connected_demand.spend_request_operation(&budget) {
             return Ok(());
         }
         crate::request_context::mark_request_result_inference_budget_exceeded();

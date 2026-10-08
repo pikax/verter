@@ -192,6 +192,12 @@ impl SemanticGraphStore {
         result: SemanticNodeId,
         receipt: std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     ) {
+        // The receipt lives as long as the entry: it is charged to the
+        // retention account like every retained receipt, and an entry the
+        // account declines is not kept.
+        if receipt.reserve_retention(self.retention_account()).is_err() {
+            return;
+        }
         let key = (node, context);
         match self.evaluate_deferred_memo.entry(key) {
             Entry::Occupied(_) => {

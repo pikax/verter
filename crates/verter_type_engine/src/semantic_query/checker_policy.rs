@@ -264,6 +264,11 @@ impl ConditionalTail {
         Self { steps }
     }
 
+    /// The tail steps the run has counted.
+    pub(crate) const fn steps(&self) -> u32 {
+        self.steps
+    }
+
     /// Take one more tail step of `operation`: its refusal when the run
     /// reaches `budget` there.
     pub(crate) fn step(

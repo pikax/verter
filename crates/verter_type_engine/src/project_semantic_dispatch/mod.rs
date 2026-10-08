@@ -548,7 +548,7 @@ pub(super) struct PublishedResult {
     /// The published read; its receipt is the build's sealed one.
     read: CacheRead<QueryResult<SemanticQueryValue>>,
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
-    /// The workspace's edit clocks when the build published.
+    /// The workspace's edit clocks the build computed under.
     published_at: WorkspaceEdit,
 }
 
@@ -973,13 +973,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// trips exactly where a cold evaluation would; outside any demand
     /// nothing is charged.
     ///
-    /// `nesting` is the native query nesting the read stands for: 1 for a
-    /// synchronous entry, 0 for a need the continuation runtime holds on
-    /// the heap.
+    /// `nesting` is how the read is reached: a synchronous entry, a drive's
+    /// root, a need a continuation frame holds on the heap, or a read in
+    /// place.
     pub(super) fn admit_served(
         &self,
         receipt: &Arc<cost_receipt::DemandCostReceipt>,
-        nesting: u16,
+        nesting: cost_receipt::Nesting,
     ) -> ServedAdmission {
         if !self.connected_demand.is_active() {
             return ServedAdmission::Admitted;
@@ -987,7 +987,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let request = crate::request_context::current_request_budget();
         match self
             .connected_demand
-            .replay_admit(receipt, request.as_deref())
+            .replay_admit(receipt, request.as_deref(), nesting)
         {
             Ok(()) => {
                 self.connected_demand.record_prerequisite(receipt, nesting);
@@ -1006,7 +1006,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// falls back to the cooperative query, which does.
     pub(super) fn admits_served(&self, receipt: &crate::semantic_query::ReadReceipt) -> bool {
         receipt.priced().is_none_or(|receipt| {
-            matches!(self.admit_served(receipt, 1), ServedAdmission::Admitted)
+            matches!(
+                self.admit_served(receipt, cost_receipt::Nesting::Entered),
+                ServedAdmission::Admitted
+            )
         })
     }
 
@@ -1020,7 +1023,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &SemanticQueryKey,
         read: CacheRead<QueryResult<SemanticQueryValue>>,
-        nesting: u16,
+        nesting: cost_receipt::Nesting,
     ) -> Result<CacheRead<QueryResult<SemanticQueryValue>>, cost_receipt::ReplayRefusal> {
         let Some(receipt) = read.receipt.priced() else {
             return Ok(read);
@@ -1046,12 +1049,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             cost_receipt::ReplayRefusal::Work => PartialReasonSet::PROJECTION_WORK_LIMIT,
             cost_receipt::ReplayRefusal::Operations => {
                 if let Some(request) = crate::request_context::current_request_budget() {
-                    request.exhaust();
+                    let spent = request.exhaust();
+                    self.connected_demand.note_request_effects(spent, 0);
                 }
                 PartialReasonSet::PROJECTION_WORK_LIMIT
             }
-            cost_receipt::ReplayRefusal::Bytes => PartialReasonSet::CONNECTED_MEMORY_LIMIT,
             cost_receipt::ReplayRefusal::Depth => PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
+            // An operation allowance stops the operation, not the demand:
+            // the entry is the operation's resource stop.
+            cost_receipt::ReplayRefusal::InstantiationDepth
+            | cost_receipt::ReplayRefusal::TailSteps => {
+                return widen_node_cache_read(
+                    self.connected_limit_read(key, PartialReasonSet::OPERATION_BUDGET),
+                );
+            }
             cost_receipt::ReplayRefusal::Tripped => PartialReasonSet::empty(),
         };
         let reasons = self.trip_connected_demand(reason);
@@ -1069,7 +1080,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn own_published_read(
         &self,
         key: &SemanticQueryKey,
-        nesting: u16,
+        nesting: cost_receipt::Nesting,
     ) -> Option<(
         CacheRead<QueryResult<SemanticQueryValue>>,
         verter_session_query::facts::fact_cache::ReadSetSignature,
@@ -1088,18 +1099,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some((read, carrier))
     }
 
-    /// Keep a result this dispatcher's build just published. Only a
+    /// Keep a result this dispatcher's build just published, under the
+    /// edit clocks `computed_at` sampled before the build ran: an edit that
+    /// landed while it ran (or after, before this call) moved the clocks
+    /// past that sample, so the result is never served after it. Only a
     /// priced read is kept: a result is served only with its receipt.
     pub(super) fn keep_published(
         &self,
         key: &SemanticQueryKey,
         read: &CacheRead<QueryResult<SemanticQueryValue>>,
         carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
+        computed_at: WorkspaceEdit,
     ) {
         if read.receipt.priced().is_none() {
             return;
         }
-        let published_at = self.workspace_edit();
+        let published_at = computed_at;
         self.published_results.borrow_mut().insert(
             key.clone(),
             PublishedResult {
@@ -1123,12 +1138,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The refusal identity of a root entry, when the entry is an isolated
     /// root: a fresh connected demand, recording nothing, outside every
     /// checker obligation and operand force. The identity is the canonical
-    /// query, the interned allowances it answers to, and the state of the
-    /// request it enters — what the request has already spent and paid —
-    /// so a refusal is never inherited by a demand that would be charged
-    /// differently. Any other entry inherits its context's spent
-    /// allowance, and its refusal is that context's: it is returned, never
-    /// sealed.
+    /// query, the allowances it answers to, and the state of the request it
+    /// enters — what the request has already spent and paid — so a refusal
+    /// is never inherited by a demand that would be charged differently.
+    /// Any other entry inherits its context's spent allowance, and its
+    /// refusal is that context's: it is returned, never sealed.
     pub(super) fn isolated_root_identity(
         &self,
         connected_guard: &connected_demand::ConnectedDemandGuard<'_>,
@@ -1143,39 +1157,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let request = crate::request_context::current_request_budget();
         Some(IsolatedRoot {
-            prepared: crate::semantic_query_memo::prepared::PreparedKeyHandle::prepare(key.clone()),
-            profile: self.connected_demand.profile(request.as_deref()),
+            key: key.clone(),
+            profile: self.connected_demand.profile_spec(request.as_deref()),
             request_entry: request.as_deref().map(|request| request.entry_state()),
             generation: self.snapshot.flags().current_project_generation(),
         })
     }
 
-    /// The sealed refusal answering `root`, if one validates.
-    pub(super) fn sealed_refusal_for(
+    /// Answer the isolated root `root` from its sealed refusal, when one
+    /// validates for the caller's view and the request is exactly where the
+    /// failed evaluation entered it: no evaluation, only the facts the
+    /// failed evaluation observed (for the caller's tracers) and the
+    /// charges it made (for the demand and its request). The request's
+    /// state is checked and the evaluation's charges applied to it in one
+    /// step, so a sibling root spending in between makes this root evaluate
+    /// for itself rather than answer from a state it no longer enters.
+    pub(super) fn answer_from_sealed_refusal(
         &self,
         root: &IsolatedRoot,
-    ) -> Option<Arc<crate::semantic_query_memo::refusal_summary::RefusalSummary>> {
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         let request = crate::request_context::current_request_budget();
-        self.graph()
-            .sealed_refusal(self.ctx, &root.prepared, &root.profile, request.as_deref())
-    }
-
-    /// Answer an isolated root from its sealed refusal: no evaluation, only
-    /// the facts the failed evaluation observed (for the caller's tracers)
-    /// and the charges it made (for the demand and its request).
-    pub(super) fn deliver_sealed_refusal(
-        &self,
-        summary: &crate::semantic_query_memo::refusal_summary::RefusalSummary,
-    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        let summary =
+            self.graph()
+                .sealed_refusal(self.ctx, &root.key, &root.profile, request.as_deref())?;
         let prefix = &summary.prefix;
+        match (request.as_deref(), prefix.request.as_ref()) {
+            (Some(request), Some(spent)) => {
+                if !request.apply_refusal(spent) {
+                    return None;
+                }
+            }
+            (None, None) => {}
+            _ => return None,
+        }
         self.connected_demand
             .apply_refusal(prefix.work, prefix.bytes, prefix.trip);
-        if let (Some(request), Some(spent)) = (
-            crate::request_context::current_request_budget(),
-            prefix.request.as_ref(),
-        ) {
-            request.restore(spent);
-        }
         crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&summary.carrier);
         let read = summary.read.clone();
         self.fold_local_partial_completeness(read.partial_reasons);
@@ -1184,24 +1200,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             read.cache_suppress,
             read.partial_reason_classes(),
         );
-        read
+        Some(read)
     }
 
-    /// Seal the refusal an isolated root answered with: kept only when the
-    /// demand tripped on an allowance (never on cancellation) and its
-    /// evaluation's facts were traced soundly.
+    /// Seal the refusal an isolated root answered with. A refusal is kept
+    /// only when it is a function of the root's identity alone: the demand
+    /// tripped its work or depth allowance, or an operation exhausted its
+    /// own allowance, and nothing else stopped it — never a cancellation,
+    /// a superseded generation, a torn view, a fault, nor the soft
+    /// construction-byte rail, whose refusal depends on context. Its
+    /// evaluation's facts must have been traced soundly, and the root must
+    /// have been the only thing spending its request while it ran.
     pub(super) fn seal_root_refusal(
         &self,
         root: IsolatedRoot,
         read: &CacheRead<QueryResult<SemanticQueryValue>>,
         traced: TracedFacts,
     ) {
-        let Some(trip) = self.connected_demand_trip() else {
+        use crate::semantic_query::PartialReasonSet;
+        if !read.result_is_partial {
             return;
-        };
-        if !read.result_is_partial
-            || trip.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
-        {
+        }
+        let context_dependent = [
+            PartialReasonSet::CANCELLED,
+            PartialReasonSet::SUPERSEDED_GENERATION,
+            PartialReasonSet::UNSTABLE_STATE,
+            PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+            PartialReasonSet::CONNECTED_MEMORY_LIMIT,
+        ];
+        let trip = self.connected_demand_trip();
+        let reasons = read.partial_reason_classes();
+        if context_dependent.iter().any(|reason| {
+            reasons.contains(*reason) || trip.is_some_and(|trip| trip.contains(*reason))
+        }) {
+            return;
+        }
+        let trip = trip.unwrap_or_default();
+        if trip.is_empty() && !reasons.contains(PartialReasonSet::OPERATION_BUDGET) {
             return;
         }
         let (work, bytes) = self.connected_demand.charged();
@@ -1209,26 +1245,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::request_context::current_request_budget(),
             root.request_entry,
         ) {
-            (Some(request), Some(entry)) => Some(request.spent_since(entry)),
+            (Some(request), Some(entry)) => {
+                match request.spent_alone_since(entry, self.connected_demand.request_effects()) {
+                    Some(spent) => Some(spent),
+                    // Another root of the request spent while this one ran:
+                    // where it stopped is not this root's alone.
+                    None => return,
+                }
+            }
             (None, None) => None,
             _ => return,
         };
         self.graph().seal_refusal(
             self.ctx,
-            root.prepared,
-            root.profile,
+            root.key,
+            cost_receipt::BudgetProfile::intern(root.profile),
             root.generation,
-            crate::semantic_query_memo::refusal_summary::RefusalSummary {
-                read: read.clone(),
-                carrier: traced.carrier,
-                self_root_canonicals: traced.self_roots,
-                prefix: crate::semantic_query_memo::refusal_summary::RefusalPrefix {
+            crate::semantic_query_memo::refusal_summary::RefusalSummary::new(
+                read.clone(),
+                traced.carrier,
+                traced.self_roots,
+                crate::semantic_query_memo::refusal_summary::RefusalPrefix {
                     work,
                     bytes,
                     request,
                     trip,
                 },
-            },
+            ),
         );
     }
 
@@ -3056,8 +3099,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if semantic_query_counts_toward_projection_budget(key) {
             if let Some(budget) = crate::request_context::current_request_budget() {
-                self.connected_demand.accrue_operation();
-                if budget.check_projection_op_count() {
+                if self.connected_demand.spend_request_operation(&budget) {
                     let reasons = self.trip_connected_demand(
                         crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
                     );
@@ -3360,11 +3402,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let isolated_root = plain_read
             .then(|| self.isolated_root_identity(&connected_guard, &key))
             .flatten();
-        if let Some(summary) = isolated_root
+        if let Some(read) = isolated_root
             .as_ref()
-            .and_then(|root| self.sealed_refusal_for(root))
+            .and_then(|root| self.answer_from_sealed_refusal(root))
         {
-            return self.deliver_sealed_refusal(&summary);
+            return read;
         }
 
         // Carrier-subject normalization: when the query SUBJECT is a `BareRef`
@@ -3790,6 +3832,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut refused = None;
         let cache_read = loop {
             let recompute = refused.is_some();
+            // A result this dispatcher published answers before any claim:
+            // a claim installs a flight other tasks may join, so it is
+            // taken only to produce.
+            if let Some((read, carrier)) = plain_read
+                .then(|| self.own_published_read(&key, cost_receipt::Nesting::Entered))
+                .flatten()
+            {
+                crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&carrier);
+                break read;
+            }
             break match graph.acquire_query(
                 self.ctx,
                 flags,
@@ -3798,31 +3850,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &mut capture,
                 recompute,
             ) {
-                Acquired::Read(read) => match self.served_read(&key, read, 1) {
-                    Ok(read) => read,
-                    Err(refusal) if !recompute => {
-                        refused = Some(refusal);
-                        continue;
+                Acquired::Read(read) => {
+                    match self.served_read(&key, read, cost_receipt::Nesting::Entered) {
+                        Ok(read) => read,
+                        Err(refusal) if !recompute => {
+                            refused = Some(refusal);
+                            continue;
+                        }
+                        Err(refusal) => self.refused_replay_read(&key, refusal),
                     }
-                    Err(refusal) => self.refused_replay_read(&key, refusal),
-                },
+                }
                 Acquired::Recursive(recursion) => SemanticGraphStore::recursion_read(
                     recursion,
                     (sentinel.take().expect("the claim ends once"))(),
                 ),
                 Acquired::Produce(lease) => {
-                    if let Some((read, carrier)) = plain_read
-                        .then(|| self.own_published_read(&key, 1))
-                        .flatten()
-                    {
-                        // Dropping the lease releases the flight unpublished.
-                        drop(lease);
-                        crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
-                            &carrier,
-                        );
-                        break read;
-                    }
                     let traced_build = traced_build.take().expect("the claim ends once");
+                    // The clocks the build computes under: an edit landing
+                    // while it runs moves them, so its result is never
+                    // served as current past that edit.
+                    let computed_at = self.workspace_edit();
                     // The build's charges are its own exclusive cost; its
                     // receipt is what every later read of the result pays.
                     let request = crate::request_context::current_request_budget();
@@ -3834,7 +3881,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let receipt =
                         recording.finish(!output.completeness.is_partial(), request.as_deref());
                     if let Some(receipt) = &receipt {
-                        self.connected_demand.record_prerequisite(receipt, 1);
+                        self.connected_demand
+                            .record_prerequisite(receipt, cost_receipt::Nesting::Entered);
                     }
                     match lease.settle(self.ctx, flags, output, receipt.clone()) {
                         Err(read) => read,
@@ -3844,7 +3892,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 let published = settled.published_carrier();
                                 let read = settled.complete(self.ctx, &mut capture);
                                 if let Some(carrier) = published {
-                                    self.keep_published(&key, &read, carrier);
+                                    self.keep_published(&key, &read, carrier, computed_at);
                                 }
                                 read
                             }
@@ -3904,8 +3952,8 @@ impl TracedFacts {
 /// The refusal identity of an isolated root entry
 /// ([`ProjectSemanticDispatch::isolated_root_identity`]).
 pub(super) struct IsolatedRoot {
-    prepared: crate::semantic_query_memo::prepared::PreparedKeyHandle,
-    profile: cost_receipt::BudgetProfile,
+    key: SemanticQueryKey,
+    profile: cost_receipt::BudgetProfileSpec,
     request_entry: Option<crate::request_budget::RequestEntryState>,
     generation: u64,
 }
