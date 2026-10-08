@@ -178,6 +178,7 @@ fn contracts(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)] // one fixture's fields, assembled in one place
 fn finish(
     name: String,
     src: Src,
@@ -754,7 +755,7 @@ pub fn flat_matrix(n: usize, callbacks: usize, broken: bool) -> Fixture {
 /// outermost positive and its own narrowed member. With `broken`, each
 /// callback reads the next level's (not yet narrowed) member instead.
 pub fn nested_matrix(n: usize, broken: bool) -> Fixture {
-    assert!(n % 4 == 0 && n >= 8);
+    assert!(n.is_multiple_of(4) && n >= 8);
     let levels = n / 4;
     let mut decls = String::from(
         "type S = 'a' | 'b' | 'c' | 'd';\n\

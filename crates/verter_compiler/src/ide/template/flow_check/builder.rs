@@ -529,14 +529,14 @@ impl<'s, 'p, 'alloc> Builder<'s, 'p, 'alloc> {
         }
         // The producer drops the whitespace around an expression; the resolved
         // expression spans exactly its authored runs.
-        let authored = pieces.iter().filter_map(|piece| match piece {
+        let mut authored = pieces.iter().filter_map(|piece| match piece {
             Piece::Authored(span) => Some(*span),
             Piece::Synthetic(_) => None,
         });
         let span = authored
             .clone()
             .next()
-            .zip(authored.last())
+            .zip(authored.next_back())
             .map_or(Span::new(span.start, span.start), |(first, last)| {
                 Span::new(first.start, last.end)
             });
