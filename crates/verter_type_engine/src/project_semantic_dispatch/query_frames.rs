@@ -513,6 +513,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The recursion carrier answering `key`.
     fn recursion_delivery(&self, key: &SemanticQueryKey, recursion: Recursion) -> QueryDelivery {
+        if recursion == Recursion::WaitCycle {
+            self.connected_demand.note_schedule_cut();
+        }
         let read = SemanticGraphStore::recursion_read(recursion, self.query_sentinel(key));
         QueryDelivery {
             read: self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none()),
@@ -672,11 +675,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .take()
             .expect("a stepped frame owns its tracer")
             .finish();
-        let traced_soundly = matches!(
-            finalise,
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_)
-        );
-        let output = self.close_cold_build(
+        let (output, rooting) = self.close_cold_build(
             output.into(),
             std::mem::take(&mut frame.taint),
             finalise,
@@ -690,8 +689,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .expect("a producing frame owns its lease");
         if frame.depth == 1 {
             // The drive's root: its entry seals a refusal on these facts.
-            *self.driven_root_traced.borrow_mut() =
-                super::TracedFacts::of_output(&output, traced_soundly);
+            *self.driven_root_traced.borrow_mut() = super::TracedFacts::of_output(&output, rooting);
         }
         let request = crate::request_context::current_request_budget();
         let receipt = if std::mem::take(&mut frame.recording) {

@@ -681,6 +681,11 @@ pub struct SemanticGraphStore {
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
     /// Sealed refusals of isolated root demands — see `refusal_summary`.
     pub(super) refusal_summaries: refusal_summary::RefusalSummaryTable,
+    /// Test-only: run by a dispatch's synchronous entry once it holds a
+    /// key's producer claim, before the producer builds — see
+    /// [`Self::set_produce_hook_for_tests`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) produce_hook: parking_lot::Mutex<Option<test_support::ProduceHookForTests>>,
 }
 
 /// Exact memo candidate admitted by one cold-winner publication.

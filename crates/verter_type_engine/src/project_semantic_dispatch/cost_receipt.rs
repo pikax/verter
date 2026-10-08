@@ -4,7 +4,7 @@
 //! computation once per connected demand, however many consumers share it.
 //!
 //! A receipt records only its OWN (exclusive) work units, construction
-//! bytes and request operations, plus shared references to the receipts of
+//! bytes, request operations and structured relation comparisons, plus shared references to the receipts of
 //! the computations it consumed. The cost of demanding a result is the sum
 //! of the exclusive costs over the DISTINCT computations its receipt
 //! reaches: a set sum, so neither sharing, warmth nor the order siblings are
@@ -35,10 +35,11 @@ use verter_session_query::retention::{
 };
 
 /// The revision of the logical cost model: what a work unit, a
-/// construction byte and a request operation are charged for. A receipt is
-/// meaningful only under the revision that recorded it, and a refusal only
-/// under the [`BudgetProfile`] that refused it.
-pub const COST_MODEL_REVISION: u32 = 1;
+/// construction byte, a request operation and a relation comparison are
+/// charged for. A receipt is meaningful only under the revision that
+/// recorded it, and a refusal only under the [`BudgetProfile`] that refused
+/// it.
+pub const COST_MODEL_REVISION: u32 = 2;
 
 /// The exact identity of one semantic computation: the canonical demand
 /// and the materialized point it answers, as the memo's prepared key
@@ -151,13 +152,16 @@ fn digest_of(bytes: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(bytes)
 }
 
-/// The logical cost of work: its work units, its construction bytes and
-/// the request operations (the per-request projection fuse) it spent.
+/// The logical cost of work: its work units, its construction bytes, the
+/// request operations (the per-request projection fuse) it spent, and the
+/// structured comparisons its relation checks recorded (the checker's
+/// relation-complexity count).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LogicalUsage {
     pub work: u64,
     pub bytes: u64,
     pub operations: u64,
+    pub comparisons: u64,
 }
 
 impl LogicalUsage {
@@ -167,6 +171,7 @@ impl LogicalUsage {
             work: self.work.checked_add(other.work)?,
             bytes: self.bytes.checked_add(other.bytes)?,
             operations: self.operations.checked_add(other.operations)?,
+            comparisons: self.comparisons.checked_add(other.comparisons)?,
         })
     }
 
@@ -176,6 +181,7 @@ impl LogicalUsage {
             work: self.work.saturating_add(other.work),
             bytes: self.bytes.saturating_add(other.bytes),
             operations: self.operations.saturating_add(other.operations),
+            comparisons: self.comparisons.saturating_add(other.comparisons),
         }
     }
 }
@@ -523,6 +529,10 @@ pub enum ReplayRefusal {
     /// A tail run of the closure took more steps than the reader's tail
     /// allowance admits.
     TailSteps,
+    /// The closure's structured comparisons would pass what remains of the
+    /// relation-complexity allowance of the check the reader is in (all of
+    /// it, outside any check).
+    RelationComparisons,
     /// The demand already tripped, or its request was cancelled.
     Tripped,
 }

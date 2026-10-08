@@ -230,6 +230,11 @@ pub struct ConnectedDemandLedger<'a> {
     /// What this connected demand itself did to its request: the request
     /// operations it spent and the computations it was first to pay.
     request_effects: Cell<RequestEffects>,
+    /// Whether one of this demand's reads was answered with a recursion
+    /// carrier another task's schedule decided — a cross-task wait cycle,
+    /// or a joined producer's own re-entry: the demand went on without work
+    /// it alone would have done, so where it stopped is not its own.
+    schedule_cut: Cell<bool>,
 }
 
 /// What one connected demand did to its request
@@ -288,6 +293,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             scope_open: Cell::new(false),
             paid: RefCell::new(FxHashSet::default()),
             request_effects: Cell::new(RequestEffects::default()),
+            schedule_cut: Cell::new(false),
         }
     }
 
@@ -330,6 +336,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             self.bytes_used.set(0);
             self.paid.borrow_mut().clear();
             self.request_effects.set(RequestEffects::default());
+            self.schedule_cut.set(false);
             self.scopes.borrow_mut().clear();
             self.scope_open.set(false);
             self.query_depth.set(0);
@@ -430,6 +437,18 @@ impl<'a> ConnectedDemandLedger<'a> {
         }
         self.commit(units);
         Ok(())
+    }
+
+    /// Add one structured relation comparison to the open recording, if
+    /// any: a comparison the computation on top recorded itself.
+    #[inline(always)]
+    pub(crate) fn accrue_comparison(&self) {
+        if !self.scope_open.get() {
+            return;
+        }
+        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+            scope.exclusive.comparisons = scope.exclusive.comparisons.saturating_add(1);
+        }
     }
 
     /// Add `work` units and `bytes` to the open recording, if any: the cost
@@ -660,6 +679,20 @@ impl ConnectedDemandLedger<'_> {
         self.request_effects.get()
     }
 
+    /// Record that one of this demand's reads was answered with a recursion
+    /// carrier another task's schedule decided.
+    pub(crate) fn note_schedule_cut(&self) {
+        if self.active.get() {
+            self.schedule_cut.set(true);
+        }
+    }
+
+    /// Whether another task's schedule has cut this demand's evaluation:
+    /// what it answered depends on that schedule.
+    pub(crate) fn was_schedule_cut(&self) -> bool {
+        self.schedule_cut.get()
+    }
+
     /// Mark `identity` paid in `request`, counting it as this demand's
     /// effect when the demand is the first to pay it there.
     fn mark_request_paid(
@@ -772,13 +805,35 @@ impl ConnectedDemandLedger<'_> {
     /// Construction bytes are charged but never refuse: a complete result
     /// is not rejected at handoff for the bytes it took to build. Replayed
     /// charges belong to no open recording — the consumer records the
-    /// receipt as a prerequisite instead.
+    /// receipt as a prerequisite instead. The unpaid closure's structured
+    /// comparisons must fit a fresh relation check's whole allowance.
     pub fn replay_admit(
         &self,
         receipt: &Arc<DemandCostReceipt>,
         request: Option<&crate::request_budget::RequestBudget>,
         nesting: Nesting,
     ) -> Result<(), ReplayRefusal> {
+        self.replay_admit_within(
+            receipt,
+            request,
+            nesting,
+            crate::semantic_query::checker_policy::relation_comparisons(),
+        )
+        .map(|_| ())
+    }
+
+    /// [`Self::replay_admit`] for a reader whose relation check, if any,
+    /// has `comparison_room` structured comparisons left: the unpaid
+    /// closure's comparisons — what its cold run would have recorded into
+    /// that check — must fit it. `Ok` carries those comparisons, which the
+    /// reader's check records as its cold run would have.
+    pub(crate) fn replay_admit_within(
+        &self,
+        receipt: &Arc<DemandCostReceipt>,
+        request: Option<&crate::request_budget::RequestBudget>,
+        nesting: Nesting,
+        comparison_room: u32,
+    ) -> Result<u32, ReplayRefusal> {
         let tripped = self.tripped.get();
         if !tripped.is_empty() || self.cancellation.is_cancelled() {
             return Err(ReplayRefusal::Tripped);
@@ -837,6 +892,11 @@ impl ConnectedDemandLedger<'_> {
                     } else {
                         exclusive.operations
                     },
+                    comparisons: if demand_paid {
+                        0
+                    } else {
+                        exclusive.comparisons
+                    },
                 };
                 total = total.checked_add(owed).ok_or(ReplayRefusal::Work)?;
                 // The rest of the closure can only add to what is owed.
@@ -845,6 +905,9 @@ impl ConnectedDemandLedger<'_> {
                 }
                 if total.operations > operation_room {
                     return Err(ReplayRefusal::Operations);
+                }
+                if total.comparisons > u64::from(comparison_room) {
+                    return Err(ReplayRefusal::RelationComparisons);
                 }
                 if !demand_paid {
                     unpaid.push(identity);
@@ -884,7 +947,8 @@ impl ConnectedDemandLedger<'_> {
         self.bytes_used
             .set(self.bytes_used.get().saturating_add(total.bytes as usize));
         self.paid.borrow_mut().extend(unpaid);
-        Ok(())
+        // Within `comparison_room`, so within `u32`.
+        Ok(u32::try_from(total.comparisons).unwrap_or(u32::MAX))
     }
 }
 

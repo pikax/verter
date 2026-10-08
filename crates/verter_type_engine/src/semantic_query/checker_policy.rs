@@ -333,6 +333,17 @@ impl RelationComplexity {
         self.recorded += 1;
         Ok(())
     }
+
+    /// The structured comparisons the check may still record.
+    pub(crate) fn remaining(&self) -> u32 {
+        relation_comparisons().saturating_sub(self.recorded)
+    }
+
+    /// Record `comparisons` structured comparisons a replayed result's cold
+    /// run recorded, already checked against [`Self::remaining`].
+    pub(crate) fn record_replayed(&mut self, comparisons: u32) {
+        self.recorded = self.recorded.saturating_add(comparisons);
+    }
 }
 
 /// One factor of a cross product, as `getCrossProductUnionSize` counts it: a

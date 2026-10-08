@@ -24,7 +24,7 @@
 //! pressure — the refusal is then returned, never sealed.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -127,12 +127,26 @@ pub(crate) struct RefusalSummaries {
     order: VecDeque<RefusalKey>,
 }
 
-/// The store field: the table, and how many summaries it holds, read
-/// without its lock by every isolated root while it is empty.
+/// The store field: the table, how many summaries it holds (read without
+/// its lock by every isolated root while it is empty), and how many times
+/// it has been cleared.
 #[derive(Default)]
 pub(crate) struct RefusalSummaryTable {
     table: Mutex<RefusalSummaries>,
     len: AtomicUsize,
+    /// Advanced under the table's lock by every clear: an evaluation that
+    /// entered before a clear finishes after it, and its summary — decided
+    /// against what the clear dropped — is never inserted.
+    clears: AtomicU64,
+}
+
+/// Where an isolated root entered the store: the project generation and
+/// the refusal table's clear count it evaluated under. Its refusal is
+/// sealed only while both still hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusalEntryState {
+    pub generation: u64,
+    pub clears: u64,
 }
 
 impl SemanticGraphStore {
@@ -170,26 +184,35 @@ impl SemanticGraphStore {
         .then_some(summary)
     }
 
+    /// Where an isolated root of `ctx`'s request enters the store now.
+    pub(crate) fn refusal_entry<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    ) -> RefusalEntryState {
+        RefusalEntryState {
+            generation: ctx.request_flags().current_project_generation(),
+            clears: self.refusal_summaries.clears.load(Ordering::Acquire),
+        }
+    }
+
     /// Seal `summary` as the refusal of the isolated root `key` under
-    /// `profile`, entered at project generation `entered_at`. Refused —
-    /// nothing kept — for a cancelled evaluation, an overflowed fact rail,
-    /// one the project moved under (a torn evaluation never becomes a
-    /// summary), or one the retention account declines to keep. Its facts
-    /// are revalidated at every delivery. A re-sealed refusal is the
-    /// newest.
+    /// `profile`, entered at `entered`. Refused — nothing kept — for an
+    /// overflowed fact rail, one the retention account declines to keep,
+    /// and, decided under the table's lock in the same step as the
+    /// insertion, a cancelled evaluation, one the project moved under, or
+    /// one the table was cleared under: a torn or superseded evaluation
+    /// never becomes a summary, however its completion interleaves with the
+    /// cancellation or the clear. Its facts are revalidated at every
+    /// delivery. A re-sealed refusal is the newest.
     pub(crate) fn seal_refusal<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         profile: BudgetProfile,
-        entered_at: u64,
+        entered: RefusalEntryState,
         mut summary: RefusalSummary,
     ) -> bool {
-        let flags = ctx.request_flags();
-        if summary.carrier.overflowed
-            || flags.is_cancelled()
-            || flags.current_project_generation() != entered_at
-        {
+        if summary.carrier.overflowed {
             return false;
         }
         match self
@@ -205,8 +228,19 @@ impl SemanticGraphStore {
             }
         }
         let key = (PreparedKeyHandle::prepare(key), profile);
+        let flags = ctx.request_flags();
         let evicted = {
             let mut summaries = self.refusal_summaries.table.lock();
+            if flags.is_cancelled()
+                || flags.current_project_generation() != entered.generation
+                || self.refusal_summaries.clears.load(Ordering::Acquire) != entered.clears
+            {
+                drop(summaries);
+                // The summary and its reservation are released outside the
+                // table's lock.
+                drop(summary);
+                return false;
+            }
             if summaries
                 .entries
                 .insert(key.clone(), Arc::new(summary))
@@ -244,6 +278,7 @@ impl SemanticGraphStore {
             let mut summaries = self.refusal_summaries.table.lock();
             summaries.order.clear();
             self.refusal_summaries.len.store(0, Ordering::Release);
+            self.refusal_summaries.clears.fetch_add(1, Ordering::AcqRel);
             std::mem::take(&mut summaries.entries)
         };
         drop(cleared);
@@ -255,15 +290,24 @@ impl SemanticGraphStore {
         self.refusal_summaries.table.lock().entries.len()
     }
 
+    /// Where an isolated root of `ctx`'s request enters the store now.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refusal_entry_for_tests<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    ) -> RefusalEntryState {
+        self.refusal_entry(ctx)
+    }
+
     /// Seal a request-less refusal of `key` under `profile`, entered at
-    /// project generation `entered_at`, through the production seal.
+    /// `entered`, through the production seal.
     #[cfg(any(test, feature = "test-support"))]
     pub fn seal_refusal_for_tests<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: crate::semantic_query::SemanticQueryKey,
         profile: BudgetProfile,
-        entered_at: u64,
+        entered: RefusalEntryState,
         read: CacheRead<QueryResult<SemanticQueryValue>>,
         carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
@@ -271,7 +315,7 @@ impl SemanticGraphStore {
             ctx,
             key,
             profile,
-            entered_at,
+            entered,
             RefusalSummary::new(
                 read,
                 carrier,

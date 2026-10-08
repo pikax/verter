@@ -26,7 +26,7 @@ fn usage(work: u64, bytes: u64) -> LogicalUsage {
     LogicalUsage {
         work,
         bytes,
-        operations: 0,
+        ..LogicalUsage::default()
     }
 }
 
@@ -537,8 +537,8 @@ fn a_replay_spends_request_operations_once_per_request() {
             identity(name),
             LogicalUsage {
                 work: 1,
-                bytes: 0,
                 operations: count,
+                ..LogicalUsage::default()
             },
             Vec::new(),
         )
@@ -979,6 +979,74 @@ fn an_operation_refusal_answers_its_repeat_without_evaluating() {
     assert!(semantic_misses(&host) > before, "another profile evaluates");
 }
 
+/// A relation warmed under the checker's comparison allowance never
+/// answers a demand under a smaller one: its receipt carries the structured
+/// comparisons its cold run recorded, so a demand that could not record
+/// them is refused the replay and relates the pair itself — stopping where
+/// a cold run under that allowance stops, on a fresh host as on a warm one.
+#[test]
+fn a_warm_relation_answers_to_the_comparison_allowance_its_cold_run_needed() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let cold_limited = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = reversed_relation_key(&host, 40, false);
+        with_relation_comparisons_for_tests(50, || root_read(&host, &key, full))
+    };
+    assert!(
+        cold_limited.partial
+            && cold_limited
+                .reasons
+                .contains(PartialReasonSet::OPERATION_BUDGET),
+        "50 comparisons cannot relate 40 reversed arms cold: {cold_limited:?}"
+    );
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 40, false);
+    assert!(
+        !root_read(&host, &key, full).partial,
+        "the checker's allowance relates them, and keeps the relation"
+    );
+    let warm_limited = with_relation_comparisons_for_tests(50, || root_read(&host, &key, full));
+    assert_eq!(
+        (
+            warm_limited.answer,
+            warm_limited.partial,
+            warm_limited.reasons
+        ),
+        (
+            cold_limited.answer,
+            cold_limited.partial,
+            cold_limited.reasons
+        ),
+        "a smaller allowance answers as its cold run does, never from the warm relation"
+    );
+}
+
+/// The same boundary through the public named-symbol request: a request
+/// under a small comparison allowance answers its conditional as a cold
+/// request under it does, whatever a request under the checker's allowance
+/// warmed before it.
+#[test]
+fn a_named_symbol_under_a_smaller_comparison_allowance_answers_as_cold() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let limited =
+        |host: &VerterHost| with_relation_comparisons_for_tests(50, || probe_answer(host));
+    let cold = limited(&bench_host(1_000_000, &reversed_unions(40)));
+    let host = bench_host(1_000_000, &reversed_unions(40));
+    let warmed = probe_answer(&host);
+    assert_ne!(
+        warmed, cold,
+        "the checker's allowance relates the arms, a smaller one does not"
+    );
+    assert_eq!(
+        limited(&host),
+        cold,
+        "after a warm request at the full allowance"
+    );
+}
+
 /// A refusal is sealed at the request state its root entered: the
 /// operations the request had spent and the computations it had paid. A
 /// root entering a request at that state answers from it whatever runs
@@ -1032,6 +1100,60 @@ fn a_refusal_answers_only_the_request_state_it_entered_at() {
     }
 }
 
+/// A cancelled request never answers from a sealed refusal: an exact
+/// repeat of a sealed root under an otherwise identical request that is
+/// cancelled takes the cancellation terminal — as it would with no summary
+/// kept — and spends nothing of its request.
+#[test]
+fn a_cancelled_repeat_never_answers_from_a_sealed_refusal() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 40, false);
+    let refused = {
+        let _request = fresh_request(1);
+        root_read(&host, &key, 64)
+    };
+    assert!(refused.partial && !refused.reasons.contains(PartialReasonSet::CANCELLED));
+    {
+        let _request = fresh_request(2);
+        assert_eq!(
+            root_read(&host, &key, 64),
+            refused,
+            "an uncancelled repeat answers the sealed refusal"
+        );
+    }
+
+    let cancelled =
+        verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+            3,
+            Arc::from(BENCH_SCENARIO),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1_000_000,
+        );
+    cancelled.cancel();
+    let _request = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
+    let answer = root_read(&host, &key, 64);
+    assert!(
+        answer.partial && answer.reasons.contains(PartialReasonSet::CANCELLED),
+        "a cancelled repeat is answered as cancelled: {answer:?}"
+    );
+    assert_eq!(
+        (answer.work, answer.bytes),
+        (0, 0),
+        "and charged nothing of the sealed evaluation"
+    );
+    assert_eq!(
+        verter_type_engine::request_context::current_request_budget()
+            .expect("the cancelled request is installed")
+            .projection_ops_executed_count(),
+        0,
+        "and spent none of its request's operations"
+    );
+}
+
 /// A demand served the sub-results an earlier demand computed before its
 /// allowance ran out is charged exactly as its cold run, wherever the
 /// earlier demand stopped: a stored evaluation's receipt carries everything
@@ -1057,13 +1179,49 @@ fn a_partly_warm_demand_is_charged_as_its_cold_run() {
     }
 }
 
-/// Demands under different allowances, and demands sharing producers with
-/// one another, run concurrently against one store: each answers and is
-/// charged exactly as it is alone and cold. A follower that joins another
-/// demand's producer pays the producer's receipt, and one that cannot pay
-/// computes the result itself.
+/// Waits until `ready` holds, failing the test past a deadline rather than
+/// hanging it.
+fn wait_until(what: &str, ready: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Removes a store's producer hook however the test ends.
+struct ProduceHookGuard<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
+
+impl<'s> ProduceHookGuard<'s> {
+    fn install(
+        store: &'s verter_type_engine::semantic_query_memo::SemanticGraphStore,
+        hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests,
+    ) -> Self {
+        store.set_produce_hook_for_tests(Some(hook));
+        Self(store)
+    }
+}
+
+impl Drop for ProduceHookGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set_produce_hook_for_tests(None);
+    }
+}
+
+/// Followers that join another demand's producer under different
+/// allowances answer and are charged exactly as they are alone and cold.
+/// The producer, under the production allowance, is held once it claims the
+/// root until both followers are parked on its flight; released, it
+/// publishes a complete, priced result. The follower that can pay replays
+/// its receipt and is charged as its cold run; the one that cannot is
+/// refused the joined result and computes the root itself, stopping where
+/// its cold run stops.
 #[test]
 fn concurrent_profiles_and_followers_are_charged_as_alone() {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
     let alone = |work: usize| {
         let host = super::checker_probe_lane_tests::default_probe_host();
@@ -1080,35 +1238,151 @@ fn concurrent_profiles_and_followers_are_charged_as_alone() {
 
     let host = super::checker_probe_lane_tests::default_probe_host();
     let key = reversed_relation_key(&host, 24, false);
-    let allowances = [48, full, 48, full, full, 48];
-    let barrier = std::sync::Barrier::new(allowances.len());
-    let answers: Vec<RootAnswer> = std::thread::scope(|scope| {
-        let workers: Vec<_> = allowances
-            .iter()
-            .map(|&work| {
-                let (host, key, barrier) = (&host, &key, &barrier);
-                scope.spawn(move || {
-                    barrier.wait();
-                    root_read(host, key, work)
-                })
+    let store = Arc::clone(host.project_type_store().semantic_graph());
+    let claimed = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicBool::new(false));
+    let joined_before = store.test_joiner_on_condvar_count();
+    let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
+        let (key, claimed, held, store) = (
+            key.clone(),
+            claimed.clone(),
+            held.clone(),
+            Arc::clone(&store),
+        );
+        Arc::new(move |claimed_key, _| {
+            if claimed_key != &key || held.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            claimed.store(true, Ordering::SeqCst);
+            wait_until("both followers to park on the producer's flight", || {
+                store.test_joiner_on_condvar_count() >= joined_before + 2
+            });
+        })
+    };
+    let _hook = ProduceHookGuard::install(&store, hook);
+    let (producer, followers) = std::thread::scope(|scope| {
+        let producer = scope.spawn(|| root_read(&host, &key, full));
+        wait_until("the producer to claim the root", || {
+            claimed.load(Ordering::SeqCst)
+        });
+        let followers: Vec<_> = [48, full]
+            .into_iter()
+            .map(|work| {
+                let (host, key) = (&host, &key);
+                (work, scope.spawn(move || root_read(host, key, work)))
             })
             .collect();
-        workers
+        let producer = producer.join().expect("the producer completes");
+        let followers: Vec<_> = followers
             .into_iter()
-            .map(|worker| worker.join().expect("a concurrent demand completes"))
-            .collect()
+            .map(|(work, follower)| (work, follower.join().expect("a follower completes")))
+            .collect();
+        (producer, followers)
     });
-    for (work, answer) in allowances.iter().zip(answers) {
-        let expected = if *work == full {
+    assert!(
+        store.test_joiner_on_condvar_count() >= joined_before + 2,
+        "both followers joined the producer's flight"
+    );
+    assert_eq!(
+        producer, complete_alone,
+        "the producer answers as it does alone"
+    );
+    for (work, answer) in followers {
+        let expected = if work == full {
             &complete_alone
         } else {
             &refused_alone
         };
         assert_eq!(
             &answer, expected,
-            "a concurrent demand with {work} units answers and is charged as it is alone"
+            "a follower with {work} units answers and is charged as it is alone"
         );
     }
+}
+
+/// A root whose evaluation a cross-task wait cycle cut never seals its
+/// refusal: the read the cycle answered with a recursion carrier is work
+/// another task's schedule withheld, so where the root stopped is not its
+/// own. Two tasks each produce one key and need the other's; the root then
+/// runs out of its allowance. No refusal is kept, and the root evaluated
+/// alone afterwards answers as a solo cold run.
+#[test]
+fn a_root_cut_by_a_wait_cycle_never_seals_its_refusal() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let solo = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = reversed_relation_key(&host, 40, false);
+        root_read(&host, &key, 64)
+    };
+    assert!(solo.partial, "64 units cannot relate 40 arms");
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let k = reversed_relation_key(&host, 40, false);
+    let j = reversed_relation_key(&host, 40, true);
+    let store = Arc::clone(host.project_type_store().semantic_graph());
+    let k_claimed = Arc::new(AtomicBool::new(false));
+    let j_claimed = Arc::new(AtomicBool::new(false));
+    let cut = Arc::new(AtomicBool::new(false));
+    let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
+        let (k, j) = (k.clone(), j.clone());
+        let (k_claimed, j_claimed, cut, store) = (
+            k_claimed.clone(),
+            j_claimed.clone(),
+            cut.clone(),
+            Arc::clone(&store),
+        );
+        Arc::new(move |claimed, nested| {
+            if claimed == &k && !k_claimed.swap(true, Ordering::SeqCst) {
+                // K's producer: once J's producer waits on K, need J.
+                wait_until("J's producer to claim J", || {
+                    j_claimed.load(Ordering::SeqCst)
+                });
+                wait_until("J's producer to wait on K", || {
+                    store.wait_graph_counts_for_tests().1 >= 1
+                });
+                nested(j.clone());
+                cut.store(true, Ordering::SeqCst);
+            } else if claimed == &j && !j_claimed.load(Ordering::SeqCst) {
+                // J's producer: need K, which K's producer holds.
+                wait_until("K's producer to claim K", || {
+                    k_claimed.load(Ordering::SeqCst)
+                });
+                j_claimed.store(true, Ordering::SeqCst);
+                nested(k.clone());
+            }
+        })
+    };
+    let hook = ProduceHookGuard::install(&store, hook);
+    let refused = std::thread::scope(|scope| {
+        let refused = scope.spawn(|| root_read(&host, &k, 64));
+        let other = scope.spawn(|| root_read(&host, &j, full));
+        let refused = refused.join().expect("K's root completes");
+        other.join().expect("J's root completes");
+        refused
+    });
+    drop(hook);
+    assert!(
+        cut.load(Ordering::SeqCst),
+        "K's producer needed J across the cycle"
+    );
+    assert!(refused.partial, "K's root still runs out of its allowance");
+    assert_eq!(
+        store.refusal_summary_count_for_tests(),
+        0,
+        "a refusal a wait cycle cut is never sealed"
+    );
+    let misses = semantic_misses(&host);
+    let repeat = root_read(&host, &k, 64);
+    assert!(
+        semantic_misses(&host) > misses,
+        "the repeat evaluates for itself"
+    );
+    assert_eq!(
+        (repeat.answer, repeat.partial, repeat.reasons),
+        (solo.answer, solo.partial, solo.reasons),
+        "and answers as the root does alone"
+    );
 }
 
 /// The refusal table is bounded: past its cap the oldest refusal is
@@ -1117,7 +1391,6 @@ fn concurrent_profiles_and_followers_are_charged_as_alone() {
 /// that is not its allowance: neither ever becomes a refusal.
 #[test]
 fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
-    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
     use verter_type_engine::semantic_query::{
         CacheRead, PartialReasonSet, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryKey,
         SemanticQueryValue,
@@ -1162,13 +1435,13 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     };
     let carrier =
         || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));
-    let generation = host.request_flags().current_project_generation();
+    let entry = store.refusal_entry_for_tests(&host);
     for name in 0..=REFUSAL_SUMMARY_CAP {
         assert!(store.seal_refusal_for_tests(
             &host,
             key(name),
             profile.clone(),
-            generation,
+            entry,
             refusal(),
             carrier(),
         ));
@@ -1197,7 +1470,10 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
             &host,
             torn.clone(),
             profile.clone(),
-            generation.wrapping_sub(1),
+            verter_type_engine::semantic_query_memo::refusal_summary::RefusalEntryState {
+                generation: entry.generation.wrapping_sub(1),
+                ..entry
+            },
             refusal(),
             carrier(),
         ),
@@ -1220,7 +1496,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
                 &host,
                 cancelled_key.clone(),
                 profile.clone(),
-                generation,
+                entry,
                 refusal(),
                 carrier(),
             ),
@@ -1246,7 +1522,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
             &host,
             key(0),
             profile.clone(),
-            generation,
+            exhausted.refusal_entry_for_tests(&host),
             refusal(),
             carrier(),
         ),
@@ -1254,4 +1530,31 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     );
     assert_eq!(exhausted.refusal_summary_count_for_tests(), 0);
     assert!(store.retention_account().snapshot().retained_bytes > 0);
+
+    // An evaluation that entered before the table was cleared finishes
+    // after the clear: its refusal, decided against what the clear
+    // dropped, is never inserted. One entering after the clear is.
+    let before_clear = store.refusal_entry_for_tests(&host);
+    store.invalidate_all();
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert!(
+        !store.seal_refusal_for_tests(
+            &host,
+            key(0),
+            profile.clone(),
+            before_clear,
+            refusal(),
+            carrier(),
+        ),
+        "a refusal entered before a clear is never sealed after it"
+    );
+    assert!(!store.has_sealed_refusal_for_tests(&host, key(0), &profile));
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key(0),
+        profile.clone(),
+        store.refusal_entry_for_tests(&host),
+        refusal(),
+        carrier(),
+    ));
 }

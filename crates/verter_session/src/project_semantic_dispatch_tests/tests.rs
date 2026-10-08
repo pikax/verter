@@ -2362,6 +2362,78 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
     );
 }
 
+/// A budget-refused build whose tracer finalised cleanly but whose observed
+/// self-roots conflict — one canonical seen at two whole hashes — carries
+/// its traced facts on a broadcast-only carrier, which never certifies a
+/// sealed refusal: the strict self-roots a delivery would validate were
+/// never completed. The same refusal over consistent self-roots does.
+#[test]
+fn a_torn_self_root_never_certifies_a_refusal() {
+    use verter_type_engine::project_semantic_dispatch::finalised_build_certifies_refusal_for_tests;
+    let canonical = "/w/refusal-roots.ts";
+    let host = host();
+    upsert_ts(&host, canonical, "export type Root = string;\n");
+    let before = host
+        .ensure_indexed_ready(canonical)
+        .expect("the root is indexed")
+        .whole_hash;
+    upsert_ts(&host, canonical, "export type Root = number;\n");
+    let after = host
+        .ensure_indexed_ready(canonical)
+        .expect("the root is indexed")
+        .whole_hash;
+    assert_ne!(before, after);
+    let refused = |roots: Vec<(Arc<str>, _)>| {
+        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
+            (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
+        output.mark_partial_with(
+            verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+        );
+        output.observed_self_roots = roots;
+        output
+    };
+    let traced = || {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(Vec::new()))
+    };
+
+    let torn = || {
+        refused(vec![
+            (Arc::from(canonical), before),
+            (Arc::from(canonical), after),
+        ])
+    };
+    let broadcast = finalise_traced_build_output(
+        &host,
+        torn(),
+        traced(),
+        &host.provenance.engine,
+        &CarrierNormalizationPrelude::none(),
+        false,
+    );
+    assert!(
+        broadcast.graph_carrier.is_some(),
+        "the torn build still broadcasts its traced facts to joiners"
+    );
+    assert!(
+        !finalised_build_certifies_refusal_for_tests(
+            &host,
+            torn(),
+            traced(),
+            &host.provenance.engine
+        ),
+        "a broadcast-only carrier never certifies a refusal"
+    );
+    assert!(
+        finalised_build_certifies_refusal_for_tests(
+            &host,
+            refused(vec![(Arc::from(canonical), after)]),
+            traced(),
+            &host.provenance.engine
+        ),
+        "a refusal over its completed self-roots does"
+    );
+}
+
 /// `ResolveDecl` for a known top-level type returns a value node. The
 /// memo is keyed by the semantic identity, so a second query for the
 /// same key returns the same [`SemanticNodeId`].
