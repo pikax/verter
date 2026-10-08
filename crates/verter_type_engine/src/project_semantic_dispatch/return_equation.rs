@@ -216,8 +216,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     return Some((result, Vec::new()));
                 }
-                self.graph()
-                    .get_flow_return_result(self.ctx, key)
+                self.warm_flow_return_read(key)
                     .map(|result| (result.return_type(), Vec::new()))
             }
             ReturnObligationIdentity::ResolveCall(key) => {
@@ -232,10 +231,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     return Some(result);
                 }
-                self.graph()
-                    .get_resolve_call_result(self.ctx, key)
-                    .as_ref()
-                    .map(resolved_call_fresh_target)
+                let served = self.graph().get_resolve_call_result(self.ctx, key)?;
+                if !self.admits_served(&served.receipt) {
+                    return None;
+                }
+                Some(resolved_call_fresh_target(&served.value))
             }
         }
     }

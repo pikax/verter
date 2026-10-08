@@ -17,7 +17,31 @@
 
 use super::*;
 
+/// A test's hook into a synchronous producer
+/// ([`SemanticGraphStore::set_produce_hook_for_tests`]): called with the
+/// claimed key and an entry that evaluates another key as a nested query of
+/// the producing demand, on the producing task.
+#[cfg(any(test, feature = "test-support"))]
+pub type ProduceHookForTests =
+    Arc<dyn Fn(&SemanticQueryKey, &dyn Fn(SemanticQueryKey)) + Send + Sync>;
+
 impl SemanticGraphStore {
+    /// Test-only: install `hook` to run whenever a dispatch's synchronous
+    /// entry has claimed a key's producer and is about to build it — the
+    /// point a test holds a producer at to let other tasks subscribe to it,
+    /// or to make the producer need another task's key. `None` removes it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn set_produce_hook_for_tests(&self, hook: Option<ProduceHookForTests>) {
+        *self.produce_hook.lock() = hook;
+    }
+
+    /// The installed producer hook, if any.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn produce_hook_for_tests(&self) -> Option<ProduceHookForTests> {
+        self.produce_hook.lock().clone()
+    }
+
     /// Test-only active execution-owner and wait-edge counts.
     #[cfg(any(test, feature = "test-support"))]
     pub fn wait_graph_counts_for_tests(&self) -> (usize, usize) {

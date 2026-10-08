@@ -536,6 +536,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/const_literal_widening_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/continuation_depth_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/cost_receipt_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/deep_input_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/differential_harness_tests.rs",

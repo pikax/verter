@@ -625,6 +625,13 @@ fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
                             ),
                             key: child_for_worker,
                             node: child_node,
+                            cost_receipt: Some(verter_type_engine::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+                                verter_type_engine::project_semantic_dispatch::cost_receipt::CostIdentity::new(
+                                    b"prefix".to_vec(),
+                                ),
+                                Default::default(),
+                                Vec::new(),
+                            )),
                         }],
                         satisfied_projection: MaterializedSet::single(
                             super::family::requested_point_for_key(&parent_for_worker),

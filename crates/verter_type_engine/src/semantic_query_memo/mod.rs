@@ -63,6 +63,7 @@ pub use nodes::AliasChainEnd;
 mod observability;
 mod origin_edges;
 pub mod prepared;
+pub mod refusal_summary;
 pub(crate) mod relation_memo;
 pub(crate) mod release;
 mod resolve_call_memo;
@@ -177,6 +178,7 @@ fn narrow_cache_read(
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
         partial_reasons: read.partial_reasons,
+        receipt: read.receipt,
     }
 }
 
@@ -189,6 +191,7 @@ pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue
         cache_suppress: true,
         result_is_partial: true,
         partial_reasons: crate::semantic_query::PartialReasonSet::CANCELLED,
+        receipt: crate::semantic_query::ReadReceipt::Unpriced,
     }
 }
 
@@ -654,7 +657,10 @@ pub struct SemanticGraphStore {
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
         ),
-        SemanticNodeId,
+        (
+            SemanticNodeId,
+            std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        ),
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(
@@ -673,6 +679,13 @@ pub struct SemanticGraphStore {
         DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>,
     pub(super) member_ordinal_index_fifo:
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
+    /// Sealed refusals of isolated root demands — see `refusal_summary`.
+    pub(super) refusal_summaries: refusal_summary::RefusalSummaryTable,
+    /// Test-only: run by a dispatch's synchronous entry once it holds a
+    /// key's producer claim, before the producer builds — see
+    /// [`Self::set_produce_hook_for_tests`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) produce_hook: parking_lot::Mutex<Option<test_support::ProduceHookForTests>>,
 }
 
 /// Exact memo candidate admitted by one cold-winner publication.
@@ -686,6 +699,9 @@ pub struct PublishedMemoCandidate {
     pub self_root_canonicals: Arc<[Arc<str>]>,
     pub validated_at_generation: u64,
     pub admission_seq: u64,
+    /// The receipt of the build that published the candidate: an SCC
+    /// component's members share it.
+    pub cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
 }
 
 /// Non-identity runtime evidence retained with a store-local node handle.
@@ -1452,6 +1468,7 @@ impl SemanticGraphStore {
     /// in the family memo) — no separate relation gate exists.
     pub fn invalidate_all(&self) -> usize {
         let _ = self.signatures.replace_epoch();
+        self.clear_refusal_summaries();
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
             let count = entries.values().map(FamilySlots::populated_count).sum();
@@ -1769,6 +1786,7 @@ impl SemanticGraphStore {
                     cache_suppress: false,
                     result_is_partial: false,
                     partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
                 }
             })
         });
@@ -1834,7 +1852,10 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
-        let (operand_evidence, deferred_carrier) = capture.parts();
+        let producer::CaptureParts {
+            evidence: operand_evidence,
+            carrier: deferred_carrier,
+        } = capture.parts();
         self.get_validated_value_impl(
             prepared.family(),
             prepared.slot(),
@@ -1923,6 +1944,7 @@ impl SemanticGraphStore {
                 cache_suppress: false,
                 result_is_partial: false,
                 partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
             }
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -2005,7 +2027,10 @@ impl SemanticGraphStore {
         prepared: &PreparedKeyHandle,
         capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
-        let (operand_evidence, deferred_carrier) = capture.parts();
+        let producer::CaptureParts {
+            evidence: operand_evidence,
+            carrier: deferred_carrier,
+        } = capture.parts();
         let key = prepared.key();
         let family = prepared.family();
         let slot = prepared.slot();
@@ -2068,6 +2093,7 @@ impl SemanticGraphStore {
             cache_suppress: false,
             result_is_partial: false,
             partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+            receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
         };
 
         // Instrumentation — fast-path attribution.
@@ -2136,6 +2162,7 @@ impl SemanticGraphStore {
             state.completed = None;
             state.dep_signature = None;
             state.graph_carrier = None;
+            state.cost_receipt = None;
             state.walker_diagnostics = None;
             state.cache_suppress = true;
             state.result_is_partial = true;
@@ -2216,6 +2243,7 @@ impl SemanticGraphStore {
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         satisfied_projection: &MaterializedSet,
+        cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         inflight: &Arc<FlightCell>,
     ) -> WarmPublishOutcome {
         let publishable = matches!(result, QueryResult::Value(_));
@@ -2263,6 +2291,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            cost_receipt: Arc::clone(cost_receipt),
         };
         // Aggregate retention admission, BEFORE the per-family cap plan:
         // a refusal must not displace a resident candidate to make room
@@ -2382,6 +2411,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(self_root_canonicals),
             validated_at_generation,
             admission_seq,
+            cost_receipt: Arc::clone(cost_receipt),
         };
         drop(entries);
         // Published cleanly under a non-aborted in-flight entry — the
@@ -2439,6 +2469,7 @@ impl SemanticGraphStore {
         dispatch_dep_signature: DepSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         satisfied_projection: MaterializedSet,
+        cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         parent_inflight: &Arc<FlightCell>,
         admission_already_linearized: bool,
     ) -> bool {
@@ -2507,6 +2538,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            cost_receipt,
         };
         // A narrower sibling slot is a fresh candidate with its own
         // carriers, so it is charged like any other publish. Under

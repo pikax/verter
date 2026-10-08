@@ -2889,6 +2889,30 @@ pub struct CompletedSccMember {
     pub(crate) inline_flight: Option<InlineMemberFlight>,
 }
 
+impl RelationDomainRuntime {
+    /// The session `id`. Sessions are appended in the order their ids are
+    /// allocated and never reordered, so the stack is sorted by id and a
+    /// lookup is a binary search, not a scan of every session opened in the
+    /// transaction.
+    pub(crate) fn session(&self, id: SessionId) -> Option<&InferenceSession> {
+        let position = self.session_position(id)?;
+        self.sessions.get(position)
+    }
+
+    /// [`Self::session`], mutably.
+    pub(crate) fn session_mut(&mut self, id: SessionId) -> Option<&mut InferenceSession> {
+        let position = self.session_position(id)?;
+        self.sessions.get_mut(position)
+    }
+
+    /// The stack position of the session `id`.
+    pub(crate) fn session_position(&self, id: SessionId) -> Option<usize> {
+        self.sessions
+            .binary_search_by_key(&id, |session| session.id)
+            .ok()
+    }
+}
+
 /// The relation domain runtime: inference sessions, relation provisional
 /// payloads, and relation redischarge/fixation state. The SCC topology it
 /// runs on lives in the generic [`ObligationRuntime`].
@@ -3258,6 +3282,13 @@ impl CheckerDispatchTransaction {
         let id = self.alloc_session_id();
         let mut session = InferenceSession::new(id, setup, reverse_projection);
         session.opened_at_depth = self.reentry().depth();
+        verter_debug_assert!(
+            self.relation
+                .sessions
+                .last()
+                .is_none_or(|last| last.id < id),
+            "sessions are appended in id order"
+        );
         self.relation.sessions.push(session);
         id
     }
@@ -3406,11 +3437,8 @@ impl CheckerDispatchTransaction {
         if depth == 0 {
             return;
         }
-        let first_non_owner = self
-            .relation
-            .sessions
-            .iter()
-            .find(|session| Some(session.id) == active_id)
+        let first_non_owner = active_id
+            .and_then(|id| self.relation.session(id))
             .map_or(0, |session| session.opened_at_depth);
         self.note_session_delta_range(first_non_owner, depth);
     }

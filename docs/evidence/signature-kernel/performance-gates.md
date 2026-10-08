@@ -295,7 +295,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   guard (24 nested query boundaries —
   `projection_stack_safety_tests.rs` →
   `connected_query_depth_limit_allows_boundary_and_trips_at_plus_one` and
-  `connected_query_depth_limit_is_distinct_diagnostic_and_is_not_cached`),
+  `connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal`),
   and the native nesting bound (24 nested inline flow evaluations —
   `flow_return_coverage_tests.rs` →
   `schedule::an_unpredicted_deep_chain_ends_in_the_typed_depth_refusal`,
