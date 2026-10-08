@@ -97,7 +97,7 @@ fn an_unread_marker_is_never_a_relation_fact() {
 }
 
 /// Two unmodelled values leave a conditional undecided in a probe (a
-/// function-local class's instance is an unmodelled position), and an
+/// function-local enum's value is an unmodelled position), and an
 /// undecided conditional is a typed gap: tsc 7.0.2 answers `'y'` for both
 /// probes in all four settings, so the lane publishes the partial
 /// `UNDECIDED_CONDITIONAL` demand, never a complete conditional and never a
@@ -106,7 +106,7 @@ fn an_unread_marker_is_never_a_relation_fact() {
 fn a_conditional_over_two_unmodelled_values_stays_undecided() {
     let fixture = "\
 type Ext<A, B> = [A] extends [B] ? 'y' : 'n';
-function locals() { class LB { x = 1 } class LS extends LB { y = 2 } return [new LS(), new LB()] as const; }
+function locals() { enum E { A } return [E, E] as const; }
 ";
     for probe in [
         "Ext<ReturnType<typeof locals>[0], ReturnType<typeof locals>[1]>",

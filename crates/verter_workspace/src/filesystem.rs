@@ -1320,6 +1320,10 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
             .last_content_transition_generation(canonical_id)
     }
 
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        Some(self.workspace.engine.freshness_readers())
+    }
+
     fn published_root(&self) -> Option<Arc<crate::published_state::PublishedRoot>> {
         Some(Arc::clone(&self.published))
     }
@@ -1592,6 +1596,10 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
         self.workspace
             .engine
             .last_content_transition_generation(canonical_id)
+    }
+
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        Some(self.workspace.engine.freshness_readers())
     }
 
     fn published_root(&self) -> Option<Arc<crate::published_state::PublishedRoot>> {
@@ -2126,6 +2134,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 
     fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
         self.engine.last_content_transition_generation(canonical_id)
+    }
+
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        Some(self.engine.freshness_readers())
     }
 
     fn record_content_transition(&self, canonical_id: &str) {

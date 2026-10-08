@@ -2942,6 +2942,10 @@ impl VerterLanguageServer {
         };
         let generation = lanes.open_generation(canonical_id);
         let host = self.documents.host();
+        // Own the source's transition evidence before reading the revision
+        // the `current` recheck compares against: unrelated history
+        // retirement must not read as a transition of this source.
+        let _source_evidence = host.lease_content_transition(canonical_id);
         let revision = host.last_content_transition_generation(canonical_id);
         let carrier_source = crate::provider_surface_store::resolve_carrier_source(
             Some(&self.documents),

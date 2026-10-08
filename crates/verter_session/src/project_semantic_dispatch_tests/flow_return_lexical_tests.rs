@@ -2054,8 +2054,6 @@ fn function_return(expr: &TypeExpr) -> &TypeExpr {
 fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
     let host = make_r5_host();
     for name in [
-        // A local `class` declaration's name.
-        "r5LocalClass",
         // A local `enum` declaration's name.
         "r5LocalEnum",
         // A local `namespace` declaration's name.
@@ -2097,14 +2095,39 @@ fn flow_return_destructured_param_element_binds_the_annotation_member() {
     assert_clean_warm(&host, "r5DestructuredParamAliased", number());
 }
 
-/// The cross-file proof: a local `class importedValue {}` shadows the
-/// IMPORTED `importedValue`. A content half that cannot classify the
-/// local name resolves the read in FILE OWNER SCOPE and publishes the
-/// other file's value — clean, warm, and wrong.
+/// A local `class` declaration's name read as a value is the class it
+/// declares — never the file-scope bait of the same name (`C: "outer"`),
+/// and, for a local `class importedValue {}`, never the IMPORTED
+/// `importedValue`, which a content half that could not classify the local
+/// name would publish from the other file. TypeScript 7.0.2: both are the
+/// class's constructor type (`typeof C`, `typeof importedValue`), a
+/// constructor of the empty instance. The class's capture set is a typed
+/// gap of the flow proof, so the answer is never admitted warm.
 #[test]
 fn flow_return_local_binding_never_resolves_to_a_cross_file_import() {
     let host = make_r5_host();
-    assert_fails_closed(&host, "r5CrossFileLeak");
+    let constructor = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        properties: vec![verter_type_expr::ObjectMember::ConstructSignature(
+            verter_type_expr::FunctionExpr::synthetic(
+                Vec::new(),
+                Some(Arc::new(TypeExpr::Object(Arc::new(
+                    verter_type_expr::ObjectExpr {
+                        properties: Vec::new(),
+                    },
+                )))),
+                Vec::new(),
+            ),
+        )],
+    }));
+    for name in ["r5LocalClass", "r5CrossFileLeak"] {
+        let outcome = r5_eval(&host, name).unwrap_or_else(|| panic!("{name} evaluates"));
+        assert_eq!(outcome.degradation, None, "{name} evaluates clean");
+        assert_eq!(outcome.ty, constructor, "{name} is the local class");
+        assert_eq!(
+            outcome.candidates, 0,
+            "{name}: an unproven capture set admits nothing"
+        );
+    }
 }
 
 /// The positive control: a name whose ONLY local binding is confined to

@@ -79,6 +79,7 @@ pub mod env_hash;
 pub mod error;
 pub mod exact_resolution;
 pub mod filesystem;
+pub mod freshness;
 pub mod generated_unit_admission;
 pub mod intrinsic_library;
 pub mod membership;
@@ -162,6 +163,11 @@ pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
+#[cfg(feature = "semantic-observe")]
+pub use freshness::FreshnessObserveSnapshot;
+pub use freshness::{
+    CanonicalFreshnessLease, FreshnessReaders, FreshnessResidency, ViewFreshnessLease,
+};
 pub use generated_unit_admission::{
     decide_generated_unit_admission, decide_generated_unit_admission_with_basis,
     AdmittedGeneratedUnits, GeneratedUnitAdmission, GeneratedUnitAdmissionFingerprint,

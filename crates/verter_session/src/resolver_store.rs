@@ -2317,6 +2317,23 @@ impl HostStoreView {
         self.snapshot.roots.is_tombstoned(canonical_id)
     }
 
+    /// Cap the captured workspace's freshness-history retirement at this
+    /// view's captured content generation while the returned lease lives.
+    ///
+    /// The artifact-only whole-hash leg clamps every transition answer to
+    /// that generation. From the moment the lease is taken retirement
+    /// cannot raise the floor past it; a floor that already passed it is
+    /// not lowered. Either way an artifact the view reads stays answerable
+    /// from its own evidence: every stored version holds a canonical lease,
+    /// which never answers from the floor. `None` when the view captured
+    /// no workspace or the workspace keeps no history.
+    pub(crate) fn lease_freshness(&self) -> Option<verter_workspace::ViewFreshnessLease> {
+        let workspace = self.snapshot.roots.workspace.as_ref()?;
+        workspace
+            .freshness_readers()
+            .map(|readers| readers.lease_view(self.content_generation))
+    }
+
     /// The validation token under which this view was built. The base
     /// token is captured by [`StoreViewManager`]; a session-overlaid
     /// view re-derives it from the shared snapshot + its frozen overlay

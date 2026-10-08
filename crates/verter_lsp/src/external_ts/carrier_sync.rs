@@ -680,14 +680,16 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         // that a newer edit supersedes carries an OLDER revision than the newer pass and
         // is refused by the admission gate's compare-and-swap. (tsgo companion versions are
         // recorded post-open, so they are not a stable open-time revision.)
-        let source_revision = carrier_source_revision(req.host, req.canonical_id);
+        let (source_revision, source_evidence) =
+            held_carrier_source_revision(req.host, req.canonical_id);
         let pending = PendingProviderReady::authorize(
             &binding,
             source_revision,
             intent_epoch,
             "tsgo",
             &companions,
-        );
+        )
+        .holding_source_evidence(source_evidence);
         return CarrierSyncDecision::DirectOpen {
             transition,
             pending,
@@ -936,14 +938,16 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                     // still requires direct companion buffers. Its independent
                     // receipt is minted only after those opens succeed and
                     // attests the exact provider-specialized IDE bytes.
-                    let source_revision = carrier_source_revision(req.host, req.canonical_id);
+                    let (source_revision, source_evidence) =
+                        held_carrier_source_revision(req.host, req.canonical_id);
                     let pending = PendingProviderReady::authorize(
                         &binding,
                         source_revision,
                         intent_epoch,
                         "tsgo",
                         &companions,
-                    );
+                    )
+                    .holding_source_evidence(source_evidence);
                     CarrierSyncDecision::DirectOpen {
                         transition,
                         pending,
@@ -974,6 +978,18 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
 /// `NotReady` and no owned commit is minted).
 fn carrier_source_revision(host: &VerterHost, canonical_id: &str) -> u64 {
     host.last_content_transition_generation(canonical_id)
+}
+
+/// [`carrier_source_revision`] together with the source's freshness lease,
+/// taken FIRST so the revision is read from evidence the caller owns: while
+/// the lease lives, retiring unrelated workspace history never moves it, so
+/// the drain's equality recheck refuses only a transition of this source.
+fn held_carrier_source_revision(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> (u64, Option<verter_workspace::CanonicalFreshnessLease>) {
+    let evidence = host.lease_content_transition(canonical_id);
+    (carrier_source_revision(host, canonical_id), evidence)
 }
 
 /// Whether the owning configured project EXCLUDES the carrier's generated units
