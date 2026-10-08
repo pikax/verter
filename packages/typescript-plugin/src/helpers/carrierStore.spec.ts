@@ -346,6 +346,18 @@ describe("DiskCarrierStoreReader.readManifest", () => {
     expect(reader.readyFile("d:/ws/src/A.vue.tsx")).toBeDefined();
   });
 
+  it("retains the prior fold when a checksum-valid record has a malformed operation", () => {
+    const dir = track(makeStore(baseManifest()));
+    const reader = new DiskCarrierStoreReader(dir);
+    appendCarrierStoreRecord(dir, {
+      epoch: 8,
+      ops: [{ op: "owned_put", project: "d:/ws/tsconfig.json" } as never],
+    });
+    expect(reader.currentEpoch()).toBe(7);
+    expect(reader.ownedSourceFor("d:/ws/src/B.vue")).toBeDefined();
+    expect(reader.readyFile("d:/ws/src/A.vue.tsx")).toBeDefined();
+  });
+
   it("folds owned replacements and retractions through the canonical index", () => {
     const dir = track(makeStore(baseManifest()));
     const reader = new DiskCarrierStoreReader(dir, "d:/ws/tsconfig.json", false);

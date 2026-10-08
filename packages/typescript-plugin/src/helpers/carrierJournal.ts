@@ -49,7 +49,13 @@ export interface CarrierJournalRecord {
   ops: CarrierJournalOp[];
 }
 
-/** FNV-1a 32 over `bytes[start, end)` — the per-line torn-write check. */
+/**
+ * FNV-1a 32 over `bytes[start, end)` — the per-line torn-write check. Constants
+ * are the standard FNV-1a 32-bit parameters (offset basis 0x811c9dc5, prime
+ * 0x01000193; XOR the byte, then multiply) from the FNV reference,
+ * http://www.isthe.com/chongo/tech/comp/fnv/ and draft-eastlake-fnv; the spec
+ * pins its vectors in `carrierJournal.spec.ts`.
+ */
 export function fnv1a32(bytes: Uint8Array, start = 0, end = bytes.length): number {
   let hash = 0x811c9dc5;
   for (let i = start; i < end; i++) {
@@ -79,14 +85,56 @@ export function parseCarrierStoreHead(raw: string): CarrierStoreHead | undefined
   return head as CarrierStoreHead;
 }
 
-const OP_KINDS = new Set([
-  "project_put",
-  "owned_clear",
-  "owned_put",
-  "owned_del",
-  "ready_put",
-  "ready_del",
-]);
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isOwnedRow(row: unknown): boolean {
+  if (row === null || typeof row !== "object") return false;
+  const r = row as Record<string, unknown>;
+  return (
+    isString(r.source_uri) &&
+    isString(r.provider_uri) &&
+    isString(r.role) &&
+    isString(r.script_kind)
+  );
+}
+
+function isReadyFile(file: unknown): boolean {
+  if (file === null || typeof file !== "object") return false;
+  const f = file as Record<string, unknown>;
+  return (
+    isString(f.content_hash) &&
+    typeof f.version === "number" &&
+    isString(f.script_kind) &&
+    isString(f.role) &&
+    isString(f.map_hash) &&
+    isString(f.blob_rel) &&
+    (f.map_rel === undefined || isString(f.map_rel))
+  );
+}
+
+/** Whether `op` carries exactly the payload its tag requires (mirrors the Rust `serde` enum). */
+function isJournalOp(op: unknown): op is CarrierJournalOp {
+  if (op === null || typeof op !== "object") return false;
+  const o = op as Record<string, unknown>;
+  if (!isString(o.project)) return false;
+  switch (o.op) {
+    case "project_put":
+    case "owned_clear":
+      return true;
+    case "owned_put":
+      return isString(o.source_uri) && Array.isArray(o.rows) && o.rows.every(isOwnedRow);
+    case "owned_del":
+      return isString(o.source_uri);
+    case "ready_put":
+      return isString(o.provider_uri) && isReadyFile(o.file);
+    case "ready_del":
+      return isString(o.provider_uri);
+    default:
+      return false;
+  }
+}
 
 /**
  * Decode one complete journal line `bytes[start, end)` (without its `\n`), or
@@ -116,16 +164,7 @@ export function decodeCarrierJournalLine(
   if (parsed === null || typeof parsed !== "object") return undefined;
   const record = parsed as Partial<CarrierJournalRecord>;
   if (typeof record.epoch !== "number" || !Array.isArray(record.ops)) return undefined;
-  for (const op of record.ops) {
-    if (
-      op === null ||
-      typeof op !== "object" ||
-      !OP_KINDS.has((op as { op?: unknown }).op as string) ||
-      typeof (op as { project?: unknown }).project !== "string"
-    ) {
-      return undefined;
-    }
-  }
+  if (!record.ops.every(isJournalOp)) return undefined;
   return record as CarrierJournalRecord;
 }
 

@@ -437,3 +437,114 @@ fn a_re_created_store_is_reloaded_never_tailed_from_a_stale_offset() {
     let want: Vec<usize> = (10..20).collect();
     assert_eq!(membership(&follower.manifest().unwrap()), expect(&want));
 }
+
+#[test]
+fn fnv1a32_matches_the_published_vectors() {
+    // Test vectors from the FNV reference (http://www.isthe.com/chongo/tech/comp/fnv/).
+    assert_eq!(journal::fnv1a32(b""), 0x811c_9dc5);
+    assert_eq!(journal::fnv1a32(b"a"), 0xe40c_292c);
+    assert_eq!(journal::fnv1a32(b"foobar"), 0xbf9c_f968);
+}
+
+/// The journal lines both languages must agree on byte-for-byte; the Node reader
+/// decodes and re-frames the same file.
+const CORPUS: &str =
+    include_str!("../../../../packages/typescript-plugin/src/helpers/carrierJournalCorpus.txt");
+
+fn corpus_records() -> Vec<journal::JournalRecord> {
+    use journal::JournalOp::*;
+    let project = || PROJECT.to_string();
+    let row = OwnedSource {
+        source_uri: "d:/ws/src/A.vue".into(),
+        provider_uri: "d:/ws/src/A.vue.tsx".into(),
+        role: ManifestRole::CarrierIde,
+        script_kind: ManifestScriptKind::Tsx,
+    };
+    let file = ReadyFile {
+        content_hash: "aaaa".into(),
+        version: 3,
+        script_kind: ManifestScriptKind::Tsx,
+        role: ManifestRole::CarrierIde,
+        map_hash: "bbbb".into(),
+        blob_rel: "blobs/blake3-aaaa.tsx".into(),
+        map_rel: Some("maps/blake3-bbbb.json".into()),
+        structure: None,
+    };
+    vec![
+        journal::JournalRecord {
+            epoch: 8,
+            ops: vec![
+                ProjectPut { project: project() },
+                OwnedClear { project: project() },
+                OwnedPut {
+                    project: project(),
+                    source_uri: row.source_uri.clone(),
+                    rows: vec![row.clone()],
+                },
+                ReadyPut {
+                    project: project(),
+                    provider_uri: row.provider_uri.clone(),
+                    file,
+                },
+            ],
+        },
+        journal::JournalRecord {
+            epoch: 9,
+            ops: vec![
+                ReadyDel {
+                    project: project(),
+                    provider_uri: row.provider_uri.clone(),
+                },
+                OwnedDel {
+                    project: project(),
+                    source_uri: row.source_uri.clone(),
+                },
+            ],
+        },
+    ]
+}
+
+#[test]
+fn the_shared_journal_corpus_is_what_the_rust_writer_frames_and_reads() {
+    let framed: Vec<u8> = corpus_records()
+        .iter()
+        .flat_map(|r| journal::frame_record(r).expect("frame"))
+        .collect();
+    assert_eq!(
+        framed,
+        CORPUS.as_bytes(),
+        "the Rust writer's bytes drifted from the corpus the Node reader decodes"
+    );
+    let decoded: Vec<_> = CORPUS
+        .lines()
+        .map(|l| journal::decode_line(l.as_bytes()).expect("corpus line verifies"))
+        .collect();
+    assert_eq!(decoded, corpus_records());
+}
+
+#[test]
+fn a_complete_invalid_last_line_is_dropped_and_the_next_publish_rebuilds_on_the_last_good_prefix() {
+    let (store, ws, _ut) = fresh();
+    publish(&store, &ws, 0, 0).expect("publish 0");
+    publish(&store, &ws, 1, 0).expect("publish 1");
+    let journal_path = store
+        .workspace_dir()
+        .join(journal::journal_file(head_generation(&store)));
+    let mut bytes = std::fs::read(&journal_path).expect("journal");
+    // Corrupt the LAST record's JSON but keep its trailing newline as the journal's
+    // final byte: a complete line that fails verification with nothing after it is
+    // a torn tail (its ops are dropped), not fail-closed corruption.
+    let last_start = bytes[..bytes.len() - 1]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    bytes[last_start + 12] ^= 0x01;
+    std::fs::write(&journal_path, &bytes).expect("corrupt");
+
+    assert_eq!(membership(&read_strict(&store)), expect(&[0]));
+    // A restarted writer folds the last-good prefix, truncates the torn tail and
+    // appends on top of it: publication 1's ops are gone, not deferred.
+    let restarted = CarrierPublishStore::open(HOST_VERSION, &ws);
+    publish(&restarted, &ws, 2, 0).expect("the next publish truncates the torn tail");
+    assert_eq!(membership(&read_strict(&restarted)), expect(&[0, 2]));
+}

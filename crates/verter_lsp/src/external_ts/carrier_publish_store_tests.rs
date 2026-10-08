@@ -1326,8 +1326,10 @@ fn legacy_manifest_membership_survives_the_first_journal_publish() {
             &format!("d:/ws/src/{name}.vue.tsx"),
         )
     };
-    let mut entry = ProjectEntry::default();
-    entry.owned_sources = vec![legacy_row("A"), legacy_row("B")];
+    let entry = ProjectEntry {
+        owned_sources: vec![legacy_row("A"), legacy_row("B")],
+        ..ProjectEntry::default()
+    };
     let legacy = Manifest {
         epoch: 7,
         host_version: HOST_VERSION.to_owned(),

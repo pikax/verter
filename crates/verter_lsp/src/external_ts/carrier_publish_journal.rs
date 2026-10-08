@@ -138,6 +138,12 @@ pub(crate) struct JournalRecord {
 
 /// FNV-1a 32 over the record JSON bytes — the per-line torn-write check the Node
 /// reader recomputes byte-for-byte.
+///
+/// The constants are the standard FNV-1a 32-bit parameters — offset basis
+/// `0x811c9dc5`, prime `0x01000193` — and the order is the FNV-1a order (XOR the
+/// byte, THEN multiply), per the FNV reference
+/// (<http://www.isthe.com/chongo/tech/comp/fnv/>, draft-eastlake-fnv). The
+/// published test vectors are pinned in `carrier_publish_journal_tests.rs`.
 pub(crate) fn fnv1a32(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for &b in bytes {
@@ -158,7 +164,7 @@ pub(crate) fn frame_record(record: &JournalRecord) -> std::io::Result<Vec<u8>> {
 }
 
 /// Decode one complete line (without its `\n`), or `None` when it does not verify.
-fn decode_line(line: &[u8]) -> Option<JournalRecord> {
+pub(crate) fn decode_line(line: &[u8]) -> Option<JournalRecord> {
     if line.len() < 9 || line[8] != b' ' {
         return None;
     }
