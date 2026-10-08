@@ -611,6 +611,7 @@ fn empty_skeleton() -> FunctionBodySkeleton {
         writes: Arc::from([]),
         closure_assignments: Arc::from([]),
         span_index: Default::default(),
+        name_index: Default::default(),
     }
 }
 

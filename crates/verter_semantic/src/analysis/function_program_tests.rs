@@ -174,16 +174,16 @@ fn captures_exclude_local_shadows_and_share_hoisted_runtime_slots() {
         .collect();
     assert_eq!(children.len(), 3);
     assert!(
-        children[0].captures().0.is_empty(),
+        children[0].captures().is_empty(),
         "a child parameter shadows the outer variable"
     );
     assert!(
-        children[1].captures().0.is_empty(),
+        children[1].captures().is_empty(),
         "a child local shadows the outer variable"
     );
-    assert_eq!(children[2].captures().0.len(), 1);
+    assert_eq!(children[2].captures().count(), 1);
     assert_eq!(
-        children[2].captures().0[0].binding_slot,
+        children[2].captures().next().unwrap().binding_slot,
         0,
         "the parameter is the shared runtime identity of its var redeclaration"
     );
@@ -251,7 +251,9 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
         "an intervening local stops capture resolution"
     );
     assert!(
-        deepest.captures().0.contains(&deepest_targets[0]),
+        deepest
+            .captures()
+            .any(|binding| binding == &deepest_targets[0]),
         "write-only captures retain their exact binding authority"
     );
     assert!(middle.descendant_writes().contains(&deepest_targets[0]));
@@ -301,14 +303,21 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
         .find(|entry| entry.lexical_parent() == Some(child.key()))
         .unwrap();
     assert_eq!(
-        grandchild.captured_reads()[0].path.as_ref(),
+        grandchild.captured_reads().next().unwrap().path.as_ref(),
         [Arc::from("selected")]
     );
-    assert_eq!(
-        &child.nested_captures()[0].reads,
-        grandchild.captured_reads()
-    );
-    assert_eq!(&root.nested_captures()[0].reads, child.captured_reads());
+    assert!(child
+        .nested_captures()
+        .next()
+        .unwrap()
+        .reads()
+        .eq(grandchild.captured_reads()));
+    assert!(root
+        .nested_captures()
+        .next()
+        .unwrap()
+        .reads()
+        .eq(child.captured_reads()));
     let transitive = index_of("function root(payload) { return () => () => payload.selected; }");
     let root = entry_of(&transitive, "root");
     let child = transitive
@@ -317,12 +326,12 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
         .find(|entry| entry.lexical_parent() == Some(root.key()))
         .unwrap();
     assert_eq!(
-        child.captures().0.len(),
+        child.captures().count(),
         1,
         "intervening closures retain the cell their children capture"
     );
     assert_eq!(
-        child.captured_reads()[0].path.as_ref(),
+        child.captured_reads().next().unwrap().path.as_ref(),
         [Arc::from("selected")]
     );
 }
@@ -1119,8 +1128,8 @@ function outer() {
         "the lexical parent is the enclosing position"
     );
     assert_eq!(
-        inner.captures().0.as_ref(),
-        &[FlowBindingIdentity {
+        inner.captures().cloned().collect::<Vec<_>>(),
+        [FlowBindingIdentity {
             name: Arc::from("x"),
             kind: FunctionBindingKind::Const,
             defining_function: outer.key().clone(),
@@ -1161,8 +1170,8 @@ function outer() {
         "the callback locator addresses the first directly nested callable"
     );
     assert_eq!(
-        callback.captures().0.as_ref(),
-        &[FlowBindingIdentity {
+        callback.captures().cloned().collect::<Vec<_>>(),
+        [FlowBindingIdentity {
             name: Arc::from("x"),
             kind: FunctionBindingKind::Const,
             defining_function: entry_of(&index, "outer").key().clone(),
@@ -1232,8 +1241,8 @@ function outer() {
         .collect();
     assert_eq!(callbacks.len(), 1);
     assert_eq!(
-        callbacks[0].captures().0.as_ref(),
-        &[FlowBindingIdentity {
+        callbacks[0].captures().cloned().collect::<Vec<_>>(),
+        [FlowBindingIdentity {
             name: Arc::from("inner"),
             kind: FunctionBindingKind::NestedFunction,
             defining_function: entry_of(&index, "outer").key().clone(),
@@ -1300,12 +1309,12 @@ function outer(shadowed: string) {
         .iter()
         .map(|entry| {
             assert_eq!(
-                entry.captures().0.len(),
+                entry.captures().count(),
                 1,
                 "each callback captures exactly one binding: {:?}",
                 entry.captures()
             );
-            &entry.captures().0[0]
+            entry.captures().next().unwrap()
         })
         .collect();
 
@@ -1943,4 +1952,262 @@ fn descents_carry_their_hash_and_namespace_steps() {
     assert_ne!(hash(&namespaced), hash(&other));
     assert!(namespaced.has_namespace_member());
     assert!(!other.has_namespace_member());
+}
+
+// ---------------------------------------------------------------------------
+// Shared transitive capture summaries
+// ---------------------------------------------------------------------------
+
+/// The transitive captures and captured reads of `entry`, computed the
+/// direct way from the index's own records: the position's own references
+/// and write targets that resolve to an enclosing frame, then each
+/// directly nested position's set placed at its start, less what this
+/// frame declares; each binding (each binding and path, for reads) once,
+/// first in source order.
+fn expected_captures(
+    index: &FunctionProgramIndex,
+    entry: &FunctionProgramEntry,
+) -> (Vec<FlowBindingIdentity>, Vec<FunctionCapturedRead>) {
+    let key = entry.key();
+    let mut sites: Vec<(u32, FlowBindingIdentity)> = Vec::new();
+    let mut reads: Vec<FunctionCapturedRead> = Vec::new();
+    for reference in entry.references().iter() {
+        let FunctionReferenceBinding::Resolved(binding) = &reference.binding else {
+            continue;
+        };
+        if &binding.defining_function == key {
+            continue;
+        }
+        sites.push((reference.span.start, binding.clone()));
+        if reference.read_role.is_some() {
+            reads.push(FunctionCapturedRead {
+                binding: binding.clone(),
+                path: Arc::clone(&reference.path),
+                span: reference.span,
+            });
+        }
+    }
+    for target in entry.writes().iter().flat_map(|write| write.targets.iter()) {
+        if let FunctionWriteTarget::Binding { reference, .. } = target {
+            if let FunctionReferenceBinding::Resolved(binding) = &reference.binding {
+                if &binding.defining_function != key {
+                    sites.push((reference.span.start, binding.clone()));
+                }
+            }
+        }
+    }
+    for child in index
+        .entries_for_test()
+        .iter()
+        .filter(|candidate| candidate.lexical_parent() == Some(key))
+    {
+        let (child_captures, child_reads) = expected_captures(index, child);
+        sites.extend(
+            child_captures
+                .into_iter()
+                .filter(|binding| &binding.defining_function != key)
+                .map(|binding| (child.span().start, binding)),
+        );
+        reads.extend(
+            child_reads
+                .into_iter()
+                .filter(|read| &read.binding.defining_function != key),
+        );
+    }
+    sites.sort_by_key(|(start, _)| *start);
+    let mut seen = std::collections::HashSet::new();
+    let captures = sites
+        .into_iter()
+        .filter_map(|(_, binding)| seen.insert(binding.clone()).then_some(binding))
+        .collect();
+    reads.sort_by_key(|read| read.span.start);
+    let mut seen = std::collections::HashSet::new();
+    reads.retain(|read| seen.insert((read.binding.clone(), Arc::clone(&read.path))));
+    (captures, reads)
+}
+
+/// Every position's shared view answers exactly what its own records
+/// imply, through shadowing parameters and block locals, a parameter
+/// shared with its `var` redeclaration, sibling same-name locals,
+/// write-only and member-path captures, and three levels of nesting.
+#[test]
+fn shared_capture_views_answer_each_position_exactly() {
+    let source = r#"function root(value, payload) {
+        var value; let outer = 0; const object = {};
+        { let twin = 1; const first = () => { twin++; object.field = payload.a; [value, outer] = pair; }; }
+        { let twin = 2; const second = (value) => { twin = value + payload.b; }; }
+        const middle = () => {
+            let outer = 1;
+            const inner = () => { const payload = 3; return () => outer + payload + value + twin; };
+            return () => { outer = 4; return payload.c.d + object; };
+        };
+        function hoisted() { return value + payload.a; }
+        return [middle, hoisted, (x) => x + outer];
+    }
+    function other() { let value = 9; return () => value; }"#;
+    let index = index_of(source);
+    let mut nested_positions = 0;
+    for entry in index.entries_for_test().iter() {
+        let (captures, reads) = expected_captures(&index, entry);
+        assert_eq!(
+            entry.captures().cloned().collect::<Vec<_>>(),
+            captures,
+            "captures of {:?}",
+            entry.key()
+        );
+        assert_eq!(
+            entry.captured_reads().cloned().collect::<Vec<_>>(),
+            reads,
+            "captured reads of {:?}",
+            entry.key()
+        );
+        for nested in entry.nested_captures() {
+            nested_positions += 1;
+            let child = index.get(nested.function()).unwrap().entry();
+            assert_eq!(nested.span(), child.span());
+            assert!(nested.bindings().eq(child.captures()));
+            assert!(nested.reads().eq(child.captured_reads()));
+            assert_eq!(nested.exhaustive(), child.captures_exhaustive());
+        }
+    }
+    assert!(
+        nested_positions >= 8,
+        "the fixture nests: {nested_positions}"
+    );
+    let other = entry_of(&index, "other");
+    assert!(other.captures().is_empty());
+    let other_child = other.nested_captures().next().unwrap();
+    assert_eq!(
+        other_child
+            .bindings()
+            .map(|binding| &binding.defining_function)
+            .collect::<Vec<_>>(),
+        [other.key()],
+        "a same-name local of another function is its own binding"
+    );
+    let root = entry_of(&index, "root");
+    assert!(index
+        .entries_for_test()
+        .iter()
+        .all(|entry| entry.shares_capture_summary(root)));
+}
+
+/// A class's members are code no entry serves: the frame creating one,
+/// and every frame enclosing it, has only a lower bound of captures.
+#[test]
+fn unserved_callables_make_every_enclosing_capture_set_partial() {
+    let index = index_of(
+        "function root(a) { return () => { const b = a; return () => class { m() { return b; } }; }; }\nfunction plain(a) { return () => a; }",
+    );
+    let root = entry_of(&index, "root");
+    let child = root.nested_captures().next().unwrap();
+    let grandchild = index
+        .get(child.function())
+        .unwrap()
+        .entry()
+        .nested_captures()
+        .next()
+        .unwrap();
+    assert!(!grandchild.exhaustive());
+    assert!(!child.exhaustive());
+    assert!(!root.captures_exhaustive());
+    let plain = entry_of(&index, "plain");
+    assert!(plain.captures_exhaustive());
+    assert!(plain.nested_captures().all(|child| child.exhaustive()));
+}
+
+/// `function root(v0) { return (v1) => (v2) => … => [v0, v1, …]; }`: each
+/// arrow declares one binding and the innermost reads them all.
+fn nested_capture_chain(depth: usize) -> String {
+    let mut source = String::from("function root(v0) { return ");
+    for ordinal in 1..depth {
+        source.push_str(&format!("(v{ordinal}) => "));
+    }
+    source.push_str("() => [");
+    for ordinal in 0..depth {
+        source.push_str(&format!("v{ordinal},"));
+    }
+    source.push_str("]; }");
+    source
+}
+
+/// `function root(v0, …, vN) { return () => () => () => () => [v0, …]; }`:
+/// four functions nested in the one declaring every captured binding.
+fn wide_capture_family(width: usize) -> String {
+    let parameters: Vec<_> = (0..width).map(|ordinal| format!("v{ordinal}")).collect();
+    format!(
+        "function root({}) {{ return () => () => () => () => [{}]; }}",
+        parameters.join(","),
+        parameters.join(",")
+    )
+}
+
+/// The capture summary stores each authored capture once. A chain of N
+/// nested functions whose innermost reads one binding from each enclosing
+/// frame captures 1 + 2 + … + N bindings across its positions, but holds
+/// N capture records; N bindings read through four enclosing functions
+/// hold N records, not one copy per enclosing function.
+#[test]
+fn capture_summary_records_grow_with_authored_captures_not_nesting() {
+    let mut previous: Option<usize> = None;
+    for depth in [128, 256, 512, 1024] {
+        let index = index_of(&nested_capture_chain(depth));
+        let root = entry_of(&index, "root");
+        let counts = root.capture_summary_counts();
+        assert_eq!(counts.frames, depth + 1);
+        assert_eq!(counts.nested_links, depth);
+        assert_eq!(counts.bindings, depth);
+        assert_eq!(counts.captures, depth, "one record per authored capture");
+        assert_eq!(counts.reads, depth, "one record per authored read");
+        // The views still answer every position's transitive set: the
+        // arrow at nesting k captures v0 … v(k - 1).
+        let mut logical = 0;
+        let mut frame = root.nested_captures().next();
+        let mut nesting = 1;
+        while let Some(current) = frame {
+            let captured = current.bindings().count();
+            assert_eq!(captured, nesting, "the arrow at nesting {nesting}");
+            assert_eq!(current.reads().count(), nesting);
+            logical += captured;
+            frame = index
+                .get(current.function())
+                .unwrap()
+                .entry()
+                .nested_captures()
+                .next();
+            nesting += 1;
+        }
+        assert_eq!(nesting, depth + 1);
+        assert_eq!(logical, depth * (depth + 1) / 2);
+        if let Some(previous) = previous {
+            assert!(
+                counts.total() * 10 <= previous * 21,
+                "doubling the nesting at most doubles the records: {previous} -> {}",
+                counts.total()
+            );
+        }
+        previous = Some(counts.total());
+
+        let index = index_of(&wide_capture_family(depth));
+        let root = entry_of(&index, "root");
+        let counts = root.capture_summary_counts();
+        assert_eq!(counts.frames, 5);
+        assert_eq!(counts.bindings, depth);
+        assert_eq!(counts.captures, depth, "no enclosing function copies them");
+        assert_eq!(counts.reads, depth);
+        let mut frame = root.nested_captures().next();
+        let mut nesting = 0;
+        while let Some(current) = frame {
+            assert_eq!(current.bindings().count(), depth);
+            assert_eq!(current.reads().count(), depth);
+            frame = index
+                .get(current.function())
+                .unwrap()
+                .entry()
+                .nested_captures()
+                .next();
+            nesting += 1;
+        }
+        assert_eq!(nesting, 4);
+    }
 }

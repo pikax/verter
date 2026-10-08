@@ -879,6 +879,7 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
         writes: Arc::from([]),
         closure_assignments: Arc::from([]),
         span_index: Default::default(),
+        name_index: Default::default(),
     };
     let captured = indexed_returned_arrow("function root() { const x = 1; return () => x; }");
     for (skeleton, captures) in [(populated, 0), (empty, 0), (captured, 1)] {

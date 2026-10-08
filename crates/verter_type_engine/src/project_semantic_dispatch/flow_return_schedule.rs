@@ -624,12 +624,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let canonical = frame.function.declaration_slot.defining_canonical.as_ref();
         let anchor = entry.span().start;
         let mut composed: Vec<(&FunctionProgramEntry, Vec<NamedCall>)> = Vec::new();
-        for nested in entry.nested_captures().iter() {
-            let relative = FrameSpan::rebase(anchor, nested.span);
+        for nested in entry.nested_captures() {
+            let relative = FrameSpan::rebase(anchor, nested.span());
             let selected = lowered.exprs.iter().any(|expression| {
                 expression.role == FlowExprRole::Value && expression.span.contains(relative)
             });
-            let Some(value) = index.get(&nested.function).map(|matched| matched.entry()) else {
+            let Some(value) = index.get(nested.function()).map(|matched| matched.entry()) else {
                 continue;
             };
             if selected {
@@ -1508,7 +1508,7 @@ fn annotated(prepared: &verter_session_query::type_solver::prepared::PreparedVal
 /// own frame or a composed one, or reads a `typeof` in a type position.
 fn demands_callees(entry: &FunctionProgramEntry) -> bool {
     !(entry.effects().is_empty()
-        && entry.nested_captures().is_empty()
+        && entry.nested_captures().len() == 0
         && entry.type_queries().is_empty())
 }
 

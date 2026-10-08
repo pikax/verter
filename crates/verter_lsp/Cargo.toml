@@ -119,6 +119,10 @@ paste = "1.0.15"
 # controls (`test-support`) and project-binding constructors (`test-util`).
 verter_session = { path = "../verter_session", features = ["test-support", "test-util"] }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
+# Test builds only: the flow-transparent callback check (generator, typed seam
+# and source-backed fixtures) that `real_provider_tests::flow_check` runs
+# against both real providers.
+verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 # Structural `[features]`-table parse for the `test-support` default-off
 # architecture guard (tests/cases/test_support_feature_off_in_default_build.rs),
 # mirroring verter_session's dev-dependency of the same purpose.
