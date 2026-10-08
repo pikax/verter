@@ -1,0 +1,219 @@
+{
+  "id": "firewall-route-ledger.v1",
+  "schema": 1,
+  "contractNode": "UAK1",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the kernel authority inventory and deletion ledger",
+    "date": "2026-10-08"
+  },
+  "categories": [
+    "central-framework-switch",
+    "untagged-coordinate-or-public-identity",
+    "duplicate-component-information-authority"
+  ],
+  "rules": {
+    "oneOwnerPerRoute": "Every displaced route names exactly one later production-capable deletion/rejection owner, its successor path from UAK1 and its receiving acceptance ID. FWC1 owns the atomic production firewall cutover for K01-K04; UAK1 acceptance requires its contract and edges to exist in the applied controller graph.",
+    "inheritedRoutes": "UAK0 routes D01-D19 keep their UAK0 owners. They are listed here by id only, each with the constitution rule (F.. or U..) it breaches; UAK1 assigns them no new owner.",
+    "productionCapable": "The family locks (UAI0, UAO0, UAP0, UAM0), the joins (UAK2, UKS0, CEJ0) and the verifiers delete nothing and are never deletion owners here."
+  },
+  "displacedRoutes": [
+    {
+      "id": "K01",
+      "category": "central-framework-switch",
+      "constitutionRule": "F01",
+      "unit": "Kernel session production closure links verter_compiler: the runtime backends and the carrier frontend half",
+      "symbols": [
+        "verter_compiler::compile",
+        "verter_compiler::compile_transaction",
+        "verter_compiler::assembly",
+        "verter_compiler::standalone",
+        "verter_compiler::svelte::runtime",
+        "verter_compiler::style_planner",
+        "verter_compiler::framework_common::vue_bridge",
+        "verter_compiler::framework_common::FrameworkParseArtifact",
+        "verter_compiler::framework_common::registered_carrier_projection",
+        "verter_compiler::framework_common::carrier_compiler",
+        "verter_compiler::parser::types::ParsedSfc",
+        "verter_compiler::tsc"
+      ],
+      "paths": [
+        "crates/verter_session/Cargo.toml",
+        "crates/verter_session/src/host_resolve",
+        "crates/verter_session/src/project_type_store.rs",
+        "crates/verter_session/src/file_artifact_store.rs",
+        "crates/verter_session/src/resolver_core/owned_lowering_port.rs",
+        "crates/verter_session/src/parse.rs",
+        "crates/verter_session/src/template_convert.rs",
+        "crates/verter_session/src/types/tsc_response.rs",
+        "crates/verter_identity/tests/cases/workspace_dependency_layers.rs"
+      ],
+      "disposition": "replace",
+      "successor": "the whole verter_session -> verter_compiler crate edge is removed, frontend half included: kernel services reach compile products only through the optional CarrierCompilerBackendRegistry populated by the composition root, and store/parse/template-convert/tsc code consumes neutral typed parse and projection ports instead of verter_compiler types",
+      "deletionOwner": "FWC1",
+      "productionCapable": true,
+      "successorPath": ["UAK1", "CPF0", "CPF1", "FWC1"],
+      "receivingAcceptance": "FWC1-AC1"
+    },
+    {
+      "id": "K02",
+      "category": "central-framework-switch",
+      "constitutionRule": "F01",
+      "unit": "Svelte JSX shim assets embedded in the kernel session crate",
+      "symbols": [
+        "SVELTE_JSX_RUNTIME_DTS",
+        "SVELTE_JSX_DEV_RUNTIME_DTS",
+        "SVELTE_JSX_SVG_RUNTIME_DTS",
+        "SVELTE_JSX_SVG_DEV_RUNTIME_DTS",
+        "SVELTE_JSX_MATHML_RUNTIME_DTS",
+        "SVELTE_JSX_MATHML_DEV_RUNTIME_DTS",
+        "SVELTE_JSX_PACKAGE_NAME",
+        "SVELTE_JSX_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_DEV_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_SVG_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_SVG_DEV_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_MATHML_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_MATHML_DEV_RUNTIME_SPECIFIER"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/svelte_jsx_assets.rs",
+        "crates/verter_session/src/framework/svelte_jsx_assets"
+      ],
+      "disposition": "retag",
+      "successor": "the Svelte vertical registers its IDE-projection assets on the catalog; consumers (verter_lsp svelte_assets, verter_tsc checker) read them from the registration, not from a kernel module",
+      "deletionOwner": "FWC1",
+      "productionCapable": true,
+      "successorPath": ["UAK1", "CPF0", "CPF1", "FWC1"],
+      "receivingAcceptance": "FWC1-AC2"
+    },
+    {
+      "id": "K03",
+      "category": "central-framework-switch",
+      "constitutionRule": "F01",
+      "disposition": "replace",
+      "productionCapable": true,
+      "successorPath": ["UAK1", "CPF0", "CPF1", "FWC1"],
+      "unit": "Vue/Svelte carrier frontend lives in the kernel parse substrate",
+      "symbols": ["Vue SFC parser", "svelte_reactivity"],
+      "paths": ["crates/verter_parser/src"],
+      "successor": "the carrier frontends register through the catalog; the kernel keeps only the carrier-neutral parse substrate",
+      "deletionOwner": "FWC1",
+      "receivingAcceptance": "FWC1-AC3"
+    },
+    {
+      "id": "K04",
+      "category": "central-framework-switch",
+      "constitutionRule": "F01",
+      "disposition": "replace",
+      "productionCapable": true,
+      "successorPath": ["UAK1", "CPF0", "CPF1", "FWC1"],
+      "unit": "Vue macro and framework semantics live in the kernel semantic crate",
+      "symbols": [
+        "analysis::macros",
+        "analysis::component_meta",
+        "analysis::classify",
+        "analyzers::reactive_flow"
+      ],
+      "paths": ["crates/verter_semantic/src/analysis", "crates/verter_semantic/src/analyzers"],
+      "successor": "framework semantic profiles register through the catalog; the kernel keeps only carrier-neutral analysis",
+      "deletionOwner": "FWC1",
+      "receivingAcceptance": "FWC1-AC4"
+    }
+  ],
+  "inheritedRoutes": [
+    {
+      "id": "D01",
+      "constitutionRule": "F01",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D02",
+      "constitutionRule": "F04",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D03",
+      "constitutionRule": "F01",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D04",
+      "constitutionRule": "F01",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D05",
+      "constitutionRule": "F01",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D06",
+      "constitutionRule": "F04",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D07",
+      "constitutionRule": "F04",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D08",
+      "constitutionRule": "F01",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D09",
+      "constitutionRule": "U06",
+      "owner": "COX0"
+    },
+    {
+      "id": "D10",
+      "constitutionRule": "F04",
+      "owner": "COX0"
+    },
+    {
+      "id": "D11",
+      "constitutionRule": "F04",
+      "owner": "COX0"
+    },
+    {
+      "id": "D12",
+      "constitutionRule": "F02",
+      "owner": "TIF1"
+    },
+    {
+      "id": "D13",
+      "constitutionRule": "F02",
+      "owner": "TIF1"
+    },
+    {
+      "id": "D14",
+      "constitutionRule": "F02",
+      "owner": "TIF1"
+    },
+    {
+      "id": "D15",
+      "constitutionRule": "F02",
+      "owner": "TIF1"
+    },
+    {
+      "id": "D16",
+      "constitutionRule": "U06",
+      "owner": "ENCF0"
+    },
+    {
+      "id": "D17",
+      "constitutionRule": "U06",
+      "owner": "ENCL0"
+    },
+    {
+      "id": "D18",
+      "constitutionRule": "F02",
+      "owner": "IDX0"
+    },
+    {
+      "id": "D19",
+      "constitutionRule": "U05",
+      "owner": "PM1"
+    }
+  ]
+}
