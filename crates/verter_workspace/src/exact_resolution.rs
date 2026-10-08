@@ -96,10 +96,15 @@ impl DependencySnapshot {
 
     /// Whether the owner has no dependency state in any class.
     pub(crate) fn is_empty(&self) -> bool {
+        self.lazy_resolved.is_empty() && self.is_empty_beyond_lazy_resolved()
+    }
+
+    /// Whether the owner's only dependency state, if any, is resolution
+    /// answers (`lazy_resolved`).
+    fn is_empty_beyond_lazy_resolved(&self) -> bool {
         self.parsed_resolved.is_empty()
             && self.parsed_unresolved_relatives.is_empty()
             && self.exact_resolved.is_empty()
-            && self.lazy_resolved.is_empty()
             && self.ambient_resolved.is_empty()
             && self.semantic_transitive.is_empty()
             && self.bare_specifiers.is_empty()
@@ -413,6 +418,15 @@ impl EdgeStore {
         }
     }
 
+    /// Whether the owner has dependency state beyond resolution answers —
+    /// parsed, exact, ambient or semantic edges — that its own retirement,
+    /// not its resolutions', removes.
+    pub(crate) fn holds_state_beyond_lazy_resolutions(&self, canonical_id: &str) -> bool {
+        self.files
+            .get(canonical_id)
+            .is_some_and(|state| !state.deps.is_empty_beyond_lazy_resolved())
+    }
+
     /// Replace `ambient_resolved` set wholesale.
     #[allow(dead_code)]
     pub fn replace_ambient_resolved(&mut self, canonical_id: &str, deps: BTreeSet<String>) {
@@ -573,17 +587,19 @@ impl EdgeStore {
         // when its edges change or it is removed.
     }
 
-    /// Remove all state for files under a directory prefix.
-    pub fn remove_under(&mut self, prefix: &str) {
+    /// Remove all state for files under a directory prefix. Returns the
+    /// owners removed.
+    pub fn remove_under(&mut self, prefix: &str) -> Vec<String> {
         let to_remove: Vec<String> = self
             .files
             .keys()
             .filter(|path| path_matches_prefix(path, prefix))
             .cloned()
             .collect();
-        for canonical_id in to_remove {
-            self.remove_file(&canonical_id);
+        for canonical_id in &to_remove {
+            self.remove_file(canonical_id);
         }
+        to_remove
     }
 
     /// Get stored bare specifiers for a file (for lazy resolution).

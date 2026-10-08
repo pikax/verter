@@ -1007,6 +1007,65 @@ fn refused_retention_serves_complete_answers_uncached_and_owners_drain() {
     assert_owned_state_at_baseline(residency(&workspace), baseline);
 }
 
+/// A workspace importer's dependency edge is import-graph state, not a lane
+/// resident: it survives its answer's eviction by the slot cap and a
+/// retention refusal of the answer, and leaves with the importer itself.
+///
+/// Mutation recipe: record the edge only for a slot-backed answer (drop the
+/// `importer_held_by_workspace` arm), or retract it for every importer. The
+/// evicted or refused importer then vanishes from its dependency's reverse
+/// set while it still imports it.
+#[test]
+fn a_workspace_importer_keeps_its_dependency_edge_whatever_the_lane_retains() {
+    let workspace = ownership_workspace();
+    workspace
+        .engine
+        .lazy_resolution_cache
+        .write()
+        .set_slot_cap_for_test(1);
+    let evicted = "/p/edge-evicted.ts";
+    let evictor = "/p/edge-evictor.ts";
+    let refused = "/p/edge-refused.ts";
+    for importer in [evicted, evictor, refused] {
+        workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    }
+    let _ = admitted_signature(resolve_owned(&workspace, evicted, "./dep"));
+    let _ = admitted_signature(resolve_owned(&workspace, evictor, "./dep"));
+    assert_eq!(
+        residency(&workspace).slots,
+        1,
+        "fixture invariant: one slot"
+    );
+    WorkspaceAccess::install_resolution_retention(
+        &workspace,
+        Arc::new(OwnershipAccount {
+            admit: false,
+            charged: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+    );
+    assert_eq!(
+        resolve_owned(&workspace, refused, "./dep").non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::RetentionPressure),
+        "fixture invariant: the account refuses the answer"
+    );
+
+    let dependents = WorkspaceRead::reverse_deps_for(&workspace, OWNERSHIP_DEP);
+    for importer in [evicted, evictor, refused] {
+        assert!(
+            dependents.iter().any(|dependent| dependent == importer),
+            "{importer} still imports the dependency: {dependents:?}"
+        );
+    }
+    for importer in [evicted, evictor, refused] {
+        workspace.remove_file(importer);
+    }
+    let dependents = WorkspaceRead::reverse_deps_for(&workspace, OWNERSHIP_DEP);
+    assert!(
+        dependents.is_empty(),
+        "every edge leaves with its importer: {dependents:?}"
+    );
+}
+
 /// A snapshot that outlives an importer's retirement still holds the
 /// retired decision, so its bytes stay charged until that snapshot drops,
 /// and are then released exactly once.
@@ -1170,15 +1229,22 @@ fn an_admission_that_folds_the_history_returns_a_current_witness() {
 }
 
 /// A residency read never pairs a lane whose slots already retired with a
-/// decision graph that still holds their decisions.
+/// decision graph that still holds their decisions: a read that meets a
+/// deletion paused between slot retirement and root publication waits for
+/// the publication and reports the post-deletion generation whole.
+///
+/// The reader is observed contending for the publication gate while the
+/// deletion is still paused inside its window, so the overlap is proven
+/// rather than left to scheduling; the timeouts only fail a stalled run.
 ///
 /// Mutation recipe: drop the publication-gate guard from
-/// `resolution_residency`. The read taken while the deletion is paused
-/// between slot retirement and root publication then reports the slot gone
-/// and its decision still live.
+/// `resolution_residency`. The reader then never contends for the gate and
+/// the rendezvous below fails; reading the lane before taking the gate
+/// instead reports the slot gone beside its still-live decision.
 #[test]
 fn a_residency_read_never_mixes_retirement_generations() {
     use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::sync::mpsc::channel;
     use std::time::Duration;
 
     let workspace = ownership_workspace();
@@ -1192,16 +1258,20 @@ fn a_residency_read_never_mixes_retirement_generations() {
         "fixture invariant: {live:?}"
     );
 
-    let (paused_tx, paused_rx) = std::sync::mpsc::channel::<()>();
-    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
     let workspace = &workspace;
     let read = std::thread::scope(|scope| {
+        let (paused_tx, paused_rx) = channel::<()>();
+        let (contended_tx, contended_rx) = channel::<()>();
+        // Owned by this closure, so a failed watchdog below drops it while
+        // unwinding — before the scope joins the deleter — and the paused
+        // deletion runs on instead of deadlocking the join.
+        let (resume_tx, resume_rx) = channel::<()>();
         let deleter = scope.spawn(move || {
             resolution_test_hooks::with_hook(
                 ResolutionPhase::ImporterSlotsRetired,
                 move || {
-                    paused_tx.send(()).expect("test alive");
-                    resume_rx.recv().expect("test alive");
+                    let _ = paused_tx.send(());
+                    let _ = resume_rx.recv();
                 },
                 || workspace.remove_file(importer),
             );
@@ -1209,31 +1279,32 @@ fn a_residency_read_never_mixes_retirement_generations() {
         paused_rx
             .recv_timeout(Duration::from_secs(20))
             .expect("the deletion reaches its slot retirement");
-        let (read_tx, read_rx) = std::sync::mpsc::channel();
         let reader = scope.spawn(move || {
-            read_tx.send(residency(workspace)).expect("test alive");
+            resolution_test_hooks::with_hook(
+                ResolutionPhase::ResidencyGateContended,
+                move || {
+                    let _ = contended_tx.send(());
+                },
+                || residency(workspace),
+            )
         });
-        // A gated read cannot finish while the deletion is paused inside
-        // its window; an ungated one finishes at once with a mixed pair.
-        let early = read_rx.recv_timeout(Duration::from_millis(250)).ok();
-        resume_tx.send(()).expect("deleter alive");
-        let read = early.unwrap_or_else(|| read_rx.recv().expect("reader finishes"));
+        let contended = contended_rx.recv_timeout(Duration::from_secs(20));
+        drop(resume_tx);
+        contended.expect("the residency read waits on the paused deletion's publication gate");
         deleter.join().expect("deleter");
-        reader.join().expect("reader");
-        read
+        reader.join().expect("reader")
     });
-    let before = read.slots == live.slots && read.derived_nodes == live.derived_nodes;
-    let after = read.slots == baseline.slots && read.derived_nodes == baseline.derived_nodes;
     assert!(
-        before || after,
+        read.slots == baseline.slots && read.derived_nodes == baseline.derived_nodes,
         "the read mixed generations: {read:?} (live {live:?}, baseline {baseline:?})"
     );
 }
 
 /// A warm reuse whose slot another admission evicted between the reuse and
 /// its final fence has no live decision to root on: it returns the
-/// candidate's own witness, which a later change to its target invalidates,
-/// and records no dependency edge for an answer the lane no longer holds.
+/// candidate's own witness, which a later change to its target invalidates.
+/// Its importer is a workspace file, so the import graph still records the
+/// dependency the answer names, retained or not.
 ///
 /// Mutation recipe: drop the `serves` re-check under the final fence. The
 /// reuse then roots on the evicted decision's tombstone, which has no
@@ -1268,12 +1339,11 @@ fn a_reuse_evicted_before_its_fence_returns_its_own_witness() {
         "fixture invariant: the first importer's demand reused its candidate"
     );
     let witness = admitted_signature(outcome);
-    let lazy = WorkspaceRead::dependency_snapshot(workspace.as_ref(), first)
-        .map(|snapshot| snapshot.lazy_resolved)
-        .unwrap_or_default();
     assert!(
-        !lazy.contains(OWNERSHIP_DEP),
-        "an evicted answer records no dependency edge: {lazy:?}"
+        WorkspaceRead::reverse_deps_for(workspace.as_ref(), OWNERSHIP_DEP)
+            .iter()
+            .any(|dependent| dependent == first),
+        "a workspace importer keeps the dependency edge its evicted answer names"
     );
 
     workspace.remove_file(OWNERSHIP_DEP);
@@ -1282,6 +1352,54 @@ fn a_reuse_evicted_before_its_fence_returns_its_own_witness() {
     assert!(
         !witness.validates(fresh.as_ref()),
         "the reuse's witness must see its target's deletion"
+    );
+}
+
+/// A warm reuse whose decision a concurrent write advanced after the reuse
+/// validated its candidate is never stamped with the advanced version: the
+/// write here creates a higher-priority target the candidate's negative
+/// probe ruled out, and the demand retries against the new world instead of
+/// serving the invalidated answer under a witness that world accepts.
+///
+/// Mutation recipe: drop the decision-version comparison from the final
+/// fence's filter. The warm demand then returns `/p/dep.tsx`, admitted with
+/// a witness the post-write world validates.
+#[test]
+fn a_reuse_whose_decision_advanced_before_its_fence_is_not_restamped() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+
+    let shadowed = "/p/dep.tsx";
+    let workspace = Arc::new(memory_workspace_with(shadowed));
+    let importer = "/p/main.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    let resolve = |workspace: &MemoryWorkspace| {
+        WorkspaceRead::resolve_import_outcome(workspace, importer, "./dep", OWNERSHIP_CONTEXT)
+    };
+    let cold = resolve(&workspace);
+    assert_eq!(
+        cold.result().map(|result| result.source_id.as_str()),
+        Some(shadowed),
+        "fixture invariant: only the lower-priority target exists"
+    );
+    let _ = admitted_signature(cold);
+
+    let writer = Arc::clone(&workspace);
+    let warm = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || writer.inject_file(OWNERSHIP_DEP.to_string(), Arc::from("export const v = 2\n")),
+        || resolve(&workspace),
+    );
+    assert_eq!(
+        warm.result().map(|result| result.source_id.as_str()),
+        Some(OWNERSHIP_DEP),
+        "the warm demand must not serve the answer the write invalidated"
+    );
+    let witness = admitted_signature(warm);
+    let fresh =
+        WorkspaceRead::capture_resolution_world(workspace.as_ref()).expect("captured world");
+    assert!(
+        witness.validates(fresh.as_ref()),
+        "the retried answer is current"
     );
 }
 

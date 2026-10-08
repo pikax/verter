@@ -26,6 +26,9 @@ pub(crate) enum ResolutionPhase {
     /// inside its window at capture, or the attempt is taking the gate to
     /// admit).
     PublicationGateWait,
+    /// A residency read found the publication gate held by a writer and is
+    /// about to wait for it.
+    ResidencyGateContended,
 }
 
 struct InstalledHook {

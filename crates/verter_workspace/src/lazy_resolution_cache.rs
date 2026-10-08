@@ -217,12 +217,13 @@ impl WorkspaceResolutionSlots {
         retirement
     }
 
-    /// [`Self::retire_owner`] for every owner at or under `prefix`.
+    /// [`Self::retire_owner`] for every owner at or under `prefix`. Also
+    /// returns those owners: every importer the lane held under `prefix`.
     pub(crate) fn retire_owners_under(
         &mut self,
         prefix: &str,
         retire: impl Fn(&str, ResolutionPopulation) -> bool,
-    ) -> SlotRetirement {
+    ) -> (Vec<String>, SlotRetirement) {
         let prefix = verter_session_query::resolution::normalize_canonical_id(prefix);
         let base = prefix.trim_end_matches('/');
         let directory = format!("{base}/");
@@ -235,8 +236,8 @@ impl WorkspaceResolutionSlots {
             .cloned()
             .collect();
         let mut retirement = SlotRetirement::default();
-        self.retire_owners(owners.into_iter(), &retire, &mut retirement);
-        retirement
+        self.retire_owners(owners.iter().cloned(), &retire, &mut retirement);
+        (owners, retirement)
     }
 
     pub(crate) fn residency(&self) -> SlotResidency {

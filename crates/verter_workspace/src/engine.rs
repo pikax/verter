@@ -1548,17 +1548,41 @@ impl Engine {
     }
 
     /// Retract the resolution-owned dependency edges no retained answer
-    /// backs any more. Runs under the publication gate, like every lane
-    /// mutation, so it cannot interleave with the admission that records
-    /// one.
+    /// backs any more, for importers the workspace does not hold: a held
+    /// importer's edges are import-graph state its consumers read whatever
+    /// the lane retains, and leave with the importer's own retirement. Runs
+    /// under the publication gate, like every lane mutation, so it cannot
+    /// interleave with the admission that records one.
     fn retract_lazy_dependencies(&self, dependencies: Vec<(String, String)>) {
         if dependencies.is_empty() {
             return;
         }
+        let in_snapshot: Vec<bool> = {
+            let snapshot = self.snapshot.read();
+            dependencies
+                .iter()
+                .map(|(importer, _)| snapshot.contains(importer))
+                .collect()
+        };
         let mut edges = self.edges.write();
-        for (importer, dependency) in dependencies {
+        for ((importer, dependency), in_snapshot) in dependencies.into_iter().zip(in_snapshot) {
+            if in_snapshot || edges.holds_state_beyond_lazy_resolutions(&importer) {
+                continue;
+            }
             edges.retract_lazy_resolved_dep(&importer, &dependency);
         }
+    }
+
+    /// Whether the workspace holds `importer` as one of its own files — its
+    /// content, or dependency state beyond resolution answers (its parsed
+    /// edges) — so that the importer's own retirement removes every edge it
+    /// owns.
+    fn importer_held_by_workspace(&self, importer: &str) -> bool {
+        self.snapshot.read().contains(importer)
+            || self
+                .edges
+                .read()
+                .holds_state_beyond_lazy_resolutions(importer)
     }
 
     /// Split `queries` into base and per-session decision nodes.
@@ -2149,9 +2173,13 @@ impl Engine {
     }
 
     /// [`Self::retire_importer_in_world`] for every importer at or under
-    /// `prefix`.
-    fn retire_importers_under_in_world(&self, world: &mut ResolutionWorldRoot, prefix: &str) {
-        let retirement = {
+    /// `prefix`. Returns every importer the lane held there.
+    fn retire_importers_under_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        prefix: &str,
+    ) -> Vec<String> {
+        let (owners, retirement) = {
             let overlay = self.overlay.read();
             self.lazy_resolution_cache
                 .write()
@@ -2160,6 +2188,7 @@ impl Engine {
                 })
         };
         self.retire_resolution_decisions_in_world(world, retirement);
+        owners
     }
 
     /// An overlay closing over an importer the base world knows is absent
@@ -2227,14 +2256,38 @@ impl Engine {
         }
     }
 
-    fn remove_edges_under_in_world(&self, world: &mut ResolutionWorldRoot, prefix: &str) -> bool {
+    /// Remove the dependency and exact state of every owner at or under
+    /// `prefix`. Returns the dependency owners removed.
+    fn remove_edges_under_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        prefix: &str,
+    ) -> Vec<String> {
         let exact_owners = world.exact_owners_under(prefix);
-        self.edges.write().remove_under(prefix);
-        let mut changed = false;
+        let removed = self.edges.write().remove_under(prefix);
         for owner in exact_owners {
-            changed |= self.replace_world_exact_resolutions(world, &owner, &[]);
+            self.replace_world_exact_resolutions(world, &owner, &[]);
         }
-        changed
+        removed
+    }
+
+    /// Remove every importer at or under `prefix` from the world a recursive
+    /// deletion leaves: its edges, its slots and decisions, and — as a
+    /// per-file deletion does — its recorded absence, so a demand from one
+    /// of them still in flight is served at its fence but not retained
+    /// ([`Self::importer_known_absent`]).
+    fn remove_importers_under_in_world(&self, world: &mut ResolutionWorldRoot, prefix: &str) {
+        let mut removed = self.remove_edges_under_in_world(world, prefix);
+        removed.extend(self.retire_importers_under_in_world(world, prefix));
+        removed.sort();
+        removed.dedup();
+        for importer in removed {
+            self.update_base_path_facts(
+                world,
+                &importer,
+                verter_session_query::resolution::PathProbe::Absent,
+            );
+        }
     }
 
     /// Execute one canonical-scoped content mutation while the resolution
@@ -2389,8 +2442,7 @@ impl Engine {
             if !changed {
                 return (result, false);
             }
-            self.remove_edges_under_in_world(world, prefix);
-            self.retire_importers_under_in_world(world, prefix);
+            self.remove_importers_under_in_world(world, prefix);
             let generation = self.bump_content_generation_in_world();
             for canonical_id in transitioned {
                 self.update_base_path_facts(
@@ -2426,8 +2478,7 @@ impl Engine {
                 return (result, false);
             }
             if remove_edges {
-                self.remove_edges_under_in_world(world, prefix);
-                self.retire_importers_under_in_world(world, prefix);
+                self.remove_importers_under_in_world(world, prefix);
             }
             let normalized = verter_session_query::resolution::normalize_canonical_id(prefix);
             self.advance_resolution_fact(
@@ -2875,7 +2926,13 @@ impl Engine {
     /// publication gate (session writers included), so holding it pins the
     /// lane and every root together.
     pub(crate) fn resolution_residency(&self) -> crate::traits::ResolutionResidency {
-        let _publication = self.resolution_world_write.lock();
+        let _publication = self.resolution_world_write.try_lock().unwrap_or_else(|| {
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::ResidencyGateContended,
+            );
+            self.resolution_world_write.lock()
+        });
         let mut derived = self.resolution_world.load().facts.residency();
         for domain in self.resolution_sessions.read().values() {
             let session = domain.root.load().facts.residency();
@@ -4267,12 +4324,29 @@ impl Engine {
                     session_domain.as_ref().map(|domain| domain.write.lock()),
                 )
             };
-            let admission_fence = self.admission_fence_under_gate(
-                &captured,
-                population,
-                request_overlay,
-                &transaction.lock(),
-            );
+            let admission_fence = self
+                .admission_fence_under_gate(
+                    &captured,
+                    population,
+                    request_overlay,
+                    &transaction.lock(),
+                )
+                .filter(|latest| {
+                    // A reuse rooted on its decision is stamped with the
+                    // decision's version in the fenced world, which its
+                    // transaction never observed: a later world is
+                    // compatible only while that decision has not advanced
+                    // since the reuse validated its candidate. A retired
+                    // decision is not rooted on (the reuse restates its
+                    // candidate's witness below), so it is not compared.
+                    reused_decision.as_ref().is_none_or(|query| {
+                        if !self.lazy_resolution_cache.read().serves(&cache_key, query) {
+                            return true;
+                        }
+                        let node = ResolutionFactKey::decision(query.clone());
+                        latest.world.fact_version(&node) == captured.world.fact_version(&node)
+                    })
+                });
             match admission_fence {
                 Some(latest) => {
                     transaction.lock().rebase_onto(Arc::clone(&latest.world));
@@ -4398,6 +4472,8 @@ impl Engine {
                 SignatureAdmission::Cacheable(signature) => Some(signature.clone()),
                 SignatureAdmission::NonCacheable(_) => None,
             };
+            // Complete and current, before any retention decision.
+            let complete_answer = cacheable_signature.is_some();
 
             let mut published = false;
             if reused {
@@ -4570,15 +4646,23 @@ impl Engine {
             // workspace resolved: a request overlay's answer, even one
             // resolution-equivalent to the workspace's, may be for an
             // importer's overlay-only specifier.
-            // The dependency edge is the retained answer's: it is recorded
-            // only while a workspace-lane candidate backs it, under the
-            // same gate that retires it with that candidate.
             if request_overlay.is_none() && matches!(&admission, SignatureAdmission::Cacheable(_)) {
                 input_ledger.commit_loaded_inputs(reader);
-                if let (true, Some(result)) = (slot_backed, result.as_ref()) {
-                    self.edges
-                        .write()
-                        .add_lazy_resolved_dep(importer_id, &result.source_id);
+            }
+            // The dependency edge is import-graph bookkeeping for every
+            // complete answer, retained or refused retention: an importer
+            // the workspace holds keeps it until its own retirement removes
+            // every edge it owns. An importer the workspace does not hold
+            // has nothing else to retire it, so its edge is recorded only
+            // while a workspace-lane candidate backs it, under the same gate
+            // that retracts it with that candidate.
+            if request_overlay.is_none() && complete_answer {
+                if let Some(result) = result.as_ref() {
+                    if slot_backed || self.importer_held_by_workspace(importer_id) {
+                        self.edges
+                            .write()
+                            .add_lazy_resolved_dep(importer_id, &result.source_id);
+                    }
                 }
             }
 
