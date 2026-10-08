@@ -1736,29 +1736,14 @@ impl Engine {
         canonical_id: &str,
         resolutions: &[ExactResolution],
     ) -> bool {
-        if world.owner_exacts_equal(canonical_id, resolutions) {
+        let Some(affected) = world.replace_owner_exacts(canonical_id, resolutions) else {
             return false;
-        }
-        let mut affected = world.owner_exact_fact_keys(canonical_id);
-        affected.extend(resolutions.iter().map(|resolution| {
-            ResolutionFactKey::exact_importer(
-                canonical_id,
-                &resolution.specifier,
-                verter_session_query::resolution::ResolutionContext {
-                    phase: resolution.phase,
-                    kind: resolution.kind,
-                },
-                ResolutionPopulation::Base,
-            )
-        }));
-        affected.sort();
-        affected.dedup();
+        };
         for key in affected {
             world
                 .facts
                 .advance(key, self.next_resolution_fact_version());
         }
-        world.replace_owner_exacts(canonical_id, resolutions);
         true
     }
 
@@ -3307,13 +3292,29 @@ impl Engine {
     }
 
     /// Set exact resolutions for a file.
+    ///
+    /// An unchanged refresh writes nothing anywhere, so it is decided under
+    /// the publication gate before a publication window opens: it builds no
+    /// replacement root and never turns the epoch odd, so no concurrent
+    /// capture is refused for it.
     pub(crate) fn set_exact_resolutions(
         &self,
         canonical_id: &str,
         resolutions: Vec<ExactResolution>,
     ) -> ExactResolutionResult {
+        let _write = self.resolution_world_write.lock();
+        if self
+            .edges
+            .read()
+            .exact_resolutions_unchanged(canonical_id, &resolutions)
+        {
+            return ExactResolutionResult {
+                newly_resolved: Vec::new(),
+                changed: false,
+            };
+        }
         let retained = resolutions.clone();
-        self.mutate_resolution_world(|world| {
+        self.mutate_resolution_world_locked(|world| {
             let result = self
                 .edges
                 .write()
