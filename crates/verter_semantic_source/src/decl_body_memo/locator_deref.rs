@@ -289,6 +289,33 @@ impl DeclBodyMemo {
                                 }
                             }
                         }
+                        // A class-body selection (`ClassMembersNamed` /
+                        // `ClassHeritage`) re-borrows only the demanded
+                        // members (or the `extends` reference) from the
+                        // retained parse: the class's other members are
+                        // never lowered.
+                        if aug_scope.is_none() {
+                            let request = match slot.path.first() {
+                                Some(TypeBodyPathStep::ClassMembersNamed { name_hash }) => {
+                                    Some(super::ClassBodyRequest::MembersNamed(*name_hash))
+                                }
+                                Some(TypeBodyPathStep::ClassHeritage) => {
+                                    Some(super::ClassBodyRequest::Heritage)
+                                }
+                                _ => None,
+                            };
+                            if let Some(request) = request {
+                                let selection = transient_outcome(
+                                    self.transient_class_body_selection(owner, symbol, request),
+                                )?;
+                                return navigate_type_space_body(
+                                    DerefedBodyShape::Single(selection.body.clone()),
+                                    &lowered.narrow_type_parameters,
+                                    &selection.type_parameters,
+                                    &slot.path[1..],
+                                );
+                            }
+                        }
                         // The record stores content-free body LOCATORS; the
                         // authored typed IR is re-borrowed from the retained
                         // snapshot by the lease-only transient service (the
@@ -848,7 +875,9 @@ fn step_may_cross_binder_scope(step: &TypeBodyPathStep) -> bool {
         | TypeBodyPathStep::IndexedAccessIndex
         | TypeBodyPathStep::IndexSignatureKey
         | TypeBodyPathStep::IndexSignatureValue
-        | TypeBodyPathStep::TupleElement { .. } => false,
+        | TypeBodyPathStep::TupleElement { .. }
+        | TypeBodyPathStep::ClassMembersNamed { .. }
+        | TypeBodyPathStep::ClassHeritage => false,
     }
 }
 

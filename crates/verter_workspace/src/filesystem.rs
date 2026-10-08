@@ -2252,6 +2252,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 }
 
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
+    #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,
         account: Arc<

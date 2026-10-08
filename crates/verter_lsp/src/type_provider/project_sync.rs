@@ -404,6 +404,16 @@ impl ProjectSync {
         self.certified_delivery(path, prepared.prepared)
     }
 
+    /// The bytes the serving engine incarnation accepted for `path` — its own
+    /// application receipt, read from the provider's local ledger without a
+    /// provider round trip.
+    pub(crate) fn serving_content(
+        &self,
+        path: &str,
+    ) -> verter_type_runtime::traits::AppliedContent {
+        self.provider.applied_content(path)
+    }
+
     /// Whether the serving engine incarnation holds exactly `content` under
     /// `path` — the provider half of a verbatim (`.d.ts`) leg's freshness basis.
     pub(crate) fn companion_applied_verbatim(&self, path: &str, content: &str) -> bool {

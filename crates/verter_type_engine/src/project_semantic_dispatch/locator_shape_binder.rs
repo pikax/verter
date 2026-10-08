@@ -724,6 +724,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // pre-lowering navigator spells
                 // `TypeParamBoundStepMisplaced`.
                 Step::TypeParamBound { .. } => return None,
+                // `ClassElement` / `ClassHeritage` are likewise consumed by
+                // the class-body deref before navigation begins; reaching
+                // the lowered graph with one is the typed miss.
+                Step::ClassMembersNamed { .. } | Step::ClassHeritage => return None,
                 Step::FunctionParam { ordinal } => match data {
                     SemanticNodeData::Signature { params, .. } => {
                         Position::Node(params.get(*ordinal as usize)?.ty)
@@ -994,7 +998,9 @@ mod step_vocabulary_completeness {
             | TypeBodyPathStep::IndexedAccessIndex
             | TypeBodyPathStep::IndexSignatureKey
             | TypeBodyPathStep::IndexSignatureValue
-            | TypeBodyPathStep::TupleElement { .. } => {}
+            | TypeBodyPathStep::TupleElement { .. }
+            | TypeBodyPathStep::ClassMembersNamed { .. }
+            | TypeBodyPathStep::ClassHeritage => {}
         }
     }
 

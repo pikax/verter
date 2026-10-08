@@ -304,6 +304,10 @@ impl key_safe_sealed::Sealed for bool {}
 impl R6KeySafe for bool {}
 impl key_safe_sealed::Sealed for u32 {}
 impl R6KeySafe for u32 {}
+// A class member NAME's hash (`class_member_name_hash`) is name identity,
+// never a content or version hash.
+impl key_safe_sealed::Sealed for u64 {}
+impl R6KeySafe for u64 {}
 impl key_safe_sealed::Sealed for String {}
 impl R6KeySafe for String {}
 impl key_safe_sealed::Sealed for str {}
@@ -408,7 +412,9 @@ fn w_type_body_path_step(step: &TypeBodyPathStep) {
         | TypeBodyPathStep::ValueSignature { ordinal }
         | TypeBodyPathStep::UnionArm { ordinal }
         | TypeBodyPathStep::TupleElement { ordinal } => key_safe(ordinal),
-        TypeBodyPathStep::MemberKey
+        TypeBodyPathStep::ClassMembersNamed { name_hash } => key_safe(name_hash),
+        TypeBodyPathStep::ClassHeritage
+        | TypeBodyPathStep::MemberKey
         | TypeBodyPathStep::MemberValue
         | TypeBodyPathStep::FunctionReturn
         | TypeBodyPathStep::MappedSource

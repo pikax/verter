@@ -974,6 +974,7 @@ async fn svelte_recovered_script_prop_facts_fail_closed_to_provider() {
         &initial_ide.code,
         initial_ide.source_map.as_deref(),
     );
+    stamp_seeded_ide_publication(server, &canonical_id, &ide_path);
     let ctx = server
         .type_provider_context(&app_uri)
         .expect("current provider surface without foreground compile");
@@ -1984,6 +1985,7 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -2090,6 +2092,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -2209,6 +2212,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -2326,6 +2330,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -3266,6 +3271,7 @@ const msg = 'hello'
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -3370,6 +3376,7 @@ const msg = 'hello'
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -3501,6 +3508,7 @@ const msg = 'hello'
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -3593,6 +3601,7 @@ const msg = 'hello'
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -3705,6 +3714,7 @@ const msg = 'hello'
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -3950,6 +3960,7 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -4095,6 +4106,7 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -4480,6 +4492,7 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -4530,6 +4543,7 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -4640,6 +4654,7 @@ defineProps<{ msg: string }>()
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -4781,6 +4796,7 @@ defineProps<{ msg: string }>()
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: Some(crate::provider_sync::CarrierCommitStamp {
             ownership_generation: verter_workspace::workspace_snapshot::SnapshotGeneration(
                 u64::MAX,
@@ -4905,6 +4921,7 @@ defineProps<{ msg: string }>()
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -5256,6 +5273,7 @@ defineProps<{ msg: string }>()
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -5341,6 +5359,7 @@ defineProps<{ msg: string }>()
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -5528,11 +5547,13 @@ const msg = 'hello'
         "open unresolved current-file sync should stay queued for future owner reconciliation"
     );
 
-    // Positive: interactive type-provider lookups still resolve from committed
-    // state (hover keeps working).
+    // Negative: tsserver never receives an unowned carrier's IDE companion —
+    // no receipt fingerprints the bytes it would read at the live path — so
+    // the provider contributes nothing until an owner publishes the surface.
     assert!(
-        server.type_provider_context(&uri).is_some(),
-        "open unresolved Vue file must keep a live type-provider context for hover"
+        server.type_provider_context(&uri).is_none(),
+        "an open unresolved carrier on tsserver must not yield a provider context from path \
+         liveness alone"
     );
 
     let calls = provider.file_sync_calls();
@@ -5617,6 +5638,7 @@ const msg = 'hello'
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -6038,6 +6060,7 @@ const msg = 'hello'
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -7580,6 +7603,7 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -9435,6 +9459,7 @@ import Child from '@/components/Child.vue'
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -9856,6 +9881,7 @@ defineProps<{ msg: string }>()
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -10050,6 +10076,7 @@ defineProps<{ show: boolean }>()
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -10175,6 +10202,7 @@ defineProps<{ msg: string }>()
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -10286,6 +10314,7 @@ defineProps<{ msg: string }>()
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -11389,6 +11418,7 @@ async fn generic_stale_closer_never_closes_declaration_overlay() {
         decl_background_loaded: true,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,

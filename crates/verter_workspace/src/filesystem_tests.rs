@@ -3165,3 +3165,67 @@ fn twelve_sibling_publications_never_refuse_a_route() {
     );
     assert_eq!(restarts, 0, "compatible siblings cost no restart");
 }
+
+/// A recursive disk deletion records every importer it removes as absent,
+/// as a per-file deletion does: a bare-import demand from one of them that
+/// is in flight across the deletion — an answer that reads nothing under
+/// the deleted directory — is served complete at its fence, but takes no
+/// slot, decision or dependency edge that nothing would ever retire.
+///
+/// Mutation recipe: drop the absence recording from
+/// `remove_importers_under_in_world`. The parked demand then admits a slot
+/// owned by the deleted importer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_demand_in_flight_across_its_directory_deletion_is_served_but_not_retained() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let (_temp, root, importer, _manifest, workspace) = filesystem_package_fixture(8);
+    let workspace = Arc::new(workspace);
+    let target = |outcome: &crate::resolution_currency::ResolutionOutcome| {
+        outcome.result().map(|result| result.source_id.clone())
+    };
+    let b = format!("{root}/node_modules/pkg/b.d.ts");
+    let a = format!("{root}/node_modules/pkg/a.d.ts");
+
+    let owned =
+        WorkspaceRead::resolve_import_outcome(workspace.as_ref(), &importer, "pkg/b", CONTEXT);
+    assert_eq!(target(&owned), Some(b), "fixture invariant: a deep import");
+    assert!(
+        owned.is_cacheable(),
+        "fixture invariant: the importer owns a slot"
+    );
+    assert_eq!(
+        WorkspaceRead::resource_snapshot(workspace.as_ref())
+            .resolution
+            .owners,
+        1,
+        "fixture invariant: the importer is the lane's one owner"
+    );
+
+    let deleter = Arc::clone(&workspace);
+    let source = format!("{root}/src");
+    let parked = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            WorkspaceAccess::delete_dir_all(deleter.as_ref(), &source).expect("subtree deletion");
+        },
+        || WorkspaceRead::resolve_import_outcome(workspace.as_ref(), &importer, "pkg", CONTEXT),
+    );
+    assert_eq!(
+        target(&parked),
+        Some(a.clone()),
+        "the answer is served complete"
+    );
+
+    let residency = WorkspaceRead::resource_snapshot(workspace.as_ref()).resolution;
+    assert_eq!(residency.slots, 0, "{residency:?}");
+    assert_eq!(residency.owners, 0, "{residency:?}");
+    assert!(
+        !WorkspaceRead::reverse_deps_for(workspace.as_ref(), &a).contains(&importer),
+        "a deleted importer records no dependency edge"
+    );
+}
