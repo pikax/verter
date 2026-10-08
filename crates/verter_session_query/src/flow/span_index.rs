@@ -127,6 +127,24 @@ impl SkeletonSpanIndex {
         }
     }
 
+    /// Whether this index was built over `skeleton`'s tables. An unprepared
+    /// skeleton carries the empty index, which would answer every question
+    /// with silence rather than refuse.
+    #[must_use]
+    pub fn covers(&self, skeleton: &FunctionBodySkeleton) -> bool {
+        self.sites.len() == skeleton.expr_sites.len()
+            && self.writes.len() == skeleton.writes.len()
+            && self.bindings.len() == skeleton.bindings.len()
+    }
+
+    /// How many entries construction indexed (sites, writes, bindings and
+    /// grouped reads): its work is one sort over each table, so this is the
+    /// size the construction cost scales with.
+    #[must_use]
+    pub fn indexed_entries(&self) -> usize {
+        self.sites.len() + self.writes.len() + self.bindings.len() + self.reads.len()
+    }
+
     /// Every expression site `span` contains, in table (source) order.
     #[must_use]
     pub fn sites_within(&self, span: FrameSpan) -> Vec<SkeletonExprSiteId> {

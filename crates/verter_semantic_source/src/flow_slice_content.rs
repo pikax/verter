@@ -6044,6 +6044,10 @@ impl<'a> Lowerer<'a> {
     ) -> (Arc<[SliceLoopWrite]>, Arc<[SliceLoopDependency]>) {
         let loop_span = self.rebase(statement.span());
         let index = &self.skeleton.span_index;
+        verter_debug_assert!(
+            index.covers(self.skeleton),
+            "loop lowering needs a prepared skeleton: its span index is unbuilt"
+        );
         let inferred: Vec<SliceLoopDependency> = index
             .bindings_within(loop_span)
             .into_iter()

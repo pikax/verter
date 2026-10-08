@@ -6535,3 +6535,28 @@ fn loop_dependency_sites_cost_linear_index_work() {
         "each doubling of the writes doubles the index work: {visits:?}"
     );
 }
+
+/// Index construction is one pass per prepared skeleton: the entries it
+/// indexes grow linearly with the loop's writes, and the loop lowering's
+/// query work (above) stays a function of the same N.
+#[test]
+fn span_index_construction_scales_linearly_with_sites() {
+    let built = [128, 256, 512, 1024].map(|writes| {
+        let (_, skeleton, _) = loop_lowering(&proportional_loop_source(writes), "lw");
+        assert!(skeleton.span_index.covers(&skeleton));
+        skeleton.span_index.indexed_entries()
+    });
+    assert_eq!(
+        [
+            built[1] - built[0],
+            built[2] - built[1],
+            built[3] - built[2]
+        ],
+        [
+            built[1] - built[0],
+            2 * (built[1] - built[0]),
+            4 * (built[1] - built[0])
+        ],
+        "each doubling of the writes doubles the indexed entries: {built:?}"
+    );
+}
