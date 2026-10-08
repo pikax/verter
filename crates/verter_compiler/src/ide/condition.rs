@@ -4,11 +4,229 @@
 //! from Verter's retired TypeScript transformer. The Rust implementation is
 //! now the sole production owner and the behavioral tests below are authoritative.
 //!
-//! Each `v-if`/`v-else-if`/`v-else` element in the template creates a [`ConditionScope`].
-//! Children inherit accumulated scopes from their ancestors. The accumulated scopes
-//! are used to generate type narrowing guards:
+//! Each `v-if`/`v-else-if`/`v-else` element in the template narrows the code
+//! nested inside it. TypeScript drops property-access narrowing (`__props.kind`)
+//! at every function boundary, so each closure the template emits — a nested
+//! `v-if` IIFE or a callback prop — repeats the narrowing as a guard:
 //! - **Block guards** (`if(!(condText)) return;`) at the start of nested v-if IIFEs
 //! - **Ternary guards** (`!(condText)? undefined :`) in arrow-function prop expressions
+//!
+//! The IDE template emitter builds guards from [`resolve_chain`] and
+//! [`GuardScope`]: every chain member's condition is resolved once, a member
+//! reads its predecessors as a prefix of the chain's shared terms, nested scopes
+//! link to their enclosing scope instead of copying it, and one guard repeats at
+//! most [`MAX_GUARD_TERMS`] terms. Guard construction therefore visits a bounded
+//! number of predecessors and the generated guard bytes grow linearly with the
+//! number of branches and callbacks, never quadratically.
+
+use std::cell::OnceCell;
+use std::rc::Rc;
+
+/// Most condition terms a single narrowing guard repeats.
+///
+/// A guard keeps its terms innermost-first — positive conditions of the
+/// element and its enclosing scopes before predecessor negations, nearest
+/// predecessor first — and drops the farthest terms beyond this bound. A guard
+/// within the bound repeats every term, exactly as the full narrowing chain.
+pub const MAX_GUARD_TERMS: usize = 16;
+
+/// One member of a `v-if` / `v-else-if` / `v-else` chain, in chain order.
+#[derive(Debug)]
+pub enum ChainBranch {
+    /// `v-if` / `v-else-if` with its resolved condition expression.
+    Condition(String),
+    /// `v-if` / `v-else-if` without a condition value: narrows nothing and
+    /// adds no negation for later members.
+    Unconditioned,
+    /// `v-else`: narrows by the negation of every preceding condition.
+    Else,
+}
+
+/// A chain member's narrowing terms: a prefix of its chain's shared resolved
+/// conditions (the predecessors, negated) plus its own positive condition.
+#[derive(Clone, Debug)]
+pub struct ChainMember {
+    /// Wrapped conditions of the whole chain, shared by every member.
+    terms: Rc<[Rc<str>]>,
+    /// `terms[..negations]` precede this member.
+    negations: usize,
+    /// Index of this member's own condition in `terms`.
+    positive: Option<usize>,
+}
+
+impl ChainMember {
+    fn positive(&self) -> Option<&str> {
+        self.positive.map(|i| &*self.terms[i])
+    }
+
+    fn negations(&self) -> &[Rc<str>] {
+        &self.terms[..self.negations]
+    }
+}
+
+/// Resolve a chain's member conditions once into shared narrowing terms.
+///
+/// Returns one entry per branch, in order: `None` for an unconditioned
+/// `v-if`/`v-else-if` (it builds no narrowing scope), `Some` otherwise. Each
+/// member shares the chain's term storage, so building every member is linear
+/// in the chain length.
+pub fn resolve_chain(branches: impl IntoIterator<Item = ChainBranch>) -> Vec<Option<ChainMember>> {
+    let branches: Vec<ChainBranch> = branches.into_iter().collect();
+    let mut terms: Vec<Rc<str>> = Vec::with_capacity(branches.len());
+    // (negations, positive) per branch; `None` when the branch builds no scope.
+    let mut shapes: Vec<Option<(usize, Option<usize>)>> = Vec::with_capacity(branches.len());
+    for branch in branches {
+        match branch {
+            ChainBranch::Condition(condition) => {
+                shapes.push(Some((terms.len(), Some(terms.len()))));
+                terms.push(Rc::from(wrap_if_needed(&condition).as_ref()));
+            }
+            ChainBranch::Unconditioned => shapes.push(None),
+            ChainBranch::Else => shapes.push(Some((terms.len(), None))),
+        }
+    }
+    let terms: Rc<[Rc<str>]> = terms.into();
+    shapes
+        .into_iter()
+        .map(|shape| {
+            shape.map(|(negations, positive)| ChainMember {
+                terms: Rc::clone(&terms),
+                negations,
+                positive,
+            })
+        })
+        .collect()
+}
+
+/// The narrowing in effect at a template position: a persistent list of the
+/// chain members enclosing it, innermost first.
+///
+/// Cloning and [`GuardScope::enter`] are O(1). The guard text of a scope is
+/// rendered at most once and shared by every element and callback inside it.
+#[derive(Clone, Debug, Default)]
+pub struct GuardScope(Option<Rc<GuardFrame>>);
+
+#[derive(Debug)]
+struct GuardFrame {
+    parent: GuardScope,
+    member: ChainMember,
+    guard: OnceCell<Option<Rc<str>>>,
+}
+
+impl GuardScope {
+    /// The scope inside `member`, nested in `self`. A member that contributes
+    /// no term (a `v-else` without predecessors) narrows nothing and returns
+    /// `self` unchanged.
+    pub fn enter(&self, member: ChainMember) -> GuardScope {
+        if member.positive.is_none() && member.negations == 0 {
+            return self.clone();
+        }
+        GuardScope(Some(Rc::new(GuardFrame {
+            parent: self.clone(),
+            member,
+            guard: OnceCell::new(),
+        })))
+    }
+
+    /// The combined condition text a closure inside this scope repeats, or
+    /// `None` outside any condition.
+    ///
+    /// Example for `v-else-if="C"` after `v-if="A"`, nested inside `v-if="P"`:
+    /// `!((A)) && (P) && (C)` — negations first, then positives, each group
+    /// ordered outermost scope first and in chain order.
+    pub fn guard_text(&self) -> Option<Rc<str>> {
+        let frame = self.0.as_deref()?;
+        frame.guard.get_or_init(|| render_guard(frame)).clone()
+    }
+}
+
+/// Render the bounded guard of `innermost`.
+///
+/// Every frame carries at least one term, so the [`MAX_GUARD_TERMS`] innermost
+/// frames hold enough terms to fill the guard; farther frames are never visited.
+fn render_guard(innermost: &GuardFrame) -> Option<Rc<str>> {
+    // Candidates innermost-first: positives by frame, negations by frame with
+    // the nearest predecessor first.
+    let mut positives: Vec<&str> = Vec::new();
+    let mut negations: Vec<&str> = Vec::new();
+    let mut visits = 0usize;
+    let mut frame = Some(innermost);
+    let mut frames = 0usize;
+    while let Some(current) = frame {
+        if frames == MAX_GUARD_TERMS {
+            break;
+        }
+        frames += 1;
+        if let Some(positive) = current.member.positive() {
+            positives.push(positive);
+            visits += 1;
+        }
+        for negation in current
+            .member
+            .negations()
+            .iter()
+            .rev()
+            .take(MAX_GUARD_TERMS)
+        {
+            negations.push(negation);
+            visits += 1;
+        }
+        frame = current.parent.0.as_deref();
+    }
+    record_guard_work(visits);
+
+    positives.truncate(MAX_GUARD_TERMS);
+    negations.truncate(MAX_GUARD_TERMS - positives.len());
+    if positives.is_empty() && negations.is_empty() {
+        return None;
+    }
+
+    let mut text = String::new();
+    for negation in negations.iter().rev() {
+        if !text.is_empty() {
+            text.push_str(" && ");
+        }
+        text.push_str("!(");
+        text.push_str(negation);
+        text.push(')');
+    }
+    for positive in positives.iter().rev() {
+        if !text.is_empty() {
+            text.push_str(" && ");
+        }
+        text.push_str(positive);
+    }
+    Some(text.into())
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+thread_local! {
+    /// Condition terms visited while rendering narrowing guards.
+    static GUARD_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+#[inline]
+fn record_guard_work(units: usize) {
+    GUARD_WORK.with(|work| work.set(work.get() + units));
+}
+
+#[cfg(not(any(test, feature = "semantic-observe")))]
+#[inline(always)]
+fn record_guard_work(_units: usize) {}
+
+/// Read and reset the per-thread guard-construction work counter.
+#[cfg(any(test, feature = "semantic-observe"))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "measurement builds read it through their own harnesses"
+    )
+)]
+pub fn take_guard_work() -> usize {
+    GUARD_WORK.with(|work| work.replace(0))
+}
 
 /// A condition scope entry for type narrowing.
 ///

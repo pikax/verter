@@ -34,7 +34,7 @@ use crate::ast::types::{
     AstNodeKind, CommentNode, ConditionalChain, ElementNode, ElementNodeConditionKind,
     InterpolationNode, TagType, TextNode,
 };
-use crate::ide::condition::{self, ConditionScope};
+use crate::ide::condition::{self, ChainBranch, ChainMember, GuardScope};
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText,
 };
@@ -199,7 +199,12 @@ pub fn generate_ide_template<'alloc>(
         strict_slot_entries: Vec::new(),
         required_slot_checks: Vec::new(),
     };
-    walk_children_with_iife_tracking(children, &content.v_if_chains, &mut ctx, &[]);
+    walk_children_with_iife_tracking(
+        children,
+        &content.v_if_chains,
+        &mut ctx,
+        &GuardScope::default(),
+    );
 
     if needs_fragment {
         ctx.out.prepend_alloc(content.end, "</>");
@@ -212,10 +217,14 @@ pub fn generate_ide_template<'alloc>(
 }
 
 /// Walk a single AST node and generate JSX output.
+///
+/// `branch` is the node's resolved chain member when it belongs to a `v-if`
+/// chain of its parent.
 fn walk_node<'a, 'alloc>(
     id: NodeId,
     ctx: &mut IdeTemplateCtx<'a, 'alloc>,
-    condition_scopes: &[ConditionScope],
+    scope: &GuardScope,
+    branch: Option<&ResolvedBranch>,
     chain_mode: ChainMode,
 ) {
     let node = &ctx.ast.nodes[id.0];
@@ -227,7 +236,7 @@ fn walk_node<'a, 'alloc>(
                 OxcNodeData::Element(el) => Some(el.as_ref()),
                 _ => None,
             };
-            walk_element(id, el, oxc_el, ctx, condition_scopes, chain_mode);
+            walk_element(id, el, oxc_el, ctx, scope, branch, chain_mode);
         }
         AstNodeKind::Text(text) => {
             visit_text(text, ctx.source, ctx.out);
@@ -258,7 +267,8 @@ fn walk_element<'a, 'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     ctx: &mut IdeTemplateCtx<'a, 'alloc>,
-    parent_condition_scopes: &[ConditionScope],
+    parent_scope: &GuardScope,
+    branch: Option<&ResolvedBranch>,
     chain_mode: ChainMode,
 ) {
     // Handle structural directives first
@@ -293,34 +303,35 @@ fn walk_element<'a, 'alloc>(
         );
     }
 
-    // Build condition scope for this element (for type narrowing guards).
-    // This computes the current element's scope and the full accumulated scopes.
-    let own_scope = if has_v_if {
-        build_condition_scope(el, oxc_el, ctx.source, ctx.resolver, ctx.ast, id)
-    } else {
-        None
+    // The element's narrowing scope. A chain member arrives resolved from the
+    // parent's chain walk; a conditional element outside any chain (an orphan
+    // `v-else-if`/`v-else`) narrows by its own condition only.
+    let orphan_branch;
+    let branch = match branch {
+        Some(branch) => Some(branch),
+        None if has_v_if => {
+            orphan_branch = resolve_chain_branches(std::iter::once((el, oxc_el)), ctx)
+                .into_iter()
+                .next();
+            orphan_branch.as_ref()
+        }
+        None => None,
     };
-    let full_scopes: Vec<ConditionScope> = if let Some(ref scope) = own_scope {
-        let mut s = parent_condition_scopes.to_vec();
-        s.push(scope.clone());
-        s
-    } else {
-        parent_condition_scopes.to_vec()
+    let scope = match branch.and_then(|b| b.member.clone()) {
+        Some(member) => parent_scope.enter(member),
+        None => parent_scope.clone(),
     };
 
-    // Generate guard text for prop narrowing (full accumulated scopes)
-    let guard_text = condition::generate_condition_text(&full_scopes);
+    // Guard text for prop narrowing, shared by every callback in this scope.
+    let guard_text = scope.guard_text();
 
     // v-if/v-else-if/v-else IIFE wrapping (skip for <template v-if v-slot>)
     if emit_iife {
         directives::emit_v_if_open(
             el,
-            oxc_el,
-            ctx.source,
+            branch.and_then(|b| b.condition.as_ref()),
             ctx.out,
-            ctx.alloc,
-            ctx.resolver,
-            parent_condition_scopes,
+            parent_scope.guard_text().as_deref(),
         );
     }
 
@@ -604,7 +615,7 @@ fn walk_element<'a, 'alloc>(
                         &content.children,
                         &content.v_if_chains,
                         ctx,
-                        &full_scopes,
+                        &scope,
                     );
                 }
             }
@@ -797,12 +808,7 @@ fn walk_element<'a, 'alloc>(
 
     // Walk children — children inherit the condition scopes from this element
     if let Some(content) = &el.content {
-        walk_children_with_iife_tracking(
-            &content.children,
-            &content.v_if_chains,
-            ctx,
-            &full_scopes,
-        );
+        walk_children_with_iife_tracking(&content.children, &content.v_if_chains, ctx, &scope);
     }
 
     // ── Strict slot children collection ────────────────────────────
@@ -1098,7 +1104,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
     children: &[NodeId],
     chains: &[ConditionalChain],
     ctx: &mut IdeTemplateCtx<'a, 'alloc>,
-    parent_condition_scopes: &[ConditionScope],
+    parent_scope: &GuardScope,
 ) {
     // ── Build per-index plan from chain metadata ──
 
@@ -1116,6 +1122,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
         is_last: bool,
         has_else: bool, // true if this member is v-else (only relevant when is_last)
         member_has_v_for: bool,
+        branch: ResolvedBranch,
     }
 
     let mut member_plan: FxHashMap<usize, MemberPlan> = FxHashMap::default();
@@ -1140,12 +1147,31 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
             ChainShape::Iife
         };
 
+        // Resolve every member's condition once, in chain order: the emitted
+        // test and every narrowing guard repeating it share the result.
+        let members: Vec<(usize, usize, &ElementNode)> = indices
+            .iter()
+            .enumerate()
+            .filter_map(
+                |(pos, &child_idx)| match &ctx.ast.nodes[children[child_idx].0].kind {
+                    AstNodeKind::Element(el) => Some((pos, child_idx, &**el)),
+                    _ => None,
+                },
+            )
+            .collect();
+        let branches = resolve_chain_branches(
+            members.iter().map(|&(_, child_idx, el)| {
+                let oxc_el = match &ctx.oxc_ast.data[children[child_idx].0] {
+                    OxcNodeData::Element(el) => Some(el.as_ref()),
+                    _ => None,
+                };
+                (el, oxc_el)
+            }),
+            ctx,
+        );
+
         let last_idx = indices.len() - 1;
-        for (pos, &child_idx) in indices.iter().enumerate() {
-            let el = match &ctx.ast.nodes[children[child_idx].0].kind {
-                AstNodeKind::Element(el) => el,
-                _ => continue,
-            };
+        for ((pos, child_idx, el), branch) in members.into_iter().zip(branches) {
             let has_else = el
                 .v_condition
                 .as_ref()
@@ -1158,6 +1184,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     is_last: pos == last_idx,
                     has_else,
                     member_has_v_for: el.v_for.is_some(),
+                    branch,
                 },
             );
         }
@@ -1231,11 +1258,6 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                         ctx.out.prepend_alloc(pos, "}}");
                     }
 
-                    let oxc_el = match &ctx.oxc_ast.data[child_id.0] {
-                        OxcNodeData::Element(el) => Some(el.as_ref()),
-                        _ => None,
-                    };
-
                     // Emit ternary structure
                     if plan.is_first {
                         // `{` opens the JSX expression
@@ -1244,40 +1266,29 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
 
                     // Emit condition
                     if let Some(ref cond) = child_el.v_condition {
+                        let condition = plan.branch.condition.as_ref();
                         match cond.kind {
                             ElementNodeConditionKind::If => {
                                 // Emit condition expression + ` ?\n`
-                                if let (Some(vs), Some(ve)) =
-                                    (cond.prop.value_start, cond.prop.value_end)
-                                {
+                                if let Some(condition) = condition {
                                     directives::emit_mapped_condition_expr(
                                         ctx.out,
                                         child_el.tag_open.start,
                                         "",
                                         " ?\n",
-                                        vs,
-                                        ve,
-                                        ctx.source,
-                                        oxc_el,
-                                        ctx.resolver,
+                                        condition,
                                     );
                                 }
                             }
                             ElementNodeConditionKind::ElseIf => {
                                 // ` : ` + condition + ` ?\n`
-                                if let (Some(vs), Some(ve)) =
-                                    (cond.prop.value_start, cond.prop.value_end)
-                                {
+                                if let Some(condition) = condition {
                                     directives::emit_mapped_condition_expr(
                                         ctx.out,
                                         child_el.tag_open.start,
                                         " : ",
                                         " ?\n",
-                                        vs,
-                                        ve,
-                                        ctx.source,
-                                        oxc_el,
-                                        ctx.resolver,
+                                        condition,
                                     );
                                 }
                             }
@@ -1298,7 +1309,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     if let Some(comments) = analysis.component_is_comments.get(&idx) {
                         ctx.ts_directives_for_component_is = comments.clone();
                     }
-                    walk_node(child_id, ctx, parent_condition_scopes, mode);
+                    walk_node(child_id, ctx, parent_scope, Some(&plan.branch), mode);
                     ctx.ts_directives_for_component_is.clear();
 
                     // Inject repositioned comments
@@ -1359,7 +1370,13 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     if let Some(comments) = analysis.component_is_comments.get(&idx) {
                         ctx.ts_directives_for_component_is = comments.clone();
                     }
-                    walk_node(child_id, ctx, parent_condition_scopes, ChainMode::Normal);
+                    walk_node(
+                        child_id,
+                        ctx,
+                        parent_scope,
+                        Some(&plan.branch),
+                        ChainMode::Normal,
+                    );
                     ctx.ts_directives_for_component_is.clear();
 
                     // Inject repositioned comments
@@ -1429,7 +1446,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
             if let Some(comments) = analysis.component_is_comments.get(&idx) {
                 ctx.ts_directives_for_component_is = comments.clone();
             }
-            walk_node(child_id, ctx, parent_condition_scopes, ChainMode::Normal);
+            walk_node(child_id, ctx, parent_scope, None, ChainMode::Normal);
             ctx.ts_directives_for_component_is.clear();
 
             // Inject repositioned comments
@@ -1704,103 +1721,55 @@ fn inject_ts_directive_comments_for_v_for(
     }
 }
 
-/// Build a [`ConditionScope`] for a v-if/v-else-if/v-else element.
-///
-/// Walks backward through siblings to collect sibling negation conditions,
-/// and resolves the element's own condition with binding prefixes.
-fn build_condition_scope<'alloc>(
-    el: &ElementNode,
-    oxc_el: Option<&OxcParsedElement<'alloc>>,
-    source: &str,
-    resolver: &BindingResolver<'alloc>,
-    ast: &crate::ast::types::TemplateAst,
-    node_id: NodeId,
-) -> Option<ConditionScope> {
-    let condition = el.v_condition.as_ref()?;
-
-    // Resolve own condition expression (positive)
-    let positive = match condition.kind {
-        ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
-            let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end)
-            else {
-                return None;
-            };
-            let raw_expr = &source[vs as usize..ve as usize];
-            Some(directives::resolve_condition_expr_pub(
-                raw_expr, vs, oxc_el, resolver,
-            ))
-        }
-        ElementNodeConditionKind::Else => None,
-    };
-
-    // Collect sibling negations by walking backward
-    let sibling_negations = match condition.kind {
-        ElementNodeConditionKind::If => vec![],
-        ElementNodeConditionKind::ElseIf | ElementNodeConditionKind::Else => {
-            collect_sibling_negations(ast, node_id, source, resolver)
-        }
-    };
-
-    Some(ConditionScope {
-        positive,
-        sibling_negations,
-    })
+/// A chain member's condition, resolved once for both its emitted test and
+/// every narrowing guard that repeats it.
+struct ResolvedBranch {
+    /// Mapped condition expression; `None` for `v-else` or a missing value.
+    condition: Option<MappedGeneratedText>,
+    /// Narrowing terms; `None` when the member narrows nothing.
+    member: Option<ChainMember>,
 }
 
-/// Walk backward through siblings of a v-else-if/v-else element to collect
-/// the resolved condition expressions of preceding v-if and v-else-if elements.
-fn collect_sibling_negations<'alloc>(
-    ast: &crate::ast::types::TemplateAst,
-    node_id: NodeId,
-    source: &str,
-    resolver: &BindingResolver<'alloc>,
-) -> Vec<String> {
-    let mut negations = Vec::new();
-    let mut current = node_id;
-
-    while let Some(prev) = ast.prev_sibling(current) {
-        let prev_node = &ast.nodes[prev.0];
-        match &prev_node.kind {
-            AstNodeKind::Element(prev_el) => {
-                if let Some(ref cond) = prev_el.v_condition {
-                    // Resolve the sibling's condition expression
-                    if let (Some(vs), Some(ve)) = (cond.prop.value_start, cond.prop.value_end) {
-                        let raw_expr = &source[vs as usize..ve as usize];
-                        let resolved = resolver.resolve_simple_expr(raw_expr);
-                        negations.push(resolved);
-                    }
-
-                    // If we hit a v-if, that's the start of the chain — stop
-                    if matches!(cond.kind, ElementNodeConditionKind::If) {
-                        break;
-                    }
-                } else {
-                    // Non-conditional element — stop (not part of the chain)
-                    break;
-                }
+/// Resolve the conditions of one `v-if` chain's members, given in chain order.
+///
+/// Each condition resolves exactly once; later members read their
+/// predecessors from the chain's shared terms instead of walking back over
+/// their siblings and resolving them again.
+fn resolve_chain_branches<'el, 'alloc: 'el>(
+    members: impl Iterator<Item = (&'el ElementNode, Option<&'el OxcParsedElement<'alloc>>)>,
+    ctx: &IdeTemplateCtx<'_, 'alloc>,
+) -> Vec<ResolvedBranch> {
+    let mut conditions = Vec::new();
+    let mut branches = Vec::new();
+    for (el, oxc_el) in members {
+        let Some(cond) = el.v_condition.as_ref() else {
+            conditions.push(None);
+            branches.push(ChainBranch::Unconditioned);
+            continue;
+        };
+        match (&cond.kind, cond.prop.value_start, cond.prop.value_end) {
+            (ElementNodeConditionKind::Else, _, _) => {
+                conditions.push(None);
+                branches.push(ChainBranch::Else);
             }
-            AstNodeKind::Text(text) => {
-                // Skip whitespace-only text nodes
-                let t = &source[text.start as usize..text.end as usize];
-                if t.trim().is_empty() {
-                    current = prev;
-                    continue;
-                }
-                break; // Non-whitespace text — stop
+            (_, Some(vs), Some(ve)) => {
+                let raw = &ctx.source[vs as usize..ve as usize];
+                let resolved =
+                    directives::resolve_condition_expr_segments(raw, vs, oxc_el, ctx.resolver);
+                branches.push(ChainBranch::Condition(resolved.text.clone()));
+                conditions.push(Some(resolved));
             }
-            AstNodeKind::Comment(_) => {
-                // Skip comments
-                current = prev;
-                continue;
+            _ => {
+                conditions.push(None);
+                branches.push(ChainBranch::Unconditioned);
             }
-            _ => break,
         }
-        current = prev;
     }
-
-    // Reverse so they're in chain order (v-if first, then v-else-if's)
-    negations.reverse();
-    negations
+    conditions
+        .into_iter()
+        .zip(condition::resolve_chain(branches))
+        .map(|(condition, member)| ResolvedBranch { condition, member })
+        .collect()
 }
 
 /// Result of rewriting Vue's polymorphic `<component :is>` tag.

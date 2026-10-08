@@ -20,7 +20,6 @@ use crate::template::code_gen::expression::{
     build_prefixed_expr_segments, resolve_simple_expr_segments,
 };
 use crate::template::code_gen::types::{CodeGenOutput, MappedGeneratedText};
-use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
 use crate::utils::oxc::{Binding, BindingExtractionResult, Dynamism};
 
@@ -36,60 +35,39 @@ use crate::utils::oxc::{Binding, BindingExtractionResult, Dynamism};
 /// The condition expression is emitted with per-identifier source mapping
 /// so that hovering over e.g. `__props.leftArrow` in the generated TSX maps
 /// back to the original `leftArrow` in the template source.
-pub fn emit_v_if_open<'alloc>(
+///
+/// `condition` is the member's condition resolved once by the chain walk, and
+/// `parent_guard` the narrowing guard of the enclosing scope, which a nested
+/// `v-if` IIFE repeats because TypeScript resets property narrowing inside it.
+pub fn emit_v_if_open(
     el: &ElementNode,
-    oxc_el: Option<&OxcParsedElement<'alloc>>,
-    source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
-    _alloc: &'alloc Allocator,
-    resolver: &BindingResolver<'alloc>,
-    parent_condition_scopes: &[crate::ide::condition::ConditionScope],
+    condition: Option<&MappedGeneratedText>,
+    out: &mut CodeGenOutput<'_>,
+    parent_guard: Option<&str>,
 ) {
-    let condition = match &el.v_condition {
-        Some(c) => c,
-        None => return,
+    let Some(v_condition) = el.v_condition.as_ref() else {
+        return;
     };
 
-    match condition.kind {
+    match v_condition.kind {
         ElementNodeConditionKind::If => {
             // v-if="cond" → {()=>{if(cond){
-            if let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) {
+            if let Some(condition) = condition {
                 // For nested v-if, emit block guard from parent scopes
-                let parent_guard =
-                    crate::ide::condition::generate_condition_text(parent_condition_scopes)
-                        .map(|text| crate::ide::condition::build_block_guard(&text))
-                        .unwrap_or_default();
+                let parent_guard = parent_guard
+                    .map(crate::ide::condition::build_block_guard)
+                    .unwrap_or_default();
 
                 let prefix = format!("{{()=>{{{}if(", parent_guard);
-                emit_mapped_condition_expr(
-                    out,
-                    el.tag_open.start,
-                    &prefix,
-                    "){\n",
-                    vs,
-                    ve,
-                    source,
-                    oxc_el,
-                    resolver,
-                );
+                emit_mapped_condition_expr(out, el.tag_open.start, &prefix, "){\n", condition);
             }
         }
         ElementNodeConditionKind::ElseIf => {
             // v-else-if="cond" → else if(cond){
             // Note: the preceding if/else-if block's `}` is emitted by emit_v_if_close,
             // so we do NOT prefix with `}` here (that would double-close).
-            if let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) {
-                emit_mapped_condition_expr(
-                    out,
-                    el.tag_open.start,
-                    "else if(",
-                    "){\n",
-                    vs,
-                    ve,
-                    source,
-                    oxc_el,
-                    resolver,
-                );
+            if let Some(condition) = condition {
+                emit_mapped_condition_expr(out, el.tag_open.start, "else if(", "){\n", condition);
             }
         }
         ElementNodeConditionKind::Else => {
@@ -512,68 +490,30 @@ pub fn emit_v_show<'alloc>(
 /// All segments use `mapped_prepends` (even unmapped gaps) to guarantee correct
 /// ordering — `apply_to` merges regular prepends before mapped prepends at the
 /// same position, which would break the interleaved order.
-#[allow(clippy::too_many_arguments)]
-pub fn emit_mapped_condition_expr<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+pub fn emit_mapped_condition_expr(
+    out: &mut CodeGenOutput<'_>,
     target_pos: u32,
     prefix: &str,
     suffix: &str,
-    vs: u32,
-    ve: u32,
-    source: &'alloc str,
-    oxc_el: Option<&OxcParsedElement<'alloc>>,
-    resolver: &BindingResolver<'alloc>,
+    condition: &MappedGeneratedText,
 ) {
     // The condition resolves through the shared expression producer
-    // (`code_gen::expression`) for both the OXC-binding (compound) and
-    // resolver-only (simple) cases. Every authored identifier and verbatim run
-    // maps to its source span; resolver-injected scaffolding — binding prefixes
+    // (`code_gen::expression`, see [`resolve_condition_expr_segments`]) for both
+    // the OXC-binding (compound) and resolver-only (simple) cases. Every
+    // authored identifier and verbatim run maps to its source span;
+    // resolver-injected scaffolding — binding prefixes
     // (`__props.`/`_ctx.`/`$setup.`), the `.value` suffix, keyword brackets,
     // shorthand keys, and the surrounding IIFE `prefix`/`suffix` wrappers —
     // carries no source-map token. The plan keeps each suffix as its own
     // unmapped segment, so a `.value` can never fold into the identifier token.
-    // Generated bytes equal the flat `resolve_condition_expr`; only the source
-    // map gains per-identifier precision.
-    let raw = &source[vs as usize..ve as usize];
-    let wrapped =
-        resolve_condition_expr_segments(raw, vs, oxc_el, resolver).wrapped(prefix, suffix);
-    out.prepend_mapped_generated_text(target_pos, &wrapped);
+    out.prepend_mapped_generated_text(target_pos, &condition.wrapped(prefix, suffix));
 }
 
-/// Build a fully resolved condition expression for v-if/v-else-if.
-/// Public wrapper for use by the condition scope builder.
-pub fn resolve_condition_expr_pub(
-    raw_expr: &str,
-    expr_start: u32,
-    oxc_el: Option<&OxcParsedElement<'_>>,
-    resolver: &BindingResolver<'_>,
-) -> String {
-    resolve_condition_expr(raw_expr, expr_start, oxc_el, resolver)
-}
-
-/// Build a fully resolved condition expression for v-if/v-else-if.
-/// Uses `build_prefixed_expr` to inject binding prefixes into the expression string,
-/// instead of positional patches that would conflict with attribute removal.
-fn resolve_condition_expr(
-    raw_expr: &str,
-    expr_start: u32,
-    oxc_el: Option<&OxcParsedElement<'_>>,
-    resolver: &BindingResolver<'_>,
-) -> String {
-    if let Some(oxc_el) = oxc_el {
-        if let Some(ref cond) = oxc_el.condition {
-            return build_prefixed_expr(raw_expr, expr_start, cond, resolver, &[]);
-        }
-    }
-    resolver.resolve_simple_expr(raw_expr)
-}
-
-/// Segmented analogue of [`resolve_condition_expr`]: the resolved condition as a
-/// [`MappedGeneratedText`] plan, so the no-OXC-binding emission path maps the
-/// authored identifier while leaving any injected `__props.` / `.value` /
-/// bracket scaffolding unmapped. `.text` is byte-identical to
-/// `resolve_condition_expr`.
-fn resolve_condition_expr_segments(
+/// Resolve a v-if/v-else-if condition expression into a mapped plan: binding
+/// prefixes are injected as unmapped scaffolding around the mapped authored
+/// identifiers. The plan's `.text` is the resolved condition that narrowing
+/// guards repeat; the chain walk resolves each condition through here once.
+pub(super) fn resolve_condition_expr_segments(
     raw_expr: &str,
     expr_start: u32,
     oxc_el: Option<&OxcParsedElement<'_>>,
@@ -676,7 +616,8 @@ mod tests {
 
         let mut out = CodeGenOutput::new(&alloc);
         // target_pos 0, prefix `if(`, suffix `){`, vs 3, ve 7 (`true`), no oxc element.
-        emit_mapped_condition_expr(&mut out, 0, "if(", "){", 3, 7, source, None, &resolver);
+        let condition = resolve_condition_expr_segments("true", 3, None, &resolver);
+        emit_mapped_condition_expr(&mut out, 0, "if(", "){", &condition);
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
         out.apply_to(&mut ct);
@@ -741,7 +682,8 @@ mod tests {
 
         let mut out = CodeGenOutput::new(&alloc);
         // prefix `if(`, suffix `){`, vs 3, ve 8 (`title`), no oxc element.
-        emit_mapped_condition_expr(&mut out, 0, "if(", "){", 3, 8, source, None, &resolver);
+        let condition = resolve_condition_expr_segments("title", 3, None, &resolver);
+        emit_mapped_condition_expr(&mut out, 0, "if(", "){", &condition);
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
         out.apply_to(&mut ct);
@@ -851,7 +793,8 @@ mod tests {
 
         let mut out = CodeGenOutput::new(&alloc);
         // prefix `if(`, suffix `){`, vs 3, ve 8 (`count`), with the OXC element.
-        emit_mapped_condition_expr(&mut out, 0, "if(", "){", 3, 8, source, Some(&el), &resolver);
+        let condition = resolve_condition_expr_segments("count", 3, Some(&el), &resolver);
+        emit_mapped_condition_expr(&mut out, 0, "if(", "){", &condition);
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
         out.apply_to(&mut ct);

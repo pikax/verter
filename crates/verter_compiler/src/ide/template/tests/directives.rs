@@ -3013,3 +3013,168 @@ fn v_show_merged_style_both_expressions_map() {
          Tokens: {tokens:?}, output: {output}"
     );
 }
+
+// ── v-if chain narrowing guards ────────────────────────────────
+
+#[test]
+fn v_if_chain_callbacks_repeat_resolved_predecessor_negations() {
+    // Every callback repeats its branch's narrowing with predecessor
+    // conditions resolved exactly like the emitted test (`__props.kind`, not
+    // the authored `kind`), and the guard stays unmapped synthetic text while
+    // the callback body keeps its authored mapping.
+    let source = r#"<template><div v-if="kind === 'a'" @click="take(kind)">A</div><div v-else-if="kind === 'b'" :onX="() => take(kind)">B</div><div v-else @click="take(kind)"><i v-if="ok" @click="take(kind)"/></div></template>"#;
+    let bindings = [
+        ("kind", BindingType::Props),
+        ("take", BindingType::SetupConst),
+        ("ok", BindingType::SetupConst),
+    ];
+    let (output, tokens) = gen_tsx_template_with_map(source, &bindings);
+
+    let not_a = "!((__props.kind === 'a'))";
+    let not_b = "!((__props.kind === 'b'))";
+    for expected in [
+        "onClick={() => {if (!((__props.kind === 'a'))) { return undefined; } take(__props.kind)}}"
+            .to_string(),
+        format!("onX={{() => !({not_a} && (__props.kind === 'b'))?undefined:take(__props.kind)}}"),
+        format!("onClick={{() => {{if (!({not_a} && {not_b})) {{ return undefined; }} take(__props.kind)}}}}"),
+        format!("{{()=>{{if(!({not_a} && {not_b})) return;if(ok){{"),
+        format!("onClick={{() => {{if (!({not_a} && {not_b} && (ok))) {{ return undefined; }} take(__props.kind)}}}}"),
+    ] {
+        assert!(output.contains(&expected), "missing `{expected}` in:\n{output}");
+    }
+
+    // The v-else handler body maps to its authored `take`; its guard does not.
+    let else_take_src =
+        (source.find("v-else @click=\"take").unwrap() + "v-else @click=\"".len()) as u32;
+    assert!(
+        has_token_for_src(&tokens, else_take_src),
+        "the v-else handler body must keep its authored mapping; output: {output}"
+    );
+    let else_guard = output
+        .find(&format!("if (!({not_a} && {not_b}))"))
+        .expect("v-else guard");
+    let (gl, gc) = gen_offset_to_line_col(&output, else_guard);
+    assert!(
+        !has_token_at_gen(&tokens, gl, gc),
+        "the synthetic v-else guard must stay unmapped; output: {output}"
+    );
+}
+
+/// A `branches`-member chain whose every branch carries a callback.
+fn callback_chain_template(branches: usize) -> String {
+    let mut s = String::from("<template>");
+    for i in 0..branches - 1 {
+        let directive = if i == 0 { "v-if" } else { "v-else-if" };
+        s.push_str(&format!(
+            "<div {directive}=\"kind === {i}\" @click=\"take(kind)\">{i}</div>"
+        ));
+    }
+    s.push_str("<div v-else @click=\"take(kind)\">last</div></template>");
+    s
+}
+
+/// `depth` nested `v-if`s whose every level carries a callback.
+fn nested_callback_template(depth: usize) -> String {
+    let mut s = String::from("<template>");
+    for i in 0..depth {
+        s.push_str(&format!(
+            "<div v-if=\"kind !== {i}\" @click=\"take(kind)\">"
+        ));
+    }
+    for _ in 0..depth {
+        s.push_str("</div>");
+    }
+    s.push_str("</template>");
+    s
+}
+
+#[test]
+fn v_if_guards_grow_linearly_with_branches_and_depth() {
+    // The 1024-deep nesting recurses through the template walk.
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(v_if_guard_growth)
+        .expect("spawn")
+        .join()
+        .expect("guard growth stays linear");
+}
+
+fn v_if_guard_growth() {
+    use crate::ide::condition::{take_guard_work, MAX_GUARD_TERMS};
+
+    let bindings = [
+        ("kind", BindingType::Props),
+        ("take", BindingType::SetupConst),
+    ];
+    for (shape, build) in [
+        ("chain", callback_chain_template as fn(usize) -> String),
+        ("nested", nested_callback_template),
+    ] {
+        let mut previous: Option<(usize, usize, usize)> = None;
+        for size in [128usize, 256, 512, 1024] {
+            take_guard_work();
+            let output = gen_tsx_template_with_bindings(&build(size), &bindings);
+            let work = take_guard_work();
+            // Each scope renders its guard once over at most MAX_GUARD_TERMS
+            // frames of at most 1 + MAX_GUARD_TERMS terms each.
+            assert!(
+                work <= size * MAX_GUARD_TERMS * (MAX_GUARD_TERMS + 1),
+                "{shape} x{size}: guard construction visited {work} terms"
+            );
+            let guards = output.matches("{ return undefined; }").count();
+            assert_eq!(guards, size, "{shape} x{size}: one guard per callback");
+            if let Some((prev_size, prev_work, prev_len)) = previous {
+                // Doubling the branches at most doubles the guard work and the
+                // generated bytes (plus the longer branch-index digits).
+                assert!(
+                    work * 10 <= prev_work * 22,
+                    "{shape}: guard work {prev_work} at {prev_size} grew to {work} at {size}"
+                );
+                assert!(
+                    output.len() * 10 <= prev_len * 22,
+                    "{shape}: generated bytes {prev_len} at {prev_size} grew to {} at {size}",
+                    output.len()
+                );
+            }
+            previous = Some((size, work, output.len()));
+        }
+    }
+}
+
+#[test]
+fn long_chain_guard_keeps_the_nearest_predecessors_and_enclosing_positive() {
+    use crate::ide::condition::MAX_GUARD_TERMS;
+
+    // A 40-branch chain inside `v-if="ready"`: the last handler's guard keeps
+    // the enclosing positive and the nearest predecessors, and drops the
+    // farthest predecessors beyond the per-guard bound.
+    let chain = callback_chain_template(40);
+    let inner = &chain["<template>".len()..chain.len() - "</template>".len()];
+    let source = format!("<template><section v-if=\"ready\">{inner}</section></template>");
+    let output = gen_tsx_template_with_bindings(
+        &source,
+        &[
+            ("kind", BindingType::Props),
+            ("take", BindingType::SetupConst),
+            ("ready", BindingType::SetupConst),
+        ],
+    );
+    let last = &output[output.rfind("onClick=").expect("last handler")..];
+    let guard = &last[..last.find("{ return undefined; }").expect("guard")];
+    assert!(
+        guard.contains("(ready)"),
+        "enclosing positive kept: {guard}"
+    );
+    let negations = guard.matches("!((__props.kind === ").count();
+    assert_eq!(negations, MAX_GUARD_TERMS - 1, "bounded guard: {guard}");
+    let nearest_kept = 39 - (MAX_GUARD_TERMS - 1);
+    assert!(
+        guard.contains(&format!("!((__props.kind === {nearest_kept}))"))
+            && guard.contains("!((__props.kind === 38))"),
+        "the nearest predecessors are kept: {guard}"
+    );
+    assert!(
+        !guard.contains(&format!("!((__props.kind === {}))", nearest_kept - 1)),
+        "the farthest predecessors are dropped: {guard}"
+    );
+}

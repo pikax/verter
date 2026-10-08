@@ -1144,3 +1144,58 @@ real_provider_test!(
         );
     }
 );
+
+// ---------------------------------------------------------------------------
+// v-if chain narrowing inside callbacks
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    diagnostics_vue_chain_callbacks_keep_discriminator_narrowing,
+    fixture = "vue-parity",
+    async fn run(session) {
+        // TypeScript resets property-access narrowing inside every callback, so
+        // each handler repeats its branch's narrowing. The `v-else` handler only
+        // type-checks when it repeats BOTH predecessor negations; the unguarded
+        // handler after the chain is the control that the union stays unnarrowed.
+        let uri = session
+            .open_virtual(
+                "src/diagnostics/ChainCallbackNarrowing.vue",
+                r#"<script setup lang="ts">
+type Item = { kind: 'a'; a: number } | { kind: 'b'; b: string } | { kind: 'c'; c: boolean }
+const state: { item: Item } = { item: { kind: 'a', a: 1 } }
+function take(value: number | string | boolean) { return value }
+</script>
+<template>
+  <div v-if="state.item.kind === 'a'" @click="take(state.item.a)">A</div>
+  <div v-else-if="state.item.kind === 'b'" @click="take(state.item.b)">B</div>
+  <div v-else @click="take(state.item.c)">C</div>
+  <span @click="take(state.item.c /* unnarrowed */)">D</span>
+</template>
+"#,
+            )
+            .await;
+        let diagnostics = session
+            .merged_diagnostics_until(&uri, |diagnostics| {
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some("2339"))
+            })
+            .await;
+        let errors: Vec<&Diagnostic> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "only the unguarded handler may fail to narrow; got {diagnostics:?}"
+        );
+        assert_eq!(lsp_diagnostic_code(errors[0]).as_deref(), Some("2339"));
+        let marker = "state.item.c /* unnarrowed */";
+        let expected = session.find_position(&uri, marker, "state.item.".len());
+        assert_eq!(
+            errors[0].range.start, expected,
+            "the unnarrowed member access maps back to its authored `c`; got {diagnostics:?}"
+        );
+    }
+);
