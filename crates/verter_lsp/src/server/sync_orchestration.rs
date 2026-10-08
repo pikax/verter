@@ -668,7 +668,16 @@ impl VerterLanguageServer {
         import_path: &str,
     ) -> Option<TextEdit> {
         let uri: Uri = doc_uri_str.parse().ok()?;
+        let identity = self.documents.snapshot_identity(&uri)?;
         let doc = self.documents.get(&uri)?;
+        // The edit is placed in the open revision the resolve request captured;
+        // a buffer that moved between the two reads cannot be addressed.
+        let coherent = *doc.source == *identity.source();
+        crate::documents::ForegroundRequest::bracket_target(&uri, identity);
+        if !coherent {
+            crate::documents::ForegroundRequest::mark_target_incoherent();
+            return None;
+        }
         let analysis = self.documents.get_analysis(&uri)?;
 
         // Skip if the component is already imported.
