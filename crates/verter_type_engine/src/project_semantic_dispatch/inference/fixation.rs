@@ -6,8 +6,9 @@
 
 use rustc_hash::FxHashMap;
 
-use super::super::dispatch_txn::{FixationInput, InferenceCandidate, RelationStep};
+use super::super::dispatch_txn::RelationStep;
 use super::super::ProjectSemanticDispatch;
+use super::session::{FixationInput, InferenceCandidate};
 use crate::semantic_query::{
     inference_candidate_precedence, FreshnessKey, InferenceCandidatePriority, PrimitiveKind,
     RelationKind, ResolveCallFailure, SemanticNodeData, SemanticNodeId, TypeParamDecl,
@@ -85,7 +86,7 @@ fn decided(step: RelationStep) -> Option<bool> {
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     pub(in crate::project_semantic_dispatch) fn fix_inference_inputs(
         &self,
-        inputs: Vec<super::super::dispatch_txn::FixationInput>,
+        inputs: Vec<FixationInput>,
         type_params: &[crate::semantic_query::TypeParamDecl],
         accepts: impl FnMut(
             &super::InferenceTxn<'_, Self>,
@@ -308,9 +309,7 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
         };
         let mut kept = first;
         for &candidate in rest {
-            let binding_guard = self.binding.disable();
             let step = self.execute_relate_pair_kind(candidate, kept, RelationKind::Subtype);
-            drop(binding_guard);
             match decided(step) {
                 Some(true) => kept = candidate,
                 Some(false) => {}

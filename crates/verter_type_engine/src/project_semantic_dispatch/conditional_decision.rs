@@ -1086,7 +1086,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let instantiated = bindings.iter().fold(extends, |node, binding| {
             self.substitute_semantic_type_param(node, binding.param, binding.bound)
         });
-        match self.relate_outside_inference(check, instantiated) {
+        match self.execute_relate_pair(check, instantiated) {
             super::dispatch_txn::RelationStep::Assignable { .. } => (
                 ConditionalBranchSelection::True,
                 Some(super::relation::RelationInferBindings { bindings }),
@@ -1226,7 +1226,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.wildcard_failure_undecided(
             [check, extends],
             wildcard,
-            self.relate_outside_inference(check, extends),
+            self.execute_relate_pair(check, extends),
         )
     }
 
@@ -1314,21 +1314,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     self.substitute_semantic_type_param(node, *param, *unconstrained)
                 })
         };
-        self.relate_outside_inference(instantiate(check), instantiate(extends))
-    }
-
-    /// `source` related to `target` as `isTypeAssignableTo` relates them:
-    /// no inference session of the enclosing call binds a type parameter
-    /// either reads, so each is rigid.
-    fn relate_outside_inference(
-        &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
-    ) -> super::dispatch_txn::RelationStep {
-        self.dispatch_txn.borrow_mut().begin_binding_disabled();
-        let step = self.execute_relate_pair(source, target);
-        self.dispatch_txn.borrow_mut().end_binding_disabled();
-        step
+        self.execute_relate_pair(instantiate(check), instantiate(extends))
     }
 
     /// The type an alias application names, instantiated as the checker

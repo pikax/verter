@@ -122,3 +122,69 @@ export function r12b() { return nu(null); }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const CONDITIONAL_TARGET_SOURCE: &str = r##"
+type Unbox<X> = X extends { v: infer U } ? U : never;
+type Id<X> = X extends infer U ? U : never;
+declare function both<T>(x: T, y: Unbox<{ v: T }>): T;
+declare function only<T>(y: Unbox<{ v: T }>): T;
+declare function id<T>(y: Id<T>): T;
+export function k1() { return both(1, 2); }
+export function k2() { return both(1, 1); }
+export function k3() { return only(2); }
+export function k4() { return id(2); }
+"##;
+
+/// A call infers through a conditional target the way the checker does:
+/// the conditional's own `infer` declaration binds in its own session,
+/// never in the call's (a type parameter the call infers is rigid to the
+/// conditional's relation), and the call infers from the instantiated true
+/// branch. The argument's own literal is kept as written wherever it lands
+/// — only a literal nested in an array or object literal argument widens —
+/// so `both(1, 2)` is `1 | 2`, not `number`; a lone fresh literal the call
+/// returns widens at the function's return (`both(1, 1)` returns `number`
+/// there, `1` at a `const`).
+#[test]
+fn a_call_infers_through_a_conditional_target_in_the_conditionals_own_session() {
+    let failures = Matrix::new(CONDITIONAL_TARGET_SOURCE)
+        .settings(&ALL)
+        .returns(&[
+            ("k1", "1 | 2"),
+            ("k2", "number"),
+            ("k3", "number"),
+            ("k4", "unknown"),
+        ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const ALTERNATIVES_SOURCE: &str = r##"
+type O = { (a: number, b: number): void; (a: string, b: string): void };
+declare function pick<T>(f: (a: T, b: string) => void): T;
+declare const o: O;
+export function r1() { return pick(o); }
+"##;
+
+/// A losing alternative leaves no candidate behind: relating the overloaded
+/// `O` to `(a: infer U, b: string) => void` rejects `(a: number, b:
+/// number)` on its second parameter after it deposited `number` for `U`,
+/// and the rollback discards that deposit, so `U` fixes to `string` alone —
+/// never `number & string` or `number | string`. A call inferring `T` from
+/// the same source agrees. A union target is the same: the arm `{ a: infer
+/// U; z: 0 }` deposits `1` before it fails on `z`, and only the arm that
+/// relates contributes (`"x"`).
+#[test]
+fn a_rejected_alternative_leaves_no_candidate_behind() {
+    let matrix = Matrix::new(ALTERNATIVES_SOURCE).settings(&ALL);
+    let mut failures = matrix.types(&[
+        (
+            "O extends (a: infer U, b: string) => void ? U : 0",
+            "string",
+        ),
+        (
+            r#"{ a: 1; b: "x" } extends { a: infer U; z: 0 } | { b: infer U } ? U : 0"#,
+            r#""x""#,
+        ),
+    ]);
+    failures.extend(matrix.returns(&[("r1", "string")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
