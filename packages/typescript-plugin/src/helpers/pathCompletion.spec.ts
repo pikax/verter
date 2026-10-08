@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { writeCarrierStoreFixture } from "./carrierStoreFixture";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect } from "vitest";
@@ -235,22 +236,18 @@ describe("carrierPathCompletionEntries", () => {
           blob_rel: `blobs/C${index}`,
         };
       }
-      fs.writeFileSync(
-        path.join(dir, "manifest.json"),
-        JSON.stringify({
-          epoch: 1,
-          host_version: "test",
-          projects: { "/ws/tsconfig.json": { owned_sources: owned, ready_files: ready } },
-        }),
-      );
+      writeCarrierStoreFixture(dir, {
+        epoch: 1,
+        host_version: "test",
+        projects: { "/ws/tsconfig.json": { owned_sources: owned, ready_files: ready } },
+      });
       const diskReader = new DiskCarrierStoreReader(dir, "/ws/tsconfig.json");
       let manifestReads = 0;
-      const originalReadManifest = DiskCarrierStoreReader.prototype.readManifest;
-      (diskReader as { readManifest(): unknown }).readManifest = function (
-        this: DiskCarrierStoreReader,
-      ) {
+      const probe = diskReader as unknown as { readFolded(): unknown };
+      const originalReadFolded = probe.readFolded;
+      probe.readFolded = function (this: DiskCarrierStoreReader) {
         manifestReads += 1;
-        return originalReadManifest.call(this);
+        return originalReadFolded.call(this);
       };
 
       const entries = carrierPathCompletionEntries({
@@ -266,7 +263,7 @@ describe("carrierPathCompletionEntries", () => {
       // trivially returns early) …
       expect(entries).toHaveLength(500);
       // … and completion fires on keystrokes, so the request does BOUNDED
-      // manifest I/O: exactly ONE read (one `statSync`), never one per
+      // store I/O: exactly ONE store read (one head read), never one per
       // candidate (1 + 500 before the fix).
       expect(manifestReads).toBe(1);
     } finally {

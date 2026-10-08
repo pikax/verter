@@ -1597,7 +1597,7 @@ pub(crate) fn publish_recovery_carrier_store<'a>(
     version: u64,
     carriers: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
 ) {
-    // Exact `@verter/typescript-plugin` manifest/blob wire contract. Keeping the
+    // Exact `@verter/typescript-plugin` store/blob wire contract. Keeping the
     // store inside the fixture TempDir makes the external-process test isolated.
     let blobs_dir = store_dir.join("blobs");
     std::fs::create_dir_all(&blobs_dir).expect("create recovery carrier blob store");
@@ -1645,11 +1645,34 @@ pub(crate) fn publish_recovery_carrier_store<'a>(
         "host_version": "real-recovery-test",
         "projects": projects,
     });
-    std::fs::write(
-        store_dir.join("manifest.json"),
-        serde_json::to_vec(&manifest).expect("serialize recovery carrier manifest"),
-    )
-    .expect("publish recovery carrier manifest");
+    // Each publish lands as the store's next generation (a compacted base with an
+    // empty journal), swapping `head.json` last, exactly as a compaction does.
+    let generation = std::fs::read(store_dir.join("head.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|head| head["generation"].as_u64())
+        .unwrap_or(0)
+        + 1;
+    let write_atomic = |name: &str, bytes: &[u8]| {
+        let tmp = store_dir.join(format!(".tmp-{name}"));
+        std::fs::write(&tmp, bytes).expect("write recovery carrier store file");
+        std::fs::rename(&tmp, store_dir.join(name)).expect("publish recovery carrier store file");
+    };
+    write_atomic(
+        &format!("snapshot-{generation}.json"),
+        &serde_json::to_vec(&manifest).expect("serialize recovery carrier manifest"),
+    );
+    write_atomic(&format!("journal-{generation}.log"), b"");
+    let head = serde_json::json!({
+        "format": 2,
+        "generation": generation,
+        "instance": "real-recovery-test",
+        "host_version": "real-recovery-test",
+    });
+    write_atomic(
+        "head.json",
+        &serde_json::to_vec(&head).expect("serialize recovery carrier head"),
+    );
 }
 
 #[test]
@@ -1671,7 +1694,7 @@ fn real_recovery_store_uses_production_blake3_wire_identity() {
         .collect::<String>();
     let blob_rel = format!("blobs/blake3-{hash}.tsx");
     let manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(store.path().join("manifest.json")).expect("read exact manifest"),
+        &std::fs::read(store.path().join("snapshot-1.json")).expect("read exact manifest"),
     )
     .expect("parse exact manifest");
     let ready = &manifest["projects"]["/w/tsconfig.json"]["ready_files"]["/w/Exact.vue.tsx"];
