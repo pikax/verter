@@ -94,6 +94,23 @@ impl DependencySnapshot {
         out
     }
 
+    /// Whether the owner has no dependency state in any class.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lazy_resolved.is_empty() && self.is_empty_beyond_lazy_resolved()
+    }
+
+    /// Whether the owner's only dependency state, if any, is resolution
+    /// answers (`lazy_resolved`).
+    fn is_empty_beyond_lazy_resolved(&self) -> bool {
+        self.parsed_resolved.is_empty()
+            && self.parsed_unresolved_relatives.is_empty()
+            && self.exact_resolved.is_empty()
+            && self.ambient_resolved.is_empty()
+            && self.semantic_transitive.is_empty()
+            && self.bare_specifiers.is_empty()
+            && self.exact_resolutions.is_empty()
+    }
+
     /// Active unresolved-stem set: `parsed_unresolved_relatives` minus
     /// specifiers dampened by a `CodegenBlocker` exact resolution. Drives
     /// `reverse_deps_by_stem`. R5 restricts dampening to
@@ -374,6 +391,42 @@ impl EdgeStore {
         inserted
     }
 
+    /// Retract one lazy-resolved dep: the retained resolution answer that
+    /// recorded it left the workspace lane, and no remaining answer of the
+    /// owner resolves to it. Only the `lazy_resolved` class moves; the
+    /// reverse-axis bucket keeps the owner while another class still names
+    /// the dep. An owner left with no dependency state at all — an importer
+    /// known only through its resolutions — leaves the store, so owners the
+    /// workspace never learns about stay bounded by the retained answers.
+    pub fn retract_lazy_resolved_dep(&mut self, canonical_id: &str, dep_id: &str) {
+        if !self
+            .files
+            .get(canonical_id)
+            .is_some_and(|state| state.deps.lazy_resolved.contains(dep_id))
+        {
+            return;
+        }
+        self.write_pattern(canonical_id, |snap| {
+            snap.lazy_resolved.remove(dep_id);
+        });
+        if self
+            .files
+            .get(canonical_id)
+            .is_some_and(|state| state.deps.is_empty())
+        {
+            self.files.remove(canonical_id);
+        }
+    }
+
+    /// Whether the owner has dependency state beyond resolution answers —
+    /// parsed, exact, ambient or semantic edges — that its own retirement,
+    /// not its resolutions', removes.
+    pub(crate) fn holds_state_beyond_lazy_resolutions(&self, canonical_id: &str) -> bool {
+        self.files
+            .get(canonical_id)
+            .is_some_and(|state| !state.deps.is_empty_beyond_lazy_resolved())
+    }
+
     /// Replace `ambient_resolved` set wholesale.
     #[allow(dead_code)]
     pub fn replace_ambient_resolved(&mut self, canonical_id: &str, deps: BTreeSet<String>) {
@@ -534,17 +587,19 @@ impl EdgeStore {
         // when its edges change or it is removed.
     }
 
-    /// Remove all state for files under a directory prefix.
-    pub fn remove_under(&mut self, prefix: &str) {
+    /// Remove all state for files under a directory prefix. Returns the
+    /// owners removed.
+    pub fn remove_under(&mut self, prefix: &str) -> Vec<String> {
         let to_remove: Vec<String> = self
             .files
             .keys()
             .filter(|path| path_matches_prefix(path, prefix))
             .cloned()
             .collect();
-        for canonical_id in to_remove {
-            self.remove_file(&canonical_id);
+        for canonical_id in &to_remove {
+            self.remove_file(canonical_id);
         }
+        to_remove
     }
 
     /// Get stored bare specifiers for a file (for lazy resolution).
