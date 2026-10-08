@@ -8,7 +8,7 @@ pub(crate) use analysis::SemanticReady;
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
 pub(crate) use diagnostics::BackgroundPublication;
 pub(crate) use diagnostics::DiagnosticsRefresh;
-pub(crate) use foreground::{ForegroundRequest, ForegroundRoute, Settled};
+pub(crate) use foreground::{EditBearing, ForegroundRequest, ForegroundRoute, Settled};
 pub use guarded_host::{HostRef, SharedHost};
 pub mod carrier_structure;
 pub mod line_index;
@@ -534,6 +534,18 @@ pub(crate) struct DocumentSnapshotIdentity {
     pub(crate) version: i32,
     revision: DocumentRevisionId,
     source: Arc<str>,
+}
+
+impl DocumentSnapshotIdentity {
+    /// The open revision's bytes.
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether both identities name the same open revision.
+    pub(crate) fn same_revision(&self, other: &Self) -> bool {
+        self.version == other.version && self.revision == other.revision
+    }
 }
 
 impl DocumentRegistry {

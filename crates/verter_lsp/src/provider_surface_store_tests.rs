@@ -1210,7 +1210,7 @@ fn classify_captured_miss_routes_known_virtual_to_drop_and_unknown_to_not_virtua
 
     // A Closing-at-capture virtual surface → captured KnownNonMappable → VirtualDrop (NEVER
     // edit a real same-named file). Classify reads ONLY the captured snapshot now (no `store`).
-    let known = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let known = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(known, ApiSurfaceResolution::VirtualDrop),
         "a captured-miss path the store KNOWS as a virtual surface (tombstone) must route \
@@ -1221,7 +1221,7 @@ fn classify_captured_miss_routes_known_virtual_to_drop_and_unknown_to_not_virtua
     // its own real file).
     let unknown_path = "/src/Unknown.vue.ts";
     let unknown =
-        classify_captured_api_surface(&captured, unknown_path, PositionEncodingKind::UTF16);
+        classify_captured_api_surface(None, &captured, unknown_path, PositionEncodingKind::UTF16);
     assert!(
         matches!(unknown, ApiSurfaceResolution::NotVirtual),
         "a captured-miss path the store does NOT know as virtual must route NotVirtual"
@@ -1784,7 +1784,7 @@ fn captured_miss_during_closing_then_finalize_still_drops_not_not_virtual() {
 
     // CLASSIFY from the captured snapshot. The captured KnownNonMappable state must
     // drive VirtualDrop (fail closed) WITHOUT consulting the now-cleared live store.
-    let res = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let res = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(res, ApiSurfaceResolution::VirtualDrop),
         "a path that was Closing at capture and finalized before classify MUST classify \
@@ -1864,7 +1864,7 @@ fn classify_ignores_live_mutation_after_capture_for_current_path() {
         "carrier B\n",
     ));
 
-    let res = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let res = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(res, ApiSurfaceResolution::Vouched(_)),
         "classify must map through the CAPTURED generation-A snapshot regardless of a live \
@@ -2773,7 +2773,7 @@ fn the_captured_api_classifier_decodes_only_through_delivered_surfaces() {
     use crate::type_provider::merge::ApiSurfaceResolution;
     use tower_lsp_server::ls_types::PositionEncodingKind;
     let classify = |captured: &ProviderQuerySnapshot| {
-        classify_captured_api_surface(captured, VPATH, PositionEncodingKind::UTF16)
+        classify_captured_api_surface(None, captured, VPATH, PositionEncodingKind::UTF16)
     };
     let api_a = "declare const Child: { new(props?: { foo: string }): {} }\n";
     let api_b = "declare const Child: { new(props?: { bar: number; foo: string }): {} }\n";

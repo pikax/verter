@@ -6080,7 +6080,7 @@ fn merge_rename_store_known_virtual_absent_from_capture_routes_virtual_drop_end_
 
     // Classify reads ONLY the captured snapshot — no `store` arg (the third-TOCTOU fix).
     let api_resolver =
-        |p: &str| classify_captured_api_surface(&captured, p, PositionEncodingKind::UTF16);
+        |p: &str| classify_captured_api_surface(None, &captured, p, PositionEncodingKind::UTF16);
 
     let type_locations = vec![RenameLocation {
         path: vpath.clone(),
@@ -6136,7 +6136,7 @@ fn merge_rename_store_unknown_path_with_real_backing_edits_in_place_end_to_end()
 
     // Classify reads ONLY the captured snapshot — no `store` arg (the third-TOCTOU fix).
     let api_resolver =
-        |p: &str| classify_captured_api_surface(&captured, p, PositionEncodingKind::UTF16);
+        |p: &str| classify_captured_api_surface(None, &captured, p, PositionEncodingKind::UTF16);
 
     let type_locations = vec![RenameLocation {
         path: vpath.clone(),

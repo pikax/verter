@@ -101,13 +101,25 @@ pub fn foreign_ide_context_from_captured(
     // coherent generation the provider answered against, so it remains
     // mappable. Requiring an open document here would make cross-file
     // navigation start working only after the user manually opened the target.
-    if let Some(uri) = documents.canonical_id_to_uri(&snapshot.source_canonical) {
-        let document = documents.get(&uri)?;
-        if ContentHash::of(&document.source) != snapshot.source_hash {
-            return None;
+    //
+    // The open revision whose bytes matched joins the current navigation or
+    // edit request's captured targets: a location or edit decoded through this
+    // map addresses exactly that revision, and settlement refuses the answer if
+    // the client's document moves before delivery.
+    let open_target = match documents.canonical_id_to_uri(&snapshot.source_canonical) {
+        Some(uri) => {
+            let identity = documents.snapshot_identity(&uri)?;
+            if ContentHash::of(identity.source()) != snapshot.source_hash {
+                return None;
+            }
+            Some((uri, identity))
         }
-    }
+        None => None,
+    };
     let context = external_ide_context_from_snapshot(snapshot, negotiated_encoding)?;
+    if let Some((uri, identity)) = open_target {
+        crate::documents::ForegroundRequest::bracket_target(&uri, identity);
+    }
     crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
     Some(context)
 }
@@ -243,7 +255,14 @@ pub fn locate_prop_decl_range_in_carrier_api(
 ///    `Child.vue.ts` next to `Child.vue`) the store did not know as virtual at
 ///    capture: `NotVirtual` (edit it in place).
 #[must_use]
+///
+/// With `documents`, a vouching surface whose carrier is open in the client
+/// must have been built from the open revision's exact bytes, and that revision
+/// joins the current navigation or edit request's captured targets (as in
+/// [`foreign_ide_context_from_captured`]); a surface built from other bytes is
+/// a `VirtualDrop`, never an offset mapped through another revision.
 pub fn classify_captured_api_surface(
+    documents: Option<&DocumentRegistry>,
     captured: &ProviderQuerySnapshot,
     api_path: &str,
     negotiated_encoding: tower_lsp_server::ls_types::PositionEncodingKind,
@@ -267,8 +286,24 @@ pub fn classify_captured_api_surface(
             ApiSurfaceResolution::VirtualDrop
         }
         Some(CapturedPathState::Current(snapshot)) => {
+            let open_target = match documents.and_then(|documents| {
+                let uri = documents.canonical_id_to_uri(&snapshot.source_canonical)?;
+                let identity = documents.snapshot_identity(&uri);
+                Some((uri, identity))
+            }) {
+                None => None,
+                Some((uri, Some(identity)))
+                    if ContentHash::of(identity.source()) == snapshot.source_hash =>
+                {
+                    Some((uri, identity))
+                }
+                Some(_) => return ApiSurfaceResolution::VirtualDrop,
+            };
             match external_ide_context_from_snapshot(snapshot, negotiated_encoding) {
                 Some(ctx) => {
+                    if let Some((uri, identity)) = open_target {
+                        crate::documents::ForegroundRequest::bracket_target(&uri, identity);
+                    }
                     crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
                     ApiSurfaceResolution::Vouched(ctx)
                 }
