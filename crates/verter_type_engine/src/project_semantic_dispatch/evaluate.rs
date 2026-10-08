@@ -2020,18 +2020,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
-        // Every frame, the root included, pays one step of connected work
-        // before it reads the memo: the step its consumer is charged
-        // whether the frame's evaluation is served (its receipt replays)
-        // or computed (its own recording opens after the step), so a
-        // served evaluation costs exactly what computing it did. Limited
-        // outcomes never reach the memo; one this demand cannot pay for is
-        // evaluated here.
-        let mut frames = vec![DeferredEvaluationFrame::new(
+        // A completed cacheable evaluation needs no connected work beyond
+        // what its receipt charges. Limited outcomes can never reach this
+        // memo; one this demand cannot pay for is evaluated here.
+        if let Some(served) = self
+            .graph()
+            .evaluate_deferred_memo_get(node, reduction_context)
+        {
+            if self.admits_served(&served.receipt) {
+                return EvaluateDeferredOutcome::complete(served.value);
+            }
+        }
+        // The root evaluates, and records from its first step: every step
+        // it takes is its own cost, so the receipt a later read replays
+        // charges exactly what computing it did. (A nested frame pays its
+        // first step to its parent whether it is served or computed.)
+        let mut root = DeferredEvaluationFrame::new(
             node,
             reduction_context,
             self.operation_budget_epoch.get(),
-        )];
+        );
+        self.connected_demand
+            .open_cost_scope(super::cost_receipt::CostIdentity::of_key((
+                node,
+                reduction_context,
+            )));
+        root.memo_checked = true;
+        root.recording = true;
+        let mut frames = vec![root];
         let mut completed_child: Option<EvaluateDeferredOutcome> = None;
 
         loop {

@@ -223,10 +223,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             key.clone(),
             &mut capture,
         ) {
-            Err(read) => {
-                drop(capture);
-                return Ok(dispatch.answered(key, read, carrier));
-            }
+            Err(read) => return Ok(dispatch.answered(key, read, carrier)),
             Ok(mut attempt) => graph.claim_query(
                 dispatch.ctx,
                 dispatch.snapshot.flags(),
@@ -235,7 +232,6 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 &mut capture,
             ),
         };
-        drop(capture);
         Ok(match claim {
             Claim::Read(read) => dispatch.answered(key, read, carrier),
             Claim::Recursive(recursion) => dispatch.recursion_delivery(key, recursion),
