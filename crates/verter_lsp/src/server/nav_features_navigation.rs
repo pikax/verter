@@ -52,7 +52,11 @@ fn host_export_location(
             let (s, e) = host.get_export_span(canonical_id, binding_name)?;
             Some((canonical_id.to_string(), s, e))
         })?;
-    let source = host.get_source(&resolved_id)?;
+    let source = crate::documents::ForegroundRequest::host_target_source(
+        &server.documents,
+        &resolved_id,
+        host.get_source(&resolved_id)?,
+    )?;
     let encoding = server.position_encoding.read().clone();
     let li = LineIndex::new(&source, encoding);
     let range = Range {
@@ -241,9 +245,7 @@ async fn handle_goto_definition_attempt(
                                     d.end,
                                     encoding.clone(),
                                     &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
+                                        block_in_place_if_available(|| server.target_source(p))
                                     },
                                 )?
                             } else {
@@ -357,7 +359,11 @@ async fn handle_goto_definition_attempt(
                     let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
                     Some((target_canonical_id.to_string(), s, e))
                 })?;
-            let target_source = host.get_source(&resolved_id)?;
+            let target_source = crate::documents::ForegroundRequest::host_target_source(
+                &server.documents,
+                &resolved_id,
+                host.get_source(&resolved_id)?,
+            )?;
             let target_li = LineIndex::new(&target_source, encoding.clone());
             let start_pos = target_li.offset_to_position(start)?;
             let end_pos = target_li.offset_to_position(end)?;
@@ -587,6 +593,7 @@ async fn definition_provider_attempt(
                     let negotiated_encoding = server.position_encoding.read().clone();
                     let api_resolver = |api_path: &str| {
                         crate::provider_surface_store::classify_captured_api_surface(
+                            Some(&server.documents),
                             &foreign_api_set,
                             api_path,
                             negotiated_encoding.clone(),
@@ -624,11 +631,7 @@ async fn definition_provider_attempt(
                         &carrier_source_exists,
                         Some(&barrel_resolver),
                         negotiated_encoding.clone(),
-                        &|p: &str| {
-                            block_in_place_if_available(|| {
-                                server.documents.host().workspace_read().read_file(p)
-                            })
-                        },
+                        &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                     );
                     // If the type provider resolved to a barrel file, follow
                     // re-exports to the terminal declaration.
@@ -722,11 +725,7 @@ async fn definition_provider_attempt(
                         &carrier_source_exists,
                         Some(&barrel_resolver),
                         negotiated_encoding.clone(),
-                        &|p: &str| {
-                            block_in_place_if_available(|| {
-                                server.documents.host().workspace_read().read_file(p)
-                            })
-                        },
+                        &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                     );
                     let mut locations = match server.resolve_barrel_locations(merged) {
                         Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
@@ -827,9 +826,7 @@ pub(super) async fn handle_goto_type_definition(
                                     d.end,
                                     encoding.clone(),
                                     &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
+                                        block_in_place_if_available(|| server.target_source(p))
                                     },
                                 )?
                             } else {
@@ -910,6 +907,7 @@ pub(super) async fn handle_goto_type_definition(
                     let negotiated_encoding = server.position_encoding.read().clone();
                     let api_resolver = |api_path: &str| {
                         crate::provider_surface_store::classify_captured_api_surface(
+                            Some(&server.documents),
                             &foreign_api_set,
                             api_path,
                             negotiated_encoding.clone(),
@@ -930,11 +928,7 @@ pub(super) async fn handle_goto_type_definition(
                         &carrier_source_exists,
                         Some(&barrel_resolver),
                         negotiated_encoding.clone(),
-                        &|p: &str| {
-                            block_in_place_if_available(|| {
-                                server.documents.host().workspace_read().read_file(p)
-                            })
-                        },
+                        &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                     ));
                 }
             } else {
@@ -1009,9 +1003,7 @@ pub(super) async fn handle_references(
                                     r.end,
                                     encoding.clone(),
                                     &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
+                                        block_in_place_if_available(|| server.target_source(p))
                                     },
                                 )?
                             } else {
@@ -1158,11 +1150,7 @@ pub(super) async fn handle_references(
                                 }),
                                 &carrier_source_exists,
                                 negotiated_encoding,
-                                &|p: &str| {
-                                    block_in_place_if_available(|| {
-                                        server.documents.host().workspace_read().read_file(p)
-                                    })
-                                },
+                                &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                             ),
                             child_prop_declaration,
                         ));
@@ -1480,6 +1468,7 @@ pub(super) async fn handle_rename(
                                 //   • ABSENT from the capture → NotVirtual (a genuinely real same-named
                                 //     file the store did not know as virtual; edit it in place).
                                 crate::provider_surface_store::classify_captured_api_surface(
+                                    Some(&server.documents),
                                     &query_snapshot,
                                     api_path,
                                     negotiated_encoding.clone(),
@@ -1499,11 +1488,7 @@ pub(super) async fn handle_rename(
                                 Some(&api_resolver),
                                 &carrier_source_exists,
                                 negotiated_encoding.clone(),
-                                &|p: &str| {
-                                    block_in_place_if_available(|| {
-                                        server.documents.host().workspace_read().read_file(p)
-                                    })
-                                },
+                                &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                             );
                             // CROSS-FILE COMPLETENESS GATE. The merge reports every
                             // provider location it could not map onto authored bytes.

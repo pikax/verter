@@ -82,6 +82,11 @@ pub(super) async fn handle_initialize(
                 .unwrap_or(false),
             std::sync::atomic::Ordering::Release,
         );
+        server.client_applies_versioned_edits.store(
+            crate::features::action_utils::WorkspaceEditSupport::negotiate(&params.capabilities)
+                == crate::features::action_utils::WorkspaceEditSupport::VersionedDocumentChanges,
+            std::sync::atomic::Ordering::Release,
+        );
         server.client_refreshes_inlay_hints.store(
             workspace
                 .and_then(|workspace| workspace.inlay_hint.as_ref())

@@ -131,10 +131,28 @@ pub(super) fn resolve_provider_auto_import_edits(
     let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
         return Err(format!("no IDE context for {tsx_path}"));
     };
+    let missing_document = || format!("no open document for {}", carrier_uri.as_str());
+    let identity = server
+        .documents
+        .snapshot_identity(&carrier_uri)
+        .ok_or_else(missing_document)?;
     let doc = server
         .documents
         .get(&carrier_uri)
-        .ok_or_else(|| format!("no open document for {}", carrier_uri.as_str()))?;
+        .ok_or_else(missing_document)?;
+    // The edits are placed through the captured surface's map, so they address
+    // the carrier bytes that map was built from. Those bytes must be the open
+    // revision the request captured; any other revision would place the import
+    // through a later revision's line index, so the request settles
+    // `ContentModified` instead of answering.
+    let coherent = *doc.source == *identity.source()
+        && crate::provider_surface_store::ContentHash::of(identity.source())
+            == snapshot.source_hash;
+    crate::documents::ForegroundRequest::bracket_target(&carrier_uri, identity);
+    if !coherent {
+        crate::documents::ForegroundRequest::mark_target_incoherent();
+        return Ok(None);
+    }
 
     let tsx_li = LineIndex::new(&snapshot.provider_content, server.documents.encoding());
     // `AnalyzedImport.span` is SFC-absolute; pass the spans straight through. The anchor authority
