@@ -51,7 +51,10 @@ impl RetentionHook {
         *self.0.write() = Some(account);
     }
 
-    fn reserve(&self, bytes: usize) -> Result<Option<ResolutionRetentionCharge>, RetentionRefused> {
+    pub(crate) fn reserve(
+        &self,
+        bytes: usize,
+    ) -> Result<Option<ResolutionRetentionCharge>, RetentionRefused> {
         match self.0.read().as_ref() {
             None => Ok(None),
             Some(account) => account

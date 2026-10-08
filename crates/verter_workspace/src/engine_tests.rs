@@ -546,3 +546,380 @@ fn rune_ambient_parser_flag_tracks_the_prelude_version() {
          bump the flag suffix when you bump the version"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Workspace-lane ownership: slots, decisions, edges and their history are
+// owned by their importer, bounded across distinct owners, and charged to
+// the retention account.
+// ─────────────────────────────────────────────────────────────────────────
+
+const OWNERSHIP_CONTEXT: ResolutionContext = ResolutionContext {
+    phase: ResolvePhase::ProviderGraph,
+    kind: ResolveRequestKind::EsmImport,
+};
+
+const OWNERSHIP_DEP: &str = "/p/dep.ts";
+
+fn ownership_workspace() -> MemoryWorkspace {
+    memory_workspace_with(OWNERSHIP_DEP)
+}
+
+fn residency(workspace: &MemoryWorkspace) -> crate::traits::ResolutionResidency {
+    WorkspaceRead::resource_snapshot(workspace).resolution
+}
+
+/// Inject `importer` and resolve `../dep`-style `specifier` from it; the
+/// answer must be the complete, admitted `/p/dep.ts`.
+fn resolve_owned(
+    workspace: &MemoryWorkspace,
+    importer: &str,
+    specifier: &str,
+) -> crate::resolution_currency::ResolutionOutcome {
+    let outcome =
+        WorkspaceRead::resolve_import_outcome(workspace, importer, specifier, OWNERSHIP_CONTEXT);
+    assert_eq!(
+        outcome.result().map(|result| result.source_id.as_str()),
+        Some(OWNERSHIP_DEP),
+        "fixture invariant: {importer} resolves {specifier} to the dependency"
+    );
+    outcome
+}
+
+fn admitted_signature(outcome: crate::resolution_currency::ResolutionOutcome) -> ReadSetSignature {
+    match outcome.admission {
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(signature) => {
+            signature
+        }
+        other => panic!("fixture invariant: the resolution must admit, got {other:?}"),
+    }
+}
+
+fn assert_owned_state_at_baseline(
+    after: crate::traits::ResolutionResidency,
+    baseline: crate::traits::ResolutionResidency,
+) {
+    assert_eq!(after.slots, baseline.slots, "slots: {after:?}");
+    assert_eq!(
+        after.candidates, baseline.candidates,
+        "candidates: {after:?}"
+    );
+    assert_eq!(after.owners, baseline.owners, "owners: {after:?}");
+    assert_eq!(
+        after.derived_nodes, baseline.derived_nodes,
+        "decisions and owner sets: {after:?}"
+    );
+    assert_eq!(
+        after.decision_edges, baseline.decision_edges,
+        "decision edges: {after:?}"
+    );
+    assert_eq!(
+        after.dependency_buckets, baseline.dependency_buckets,
+        "dependency buckets: {after:?}"
+    );
+    assert!(
+        after.retired_decisions <= crate::resolution_currency::TOMBSTONE_RETIREMENT_MINIMUM,
+        "retirement history stays bounded: {after:?}"
+    );
+}
+
+/// Deleting an importer retires its slots, its decisions, its owner set and
+/// their edges in the same mutation, and the decision tombstones that
+/// leaves behind fold into the floor, so distinct-importer churn returns
+/// every count to its baseline however many importers came and went.
+///
+/// Mutation recipe: drop the `retire_importer_in_world` call from
+/// `mutate_content_for`. The slot, owner and decision counts then grow by
+/// one per importer and every baseline assertion fails.
+#[test]
+fn distinct_importer_churn_retires_slots_decisions_edges_and_history() {
+    let workspace = ownership_workspace();
+    let population = workspace.engine.default_resolution_population();
+    let baseline = residency(&workspace);
+    let churn = 2 * crate::resolution_currency::TOMBSTONE_RETIREMENT_MINIMUM + 8;
+    for index in 0..churn {
+        let importer = format!("/p/churn/importer-{index}.ts");
+        workspace.inject_file(importer.clone(), Arc::from("import '../dep'\n"));
+        let _ = admitted_signature(resolve_owned(&workspace, &importer, "../dep"));
+        assert!(
+            workspace
+                .engine
+                .publish_owner_resolution_set(&importer, population)
+                .is_some(),
+            "fixture invariant: the importer publishes its owner set"
+        );
+        if index == 0 {
+            let live = residency(&workspace);
+            assert_eq!(live.slots, baseline.slots + 1, "{live:?}");
+            assert_eq!(live.owners, baseline.owners + 1, "{live:?}");
+            assert_eq!(
+                live.derived_nodes,
+                baseline.derived_nodes + 2,
+                "one decision and one owner set: {live:?}"
+            );
+            assert!(live.decision_edges > baseline.decision_edges, "{live:?}");
+        }
+        workspace.remove_file(&importer);
+    }
+    assert_owned_state_at_baseline(residency(&workspace), baseline);
+}
+
+/// Importers that never retire — paths the workspace does not hold, never
+/// deleted — are bounded by the lane's slot cap, and every evicted slot
+/// takes its decision and edges with it.
+///
+/// Mutation recipe: make `enforce_slot_cap` return without evicting. The
+/// slot and decision counts then reach one per importer.
+#[test]
+fn unknown_owner_resolutions_stay_within_the_slot_cap() {
+    const CAP: usize = 16;
+    let workspace = ownership_workspace();
+    workspace
+        .engine
+        .lazy_resolution_cache
+        .write()
+        .set_slot_cap_for_test(CAP);
+    let baseline = residency(&workspace);
+    let _ = admitted_signature(resolve_owned(
+        &workspace,
+        "/ghost/importer-0.ts",
+        "../p/dep",
+    ));
+    let one = residency(&workspace);
+    assert_eq!(one.slots, baseline.slots + 1, "fixture invariant: {one:?}");
+    let edges_per_decision = one.decision_edges - baseline.decision_edges;
+    assert!(edges_per_decision > 0, "fixture invariant: {one:?}");
+
+    for index in 1..(CAP * 8) {
+        let importer = format!("/ghost/importer-{index}.ts");
+        let _ = admitted_signature(resolve_owned(&workspace, &importer, "../p/dep"));
+    }
+    let after = residency(&workspace);
+    assert_eq!(after.slots, CAP, "{after:?}");
+    assert_eq!(after.owners, CAP, "{after:?}");
+    assert_eq!(after.candidates, CAP, "{after:?}");
+    assert_eq!(
+        after.derived_nodes,
+        baseline.derived_nodes + CAP,
+        "one decision per retained slot: {after:?}"
+    );
+    assert!(
+        after.decision_edges <= baseline.decision_edges + CAP * edges_per_decision,
+        "{after:?}"
+    );
+    assert!(
+        after.retired_decisions <= crate::resolution_currency::TOMBSTONE_RETIREMENT_MINIMUM,
+        "{after:?}"
+    );
+    assert!(
+        workspace.engine.lazy_resolution_cache.read().queue_len() <= 2 * CAP + 64,
+        "the admission queue stays proportional to the lane"
+    );
+}
+
+/// A subtree deletion retires every importer under it and no importer
+/// that merely shares its name prefix.
+#[test]
+fn subtree_deletion_retires_exactly_the_importers_under_it() {
+    let workspace = ownership_workspace();
+    let population = workspace.engine.default_resolution_population();
+    for importer in ["/p/sub/a.ts", "/p/sub/deep/b.ts", "/p/subway/c.ts"] {
+        workspace.inject_file(importer.to_string(), Arc::from("export {}\n"));
+    }
+    let _ = resolve_owned(&workspace, "/p/sub/a.ts", "../dep");
+    let _ = resolve_owned(&workspace, "/p/sub/deep/b.ts", "../../dep");
+    let _ = resolve_owned(&workspace, "/p/subway/c.ts", "../dep");
+
+    WorkspaceAccess::delete_dir_all(&workspace, "/p/sub").expect("subtree deletion");
+
+    let slot = |importer: &str, specifier: &str| {
+        workspace.engine.lazy_resolution_slot_len_for_test(
+            importer,
+            specifier,
+            OWNERSHIP_CONTEXT,
+            population,
+        )
+    };
+    assert_eq!(slot("/p/sub/a.ts", "../dep"), 0);
+    assert_eq!(slot("/p/sub/deep/b.ts", "../../dep"), 0);
+    assert_eq!(
+        slot("/p/subway/c.ts", "../dep"),
+        1,
+        "a sibling sharing the name prefix keeps its slot"
+    );
+    assert_eq!(residency(&workspace).owners, 1);
+}
+
+/// A base deletion leaves the session's slot for an importer an open
+/// overlay still shows; closing that overlay retires it.
+#[test]
+fn an_open_overlay_keeps_its_importer_until_it_closes() {
+    let workspace = ownership_workspace();
+    let population = workspace.engine.default_resolution_population();
+    let baseline = residency(&workspace);
+    let importer = "/p/open.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("export {}\n"));
+    WorkspaceAccess::notify_upsert(&workspace, importer, Arc::from("import './dep'\n"));
+    let _ = admitted_signature(resolve_owned(&workspace, importer, "./dep"));
+
+    workspace.remove_file(importer);
+    assert_eq!(
+        workspace.engine.lazy_resolution_slot_len_for_test(
+            importer,
+            "./dep",
+            OWNERSHIP_CONTEXT,
+            population,
+        ),
+        1,
+        "the session still sees the importer through its overlay"
+    );
+
+    WorkspaceAccess::notify_close(&workspace, importer);
+    assert_owned_state_at_baseline(residency(&workspace), baseline);
+}
+
+/// A snapshot captured before an importer retires keeps validating the
+/// witnesses it validated; a fresh capture does not — not even after the
+/// retired decision's tombstone has folded into the floor, where reading
+/// `INITIAL` again would re-validate the pre-removal witness.
+///
+/// Mutation recipe: in `retire_tombstones_if_due`, keep `derived_floor`
+/// unchanged instead of raising it to `fresh()`. The final fresh-capture
+/// assertion fails.
+#[test]
+fn held_snapshots_stay_valid_across_retirement_and_its_floor() {
+    let workspace = ownership_workspace();
+    let importer = "/p/held.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    let witness = admitted_signature(resolve_owned(&workspace, importer, "./dep"));
+    let held = WorkspaceRead::capture_resolution_world(&workspace).expect("captured world");
+    assert!(witness.validates(held.as_ref()));
+
+    workspace.remove_file(importer);
+    let fresh = WorkspaceRead::capture_resolution_world(&workspace).expect("captured world");
+    assert!(
+        witness.validates(held.as_ref()),
+        "the held snapshot is immutable"
+    );
+    assert!(
+        !witness.validates(fresh.as_ref()),
+        "the retired importer's decision no longer validates"
+    );
+
+    for index in 0..(2 * crate::resolution_currency::TOMBSTONE_RETIREMENT_MINIMUM + 8) {
+        let churned = format!("/p/churn/importer-{index}.ts");
+        workspace.inject_file(churned.clone(), Arc::from("import '../dep'\n"));
+        let _ = resolve_owned(&workspace, &churned, "../dep");
+        workspace.remove_file(&churned);
+    }
+    assert!(
+        residency(&workspace).retired_decisions
+            <= crate::resolution_currency::TOMBSTONE_RETIREMENT_MINIMUM,
+        "fixture invariant: the churn folded the history into the floor"
+    );
+    let folded = WorkspaceRead::capture_resolution_world(&workspace).expect("captured world");
+    assert!(witness.validates(held.as_ref()));
+    assert!(
+        !witness.validates(folded.as_ref()),
+        "a folded tombstone must not let the pre-removal witness validate again"
+    );
+}
+
+struct OwnershipAccount {
+    admit: bool,
+    charged: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct OwnershipCharge {
+    bytes: usize,
+    charged: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for OwnershipCharge {
+    fn drop(&mut self) {
+        self.charged
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+    for OwnershipAccount
+{
+    fn reserve_retained(
+        &self,
+        bytes: usize,
+    ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge> {
+        if !self.admit {
+            return None;
+        }
+        self.charged
+            .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
+        Some(
+            verter_session_query::retention::resolution_charge::ResolutionRetentionCharge::new(
+                OwnershipCharge {
+                    bytes,
+                    charged: Arc::clone(&self.charged),
+                },
+            ),
+        )
+    }
+}
+
+/// A complete answer the account refuses to retain is served uncached —
+/// typed as retention pressure, with no slot and no decision — and every
+/// retained answer's charge drains when its importer retires.
+///
+/// Mutation recipe: ignore the reservation result and admit the candidate
+/// anyway. The refused resolution then occupies a slot and a decision.
+#[test]
+fn refused_retention_serves_complete_answers_uncached_and_owners_drain() {
+    let workspace = ownership_workspace();
+    let baseline = residency(&workspace);
+    WorkspaceAccess::install_resolution_retention(
+        &workspace,
+        Arc::new(OwnershipAccount {
+            admit: false,
+            charged: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+    );
+    let importer = "/p/refused.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    for _ in 0..2 {
+        let outcome = resolve_owned(&workspace, importer, "./dep");
+        assert_eq!(
+            outcome.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::RetentionPressure),
+            "a refused retention is retention pressure, not a budget or work refusal"
+        );
+        let after = residency(&workspace);
+        assert_eq!(after.slots, baseline.slots, "{after:?}");
+        assert_eq!(after.derived_nodes, baseline.derived_nodes, "{after:?}");
+    }
+
+    let charged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    WorkspaceAccess::install_resolution_retention(
+        &workspace,
+        Arc::new(OwnershipAccount {
+            admit: true,
+            charged: Arc::clone(&charged),
+        }),
+    );
+    let importers: Vec<String> = (0..8).map(|index| format!("/p/kept-{index}.ts")).collect();
+    for importer in &importers {
+        workspace.inject_file(importer.clone(), Arc::from("import './dep'\n"));
+        let _ = admitted_signature(resolve_owned(&workspace, importer, "./dep"));
+    }
+    assert!(
+        charged.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "retained answers are charged"
+    );
+    for importer in &importers {
+        workspace.remove_file(importer);
+    }
+    assert_eq!(
+        charged.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "every charge drains with its importer"
+    );
+    workspace.remove_file(importer);
+    assert_owned_state_at_baseline(residency(&workspace), baseline);
+}
