@@ -148,10 +148,10 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
                 "the subscriber reads the producer's value"
             );
             assert!(
-                capture
-                    .take_receipt()
-                    .is_some_and(|delivered| Arc::ptr_eq(&delivered, &receipt)),
-                "the subscriber receives the producer's receipt, to replay it as a warm read would"
+                read.receipt
+                    .priced()
+                    .is_some_and(|delivered| Arc::ptr_eq(delivered, &receipt)),
+                "the subscriber's read carries the producer's receipt, to replay it as a warm read would"
             );
         }
         Joined::Retry => panic!("a same-view subscriber reuses the delivered result"),

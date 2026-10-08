@@ -1716,7 +1716,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "an unresolved Unknown must never publish to the relation memo"
     );
@@ -2469,7 +2469,7 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "the unresolved Unknown never publishes: {step:?}"
     );

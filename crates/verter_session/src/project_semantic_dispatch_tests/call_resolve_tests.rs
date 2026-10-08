@@ -2223,7 +2223,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.read)
+                .map(|served| served.value)
                 .is_some(),
             "the first revision's result is warm under the content-free key"
         );
@@ -2243,7 +2243,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.read)
+                .map(|served| served.value)
                 .is_none(),
             "the value-side read set / self-roots REJECT the warm entry the \
              equal key would otherwise serve"
@@ -2257,7 +2257,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.read)
+                .map(|served| served.value)
                 .is_some(),
             "the recomputed result warms under the same key"
         );
@@ -4161,10 +4161,7 @@ fn inline_callable_call_admits_rooted_on_its_declaring_file() {
     // serves it warm again.
     upsert_source(&host, UNRELATED_DECL, "export const unrelated = 2;\n");
     assert!(
-        graph
-            .get_validated(&query, host.as_ref())
-            .map(|served| served.read)
-            .is_some(),
+        graph.get_validated(&query, host.as_ref()).is_some(),
         "an unrelated edit keeps the entry"
     );
     let replay = {
@@ -4193,10 +4190,7 @@ fn inline_callable_call_admits_rooted_on_its_declaring_file() {
         "the entry survives physically"
     );
     assert!(
-        graph
-            .get_validated(&query, host.as_ref())
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&query, host.as_ref()).is_none(),
         "the declaring-file edit misses the warm read"
     );
 }
@@ -4266,10 +4260,7 @@ fn global_union_callee_call_admits_rooted_on_every_arm_file() {
 
     upsert_source(&host, UNRELATED_DECL, "export const unrelated = 2;\n");
     assert!(
-        graph
-            .get_validated(&query, host.as_ref())
-            .map(|served| served.read)
-            .is_some(),
+        graph.get_validated(&query, host.as_ref()).is_some(),
         "an unrelated edit keeps the entry"
     );
     upsert_source(
@@ -4279,10 +4270,7 @@ fn global_union_callee_call_admits_rooted_on_every_arm_file() {
     );
     assert!(graph.get_unvalidated(&query).is_some());
     assert!(
-        graph
-            .get_validated(&query, host.as_ref())
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&query, host.as_ref()).is_none(),
         "an edit to the second arm's declaring file misses the warm read"
     );
 }
@@ -4336,10 +4324,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
         "export declare const inlineA: (x: string) => 3;\n",
     );
     assert!(
-        graph
-            .get_validated(&set_key, host.as_ref())
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&set_key, host.as_ref()).is_none(),
         "an edit to an arm's declaring file misses the warm read"
     );
 }

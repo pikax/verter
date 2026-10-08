@@ -1272,7 +1272,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !self.admits_served(&served.receipt) {
             return None;
         }
-        let payload = served.read;
+        let payload = served.value;
         if measurement {
             self.dispatch_txn
                 .borrow_mut()

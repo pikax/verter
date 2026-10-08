@@ -62,18 +62,15 @@ pub enum Recursion {
     WaitCycle,
 }
 
-/// What a read captures besides its value: the publication its cold build
-/// admitted, or the operand evidence of whichever result answers it.
-///
-/// Every read that delivers a stored or computed result also captures the
-/// result's cost receipt ([`Self::take_receipt`]): the consumer replays a
-/// served one and records either as its prerequisite.
+/// What a read captures besides its envelope: the publication its cold
+/// build admitted, or the operand evidence of whichever result answers it.
+/// The result's cost receipt is not captured here: it travels in the read
+/// itself ([`CacheRead::receipt`]).
 #[derive(Default)]
 pub struct ReadCapture<'a> {
     publication: Option<&'a mut Option<PublishedMemoCandidate>>,
     evidence: Option<&'a mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
     carrier: Option<&'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
-    receipt: Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
 }
 
 impl<'a> ReadCapture<'a> {
@@ -83,7 +80,6 @@ impl<'a> ReadCapture<'a> {
             publication: Some(slot),
             evidence: None,
             carrier: None,
-            receipt: None,
         }
     }
 
@@ -97,7 +93,6 @@ impl<'a> ReadCapture<'a> {
             publication: None,
             evidence: Some(slot),
             carrier: None,
-            receipt: None,
         }
     }
 
@@ -112,26 +107,15 @@ impl<'a> ReadCapture<'a> {
             publication: None,
             evidence: None,
             carrier: Some(slot),
-            receipt: None,
         }
     }
 
-    /// The evidence, carrier and receipt slots together.
+    /// The evidence and carrier slots together.
     pub(super) fn parts(&mut self) -> CaptureParts<'_> {
         CaptureParts {
             evidence: self.evidence.as_deref_mut(),
             carrier: self.carrier.as_deref_mut(),
-            receipt: &mut self.receipt,
         }
-    }
-
-    /// The cost receipt of the result this read delivered, if it
-    /// delivered one: a stored candidate's, a subscription's producer's,
-    /// or the receipt this read's own build sealed.
-    pub fn take_receipt(
-        &mut self,
-    ) -> Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>> {
-        self.receipt.take()
     }
 
     /// Deliver the answering result's carrier: into the deferred slot, or
@@ -153,15 +137,13 @@ impl<'a> ReadCapture<'a> {
     }
 }
 
-/// The slots a warm read fills: the answering result's operand evidence,
-/// its deferred carrier, and its cost receipt.
+/// The slots a warm read fills: the answering result's operand evidence
+/// and its deferred carrier.
 pub(super) struct CaptureParts<'c> {
     pub(super) evidence:
         Option<&'c mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
     pub(super) carrier:
         Option<&'c mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
-    pub(super) receipt:
-        &'c mut Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
 }
 
 /// One logical claim of one key: the prepared key and what earlier attempts
@@ -297,6 +279,7 @@ impl SemanticGraphStore {
             cache_suppress: recursion == Recursion::WaitCycle,
             result_is_partial: true,
             partial_reasons: PartialReasonSet::SAME_PATH_RECURSION,
+            receipt: crate::semantic_query::ReadReceipt::Unpriced,
         }
     }
 
@@ -738,7 +721,6 @@ impl Subscription<'_> {
             prov.execute_cooperative_joiner_path
                 .fetch_add(1, Ordering::Relaxed);
         }
-        capture.receipt = cost_receipt;
         Joined::Read(CacheRead {
             value: result,
             dep_signature,
@@ -746,6 +728,7 @@ impl Subscription<'_> {
             cache_suppress,
             result_is_partial,
             partial_reasons,
+            receipt: cost_receipt.into(),
         })
     }
 }
@@ -1106,7 +1089,6 @@ impl SettledProducer<'_> {
             }
         }
         inflight.ready.notify_all();
-        capture.receipt = cost_receipt;
 
         // Retire the flight whatever the admission decided: a flight left
         // behind would let a later claim — after an invalidation evicted the
@@ -1122,6 +1104,7 @@ impl SettledProducer<'_> {
             cache_suppress,
             result_is_partial,
             partial_reasons,
+            receipt: cost_receipt.into(),
         }
     }
 }

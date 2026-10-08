@@ -148,15 +148,25 @@ impl SemanticGraphStore {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> Option<super::Served<SemanticNodeId>> {
+    ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
         let hit = self
             .evaluate_deferred_memo
             .get(&(node, context))
             .map(|entry| {
                 let (read, receipt) = entry.value();
-                super::Served {
-                    read: *read,
-                    receipt: std::sync::Arc::clone(receipt),
+                // A deferred evaluation is a pure function of interned
+                // nodes: it records no dependency facts, and only complete
+                // evaluations enter the memo.
+                crate::semantic_query::CacheRead {
+                    value: *read,
+                    dep_signature: super::empty_signature(),
+                    walker_diagnostics: std::sync::Arc::from([]),
+                    cache_suppress: false,
+                    result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    receipt: crate::semantic_query::ReadReceipt::Priced(std::sync::Arc::clone(
+                        receipt,
+                    )),
                 }
             });
         if hit.is_some() {

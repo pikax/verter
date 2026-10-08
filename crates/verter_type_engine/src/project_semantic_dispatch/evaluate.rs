@@ -2020,17 +2020,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
-        // A completed cacheable evaluation needs no connected work beyond
-        // what its receipt charges. Limited outcomes can never reach this
-        // memo; one this demand cannot pay for is evaluated here.
-        if let Some(served) = self
-            .graph()
-            .evaluate_deferred_memo_get(node, reduction_context)
-        {
-            if self.admits_served(&served.receipt) {
-                return EvaluateDeferredOutcome::complete(served.read);
-            }
-        }
+        // Every frame, the root included, pays one step of connected work
+        // before it reads the memo: the step its consumer is charged
+        // whether the frame's evaluation is served (its receipt replays)
+        // or computed (its own recording opens after the step), so a
+        // served evaluation costs exactly what computing it did. Limited
+        // outcomes never reach the memo; one this demand cannot pay for is
+        // evaluated here.
         let mut frames = vec![DeferredEvaluationFrame::new(
             node,
             reduction_context,
@@ -2123,7 +2119,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.graph()
                         .evaluate_deferred_memo_get(entry_node, context)
                         .filter(|served| self.admits_served(&served.receipt))
-                        .map(|served| served.read)
+                        .map(|served| served.value)
                 } else {
                     None
                 };

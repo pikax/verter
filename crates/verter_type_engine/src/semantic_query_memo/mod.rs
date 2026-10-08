@@ -178,6 +178,7 @@ fn narrow_cache_read(
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
         partial_reasons: read.partial_reasons,
+        receipt: read.receipt,
     }
 }
 
@@ -190,6 +191,7 @@ pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue
         cache_suppress: true,
         result_is_partial: true,
         partial_reasons: crate::semantic_query::PartialReasonSet::CANCELLED,
+        receipt: crate::semantic_query::ReadReceipt::Unpriced,
     }
 }
 
@@ -695,13 +697,6 @@ pub struct PublishedMemoCandidate {
     /// The receipt of the build that published the candidate: an SCC
     /// component's members share it.
     pub cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
-}
-
-/// A stored result and the receipt its consumer must replay to use it.
-#[derive(Debug, Clone)]
-pub struct Served<T> {
-    pub read: T,
-    pub receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
 }
 
 /// Non-identity runtime evidence retained with a store-local node handle.
@@ -1786,6 +1781,7 @@ impl SemanticGraphStore {
                     cache_suppress: false,
                     result_is_partial: false,
                     partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
                 }
             })
         });
@@ -1829,28 +1825,15 @@ impl SemanticGraphStore {
         &self,
         key: &SemanticQueryKey,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
-    ) -> Option<Served<CacheRead<QueryResult<SemanticNodeId>>>> {
+    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
         // Same formula as `requested_point_for_key`, reusing the
         // `family_and_slot` projection above instead of re-running it.
         let requested = crate::semantic_query::demand::MaterializedPoint::new(
             family::point_for_slot(slot, &requested_path_for_key(key)),
         );
-        let mut receipt = None;
-        let read = self.get_validated_value_impl(
-            &family,
-            slot,
-            &requested,
-            ctx,
-            None,
-            None,
-            &mut receipt,
-            true,
-        )?;
-        Some(Served {
-            read: narrow_cache_read(read),
-            receipt: receipt.expect("a served candidate carries its receipt"),
-        })
+        self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, true)
+            .map(narrow_cache_read)
     }
 
     /// Prepared-token variant of [`Self::get_validated`] — reads the
@@ -1867,7 +1850,6 @@ impl SemanticGraphStore {
         let producer::CaptureParts {
             evidence: operand_evidence,
             carrier: deferred_carrier,
-            receipt,
         } = capture.parts();
         self.get_validated_value_impl(
             prepared.family(),
@@ -1876,7 +1858,6 @@ impl SemanticGraphStore {
             ctx,
             operand_evidence,
             deferred_carrier,
-            receipt,
             true,
         )
     }
@@ -1904,9 +1885,6 @@ impl SemanticGraphStore {
         >,
         deferred_carrier: Option<
             &mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
-        >,
-        receipt: &mut Option<
-            Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         >,
         record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
@@ -1953,7 +1931,6 @@ impl SemanticGraphStore {
                 Some(slot) => *slot = Some(entry.read_set_signature.clone()),
                 None => entry.read_set_signature.bubble(ctx),
             }
-            *receipt = Some(Arc::clone(&entry.cost_receipt));
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
                 value: entry.result,
@@ -1962,6 +1939,7 @@ impl SemanticGraphStore {
                 cache_suppress: false,
                 result_is_partial: false,
                 partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
             }
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -2047,7 +2025,6 @@ impl SemanticGraphStore {
         let producer::CaptureParts {
             evidence: operand_evidence,
             carrier: deferred_carrier,
-            receipt,
         } = capture.parts();
         let key = prepared.key();
         let family = prepared.family();
@@ -2104,7 +2081,6 @@ impl SemanticGraphStore {
             Some(slot) => *slot = Some(entry.read_set_signature.clone()),
             None => entry.read_set_signature.bubble_via_tls(),
         }
-        *receipt = Some(Arc::clone(&entry.cost_receipt));
         let hit = CacheRead {
             value: entry.result,
             dep_signature: Arc::clone(&entry.dispatch_dep_signature),
@@ -2112,6 +2088,7 @@ impl SemanticGraphStore {
             cache_suppress: false,
             result_is_partial: false,
             partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+            receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
         };
 
         // Instrumentation — fast-path attribution.

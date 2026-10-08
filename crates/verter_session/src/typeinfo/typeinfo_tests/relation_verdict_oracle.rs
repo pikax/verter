@@ -251,7 +251,7 @@ fn relate_family_execute_warm_replays_decided_payload() {
     assert!(
         graph
             .get_relation_payload(host.as_ref(), &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_some(),
         "fixture: the admitted entry warm-serves through the payload read",
     );
@@ -300,7 +300,7 @@ fn relate_family_execute_warm_replays_decided_payload() {
     assert!(
         graph
             .get_relation_payload(host.as_ref(), &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "a project-generation bump must miss the warm relation read",
     );

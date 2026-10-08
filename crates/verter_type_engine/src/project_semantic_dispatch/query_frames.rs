@@ -31,8 +31,8 @@ use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatc
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::semantic_execution::{EvalStep, External, Outcome, Program, SemanticExecution, Start};
 use crate::semantic_query::{
-    CacheRead, QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryValue,
+    CacheRead, QueryError, QueryResult, ReadReceipt, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey, SemanticQueryValue,
 };
 use crate::semantic_query_memo::{
     Claim, ClaimAttempt, ExecutionTask, Joined, ProducerLease, ReadCapture, Recursion,
@@ -42,14 +42,13 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 
-/// What a query answered to the frame that needed it: the read, and the
+/// What a query answered to the frame that needed it: the read (with the
+/// answering result's cost receipt, for the consumer's recording), and the
 /// carrier of the result that answered it, for the consumer to replay.
 #[derive(Clone)]
 pub(super) struct QueryDelivery {
     read: ValueRead,
     carrier: Option<ReadSetSignature>,
-    /// The answering result's cost receipt, for the consumer's recording.
-    receipt: Option<Arc<super::cost_receipt::DemandCostReceipt>>,
 }
 
 /// The program instantiations run on: the dispatch they evaluate through
@@ -130,21 +129,24 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 Err(delivery) => return Start::Answer(Ok(*delivery)),
             },
         };
-        let (claim, carrier, receipt) = loop {
+        let (claim, carrier) = loop {
             let mut carrier = None;
-            let (claim, receipt) = {
+            let claim = {
                 let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-                let claim = dispatch.graph().claim_query(
+                dispatch.graph().claim_query(
                     dispatch.ctx,
                     dispatch.snapshot.flags(),
                     &mut attempt,
                     &self.task,
                     &mut capture,
-                );
-                (claim, capture.take_receipt())
+                )
             };
             // A warm result this demand cannot pay for is computed instead.
-            if let (Claim::Read(_), Some(receipt)) = (&claim, &receipt) {
+            if let Claim::Read(CacheRead {
+                receipt: ReadReceipt::Priced(receipt),
+                ..
+            }) = &claim
+            {
                 if !attempt.is_recomputing()
                     && matches!(
                         dispatch.admit_served(receipt, 0),
@@ -157,10 +159,10 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 // Admitted (or tripped): `answered` records it once more,
                 // which charges nothing further.
             }
-            break (claim, carrier, receipt);
+            break (claim, carrier);
         };
         match claim {
-            Claim::Read(read) => Start::Answer(Ok(dispatch.answered(key, read, carrier, receipt))),
+            Claim::Read(read) => Start::Answer(Ok(dispatch.answered(key, read, carrier))),
             Claim::Recursive(recursion) => {
                 Start::Answer(Ok(dispatch.recursion_delivery(key, recursion)))
             }
@@ -181,7 +183,6 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                             &CarrierNormalizationPrelude::none(),
                         ),
                         carrier: Some(carrier),
-                        receipt: None,
                     }));
                 }
                 Start::Produce(QueryFrame::Instantiate(Box::new(InstantiateFrame {
@@ -223,8 +224,8 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             &mut capture,
         ) {
             Err(read) => {
-                let receipt = capture.take_receipt();
-                return Ok(dispatch.answered(key, read, carrier, receipt));
+                drop(capture);
+                return Ok(dispatch.answered(key, read, carrier));
             }
             Ok(mut attempt) => graph.claim_query(
                 dispatch.ctx,
@@ -234,9 +235,9 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 &mut capture,
             ),
         };
-        let receipt = capture.take_receipt();
+        drop(capture);
         Ok(match claim {
-            Claim::Read(read) => dispatch.answered(key, read, carrier, receipt),
+            Claim::Read(read) => dispatch.answered(key, read, carrier),
             Claim::Recursive(recursion) => dispatch.recursion_delivery(key, recursion),
             Claim::Subscribed(_) | Claim::Produce(_) => {
                 dispatch.recursion_delivery(key, Recursion::SamePath)
@@ -259,18 +260,21 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             mut attempt,
         } = pending;
         let mut carrier = None;
-        let (joined, receipt) = {
+        let joined = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            let joined = subscription.wait(
+            subscription.wait(
                 dispatch.ctx,
                 dispatch.snapshot.flags(),
                 &mut attempt,
                 &mut capture,
-            );
-            (joined, capture.take_receipt())
+            )
         };
         // A joined result this demand cannot pay for is computed instead.
-        if let (Joined::Read(_), Some(receipt)) = (&joined, &receipt) {
+        if let Joined::Read(CacheRead {
+            receipt: ReadReceipt::Priced(receipt),
+            ..
+        }) = &joined
+        {
             if !attempt.is_recomputing()
                 && matches!(
                     dispatch.admit_served(receipt, 0),
@@ -283,9 +287,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             }
         }
         match joined {
-            Joined::Read(read) => {
-                External::Complete(Ok(dispatch.answered(&key, read, carrier, receipt)))
-            }
+            Joined::Read(read) => External::Complete(Ok(dispatch.answered(&key, read, carrier))),
             Joined::Recursive(recursion) => {
                 External::Complete(Ok(dispatch.recursion_delivery(&key, recursion)))
             }
@@ -342,12 +344,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let outcome = SemanticExecution::new().drive(&mut program, key.clone());
         drop(program);
         match outcome {
-            Ok(QueryDelivery {
-                read,
-                carrier,
-                receipt,
-            }) => {
-                if let Some(receipt) = &receipt {
+            Ok(QueryDelivery { read, carrier }) => {
+                if let Some(receipt) = read.receipt.priced() {
                     self.connected_demand.record_prerequisite(receipt, 1);
                 }
                 let traced = self.driven_root_traced.borrow_mut().take();
@@ -417,13 +415,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The runtime holds this entry on the heap: it enters no nested
         // native query level.
         let entered = self.enter_query(key, Some(&mut carrier), false);
-        entered.map(|(attempt, _)| attempt).map_err(|read| {
-            Box::new(QueryDelivery {
-                read,
-                carrier,
-                receipt: None,
-            })
-        })
+        entered
+            .map(|(attempt, _)| attempt)
+            .map_err(|read| Box::new(QueryDelivery { read, carrier }))
     }
 
     /// Count, charge and look up one query entry, exactly as the
@@ -460,7 +454,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             Ok(attempt) => attempt,
             Err(read) => {
-                match self.served_read(key, read, capture.take_receipt(), u16::from(charge_depth)) {
+                match self.served_read(key, read, u16::from(charge_depth)) {
                     Ok(read) => {
                         return Err(self.attribute_query_read(
                             key,
@@ -487,16 +481,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &SemanticQueryKey,
         read: ValueRead,
         carrier: Option<ReadSetSignature>,
-        receipt: Option<Arc<super::cost_receipt::DemandCostReceipt>>,
     ) -> QueryDelivery {
-        let read = match self.served_read(key, read, receipt.clone(), 0) {
+        let read = match self.served_read(key, read, 0) {
             Ok(read) => read,
             Err(refusal) => self.refused_replay_read(key, refusal),
         };
         QueryDelivery {
             read: self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none()),
             carrier,
-            receipt,
         }
     }
 
@@ -506,7 +498,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         QueryDelivery {
             read: self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none()),
             carrier: None,
-            receipt: None,
         }
     }
 
@@ -530,15 +521,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// taint, and read the instantiated node as a synchronous
     /// instantiation's reader does.
     fn consume_delivery(&self, delivery: QueryDelivery) -> SemanticNodeId {
-        let QueryDelivery {
-            read,
-            carrier,
-            receipt,
-        } = delivery;
+        let QueryDelivery { read, carrier } = delivery;
         if let Some(carrier) = carrier {
             carrier.bubble_via_tls();
         }
-        if let Some(receipt) = &receipt {
+        if let Some(receipt) = read.receipt.priced() {
             self.connected_demand.record_prerequisite(receipt, 0);
         }
         self.fold_cache_read_rails(
@@ -708,8 +695,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Ok(()) => {
                             let published = settled.published_carrier();
                             let read = settled.complete(self.ctx, &mut capture);
-                            if let (Some(carrier), Some(receipt)) = (published, &receipt) {
-                                self.keep_published(&frame.key, &read, carrier, receipt);
+                            if let Some(carrier) = published {
+                                self.keep_published(&frame.key, &read, carrier);
                             }
                             read
                         }
@@ -725,7 +712,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &CarrierNormalizationPrelude::none(),
             ),
             carrier,
-            receipt,
         }
     }
 }

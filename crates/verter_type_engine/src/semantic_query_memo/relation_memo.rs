@@ -77,7 +77,7 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<Served<crate::semantic_query::RelationPayload>> {
+    ) -> Option<CacheRead<crate::semantic_query::RelationPayload>> {
         let family = FamilyKey::Relate {
             key: super::family_intern::InternedRelateKey::intern(key.clone()),
         };
@@ -91,31 +91,23 @@ impl SemanticGraphStore {
         // Miss-neutral probe: a miss falls through to the owning
         // cooperative dispatch, which records the single miss (see
         // `get_validated_value_impl`'s `record_miss` contract).
-        let mut receipt = None;
-        let hit = self
-            .get_validated_value_impl(
-                &family,
-                ModeSlot::Single,
-                &requested,
-                ctx,
-                None,
-                None,
-                &mut receipt,
-                false,
-            )?
-            .value;
-        let receipt = receipt.expect("a served candidate carries its receipt");
-        match hit {
-            QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(Served {
-                read: payload,
-                receipt,
-            }),
+        let hit = self.get_validated_value_impl(
+            &family,
+            ModeSlot::Single,
+            &requested,
+            ctx,
+            None,
+            None,
+            false,
+        )?;
+        Some(hit.map_value(|value| match value {
+            QueryResult::Value(SemanticQueryValue::Relation(payload)) => payload,
             // Structural invariant: the relation authority only ever
             // stores `Relation` payloads in `Relate` family entries.
             other => {
                 unreachable!("Relate family entries store Relation payloads only; found {other:?}")
             }
-        }
+        }))
     }
 
     /// Read back the just-published carrier (read-set signature,

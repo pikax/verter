@@ -662,20 +662,17 @@ fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
     );
 }
 
-/// A refusal is sealed under the allowances it was decided by and answers
-/// only those: a demand with any other allowance evaluates for itself —
-/// with enough, it completes, and the completed result is kept for any
-/// demand that can pay for it — while the original allowances keep
-/// answering their refusal without evaluating, even once a complete result
-/// is stored.
-#[test]
-fn a_refusal_answers_only_its_own_allowances() {
-    let source = reversed_unions(40);
-    let host = super::checker_probe_lane_tests::default_probe_host();
-    let key = super::checker_probe_lane_tests::with_probe_on_host(
-        &host,
+/// The relation `S` to `T` of [`reversed_unions`] with `arms` arms, as a
+/// root query key on `host`.
+fn reversed_relation_key(
+    host: &Arc<VerterHost>,
+    arms: usize,
+    reversed: bool,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
         Default::default(),
-        &source,
+        &reversed_unions(arms),
         "[S, T]",
         |dispatch, node| {
             let elements = match dispatch.graph().node_data(node).as_deref() {
@@ -688,22 +685,89 @@ fn a_refusal_answers_only_its_own_allowances() {
                     .collect::<Vec<_>>(),
                 other => panic!("the probe reads the pair [S, T], got {other:?}"),
             };
-            dispatch
-                .relate_key_for(elements[0], elements[1])
-                .to_query_key()
+            let (source, target) = if reversed {
+                (elements[1], elements[0])
+            } else {
+                (elements[0], elements[1])
+            };
+            dispatch.relate_key_for(source, target).to_query_key()
         },
-    );
+    )
+}
+
+/// What one root demand answered and what it was charged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootAnswer {
+    /// The relation's outcome, or the class of the refusal it answered.
+    answer: String,
+    partial: bool,
+    reasons: verter_type_engine::semantic_query::PartialReasonSet,
+    work: usize,
+    bytes: usize,
+}
+
+/// Run `key` as an isolated root demand with `work` units over a fresh
+/// view of `host`, in whatever request is installed on this thread.
+fn root_read(
+    host: &Arc<VerterHost>,
+    key: &verter_type_engine::semantic_query::SemanticQueryKey,
+    work: usize,
+) -> RootAnswer {
+    use verter_type_engine::semantic_query::{QueryResult, SemanticQueryValue};
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&ctx);
+    dispatch.set_connected_limits_for_tests(work, 24);
+    let read = dispatch.execute_via_cold_build_helper(key.clone());
+    let answer = match &read.value {
+        QueryResult::Value(SemanticQueryValue::Relation(payload)) => {
+            format!("{:?}", payload.outcome)
+        }
+        QueryResult::Value(other) => format!("refusal carrier {:?}", other.tag()),
+        QueryResult::Recursive(_) => "recursive".to_owned(),
+        QueryResult::Error(error) => format!("error {error:?}"),
+    };
+    RootAnswer {
+        answer,
+        partial: read.result_is_partial,
+        reasons: read.partial_reason_classes(),
+        work: dispatch.connected_demand().work_used_for_tests(),
+        bytes: dispatch.connected_demand().bytes_used_for_tests(),
+    }
+}
+
+/// Install a fresh request with an operation fuse no relation here reaches.
+fn fresh_request(id: u64) -> verter_type_engine::request_context::RequestContextGuard {
+    verter_type_engine::request_context::RequestContextGuard::install(
+        verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+            id,
+            Arc::from(BENCH_SCENARIO),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1_000_000,
+        ),
+    )
+}
+
+/// A refusal is sealed under the allowances it was decided by and answers
+/// only those: a demand with any other allowance evaluates for itself —
+/// with enough, it completes, and the completed result is kept for any
+/// demand that can pay for it — while the original allowances keep
+/// answering their refusal without evaluating, even once a complete result
+/// is stored.
+#[test]
+fn a_refusal_answers_only_its_own_allowances() {
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 40, false);
     let misses = || semantic_misses(&host);
     // Each read is its own request-less root demand over a fresh view, as
     // a repeat request would be.
     let read = |work: usize| {
-        let store_view = host.resolver_store_view_read().into_owned_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&ctx);
-        dispatch.set_connected_limits_for_tests(work, 24);
-        let read = dispatch.execute_via_cold_build_helper(key.clone());
-        (format!("{:?}", read.value), read.result_is_partial)
+        let answer = root_read(&host, &key, work);
+        (answer.answer, answer.partial)
     };
 
     let refused = read(64);
@@ -733,9 +797,142 @@ fn a_refusal_answers_only_its_own_allowances() {
     );
 }
 
+/// A refusal is sealed at the request state its root entered: the
+/// operations the request had spent and the computations it had paid. A
+/// root entering a request at that state answers from it whatever runs
+/// after it; the same root run after another root of its request has paid
+/// for computations is not that refusal and evaluates for itself — so the
+/// order of a request's roots never lets one inherit a refusal decided
+/// under another.
+#[test]
+fn a_refusal_answers_only_the_request_state_it_entered_at() {
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 40, false);
+    let other = reversed_relation_key(&host, 40, true);
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let misses = || semantic_misses(&host);
+
+    let refused = {
+        let _request = fresh_request(1);
+        root_read(&host, &key, 64)
+    };
+    assert!(refused.partial, "64 units cannot relate 40 arms");
+
+    // The root first in its request: the refusal answers it.
+    {
+        let _request = fresh_request(2);
+        let before = misses();
+        assert_eq!(root_read(&host, &key, 64), refused);
+        assert_eq!(
+            misses(),
+            before,
+            "a root entering a fresh request evaluates nothing"
+        );
+        assert!(!root_read(&host, &other, full).partial);
+    }
+
+    // The same root after another root paid for computations in its
+    // request: a different entry state, which evaluates.
+    {
+        let _request = fresh_request(3);
+        assert!(!root_read(&host, &other, full).partial);
+        let before = misses();
+        let after_other = root_read(&host, &key, 64);
+        assert!(
+            misses() > before,
+            "a root entering a request with paid computations evaluates for itself"
+        );
+        assert_eq!(
+            (after_other.answer, after_other.partial, after_other.reasons),
+            (refused.answer.clone(), refused.partial, refused.reasons),
+            "and is refused where the evaluation stops, not where a sealed refusal did"
+        );
+    }
+}
+
+/// A demand served the sub-results an earlier demand computed before its
+/// allowance ran out is charged exactly as its cold run, wherever the
+/// earlier demand stopped: a stored evaluation's receipt carries everything
+/// computing it charged, including the step its consumer pays to enter it.
+#[test]
+fn a_partly_warm_demand_is_charged_as_its_cold_run() {
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let cold = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = reversed_relation_key(&host, 2, false);
+        root_read(&host, &key, full)
+    };
+    assert!(!cold.partial, "the production allowance relates them");
+    for stopped_at in 1..cold.work {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = reversed_relation_key(&host, 2, false);
+        let _ = root_read(&host, &key, stopped_at);
+        assert_eq!(
+            root_read(&host, &key, full),
+            cold,
+            "after a demand that stopped at {stopped_at} units"
+        );
+    }
+}
+
+/// Demands under different allowances, and demands sharing producers with
+/// one another, run concurrently against one store: each answers and is
+/// charged exactly as it is alone and cold. A follower that joins another
+/// demand's producer pays the producer's receipt, and one that cannot pay
+/// computes the result itself.
+#[test]
+fn concurrent_profiles_and_followers_are_charged_as_alone() {
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let alone = |work: usize| {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = reversed_relation_key(&host, 24, false);
+        root_read(&host, &key, work)
+    };
+    let refused_alone = alone(48);
+    let complete_alone = alone(full);
+    assert!(refused_alone.partial, "48 units cannot relate 24 arms");
+    assert!(
+        !complete_alone.partial,
+        "the production allowance relates them"
+    );
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 24, false);
+    let allowances = [48, full, 48, full, full, 48];
+    let barrier = std::sync::Barrier::new(allowances.len());
+    let answers: Vec<RootAnswer> = std::thread::scope(|scope| {
+        let workers: Vec<_> = allowances
+            .iter()
+            .map(|&work| {
+                let (host, key, barrier) = (&host, &key, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    root_read(host, key, work)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("a concurrent demand completes"))
+            .collect()
+    });
+    for (work, answer) in allowances.iter().zip(answers) {
+        let expected = if *work == full {
+            &complete_alone
+        } else {
+            &refused_alone
+        };
+        assert_eq!(
+            &answer, expected,
+            "a concurrent demand with {work} units answers and is charged as it is alone"
+        );
+    }
+}
+
 /// The refusal table is bounded: past its cap the oldest refusal is
 /// dropped (its root evaluates again), the newest kept. An evaluation the
-/// project moved under is torn and never becomes a refusal.
+/// project moved under is torn, and a cancelled one stopped for a reason
+/// that is not its allowance: neither ever becomes a refusal.
 #[test]
 fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
@@ -779,6 +976,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         cache_suppress: true,
         result_is_partial: true,
         partial_reasons: PartialReasonSet::PROJECTION_WORK_LIMIT,
+        receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
     };
     let carrier =
         || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));
@@ -824,4 +1022,28 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         "an evaluation the project moved under is never sealed"
     );
     assert!(!store.has_sealed_refusal_for_tests(&host, torn, &profile));
+
+    let cancelled_key = key(REFUSAL_SUMMARY_CAP + 2);
+    let cancelled = verter_type_engine::request_context::RequestContext::new(
+        1,
+        Arc::from("/refusals.ts"),
+        false,
+        None,
+    );
+    cancelled.cancel();
+    {
+        let _request = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
+        assert!(
+            !store.seal_refusal_for_tests(
+                &host,
+                cancelled_key.clone(),
+                profile.clone(),
+                generation,
+                refusal(),
+                carrier(),
+            ),
+            "a cancelled evaluation is never sealed"
+        );
+    }
+    assert!(!store.has_sealed_refusal_for_tests(&host, cancelled_key, &profile));
 }

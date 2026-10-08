@@ -39,7 +39,7 @@ impl SemanticGraphStore {
         keys.iter()
             .map(|key| {
                 if let Some(hit) = self.get_validated(key, ctx) {
-                    match hit.read.value {
+                    match hit.value {
                         QueryResult::Value(node) | QueryResult::Recursive(node) => Ok(node),
                         QueryResult::Error(_) => Err(BatchExpandError::EvictedNode),
                     }

@@ -210,7 +210,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if let Some(served) = self.graph().get_resolve_call_result(self.ctx, &key) {
             if self.admits_served(&served.receipt) {
-                return ResolveCallStep::Complete(served.read);
+                return ResolveCallStep::Complete(served.value);
             }
         }
         if self.dispatch_txn.borrow().obligations.decides_root() {

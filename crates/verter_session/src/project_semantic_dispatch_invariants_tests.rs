@@ -1474,7 +1474,7 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     // Belt-and-braces: no payload is reachable for the undecided pair.
     let cached = graph
         .get_relation_payload(&host, &dispatch.relate_key_for(source, target))
-        .map(|served| served.read);
+        .map(|served| served.value);
     assert!(
         cached.is_none(),
         "no warm payload may be reachable for an undecided relation; got {cached:?}"
@@ -1589,7 +1589,7 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_some(),
         "precondition: the relation judgement must be admitted and warm before the edit"
     );
@@ -1611,7 +1611,7 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "FENCE: editing the transitive imported fact must MISS the warm relation read \
          (recompute); a carrier that recorded no transitive facts would stale-hit"
@@ -1665,7 +1665,7 @@ fn relation_memo_overflow_returns_result_without_admission() {
     assert!(
         graph
             .get_relation_payload(&host, &dispatch.relate_key_for(string, string))
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "OVERFLOW: no warm entry may be reachable for the overflowed relation"
     );
@@ -2941,7 +2941,7 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "cold relation memo must return None before publish"
     );
@@ -2963,7 +2963,7 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     // Warm: must return the same judgement.
     let cached = graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .expect("published relation memo must be readable");
     assert_eq!(
         cached.outcome,
@@ -3818,7 +3818,7 @@ fn relate_optional_to_required_decides_not_assignable_through_execute() {
     );
     let warm = graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .expect("the decided judgement warm-serves");
     assert_eq!(
         warm.outcome,
@@ -3868,7 +3868,7 @@ fn coinductive_positive_scc_publishes_assignable() {
     let key = dispatch.relate_key_for(a, b);
     let payload = graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .expect("the positive SCC close publishes the root judgement");
     assert_eq!(
         payload.outcome,
@@ -3951,13 +3951,13 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
     let key = dispatch.relate_key_for(a, b);
     assert!(graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .is_some());
     graph.release_canonical(canonical);
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "the close evicts the published judgement"
     );
@@ -4012,7 +4012,7 @@ fn coinductive_negative_scc_publishes_stable_not_assignable() {
     let key = dispatch.relate_key_for(a, b);
     let payload = graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .expect("a negative SCC close publishes a final NotAssignable, not ReturnOnly");
     assert_eq!(
         payload.outcome,
@@ -4098,7 +4098,7 @@ fn unknown_edge_in_scc_makes_whole_component_return_only() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "no warm entry may exist for a poisoned component"
     );
@@ -4160,7 +4160,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
     assert!(
         graph
             .get_relation_payload(&host, &plain_key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "the binding judgement must NOT publish under the plain identity"
     );
@@ -4281,7 +4281,7 @@ fn relation_budget_exceeded_is_public_and_admits_nothing() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "no warm relation read may serve a budget payload"
     );
@@ -4359,7 +4359,7 @@ fn comparable_budget_exhaustion_is_typed_and_non_admissible() {
     assert_eq!(graph.relation_memo_count(), before);
     assert!(graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .is_none());
 }
 
@@ -4460,7 +4460,7 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
     // No cross-hit: each slot holds its own verdict.
     let strict_payload = graph
         .get_relation_payload(&host, &strict_key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .expect("the strict judgement stays warm in its own slot");
     assert_eq!(
         strict_payload.outcome,
@@ -4468,7 +4468,7 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
     );
     let relaxed_payload = graph
         .get_relation_payload(&host, &relaxed_key)
-        .map(|served| served.read)
+        .map(|served| served.value)
         .expect("the relaxed judgement warms its own slot");
     assert_eq!(
         relaxed_payload.outcome,
@@ -4798,7 +4798,7 @@ fn negative_scc_redischarge_runs_deepest_first() {
     for (name, s, t) in [("S1<=T1", s1, t1), ("S2<=T2", s2, t2)] {
         let warm = graph
             .get_relation_payload(&host, &dispatch.relate_key_for(s, t))
-            .map(|served| served.read);
+            .map(|served| served.value);
         assert!(
             !matches!(
                 warm.as_ref().map(|p| &p.outcome),

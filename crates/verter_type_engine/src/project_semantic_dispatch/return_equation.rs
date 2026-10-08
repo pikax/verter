@@ -235,7 +235,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !self.admits_served(&served.receipt) {
                     return None;
                 }
-                Some(resolved_call_fresh_target(&served.read))
+                Some(resolved_call_fresh_target(&served.value))
             }
         }
     }

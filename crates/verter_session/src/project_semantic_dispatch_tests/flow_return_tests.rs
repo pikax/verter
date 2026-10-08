@@ -713,7 +713,7 @@ fn flow_return_empty_cycle_is_return_only_and_never_never() {
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &key)
-                .map(|served| served.read)
+                .map(|served| served.value)
                 .is_none(),
             "an empty recursive cycle admits no family value"
         );
@@ -846,7 +846,7 @@ fn flow_return_key_carries_no_value_environment() {
             let warm = fresh
                 .graph()
                 .get_flow_return_result(fresh.ctx, &warm_key)
-                .map(|served| served.read);
+                .map(|served| served.value);
             assert!(
                 warm.is_some(),
                 "the second demand of the same function identity is a warm family hit"
@@ -933,7 +933,7 @@ pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &shifted)
-                .map(|served| served.read)
+                .map(|served| served.value)
                 .is_none(),
             "a shifted-env key must not warm-hit the base entry"
         );
@@ -1021,7 +1021,7 @@ fn function_return_helper_flow_arm_builds_the_identical_key() {
                 fresh
                     .graph()
                     .get_flow_return_result(fresh.ctx, &key)
-                    .map(|served| served.read)
+                    .map(|served| served.value)
                     .is_some(),
                 "the helper's demand admits under the identical key"
             );
@@ -1448,7 +1448,7 @@ fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
         assert!(dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &dispatch.flow_return_key_for(&identity))
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none());
     });
 }
@@ -2764,7 +2764,7 @@ fn flow_return_warm_read_consults_no_slice_state() {
         let warm_read = dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .expect("the published FlowReturn entry warm-validates on a live view");
         assert_eq!(warm_read, cold);
         flow_result_value(dispatch, key)
@@ -3302,7 +3302,7 @@ pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
         let stored = fresh
             .graph()
             .get_flow_return_result(fresh.ctx, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .expect("the dispatched FlowReturn published to the graph store");
         assert_eq!(
             stored, dispatched,
@@ -4401,7 +4401,7 @@ fn flow_return_resurrected_member_publishes_a_readable_entry() {
                 let warm = dispatch
                     .graph()
                     .get_flow_return_result(dispatch.ctx, &key)
-                    .map(|served| served.read);
+                    .map(|served| served.value);
                 (materialized, warm)
             });
             let materialized =
@@ -4469,7 +4469,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
                 let result = graph
                     .get_flow_return_result(dispatch.ctx, &key)
-                    .map(|served| served.read)
+                    .map(|served| served.value)
                     .unwrap_or_else(|| panic!("{name} must be warm before re-staging"));
                 let materialized = graph
                     .entry_satisfied_projection_for_tests(&query)
@@ -4523,7 +4523,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 let candidates = graph.slot_candidate_count_for_tests(query);
                 let warm = graph
                     .get_flow_return_result(dispatch.ctx, key)
-                    .map(|served| served.read)
+                    .map(|served| served.value)
                     .is_some();
                 if invalidate_root {
                     assert!(
@@ -5974,7 +5974,7 @@ fn flow_root_publish_requires_complete_flow_proof() {
             fresh
                 .graph()
                 .get_flow_return_result(fresh.ctx, &warm_key)
-                .map(|served| served.read)
+                .map(|served| served.value)
                 .is_some(),
             "the second request is a warm family hit"
         );
@@ -10691,7 +10691,7 @@ fn flow_expr_cold_warm(
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &key(dispatch))
-                .map(|served| served.read)
+                .map(|served| served.value)
         });
         assert_eq!(
             warm.as_ref(),
@@ -11645,7 +11645,7 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
         let warm = dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &key(dispatch))
-            .map(|served| served.read);
+            .map(|served| served.value);
         assert_eq!(
             warm.as_ref(),
             Some(&cold),

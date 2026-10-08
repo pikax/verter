@@ -2438,7 +2438,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// dispatch's view: step (2) of [`Self::execute_flow_return`].
     pub fn warm_flow_return_read(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
         let served = self.graph().get_flow_return_result(self.ctx, key)?;
-        self.admits_served(&served.receipt).then_some(served.read)
+        self.admits_served(&served.receipt).then_some(served.value)
     }
 
     /// The proven value of `key` when it already completed on this

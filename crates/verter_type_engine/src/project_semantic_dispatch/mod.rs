@@ -545,9 +545,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
 /// One result a dispatcher's build published ([`ProjectSemanticDispatch`]'s
 /// `published_results`).
 pub(super) struct PublishedResult {
+    /// The published read; its receipt is the build's sealed one.
     read: CacheRead<QueryResult<SemanticQueryValue>>,
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
-    receipt: Arc<cost_receipt::DemandCostReceipt>,
     /// The workspace's edit clocks when the build published.
     published_at: WorkspaceEdit,
 }
@@ -961,6 +961,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             cache_suppress: true,
             result_is_partial: true,
             partial_reasons: reasons,
+            receipt: crate::semantic_query::ReadReceipt::Unpriced,
         }
     }
 
@@ -1003,8 +1004,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Whether a stored result serves the active demand
     /// ([`Self::admit_served`]); a reader that cannot recompute in place
     /// falls back to the cooperative query, which does.
-    pub(super) fn admits_served(&self, receipt: &Arc<cost_receipt::DemandCostReceipt>) -> bool {
-        matches!(self.admit_served(receipt, 1), ServedAdmission::Admitted)
+    pub(super) fn admits_served(&self, receipt: &crate::semantic_query::ReadReceipt) -> bool {
+        receipt.priced().is_none_or(|receipt| {
+            matches!(self.admit_served(receipt, 1), ServedAdmission::Admitted)
+        })
     }
 
     /// The read a stored or joined result answers a query entry with once
@@ -1017,13 +1020,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &SemanticQueryKey,
         read: CacheRead<QueryResult<SemanticQueryValue>>,
-        receipt: Option<Arc<cost_receipt::DemandCostReceipt>>,
         nesting: u16,
     ) -> Result<CacheRead<QueryResult<SemanticQueryValue>>, cost_receipt::ReplayRefusal> {
-        let Some(receipt) = receipt else {
+        let Some(receipt) = read.receipt.priced() else {
             return Ok(read);
         };
-        match self.admit_served(&receipt, nesting) {
+        match self.admit_served(receipt, nesting) {
             ServedAdmission::Admitted => Ok(read),
             ServedAdmission::Tripped(reasons) => Ok(widen_node_cache_read(
                 self.connected_limit_read(key, reasons),
@@ -1072,7 +1074,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         CacheRead<QueryResult<SemanticQueryValue>>,
         verter_session_query::facts::fact_cache::ReadSetSignature,
     )> {
-        let (read, carrier, receipt) = {
+        let (read, carrier) = {
             let published = self.published_results.borrow();
             let result = published.get(key)?;
             if result.published_at != self.workspace_edit()
@@ -1080,31 +1082,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             {
                 return None;
             }
-            (
-                result.read.clone(),
-                result.carrier.clone(),
-                Arc::clone(&result.receipt),
-            )
+            (result.read.clone(), result.carrier.clone())
         };
-        let read = self.served_read(key, read, Some(receipt), nesting).ok()?;
+        let read = self.served_read(key, read, nesting).ok()?;
         Some((read, carrier))
     }
 
-    /// Keep a result this dispatcher's build just published.
+    /// Keep a result this dispatcher's build just published. Only a
+    /// priced read is kept: a result is served only with its receipt.
     pub(super) fn keep_published(
         &self,
         key: &SemanticQueryKey,
         read: &CacheRead<QueryResult<SemanticQueryValue>>,
         carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
-        receipt: &Arc<cost_receipt::DemandCostReceipt>,
     ) {
+        if read.receipt.priced().is_none() {
+            return;
+        }
         let published_at = self.workspace_edit();
         self.published_results.borrow_mut().insert(
             key.clone(),
             PublishedResult {
                 read: read.clone(),
                 carrier,
-                receipt: Arc::clone(receipt),
                 published_at,
             },
         );
@@ -2564,6 +2564,7 @@ fn widen_node_cache_read(
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
         partial_reasons: read.partial_reasons,
+        receipt: read.receipt,
     }
 }
 
@@ -2586,6 +2587,7 @@ fn narrow_value_cache_read(
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
         partial_reasons: read.partial_reasons,
+        receipt: read.receipt,
     }
 }
 
@@ -3249,6 +3251,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     cache_suppress: true,
                     result_is_partial: false,
                     partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    receipt: crate::semantic_query::ReadReceipt::Unpriced,
                 };
             }
         }
@@ -3795,16 +3798,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &mut capture,
                 recompute,
             ) {
-                Acquired::Read(read) => {
-                    match self.served_read(&key, read, capture.take_receipt(), 1) {
-                        Ok(read) => read,
-                        Err(refusal) if !recompute => {
-                            refused = Some(refusal);
-                            continue;
-                        }
-                        Err(refusal) => self.refused_replay_read(&key, refusal),
+                Acquired::Read(read) => match self.served_read(&key, read, 1) {
+                    Ok(read) => read,
+                    Err(refusal) if !recompute => {
+                        refused = Some(refusal);
+                        continue;
                     }
-                }
+                    Err(refusal) => self.refused_replay_read(&key, refusal),
+                },
                 Acquired::Recursive(recursion) => SemanticGraphStore::recursion_read(
                     recursion,
                     (sentinel.take().expect("the claim ends once"))(),
@@ -3842,8 +3843,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             Ok(()) => {
                                 let published = settled.published_carrier();
                                 let read = settled.complete(self.ctx, &mut capture);
-                                if let (Some(carrier), Some(receipt)) = (published, &receipt) {
-                                    self.keep_published(&key, &read, carrier, receipt);
+                                if let Some(carrier) = published {
+                                    self.keep_published(&key, &read, carrier);
                                 }
                                 read
                             }
@@ -4516,6 +4517,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
                     partial_reasons: slot_read.partial_reasons,
+                    receipt: slot_read.receipt,
                 };
             }
             QueryResult::Error(e) => {
@@ -4526,6 +4528,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
                     partial_reasons: slot_read.partial_reasons,
+                    receipt: slot_read.receipt,
                 };
             }
         };
@@ -4547,6 +4550,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         cache_suppress: slot_read.cache_suppress,
                         result_is_partial: slot_read.result_is_partial,
                         partial_reasons: slot_read.partial_reasons,
+                        receipt: slot_read.receipt,
                     };
                 }
             },
@@ -4558,6 +4562,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
                     partial_reasons: slot_read.partial_reasons,
+                    receipt: slot_read.receipt,
                 };
             }
         };
@@ -4609,6 +4614,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // result even when the terminal binding hop completed.
             result_is_partial: slot_read.result_is_partial || binding_read.result_is_partial,
             partial_reasons: composed_partial_reasons,
+            // Both hops were replayed into this demand when they were
+            // read; the terminal hop's receipt answers for the composition.
+            receipt: binding_read.receipt,
         }
     }
 

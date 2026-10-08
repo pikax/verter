@@ -24,7 +24,7 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::ResolveCallKey,
-    ) -> Option<Served<crate::semantic_query::ResolvedCallResult>> {
+    ) -> Option<CacheRead<crate::semantic_query::ResolvedCallResult>> {
         let family = FamilyKey::ResolveCall {
             key: super::family_intern::InternedResolveCallKey::intern(key.clone()),
         };
@@ -38,28 +38,20 @@ impl SemanticGraphStore {
         // Miss-neutral probe: a miss falls through to the owning
         // cooperative dispatch, which records the single miss (see
         // `get_validated_value_impl`'s `record_miss` contract).
-        let mut receipt = None;
-        let hit = self
-            .get_validated_value_impl(
-                &family,
-                ModeSlot::Single,
-                &requested,
-                ctx,
-                None,
-                None,
-                &mut receipt,
-                false,
-            )?
-            .value;
-        let receipt = receipt.expect("a served candidate carries its receipt");
-        match hit {
-            QueryResult::Value(SemanticQueryValue::ResolveCall(result)) => Some(Served {
-                read: result.as_ref().clone(),
-                receipt,
-            }),
+        let hit = self.get_validated_value_impl(
+            &family,
+            ModeSlot::Single,
+            &requested,
+            ctx,
+            None,
+            None,
+            false,
+        )?;
+        Some(hit.map_value(|value| match value {
+            QueryResult::Value(SemanticQueryValue::ResolveCall(result)) => result.as_ref().clone(),
             other => unreachable!(
                 "ResolveCall family entries store ResolveCall payloads only; found {other:?}"
             ),
-        }
+        }))
     }
 }

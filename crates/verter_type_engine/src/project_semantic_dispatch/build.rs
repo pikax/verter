@@ -16898,7 +16898,7 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
-    admit: impl Fn(&Arc<super::cost_receipt::DemandCostReceipt>) -> bool,
+    admit: impl Fn(&crate::semantic_query::ReadReceipt) -> bool,
 ) -> Option<(SemanticNodeId, usize)> {
     for k in (1..path.len()).rev() {
         let prefix_path: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
@@ -16915,7 +16915,7 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
             if !admit(&hit.receipt) {
                 return None;
             }
-            if let QueryResult::Value(prefix_node) = hit.read.value {
+            if let QueryResult::Value(prefix_node) = hit.value {
                 #[cfg(any(test, feature = "test-support"))]
                 PREFIX_PEEK_HITS.with(|c| *c.borrow_mut() += 1);
                 return Some((prefix_node, k));

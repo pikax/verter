@@ -216,10 +216,7 @@ fn resolve_decl_same_canonical_edit_rejects_warm_entry() {
          — the discrimination is the validator rejecting it, not its absence"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "ResolveDecl: a same-canonical content edit MUST reject the warm memo entry \
          via strict self-root validation — the entry self-roots on the keyed \
          canonical's FileWholeHash and the file's whole hash shifted",
@@ -281,10 +278,7 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
         "the physical TypeOf memo entry must still be present after the same-canonical edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "TypeOf: a same-canonical content edit MUST reject the warm memo entry \
          via strict self-root validation",
     );
@@ -357,10 +351,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         "the physical Instantiate memo entry must still be present after the same-canonical edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "Instantiate: a content edit to the declaring file MUST reject the warm memo \
          entry via strict self-root validation",
     );
@@ -433,10 +424,7 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         "the physical ResolveMacroPayload memo entry must still be present after the edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "ResolveMacroPayload: a content edit to the owning SFC MUST reject the warm memo \
          entry via strict self-root validation",
     );
@@ -871,7 +859,7 @@ fn relation_memo_warm_read_validates_self_root() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.read)
+            .map(|served| served.value)
             .is_none(),
         "the relation memo's warm read MUST validate the stored entry's self-version-rooted \
          carrier strictly — an entry self-rooted on an untracked canonical must miss",
@@ -910,7 +898,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
 
     let cached = store
         .get_relation_payload(ctx, &key)
-        .map(|served| served.read);
+        .map(|served| served.value);
     assert!(
         matches!(
             cached.as_ref().map(|payload| &payload.outcome),
@@ -945,7 +933,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
 ///    iterates an empty fact rail and accepts vacuously. Stale-by-
 ///    generation entry warm-hits.
 ///
-/// DISCRIMINATES: pre-fix, `graph.get_validated(&key, &host).map(|served| served.read)` returns
+/// DISCRIMINATES: pre-fix, `graph.get_validated(&key, &host).map(|served| served.value)` returns
 /// `Some(...)` because the bare bump leaves the entry physically
 /// resident and `validate_with_self_roots` accepts an empty fact rail.
 /// Post-fix, `dep_signature_to_fact_signature(&output.dep_signature)`
@@ -1021,10 +1009,7 @@ fn family_memo_validate_rejects_stale_project_generation() {
     // carrier.facts, `view.validates` rejects it against the live
     // generation g1, and `get_validated` returns None.
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "FAMILY MEMO STALE-GENERATION WARM HIT: a bare \
          bump_project_generation() (no clear) MUST reject the stale \
          family memo entry. Without folding the dispatch's \
@@ -1090,10 +1075,7 @@ fn structural_node_kind_publishes_no_file_self_root() {
              with NO file self-root FileWholeHash",
         );
         // A carrier with no self-roots validates vacuously.
-        let entry = graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .map(|r| r.value);
+        let entry = graph.get_validated(&key, ctx).map(|r| r.value);
         assert!(
             entry.is_some(),
             "a structural KeyOf entry (no file self-root) must warm-validate vacuously",
@@ -1208,10 +1190,7 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
         "the physical KeyOf memo entry must still be present after the same-canonical edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "KeyOf: a content edit to the base node's originating file MUST reject the warm \
          memo entry — self-version-rooting derives a self-root FileWholeHash from the base \
          node's origin scope; a `KeyOf` carrier without that self-root validates the stale \
@@ -1298,10 +1277,7 @@ fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
         "fixture invariant: the warm KeyOf memo entry must exist after priming"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_some(),
+        graph.get_validated(&key, ctx).is_some(),
         "fixture invariant: the warm KeyOf entry must validate before any edit"
     );
 
@@ -1322,10 +1298,7 @@ fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
          — the discrimination is the validator rejecting it, not its absence"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "KeyOf over a cross-file merged declaration MUST reject the warm entry on an \
          AUGMENTER edit — the entry must root on the carrier PLUS every contributor node, \
          so the augmenter contributor's FileWholeHash is recorded; rooting on the base \
@@ -1394,10 +1367,7 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
         "the physical ProjectPath memo entry must still be present after the same-canonical edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "ProjectPath: a content edit to the projection base's originating file MUST reject \
          the warm memo entry via the base node's file-derived self-root",
     );
@@ -1621,10 +1591,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
         "the physical Pick utility memo entry must still be present after the same-canonical edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "built-in utility instantiation: a content edit to the source argument's originating \
          file MUST reject the warm utility memo entry — the entry self-roots on the \
          argument's file via `observed_self_roots_from_nodes` over the `args` node set",
@@ -1746,10 +1713,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
         "the physical non-builtin Instantiate memo entry must still be present after the edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "non-builtin instantiation: a content edit to the type argument's originating file \
          (NOT the declaring file) MUST reject the warm Instantiate memo entry — the entry \
          self-roots on each file-derived argument's file via `observed_self_roots_from_nodes` \
@@ -1872,10 +1836,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
         "the physical ResolveMacroPayload memo entry must still be present after the edit"
     );
     assert!(
-        graph
-            .get_validated(&key, ctx)
-            .map(|served| served.read)
-            .is_none(),
+        graph.get_validated(&key, ctx).is_none(),
         "ResolveMacroPayload: a content edit to the macro type argument's originating file \
          (NOT the owning SFC) MUST reject the warm memo entry — the entry self-roots on each \
          file-derived `type_args` node's file via `observed_self_roots_from_nodes`, merged \

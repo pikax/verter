@@ -292,6 +292,38 @@ impl Drop for DemandCostReceipt {
     }
 }
 
+/// The cost a read's value carries, part of every read envelope
+/// ([`CacheRead`](crate::semantic_query::CacheRead)): every constructor
+/// states it, so no read can deliver a computed value with its cost
+/// detached.
+#[derive(Clone, Debug)]
+pub enum ReadReceipt {
+    /// A stored, joined or freshly built result and what computing it
+    /// cost. The consumer replays it before using the value and records it
+    /// as a prerequisite of its own computation.
+    Priced(Arc<DemandCostReceipt>),
+    /// No computed result to pay for: a recursion carrier, a cancellation,
+    /// a typed refusal, or a build that sealed no receipt (which the memo
+    /// never admits).
+    Unpriced,
+}
+
+impl ReadReceipt {
+    /// The receipt to replay and record, if the read is priced.
+    pub fn priced(&self) -> Option<&Arc<DemandCostReceipt>> {
+        match self {
+            Self::Priced(receipt) => Some(receipt),
+            Self::Unpriced => None,
+        }
+    }
+}
+
+impl From<Option<Arc<DemandCostReceipt>>> for ReadReceipt {
+    fn from(receipt: Option<Arc<DemandCostReceipt>>) -> Self {
+        receipt.map_or(Self::Unpriced, Self::Priced)
+    }
+}
+
 /// An open cold computation's recording: its identity, the usage accrued
 /// while it is on top, and the prerequisites it consumed.
 #[derive(Debug)]
