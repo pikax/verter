@@ -59,7 +59,6 @@ const APPLIED: &[(&str, &str)] = &[
     ("labeledBreak", "number"),
     ("tryCatch", "number | true"),
     ("readBefore", "string | number"),
-    ("staticLocal", "string | number"),
     ("throwOnly", "void"),
 ];
 
@@ -83,7 +82,8 @@ fn heritage_effects_never_reapply_when_the_class_value_is_read() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A static block that reads the class receiver, and a class EXPRESSION's
+/// A static block that reads the class receiver or declares a local
+/// (`staticLocal`: no outer write, still unmodelled), and a class EXPRESSION's
 /// static block, run code the enclosing frame does not model: the checker
 /// answers `{ x: string; y: number; }` and `string`, and the lane never
 /// publishes either Complete — neither drops the write nor certifies the
@@ -92,7 +92,13 @@ fn heritage_effects_never_reapply_when_the_class_value_is_read() {
 /// unapplied write it is directly in the frame (both `string | number`).
 #[test]
 fn unsupported_class_evaluation_effects_never_publish_complete() {
-    let names = ["receiverWrite", "expressionWrite", "forOf", "forOfPlain"];
+    let names = [
+        "receiverWrite",
+        "expressionWrite",
+        "forOf",
+        "forOfPlain",
+        "staticLocal",
+    ];
     let unproven = super::flow_return_tests::flow_reads_without_proof(EFFECTS, &names);
     assert_eq!(
         unproven.len(),

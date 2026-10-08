@@ -5738,6 +5738,15 @@ impl<'a> Lowerer<'a> {
                         self.walks
                             .with_node_stack(class.span(), || scanner.visit_class(class));
                         self.drain_leaf_call_scanner(scanner);
+                        // A static block outside the supported shape runs
+                        // code the scan above may see no frame-reaching
+                        // effect in (a block-local binding); it is still
+                        // unmodelled, so the statement takes the typed gap.
+                        if class.body.body.iter().any(|element| {
+                            matches!(element, oxc_ast::ast::ClassElement::StaticBlock(_))
+                        }) {
+                            self.control_test_gap = true;
+                        }
                     }
                 },
                 // Declaration / no-op statements: transparent (no return

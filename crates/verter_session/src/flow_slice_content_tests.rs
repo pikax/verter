@@ -2806,11 +2806,19 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
         );
     }
 
+    // A static block declaring a local is outside the modelled shape: it
+    // has no frame-reaching write, yet it stays unmodelled and takes the gap.
+    let node = content_for(
+        "export {};\nfunction f(x: string | number) { class C { static { let y = 0; y = 1; } } return x }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&node),
+        1,
+        "an unmodelled static block mints the typed gap: {node:?}"
+    );
+
     let clean = [
-        (
-            "a static-block-local write",
-            "export {};\nfunction f(x: string | number) { class C { static { let y = 0; y = 1; } } return x }",
-        ),
         (
             "a member write never retypes the binding",
             "export {};\nfunction f(x: string | number) { const o = { p: 0 }; class C { static { o.p = 1; } } return x }",
@@ -3082,16 +3090,6 @@ fn for_loop_left_targets_in_scanned_positions_collect_writes() {
 
     let silent = [
         (
-            "a for-of const declaration binds fresh",
-            "export {};\ndeclare const xs: unknown[];\n\
-             function f(x: string | number) { class C { static { for (const y of xs) {} } } return x }",
-        ),
-        (
-            "a for-in let declaration binds fresh",
-            "export {};\ndeclare const o: object;\n\
-             function f(x: string | number) { class C { static { for (let y in o) {} } } return x }",
-        ),
-        (
             "a member target never retypes the binding",
             "export {};\ndeclare const xs: unknown[];\n\
              function f(x: string | number) { const o = { p: 0 }; class C { static { for (o.p of xs) {} } } return x }",
@@ -3102,6 +3100,29 @@ fn for_loop_left_targets_in_scanned_positions_collect_writes() {
              function f(x: string | number) { class C { m() { for (x of xs) {} } } return x }",
         ),
     ];
+    // A static block declaring a binding is outside the modelled shape:
+    // no frame-owned write, yet unmodelled, so it takes the typed gap.
+    let unmodelled = [
+        (
+            "a for-of const declaration binds fresh",
+            "export {};\ndeclare const xs: unknown[];\n\
+             function f(x: string | number) { class C { static { for (const y of xs) {} } } return x }",
+        ),
+        (
+            "a for-in let declaration binds fresh",
+            "export {};\ndeclare const o: object;\n\
+             function f(x: string | number) { class C { static { for (let y in o) {} } } return x }",
+        ),
+    ];
+    for (case, source) in unmodelled {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: an unmodelled static block mints the typed gap: {node:?}"
+        );
+    }
+
     for (case, source) in silent {
         let node = content_for(source, "f");
         assert_eq!(
