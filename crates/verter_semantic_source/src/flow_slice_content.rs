@@ -86,8 +86,9 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use verter_semantic::analysis::flow::{
-    object_entry_descent, sequence_value_takes_await_arm, sequence_value_takes_call_rail,
-    value_descent, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, ValueDescent,
+    inline_class_evaluation, inline_class_evaluation_may_throw, object_entry_descent,
+    sequence_value_takes_await_arm, sequence_value_takes_call_rail, value_descent,
+    ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, FunctionNode, ResolvedFunctionNode,
@@ -3276,6 +3277,13 @@ fn suffix_return_of(statement: &Statement<'_>) -> SuffixReturn {
         // residual is an expression statement whose call is proven `never`:
         // that is the typed terminator feed the graph reduction still owes,
         // and it is not decidable from the statement's shape either.
+        // A class whose inline static block may throw completes abruptly.
+        Statement::ClassDeclaration(class)
+            if inline_class_evaluation(class)
+                .is_some_and(|inline| inline_class_evaluation_may_throw(&inline)) =>
+        {
+            SuffixReturn::Undecided
+        }
         Statement::EmptyStatement(_)
         | Statement::DebuggerStatement(_)
         | Statement::ExpressionStatement(_)
@@ -5696,12 +5704,42 @@ impl<'a> Lowerer<'a> {
                 // Deferred bodies (a method runs when called, an instance
                 // property initializer at construction) keep the
                 // nested-frame blanket treatment.
-                Statement::ClassDeclaration(class) => {
-                    let mut scanner = LeafCallScanner::default();
-                    self.walks
-                        .with_node_stack(class.span(), || scanner.visit_class(class));
-                    self.drain_leaf_call_scanner(scanner);
-                }
+                //
+                // A declaration whose class-evaluation positions run
+                // inline ([`inline_class_evaluation`]) applies them here,
+                // once, in source order: the `extends` value's effects as
+                // a discarded value's, then each static block as a nested
+                // block whose normal completions continue the region.
+                Statement::ClassDeclaration(class) => match inline_class_evaluation(class) {
+                    Some(inline) => {
+                        if let Some(heritage) = inline.heritage {
+                            if let Some(statement) = self.lower_effect_statement(heritage) {
+                                if statement_ends_path(&statement) {
+                                    can_fall_through = false;
+                                }
+                                out.push(statement);
+                            }
+                        }
+                        for block in inline.static_blocks {
+                            if !can_fall_through {
+                                break;
+                            }
+                            let child = self.lower_region(&block.body);
+                            can_fall_through = child
+                                .region
+                                .can_fall_through
+                                .reaches_end(CompletionDischarge::RegionComposition);
+                            hit_unsupported |= child.hit_unsupported;
+                            out.push(SliceStatement::Block(child.region));
+                        }
+                    }
+                    None => {
+                        let mut scanner = LeafCallScanner::default();
+                        self.walks
+                            .with_node_stack(class.span(), || scanner.visit_class(class));
+                        self.drain_leaf_call_scanner(scanner);
+                    }
+                },
                 // Declaration / no-op statements: transparent (no return
                 // contribution, no content statement) — EXCEPT the enum:
                 // a non-ambient enum's member initializers EVALUATE in

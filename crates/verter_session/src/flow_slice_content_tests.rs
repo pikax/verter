@@ -2475,18 +2475,17 @@ fn semantic_any_leaf_still_scans_immediate_static_block_calls() {
 /// evaluated positions run in THIS frame at the statement — a static
 /// block executes at class evaluation, so the assertion in `class C {
 /// static { assertString(x); } }` narrows `x` for every read that
-/// follows in the checker. Treating the statement as a no-op minted
-/// neither a call obligation (the skeleton mints none for a class body)
-/// nor the typed gap: the unnarrowed superset could seal complete and
-/// warm. The statement takes the SAME class discipline a class
-/// EXPRESSION leaf takes: certified only when the callee provably
-/// establishes no narrowing, otherwise the typed gap. An instance
-/// property initializer (run at construction) keeps the nested-frame
-/// blanket treatment; a method body (run when called) is its own frame,
-/// whose calls its own lowering records.
+/// follows in the checker. A static block that runs inline lowers its
+/// statements in the frame: an entered statement call is the same
+/// statement effect it is anywhere in the frame (an assertion narrows, any
+/// other call is a throw point the evaluator settles), never the typed
+/// gap. An instance property
+/// initializer (run at construction) keeps the nested-frame blanket
+/// treatment; a method body (run when called) is its own frame, whose
+/// calls its own lowering records.
 #[test]
 fn class_declaration_statement_calls_take_enclosing_frame_discipline() {
-    let refused = [
+    let lowered = [
         (
             "a closed same-file assertion in a static block",
             "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
@@ -2497,31 +2496,20 @@ fn class_declaration_statement_calls_take_enclosing_frame_discipline() {
             "import { touch } from \"./touch\";\n\
              function f(x: string | number) { class C { static { touch(); } } return x }",
         ),
+        (
+            "a closed unannotated same-file callee in a static block",
+            "export {};\nfunction touch() {}\n\
+             function f(x: string | number) { class C { static { touch(); } } return x }",
+        ),
     ];
-    for (case, source) in refused {
+    for (case, source) in lowered {
         let node = content_for(source, "f");
         assert!(
-            node.decided_above_call_spans.is_empty(),
-            "{case}: an unprovable class-evaluation call is never certified: {node:?}"
-        );
-        assert_eq!(
-            guard_gap_count(&node),
-            1,
-            "{case}: the class declaration statement takes the typed gap: {node:?}"
-        );
-    }
-
-    let certified = [(
-        "a closed unannotated same-file callee in a static block",
-        "export {};\nfunction touch() {}\n\
-         function f(x: string | number) { class C { static { touch(); } } return x }",
-    )];
-    for (case, source) in certified {
-        let node = content_for(source, "f");
-        assert_eq!(
-            node.decided_above_call_spans.len(),
-            1,
-            "{case}: a provably non-narrowing static-block call is certified: {node:?}"
+            matches!(
+                node.body.statements.first(),
+                Some(SliceStatement::Block(block)) if !block.statements.is_empty()
+            ),
+            "{case}: the static block lowers as a block of the frame: {node:?}"
         );
         assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
     }
@@ -2696,22 +2684,23 @@ fn discarded_operand_calls_stop_at_nested_frames() {
 
 /// A class-evaluation position can WRITE a frame binding, not only call:
 /// `class C { static { x = "s"; } }` retypes `x` to `"s"` in the checker
-/// for every read that follows, but the flow skeleton skips the whole
-/// class subtree, so the write never enters the slice's effect ledger and
-/// the unapplied-write gate never sees it — the candidate would seal warm
-/// with `x` at its pre-class `string | number`. The class scan collects
+/// for every read that follows. A class DECLARATION whose `extends` value
+/// and static blocks run inline lowers those writes in the frame, at the
+/// statement, as the evaluator applies them — no gap. A class EXPRESSION
+/// keeps its class subtree out of the skeleton, so its class scan collects
 /// every same-frame whole-binding write whose target the frame owns (a
 /// plain `=` assignment, a compound-operator write, an update) and flags
 /// the enclosing statement's typed gap: a degraded success, never a
-/// silently certified superset. Deferred bodies (a method runs when
-/// called, an instance property initializer at construction) keep the
-/// nested-frame blanket treatment; a write the checker never applies to
-/// the enclosing flow (in a member's computed key or a property
-/// initializer, or through a type assertion) and a write to a binding the
-/// frame does NOT own stay silent.
+/// silently certified superset; so does a declaration whose static block
+/// reads its receiver. Deferred bodies (a method runs when called, an
+/// instance property initializer at construction) keep the nested-frame
+/// blanket treatment; a write the checker never applies to the enclosing
+/// flow (in a member's computed key or a property initializer, or through
+/// a type assertion) and a write to a binding the frame does NOT own stay
+/// silent.
 #[test]
 fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
-    let gapped = [
+    let applied = [
         (
             "a static block assignment",
             "export {};\nfunction f(x: string | number) { class C { static { x = \"s\"; } } return x }",
@@ -2729,12 +2718,27 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { class C { static { x++; } } return x }",
         ),
         (
+            "a static block destructuring assignment",
+            "export {};\nfunction f(x: string | number) { class C { static { [x] = [1]; } } return x }",
+        ),
+    ];
+    for (case, source) in applied {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: the inline write lowers in the frame: {node:?}"
+        );
+    }
+
+    let gapped = [
+        (
             "a class-expression static block assignment",
             "export {};\nfunction f(x: string | number) { return (class { static { x = \"s\"; } } as object) }",
         ),
         (
-            "a static block destructuring assignment",
-            "export {};\nfunction f(x: string | number) { class C { static { [x] = [1]; } } return x }",
+            "a static block that reads its receiver",
+            "export {};\nfunction f(x: string | number) { class C { static n = 0; static { this.n = 1; x = \"s\"; } } return x }",
         ),
     ];
     for (case, source) in gapped {
@@ -3028,12 +3032,13 @@ fn discarded_operand_writes_to_frame_bindings_take_the_typed_gap() {
 /// plain read, so the write reached neither the slice's effect ledger (the
 /// skeleton skips the class subtree) nor the scanner's write channel. The
 /// loop-head target takes the same whole-binding write discipline every
-/// other scanned position applies. A `for (const y of …)` declaration
-/// binds a FRESH binding — it writes nothing the frame owns and stays
-/// silent.
+/// other scanned position applies. A class declaration's static block that
+/// runs inline lowers its loop in the frame instead, whose head write the
+/// evaluator applies. A `for (const y of …)` declaration binds a FRESH
+/// binding — it writes nothing the frame owns and stays silent.
 #[test]
 fn for_loop_left_targets_in_scanned_positions_collect_writes() {
-    let gapped = [
+    let inline = [
         (
             "a for-of identifier target in a class declaration's static block",
             "export {};\ndeclare const xs: unknown[];\n\
@@ -3044,6 +3049,17 @@ fn for_loop_left_targets_in_scanned_positions_collect_writes() {
             "export {};\ndeclare const o: object;\n\
              function f(x: string | number) { class C { static { for (x in o) {} } } return x }",
         ),
+    ];
+    for (case, source) in inline {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: the inline loop-head write lowers in the frame: {node:?}"
+        );
+    }
+
+    let gapped = [
         (
             "a for-of destructuring target in a class-expression static block",
             "export {};\ndeclare const xs: unknown[];\n\
