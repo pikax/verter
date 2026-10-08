@@ -2077,6 +2077,54 @@ pub fn sort_union_members_by_stable_key(
     }
 }
 
+/// The positions of `members` in union order: the stable permutation that
+/// visits each entry at its member's rank under
+/// [`sort_union_members_by_stable_key`]. A node id listed more than once
+/// takes the rank of its first occurrence in that order, so repeated
+/// entries stay together in input order. Ranks are recovered once, through
+/// one map built after the sort, never by searching the sorted list per
+/// entry.
+pub fn union_rank_order(graph: &SemanticGraphStore, members: &[SemanticNodeId]) -> Vec<usize> {
+    union_rank_order_probed(graph, members, || {})
+}
+
+/// [`union_rank_order`], also reporting how many rank-map probes the
+/// recovery made.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn union_rank_order_observed(
+    graph: &SemanticGraphStore,
+    members: &[SemanticNodeId],
+) -> (Vec<usize>, usize) {
+    let mut probes = 0usize;
+    let order = union_rank_order_probed(graph, members, || probes += 1);
+    (order, probes)
+}
+
+fn union_rank_order_probed(
+    graph: &SemanticGraphStore,
+    members: &[SemanticNodeId],
+    mut probe: impl FnMut(),
+) -> Vec<usize> {
+    let mut sorted = members.to_vec();
+    sort_union_members_by_stable_key(graph, &mut sorted);
+    let mut rank: FxHashMap<SemanticNodeId, usize> =
+        FxHashMap::with_capacity_and_hasher(sorted.len(), Default::default());
+    for (position, node) in sorted.into_iter().enumerate() {
+        probe();
+        rank.entry(node).or_insert(position);
+    }
+    let ranks: Vec<usize> = members
+        .iter()
+        .map(|node| {
+            probe();
+            rank[node]
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..members.len()).collect();
+    order.sort_by_key(|&index| ranks[index]);
+    order
+}
+
 /// Order a union's members as [`sort_union_members_by_stable_key`] does and
 /// drop each member whose key equals its neighbour's (the key-equality
 /// collapse [`provably_equal`] licenses), classifying every member once.
@@ -2117,16 +2165,13 @@ fn build_union_view(graph: &SemanticGraphStore, union: SemanticNodeId) -> Arc<[S
     }
 }
 
-/// Project a view from a context id when the interned context is available.
+/// Project a view from a context id.
 pub fn semantic_union_members_for_id(
     graph: &SemanticGraphStore,
     union: SemanticNodeId,
-    ctx: SemanticContextId,
+    ctx: &SemanticContextId,
 ) -> Arc<[SemanticNodeId]> {
-    match ctx.lookup() {
-        Some(context) => semantic_union_members(graph, union, &context),
-        None => build_union_view(graph, union),
-    }
+    semantic_union_members(graph, union, ctx.context())
 }
 
 pub fn order_policy_of(ctx: &SemanticContext) -> SemanticOrderPolicyId {

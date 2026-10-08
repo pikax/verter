@@ -825,7 +825,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             // subtree references an OUTER template-scope variable
             // (official-parity `hasScopeRef`); forwarded `<slot>` → see
             // helper.
-            let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc, source);
+            let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc);
             self.emit_named_slots_object_close(
                 &mut buf,
                 out,
@@ -1349,7 +1349,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         // DYNAMIC iff the slot subtree references an OUTER template-scope
         // variable (official-parity `hasScopeRef`); forwarded → FORWARDED;
         // else STABLE. TEXT is stripped (slots are not element text children).
-        let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc, source);
+        let slots_dynamic = self.component_slots_reference_outer_scope(id, oxc);
         self.emit_component_slot_close(
             &mut buf,
             out,
@@ -1401,10 +1401,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         &self,
         id: NodeId,
         oxc: Option<&OxcParsedElement<'alloc>>,
-        source: &str,
     ) -> bool {
-        let outer = self.outer_scope_names(id, oxc, source);
-        if outer.is_empty() {
+        let outer = self.outer_scope(id, oxc);
+        if outer == crate::template::oxc::types::LexicalScopeId::ROOT {
             return false;
         }
         let el_children = match &self.ast.nodes[id.0].kind {
@@ -1415,60 +1414,37 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 .unwrap_or(&[]),
             _ => return false,
         };
-        self.subtree_references_scope_names(el_children, &outer)
+        self.subtree_references_scope_names(el_children, outer)
     }
 
-    /// Template-scope variable names active at `id` from OUTER scopes:
-    /// every enclosing `v-for` alias / `v-slot` param plus the element's
-    /// own `v-for` aliases — but NOT its own `v-slot` params.
-    ///
-    /// `provided_locals` on the element's OXC parse already carries
-    /// inherited + own locals (own pushed LAST, v-for before v-slot), so
-    /// own slot params are removed by last-occurrence; an element without
-    /// scoping directives inherits the nearest ancestor's set.
-    fn outer_scope_names(
+    /// Lexical scope active at `id` from OUTER scopes: every enclosing
+    /// `v-for` alias / `v-slot` param plus the element's own `v-for` aliases —
+    /// but NOT its own `v-slot` params. That is the element's `props_scope`;
+    /// an element without parsed directives sits in its parent's children
+    /// scope, which is also its own children scope.
+    fn outer_scope(
         &self,
         id: NodeId,
         oxc: Option<&OxcParsedElement<'alloc>>,
-        source: &str,
-    ) -> Vec<String> {
-        // The element's own locals row, if it has scoping directives.
-        if let Some(oxc_el) = oxc {
-            if let Some(locals) = &oxc_el.provided_locals {
-                let mut names: Vec<String> = locals.iter().map(|s| s.to_string()).collect();
-                if let Some(v_slot) = &oxc_el.v_slot {
-                    for span in &v_slot.parsed.locals {
-                        let name = span.slice(source);
-                        if let Some(pos) = names.iter().rposition(|n| n == name) {
-                            names.remove(pos);
-                        }
-                    }
-                }
-                return names;
-            }
+    ) -> crate::template::oxc::types::LexicalScopeId {
+        match oxc {
+            Some(oxc_el) => oxc_el.props_scope,
+            None => self.oxc_ast.children_scope(id),
         }
-        // No own scoping directives: nearest ancestor's provided locals.
-        let mut current = self.ast.nodes[id.0].parent;
-        while let Some(pid) = current {
-            if let Some(crate::template::oxc::types::OxcNodeData::Element(ancestor)) =
-                self.oxc_ast.data.get(pid.0)
-            {
-                if let Some(locals) = &ancestor.provided_locals {
-                    return locals.iter().map(|s| s.to_string()).collect();
-                }
-            }
-            current = self.ast.nodes[pid.0].parent;
-        }
-        Vec::new()
     }
 
-    /// True when any expression under `children` references one of `names`.
+    /// True when any expression under `children` references a name declared
+    /// in `scope`.
     /// Scans interpolations, prop values/args, v-if conditions, v-for
     /// iterables, and v-slot default-value expressions, recursing through
     /// the subtree. Name-based like official `hasScopeRef` — descendant
     /// shadowing is deliberately not subtracted.
-    fn subtree_references_scope_names(&self, children: &[NodeId], names: &[String]) -> bool {
-        let name_hit = |n: &str| names.iter().any(|outer| outer == n);
+    fn subtree_references_scope_names(
+        &self,
+        children: &[NodeId],
+        scope: crate::template::oxc::types::LexicalScopeId,
+    ) -> bool {
+        let name_hit = |n: &str| self.oxc_ast.scopes.declares(scope, n);
         for &child_id in children {
             match self.oxc_ast.data.get(child_id.0) {
                 Some(crate::template::oxc::types::OxcNodeData::Interpolation(expr)) => {
@@ -1532,7 +1508,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             // Recurse into element children.
             if let AstNodeKind::Element(child_el) = &self.ast.nodes[child_id.0].kind {
                 if let Some(content) = &child_el.content {
-                    if self.subtree_references_scope_names(&content.children, names) {
+                    if self.subtree_references_scope_names(&content.children, scope) {
                         return true;
                     }
                 }

@@ -198,9 +198,9 @@ fn canonicalise_for_digest(
             purpose,
             context,
         } => SemanticQueryKey::ReduceIntersection {
-            input: *input,
+            input: input.clone(),
             purpose: *purpose,
-            context: *context,
+            context: context.clone(),
         },
         other => other.clone(),
     }

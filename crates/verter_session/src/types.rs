@@ -3921,6 +3921,11 @@ pub struct HostRetentionSnapshot {
     /// Stable-key classes (distinct subtrees) the semantic store's key
     /// table holds, forgotten with their released nodes.
     pub stable_key_classes: usize,
+    /// Occupancy and backing capacity of the process-wide semantic identity
+    /// indexes (intersection recipes, contexts, order domains, family-key
+    /// payloads). Each entry is forgotten when the last handle owning its
+    /// record drops, so these return to baseline once owners drain.
+    pub identity_indexes: verter_type_engine::semantic_query_memo::IdentityIndexSnapshot,
     /// Live shape-cache entries.
     pub shape_cache_entries: usize,
     /// Flow-slice graph bundles.

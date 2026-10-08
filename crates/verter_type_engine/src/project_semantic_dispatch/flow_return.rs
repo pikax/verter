@@ -6425,19 +6425,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // (`A1` beside a structurally identical interface `B1`) the one
         // earlier in that order survives.
         let order: Vec<usize> = {
-            let mut nodes: Vec<SemanticNodeId> = arms.iter().map(|arm| arm.node).collect();
-            crate::semantic_query::stable_key::sort_union_members_by_stable_key(
-                self.graph(),
-                &mut nodes,
-            );
-            let mut order: Vec<usize> = (0..arms.len()).collect();
-            order.sort_by_key(|index| {
-                nodes
-                    .iter()
-                    .position(|node| *node == arms[*index].node)
-                    .unwrap_or(usize::MAX)
-            });
-            order
+            let nodes: Vec<SemanticNodeId> = arms.iter().map(|arm| arm.node).collect();
+            crate::semantic_query::stable_key::union_rank_order(self.graph(), &nodes)
         };
         let mut kept: Vec<bool> = vec![true; arms.len()];
         let mut decided: rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), bool> =
