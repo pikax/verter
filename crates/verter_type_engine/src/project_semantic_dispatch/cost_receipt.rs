@@ -625,3 +625,7 @@ impl Hash for BudgetProfile {
         self.spec().hash(state);
     }
 }
+
+#[cfg(test)]
+#[path = "cost_receipt_retention_tests.rs"]
+mod cost_receipt_retention_tests;

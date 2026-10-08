@@ -225,6 +225,94 @@ fn a_paid_receipt_still_answers_to_the_depth_rail() {
     );
 }
 
+/// Construction bytes are charged on replay but never refuse it: a
+/// complete result is not rejected at handoff for the bytes it took to
+/// build, so serving it never turns a complete answer into a memory stop.
+#[test]
+fn a_replay_charges_bytes_but_never_refuses_on_them() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let receipts = diamond(20);
+    dispatch.connected_demand().set_byte_limit_for_tests(50);
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    dispatch
+        .connected_demand()
+        .replay_admit(&receipts[20], None, Nesting::Entered)
+        .expect("210 bytes past a 50-byte allowance still serve");
+    assert_eq!(dispatch.connected_demand().bytes_used_for_tests(), 210);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
+}
+
+/// A receipt names the operation allowances its cold run needed, and a
+/// replay answers to the reader's: its instantiation frames against the
+/// instantiation budget at the reader's frame depth, and its tail runs
+/// against the tail budget — even when its cost is already paid.
+#[test]
+fn a_replay_answers_to_the_operation_footprint_its_cold_run_needed() {
+    let host = host();
+    // Three instantiations, each needed by the frame above it.
+    let leaf = DemandCostReceipt::new(identity("I0"), usage(1, 0), Vec::new());
+    let middle = DemandCostReceipt::new(
+        identity("I1"),
+        usage(1, 0),
+        vec![super::cost_receipt::CostDependency {
+            receipt: Arc::clone(&leaf),
+            nesting: Nesting::Frame { depth: 2 },
+        }],
+    );
+    let top = DemandCostReceipt::new(
+        identity("I2"),
+        usage(1, 0),
+        vec![super::cost_receipt::CostDependency {
+            receipt: Arc::clone(&middle),
+            nesting: Nesting::Frame { depth: 2 },
+        }],
+    );
+    assert_eq!(top.footprint().instantiation_height, 2);
+    {
+        let _budget = super::connected_demand::InstantiationBudgetForTests::install(4);
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        let ledger = dispatch.connected_demand();
+        ledger
+            .replay_admit(&top, None, Nesting::Frame { depth: 2 })
+            .expect("frames 2, 3 and 4 fit a budget of 4");
+        assert_eq!(
+            ledger.replay_admit(&top, None, Nesting::Frame { depth: 3 }),
+            Err(ReplayRefusal::InstantiationDepth),
+            "one frame deeper its cold run passes the budget, paid or not"
+        );
+        assert_eq!(
+            ledger.replay_admit(&top, None, Nesting::Entered),
+            Ok(()),
+            "a synchronous read runs no frames"
+        );
+    }
+
+    let tail = DemandCostReceipt::with_tail_steps(identity("T"), usage(1, 0), Vec::new(), 5);
+    let consumer = DemandCostReceipt::new(
+        identity("C"),
+        usage(1, 0),
+        vec![super::cost_receipt::CostDependency {
+            receipt: Arc::clone(&tail),
+            nesting: Nesting::Entered,
+        }],
+    );
+    for (budget, admitted) in [(5, false), (6, true)] {
+        let _budget = super::connected_demand::TailBudgetForTests::install(budget);
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        assert_eq!(
+            dispatch
+                .connected_demand()
+                .replay_admit(&consumer, None, Nesting::Entered)
+                .is_ok(),
+            admitted,
+            "a run of 5 tail steps under a tail budget of {budget}"
+        );
+    }
+}
+
 /// Identities compare by their whole encoding.
 #[test]
 fn identities_compare_by_their_encoding() {
@@ -799,6 +887,38 @@ fn a_refusal_answers_only_its_own_allowances() {
     );
 }
 
+/// An operation that exhausts its own allowance at an isolated root — a
+/// relation past its structured-comparison allowance, TS2859 — refuses as
+/// a function of the root, its inputs and its allowances alone, without
+/// tripping the connected demand. Its refusal is sealed like a demand's: an
+/// exact repeat answers it without evaluating, and a larger allowance is
+/// another profile that evaluates and completes.
+#[test]
+fn an_operation_refusal_answers_its_repeat_without_evaluating() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 40, false);
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let limited = || with_relation_comparisons_for_tests(50, || root_read(&host, &key, full));
+
+    let refused = limited();
+    assert!(
+        refused.partial && refused.reasons.contains(PartialReasonSet::OPERATION_BUDGET),
+        "50 comparisons cannot relate 40 reversed arms: {refused:?}"
+    );
+    let before = semantic_misses(&host);
+    assert_eq!(limited(), refused, "the repeat answers the sealed refusal");
+    assert_eq!(semantic_misses(&host), before, "and evaluates nothing");
+
+    let complete = root_read(&host, &key, full);
+    assert!(
+        !complete.partial,
+        "the checker's comparison allowance relates them"
+    );
+    assert!(semantic_misses(&host) > before, "another profile evaluates");
+}
+
 /// A refusal is sealed at the request state its root entered: the
 /// operations the request had spent and the computations it had paid. A
 /// root entering a request at that state answers from it whatever runs
@@ -1048,4 +1168,30 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         );
     }
     assert!(!store.has_sealed_refusal_for_tests(&host, cancelled_key, &profile));
+
+    // A refusal is retained only with a reservation on the process
+    // retention account: an account with no room keeps none.
+    let exhausted = verter_type_engine::semantic_query_memo::SemanticGraphStore::with_account(
+        verter_session_query::retention::StoreAccount::new(
+            verter_session_query::retention::SemanticRetentionAccount::new(
+                verter_session_query::retention::RetentionLimits {
+                    aggregate_ceiling_bytes: 0,
+                    ..verter_session_query::retention::RetentionLimits::defaults()
+                },
+            ),
+        ),
+    );
+    assert!(
+        !exhausted.seal_refusal_for_tests(
+            &host,
+            key(0),
+            profile.clone(),
+            generation,
+            refusal(),
+            carrier(),
+        ),
+        "a refusal the account declines is returned, never sealed"
+    );
+    assert_eq!(exhausted.refusal_summary_count_for_tests(), 0);
+    assert!(store.retention_account().snapshot().retained_bytes > 0);
 }

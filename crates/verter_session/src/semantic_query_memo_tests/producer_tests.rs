@@ -162,6 +162,114 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
 }
 
+/// A producer whose demand ran out of its allowance completes its flight
+/// with an incomplete result and no receipt: where it stopped is that
+/// demand's, not the key's. A subscriber joined to the flight — on the
+/// same view, so the view gate alone would reuse it — never takes it: it
+/// claims again and produces the key itself, on a flight of its own, so
+/// it stops wherever its own evaluation stops and pays what it computes.
+#[test]
+fn a_subscriber_never_takes_another_demands_unpriced_partial() {
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let producer = store.task_registry_for_tests().register_task();
+    let follower = store.task_registry_for_tests().register_task();
+
+    let (claimed, _producer_attempt) = claim(&store, &host, &producer);
+    let Claim::Produce(lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let (subscribed, mut follower_attempt) = claim(&store, &host, &follower);
+    let Claim::Subscribed(subscription) = subscribed else {
+        panic!("another task's claim subscribes to the open producer");
+    };
+
+    // The producer's demand tripped inside the build: a partial, with no
+    // receipt sealed for it.
+    let mut partial = keyed_output(&store, hash);
+    partial.mark_partial_with(
+        verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+    );
+    partial.cache_suppress = true;
+    {
+        let mut capture = ReadCapture::default();
+        let flags = host.request_flags();
+        let Ok(mut settled) = lease.settle(&host, flags, partial, None) else {
+            panic!("an uncancelled producer settles");
+        };
+        settled
+            .admit(&host, flags, &mut capture)
+            .expect("an uncancelled producer completes");
+        let read = settled.complete(&host, &mut capture);
+        assert!(read.result_is_partial && read.receipt.priced().is_none());
+    }
+
+    let mut capture = ReadCapture::default();
+    assert!(
+        matches!(
+            subscription.wait(
+                &host,
+                host.request_flags(),
+                &mut follower_attempt,
+                &mut capture,
+            ),
+            Joined::Retry
+        ),
+        "the follower does not inherit the producer's resource stop"
+    );
+    // A concurrent producer of the key does not capture the follower's
+    // next claim either: it produces alone.
+    let (other, _other_attempt) = claim(&store, &host, &producer);
+    let Claim::Produce(_other_lease) = other else {
+        panic!("a fresh claim of the key produces it");
+    };
+    let mut capture = ReadCapture::default();
+    let again = store.claim_query(
+        &host,
+        host.request_flags(),
+        &mut follower_attempt,
+        &follower,
+        &mut capture,
+    );
+    assert!(
+        matches!(again, Claim::Produce(_)),
+        "the follower computes the key itself"
+    );
+}
+
+/// A claim refused the receipt of the stored result computes the key
+/// instead, and never subscribes to another task's producer of it: that
+/// producer's result is one more result the claimant may not be able to
+/// pay for, and waiting on it would move the claimant's trip to wherever
+/// that producer happens to be.
+#[test]
+fn a_recomputing_claim_never_subscribes() {
+    let (host, _hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let owner = store.task_registry_for_tests().register_task();
+    let recomputer = store.task_registry_for_tests().register_task();
+
+    let (claimed, _owner_attempt) = claim(&store, &host, &owner);
+    let Claim::Produce(_lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let Ok(mut attempt) = store.begin_query_recompute(host.request_flags(), key()) else {
+        panic!("an uncancelled recomputation begins");
+    };
+    let mut capture = ReadCapture::default();
+    let claim = store.claim_query(
+        &host,
+        host.request_flags(),
+        &mut attempt,
+        &recomputer,
+        &mut capture,
+    );
+    assert!(
+        matches!(claim, Claim::Produce(_)),
+        "the recomputing claim produces on a flight of its own"
+    );
+}
+
 /// Same-path recursion is decided by the task's open producers, not by the
 /// flight table: a producer whose flight an invalidation retired from the
 /// table is still open, so its task's nested claim of the key still answers

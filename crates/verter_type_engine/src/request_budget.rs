@@ -418,4 +418,85 @@ mod tests {
             "is_exhausted is peek-only — it must not bump the executed counter"
         );
     }
+
+    fn identity(name: &str) -> super::CostIdentity {
+        super::CostIdentity::new(name.as_bytes().to_vec())
+    }
+
+    fn effects(
+        operations: usize,
+        paid: usize,
+    ) -> crate::project_semantic_dispatch::connected_demand::RequestEffects {
+        crate::project_semantic_dispatch::connected_demand::RequestEffects { operations, paid }
+    }
+
+    /// An evaluation's spending is its own only when nothing else spent in
+    /// its request while it ran: a sibling's operation or paid computation
+    /// makes the request differ from entry plus the evaluation's effects.
+    #[test]
+    fn spending_is_an_evaluations_own_only_when_it_ran_alone() {
+        let alone = RequestBudget::new(100);
+        let entry = alone.entry_state();
+        alone.check_projection_op_count();
+        alone.mark_operations_paid(std::iter::once(identity("own")));
+        let spent = alone
+            .spent_alone_since(entry, effects(1, 1))
+            .expect("the request moved only by the evaluation's own effects");
+        assert_eq!(spent.operations, 1);
+        assert_eq!(spent.paid.len(), 1);
+        assert!(spent.entry_paid.is_empty());
+
+        let shared = RequestBudget::new(100);
+        let entry = shared.entry_state();
+        shared.check_projection_op_count();
+        // A sibling root spends an operation and pays a computation.
+        shared.check_projection_op_count();
+        shared.mark_operations_paid([identity("own"), identity("sibling")]);
+        assert!(
+            shared.spent_alone_since(entry, effects(1, 1)).is_none(),
+            "a sibling's spending is never recorded as the evaluation's"
+        );
+    }
+
+    /// Two refusals entered at the same request state each check and apply
+    /// their charges in one step: once one has moved the request, the other
+    /// is no longer at its entry and changes nothing, so their charges never
+    /// collapse into the larger of the two.
+    #[test]
+    fn a_refusal_applies_only_at_the_state_it_entered_at() {
+        let budget = RequestBudget::new(100);
+        let entry = budget.entry_state();
+        let refusal = |operations: usize, paid: &str| super::RequestSpent {
+            entry: entry.clone(),
+            entry_paid: Box::from([]),
+            operations,
+            paid: Box::from([identity(paid)]),
+        };
+        let first = refusal(3, "a");
+        let second = refusal(5, "b");
+        assert!(budget.apply_refusal(&first));
+        assert_eq!(budget.projection_ops_executed_count(), 3);
+        assert!(
+            !budget.apply_refusal(&second),
+            "the request is no longer where the second refusal entered it"
+        );
+        assert_eq!(
+            budget.projection_ops_executed_count(),
+            3,
+            "a refused application spends nothing"
+        );
+        assert!(!budget.operations_paid().contains(&identity("b")));
+
+        let raced = RequestBudget::new(100);
+        let entry = raced.entry_state();
+        // A sibling spends after the refusal's entry was read.
+        raced.check_projection_op_count();
+        assert!(!raced.apply_refusal(&super::RequestSpent {
+            entry,
+            entry_paid: Box::from([]),
+            operations: 3,
+            paid: Box::from([]),
+        }));
+        assert_eq!(raced.projection_ops_executed_count(), 1);
+    }
 }
