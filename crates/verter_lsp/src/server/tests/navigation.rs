@@ -790,6 +790,78 @@ async fn native_cross_file_definition_settles_through_its_admission() {
     }
 }
 
+/// A native definition computed from its admitted capture stays deliverable
+/// across background work that replaces no authority: an equivalent root
+/// republication and an eviction with identical reload of the requested
+/// document, landing while the native answer is computed.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_cross_file_definition_survives_movement_that_replaces_no_authority() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    for movement in ["equivalent-root", "document-eviction"] {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+        let unmoved = definition_locations(
+            server
+                .goto_definition(goto_definition_params(&app_uri, position))
+                .await
+                .expect("an unmoved definition succeeds")
+                .expect("the child event resolves natively"),
+        );
+        assert!(
+            unmoved.iter().any(|location| location.uri == child_uri),
+            "{movement}: the unmoved definition reaches the child: {unmoved:?}"
+        );
+
+        let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let server_handle = server.clone();
+            let moved = Arc::clone(&moved);
+            let app_id = crate::documents::uri_to_canonical_id(&app_uri);
+            // Runs inside the native computation, between its admitted capture
+            // and the computed answer's own currency check, at every child read.
+            server.set_child_read_hook_for_test(Some(Box::new(move || {
+                let host = server_handle.documents.host();
+                if movement == "equivalent-root" {
+                    server_handle.test_republish_equivalent_root();
+                } else {
+                    host.evict(&app_id);
+                    let _ = host.ensure_loaded(&app_id);
+                }
+                moved.store(true, std::sync::atomic::Ordering::SeqCst);
+            })));
+        }
+        let raced = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await;
+        server.set_child_read_hook_for_test(None);
+        assert!(
+            moved.load(std::sync::atomic::Ordering::SeqCst),
+            "{movement}"
+        );
+        let raced = definition_locations(
+            raced
+                .unwrap_or_else(|error| panic!("{movement}: the definition answers: {error:?}"))
+                .unwrap_or_else(|| panic!("{movement}: the native definition is delivered")),
+        );
+        assert!(
+            raced.iter().any(|location| location.uri == child_uri),
+            "{movement}: the computed native definition still reaches the child: {raced:?}"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
 #[tokio::test]
 async fn goto_definition_component_event_name_reaches_child_listener_prop() {
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{\n  label: string\n  onAlert?: (payload: string) => void\n}>()\n</script>\n";

@@ -80,13 +80,11 @@ impl VerterLanguageServer {
     pub(super) fn imported_child_contract_freshness_key(
         &self,
     ) -> Option<super::ImportedChildContractFreshnessKey> {
-        let (_, resolver_snapshot_generation) = self.import_sync_freshness_key()?;
-        let host = self.documents.host();
-        Some(super::ImportedChildContractFreshnessKey {
-            resolver_snapshot_generation,
-            published_root: host.workspace_read().published_root(),
-            project_generation: host.project_type_store().current_project_generation(),
-        })
+        let authority = self.documents.host().current_authority();
+        authority
+            .workspace()
+            .is_some()
+            .then_some(super::ImportedChildContractFreshnessKey { authority })
     }
 
     fn import_identity_is_current(
@@ -116,15 +114,15 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> Option<(
-        verter_session::carrier_publication_store::HostSourceRevisionToken,
+        verter_session_query::analysis::types::Hash16,
         super::ImportedChildContractFreshnessKey,
     )> {
-        let host_revision = self
+        let source_hash = self
             .documents
             .host()
-            .registered_source_revision_token(canonical_id)?;
+            .registered_source_whole_hash(canonical_id)?;
         let freshness = self.imported_child_contract_freshness_key()?;
-        Some((host_revision, freshness))
+        Some((source_hash, freshness))
     }
 
     /// Pure capture of a background-published child contract. The source and
@@ -134,9 +132,9 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> Option<verter_session::framework::ComponentContractAvailability> {
-        let (host_revision, freshness) = self.imported_child_contract_provenance(canonical_id)?;
+        let (source_hash, freshness) = self.imported_child_contract_provenance(canonical_id)?;
         let snapshot = self.child_public_contracts.get(canonical_id)?.clone();
-        if snapshot.host_revision != host_revision
+        if snapshot.source_hash != source_hash
             || snapshot.freshness != freshness
             || !snapshot
                 .publication_witness
@@ -144,15 +142,15 @@ impl VerterLanguageServer {
         {
             return None;
         }
-        let (after_host_revision, after_freshness) =
+        let (after_source_hash, after_freshness) =
             self.imported_child_contract_provenance(canonical_id)?;
-        let current = after_host_revision == host_revision
+        let current = after_source_hash == source_hash
             && after_freshness == freshness
             && snapshot
                 .publication_witness
                 .is_current(&self.documents.host());
         if current {
-            crate::documents::ForegroundRequest::bracket_dependency(canonical_id, host_revision);
+            crate::documents::ForegroundRequest::bracket_dependency(canonical_id, source_hash);
             crate::documents::ForegroundRequest::bracket_contract_publication(
                 &snapshot.publication_witness,
             );
@@ -164,24 +162,24 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> Option<verter_session::PublicApiProjectionError> {
-        let (host_revision, freshness) = self.imported_child_contract_provenance(canonical_id)?;
+        let (source_hash, freshness) = self.imported_child_contract_provenance(canonical_id)?;
         let snapshot = self
             .child_public_contract_failures
             .get(canonical_id)?
             .clone();
         let workspace_content_generation =
             self.documents.host().workspace_read().content_generation();
-        if snapshot.host_revision != host_revision
+        if snapshot.source_hash != source_hash
             || snapshot.freshness != freshness
             || snapshot.workspace_content_generation != workspace_content_generation
         {
             return None;
         }
-        let (after_host_revision, after_freshness) =
+        let (after_source_hash, after_freshness) =
             self.imported_child_contract_provenance(canonical_id)?;
         let after_workspace_content_generation =
             self.documents.host().workspace_read().content_generation();
-        (after_host_revision == host_revision
+        (after_source_hash == source_hash
             && after_freshness == freshness
             && after_workspace_content_generation == workspace_content_generation)
             .then_some(snapshot.error)
@@ -212,8 +210,8 @@ impl VerterLanguageServer {
             || self
                 .documents
                 .host()
-                .registered_source_revision_token(&snapshot.terminal_canonical_id)
-                != Some(snapshot.terminal_host_revision)
+                .registered_source_whole_hash(&snapshot.terminal_canonical_id)
+                != Some(snapshot.terminal_source_hash)
             || !snapshot
                 .publication_witness
                 .is_current(&self.documents.host())
@@ -226,15 +224,15 @@ impl VerterLanguageServer {
             && self
                 .documents
                 .host()
-                .registered_source_revision_token(&snapshot.terminal_canonical_id)
-                == Some(snapshot.terminal_host_revision)
+                .registered_source_whole_hash(&snapshot.terminal_canonical_id)
+                == Some(snapshot.terminal_source_hash)
             && snapshot
                 .publication_witness
                 .is_current(&self.documents.host());
         if current {
             crate::documents::ForegroundRequest::bracket_dependency(
                 &snapshot.terminal_canonical_id,
-                snapshot.terminal_host_revision,
+                snapshot.terminal_source_hash,
             );
             crate::documents::ForegroundRequest::bracket_contract_publication(
                 &snapshot.publication_witness,
@@ -265,12 +263,12 @@ impl VerterLanguageServer {
         else {
             return ImportSyncOutcome::Retry;
         };
-        let Some((terminal_host_revision, freshness)) =
+        let Some((terminal_source_hash, freshness)) =
             self.imported_child_contract_provenance(terminal_canonical_id)
         else {
             return ImportSyncOutcome::Retry;
         };
-        if child.host_revision != terminal_host_revision
+        if child.source_hash != terminal_source_hash
             || child.freshness != freshness
             || !child.publication_witness.is_current(&self.documents.host())
         {
@@ -287,7 +285,7 @@ impl VerterLanguageServer {
                 terminal_canonical_id: terminal_canonical_id.to_string(),
                 contract: child.contract,
                 publication_witness: child.publication_witness,
-                terminal_host_revision,
+                terminal_source_hash,
                 freshness,
             },
         );
@@ -380,8 +378,7 @@ impl VerterLanguageServer {
         if self.child_public_contract_is_settled(canonical_id) {
             return ImportSyncOutcome::Complete;
         }
-        let Some((host_revision, freshness)) =
-            self.imported_child_contract_provenance(canonical_id)
+        let Some((source_hash, freshness)) = self.imported_child_contract_provenance(canonical_id)
         else {
             return ImportSyncOutcome::Retry;
         };
@@ -407,7 +404,7 @@ impl VerterLanguageServer {
                     return ImportSyncOutcome::Retry;
                 }
                 if self.imported_child_contract_provenance(canonical_id)
-                    != Some((host_revision, freshness.clone()))
+                    != Some((source_hash, freshness))
                     || self.documents.host().workspace_read().content_generation()
                         != workspace_content_generation
                 {
@@ -418,13 +415,13 @@ impl VerterLanguageServer {
                     canonical_id.to_string(),
                     super::ChildPublicContractFailureSnapshot {
                         error,
-                        host_revision,
-                        freshness: freshness.clone(),
+                        source_hash,
+                        freshness,
                         workspace_content_generation,
                     },
                 );
                 if self.imported_child_contract_provenance(canonical_id)
-                    != Some((host_revision, freshness))
+                    != Some((source_hash, freshness))
                     || self.documents.host().workspace_read().content_generation()
                         != workspace_content_generation
                 {
@@ -444,9 +441,7 @@ impl VerterLanguageServer {
         if let Some(hook) = self.child_contract_after_projection_hook.lock().take() {
             hook();
         }
-        if self.imported_child_contract_provenance(canonical_id)
-            != Some((host_revision, freshness.clone()))
-        {
+        if self.imported_child_contract_provenance(canonical_id) != Some((source_hash, freshness)) {
             return ImportSyncOutcome::Retry;
         }
         self.child_public_contracts.insert(
@@ -454,12 +449,12 @@ impl VerterLanguageServer {
             super::ChildPublicContractSnapshot {
                 contract: projection.contract,
                 publication_witness: Arc::new(publication_witness),
-                host_revision,
-                freshness: freshness.clone(),
+                source_hash,
+                freshness,
             },
         );
         self.child_public_contract_failures.remove(canonical_id);
-        if self.imported_child_contract_provenance(canonical_id) != Some((host_revision, freshness))
+        if self.imported_child_contract_provenance(canonical_id) != Some((source_hash, freshness))
             || self
                 .child_public_contracts
                 .get(canonical_id)

@@ -454,7 +454,7 @@ async fn handle_goto_definition_attempt(
     let native_snapshot_is_current = native_snapshot.as_ref().is_some_and(|native| {
         server
             .documents
-            .source_feature_capture_is_current(uri, &native.capture)
+            .source_feature_document_is_current(uri, &native.capture)
     });
     if !native_snapshot_is_current {
         verter_result = None;

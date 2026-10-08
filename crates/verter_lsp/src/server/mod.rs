@@ -319,40 +319,29 @@ struct CompletionSnapshotPause {
 mod import_sync_state;
 pub(crate) use import_sync_state::{dependency_freshness_key, ImportSyncMemo};
 
-#[derive(Clone, Debug)]
+/// The host authority a child contract was published under. A contract is
+/// served only while the host still answers under it: an equivalent root
+/// republication or a cache eviction keeps it, a workspace replacement — even
+/// one repeating the scalar snapshot generation — or a reconfiguration does
+/// not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImportedChildContractFreshnessKey {
-    resolver_snapshot_generation: u64,
-    published_root: Option<Arc<verter_workspace::PublishedRoot>>,
-    project_generation: u64,
+    authority: verter_session::HostAuthority,
 }
-
-impl PartialEq for ImportedChildContractFreshnessKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.resolver_snapshot_generation == other.resolver_snapshot_generation
-            && self.project_generation == other.project_generation
-            && match (&self.published_root, &other.published_root) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
-            }
-    }
-}
-
-impl Eq for ImportedChildContractFreshnessKey {}
 
 #[derive(Clone)]
 struct ChildPublicContractSnapshot {
     contract: verter_session::framework::ComponentContractAvailability,
     publication_witness:
         Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
-    host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    source_hash: verter_session_query::analysis::types::Hash16,
     freshness: ImportedChildContractFreshnessKey,
 }
 
 #[derive(Clone)]
 struct ChildPublicContractFailureSnapshot {
     error: verter_session::PublicApiProjectionError,
-    host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    source_hash: verter_session_query::analysis::types::Hash16,
     freshness: ImportedChildContractFreshnessKey,
     workspace_content_generation: u64,
 }
@@ -374,7 +363,7 @@ struct BarrelComponentRouteSnapshot {
     contract: verter_session::framework::ComponentContractAvailability,
     publication_witness:
         Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
-    terminal_host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    terminal_source_hash: verter_session_query::analysis::types::Hash16,
     freshness: ImportedChildContractFreshnessKey,
 }
 

@@ -352,6 +352,7 @@ pub mod resolver_core;
 #[cfg(test)]
 mod resolver_core_tests;
 mod resolver_store;
+pub use resolver_store::{HostAuthority, HostAuthorityView};
 #[cfg(test)]
 mod resolver_store_tests;
 pub mod route_analysis_inputs;

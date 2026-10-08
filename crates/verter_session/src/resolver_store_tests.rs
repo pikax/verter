@@ -1075,3 +1075,56 @@ mod syntactic_route_interface_fact {
         );
     }
 }
+
+/// A captured authority view stays current across a per-file cache eviction
+/// with its identical reload and across the removal of the file's compile
+/// rows, and stops being current — for good — on a project reconfiguration
+/// and on a workspace swap.
+#[test]
+fn authority_view_survives_eviction_and_row_removal_but_not_replacement() {
+    use std::sync::Arc;
+
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let source: Arc<str> = Arc::from("export const a = 1\n");
+    workspace.inject_file("/w/a.ts".to_string(), Arc::clone(&source));
+    let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: "/w/a.ts".to_string(),
+            source,
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert");
+
+    let view = host.capture_authority_view();
+    assert!(view.published_root().is_some());
+    assert_eq!(
+        view.authority().workspace(),
+        Some(view.published_root().unwrap().authority())
+    );
+
+    host.bump_diagnostics_generation("/w/a.ts");
+    host.evict("/w/a.ts");
+    let _ = host.ensure_loaded("/w/a.ts");
+    host.drop_all_per_canonical_compile_caches("/w/a.ts");
+    host.bump_diagnostics_generation("/w/a.ts");
+    assert!(
+        view.is_current(&host),
+        "eviction and compile-row removal replace no authority"
+    );
+
+    host.configure_projects(Vec::new());
+    assert!(!view.is_current(&host), "a project reconfiguration");
+    let reconfigured = host.capture_authority_view();
+
+    host.set_workspace(Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    )));
+    assert!(!reconfigured.is_current(&host), "a workspace swap");
+    assert!(!view.is_current(&host));
+    assert_ne!(host.current_authority(), view.authority());
+}

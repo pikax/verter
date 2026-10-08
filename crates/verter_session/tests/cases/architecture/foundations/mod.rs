@@ -884,6 +884,11 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // surface extractor normalizes it to the bare
         // `pub use resolver_store::` prefix.
         "pub use resolver_store::",
+        // The captured host authority a foreground request settles against
+        // (`VerterHost::capture_authority_view`), consumed by verter_lsp's
+        // foreground request context and imported-child-contract freshness
+        // key.
+        "pub use resolver_store::{HostAuthority, HostAuthorityView}",
         // NOTE: the session-overlay copy-on-write counter is intentionally
         // ABSENT from this surface. It was retired as a process-global
         // re-export and rehomed PER-HOST onto

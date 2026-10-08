@@ -204,6 +204,11 @@ pub(crate) struct SourceFeatureDocumentCapture {
     pub(crate) document: DocumentState,
     identity: DocumentSnapshotIdentity,
     expected_host_revision: Option<HostSourceRevisionToken>,
+    /// The committed content hash of the source at capture, when the capture
+    /// is paired with a projection revision: what an answer computed from the
+    /// capture is checked against once computed, so an eviction re-committing
+    /// the same bytes never withdraws it.
+    expected_source_hash: Option<verter_session_query::analysis::types::Hash16>,
     semantic_generation: u64,
 }
 
