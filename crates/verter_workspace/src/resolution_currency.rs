@@ -1101,22 +1101,78 @@ impl RequestOverlayRoot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ExactResolutionKey {
-    importer_id: String,
-    specifier: String,
-    phase: ResolvePhase,
-    kind: ResolveRequestKind,
+// Exact-resolution entries one thread's exact publications touched: owner
+// routes compared, replaced or turned into fact keys, plus any entry of
+// another owner a scan visited.
+#[cfg(any(test, feature = "semantic-observe"))]
+thread_local! {
+    static EXACT_PUBLICATION_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-impl ExactResolutionKey {
-    fn new(importer_id: &str, specifier: &str, context: ResolutionContext) -> Self {
-        Self {
-            importer_id: importer_id.to_owned(),
-            specifier: specifier.to_owned(),
-            phase: context.phase,
-            kind: context.kind,
+#[inline]
+pub(crate) fn record_exact_publication_work(entries: usize) {
+    #[cfg(any(test, feature = "semantic-observe"))]
+    EXACT_PUBLICATION_WORK.with(|work| work.set(work.get() + entries as u64));
+    #[cfg(not(any(test, feature = "semantic-observe")))]
+    let _ = entries;
+}
+
+/// Exact-resolution entries this thread's exact publications touched since
+/// the last call, then reset.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn take_exact_publication_work() -> u64 {
+    EXACT_PUBLICATION_WORK.with(|work| work.replace(0))
+}
+
+/// One route of an owner's exact table: `(raw specifier, phase, kind)`.
+type ExactRouteKey = (String, ResolvePhase, ResolveRequestKind);
+
+/// One importer's exact resolutions. Immutable once published: a refresh of
+/// that importer publishes a replacement bucket, and every other importer's
+/// bucket is the same allocation in the outgoing and the replacement root.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ExactOwnerBucket {
+    routes: rustc_hash::FxHashMap<ExactRouteKey, ExactResolution>,
+}
+
+impl ExactOwnerBucket {
+    /// The bucket `resolutions` publish — the last route for a key wins, as
+    /// in the edge store — or `None` when there is none.
+    fn from_resolutions(resolutions: &[ExactResolution]) -> Option<Self> {
+        if resolutions.is_empty() {
+            return None;
         }
+        let routes = resolutions
+            .iter()
+            .map(|resolution| {
+                (
+                    (
+                        resolution.specifier.clone(),
+                        resolution.phase,
+                        resolution.kind,
+                    ),
+                    resolution.clone(),
+                )
+            })
+            .collect();
+        Some(Self { routes })
+    }
+
+    fn fact_keys<'a>(
+        &'a self,
+        importer_id: &'a str,
+    ) -> impl Iterator<Item = ResolutionFactKey> + 'a {
+        self.routes.keys().map(move |(specifier, phase, kind)| {
+            ResolutionFactKey::exact_importer(
+                importer_id,
+                specifier,
+                ResolutionContext {
+                    phase: *phase,
+                    kind: *kind,
+                },
+                ResolutionPopulation::Base,
+            )
+        })
     }
 }
 
@@ -1140,7 +1196,9 @@ pub(crate) struct ResolutionWorldRoot {
     /// `package.json` reads as a first observation and advances nothing.
     pub(crate) manifest_fingerprints: HashMap<String, Option<[u8; 16]>>,
     context_versions: HashMap<ResolveContextId, ResolutionFactVersion>,
-    exact_resolutions: HashMap<ExactResolutionKey, ExactResolution>,
+    /// Importer → its exact-resolution bucket. Ordered so a subtree's
+    /// importers are one range seek.
+    exact_owners: imbl::OrdMap<String, Arc<ExactOwnerBucket>>,
 }
 
 impl ResolutionWorldRoot {
@@ -1153,7 +1211,7 @@ impl ResolutionWorldRoot {
             realpaths: HashMap::new(),
             manifest_fingerprints: HashMap::new(),
             context_versions: HashMap::new(),
-            exact_resolutions: HashMap::new(),
+            exact_owners: imbl::OrdMap::new(),
         }
     }
 
@@ -1234,81 +1292,75 @@ impl ResolutionWorldRoot {
         specifier: &str,
         context: ResolutionContext,
     ) -> Option<&ExactResolution> {
-        self.exact_resolutions
-            .get(&ExactResolutionKey::new(importer_id, specifier, context))
+        self.exact_owners.get(importer_id)?.routes.get(&(
+            specifier.to_owned(),
+            context.phase,
+            context.kind,
+        ))
     }
 
+    /// The importer's published exact bucket.
+    #[cfg(test)]
+    pub(crate) fn exact_bucket(&self, importer_id: &str) -> Option<Arc<ExactOwnerBucket>> {
+        self.exact_owners.get(importer_id).cloned()
+    }
+
+    /// Replace `importer_id`'s exact routes with `resolutions`, touching
+    /// only that importer's bucket. Returns `None` when the published bucket
+    /// already holds exactly these routes; otherwise the exact fact keys of
+    /// every route the importer had before or has now, sorted, which the
+    /// caller advances in the same publication.
     pub(crate) fn replace_owner_exacts(
         &mut self,
         importer_id: &str,
         resolutions: &[ExactResolution],
-    ) {
-        self.exact_resolutions
-            .retain(|key, _| key.importer_id != importer_id);
-        for resolution in resolutions {
-            self.exact_resolutions.insert(
-                ExactResolutionKey {
-                    importer_id: importer_id.to_owned(),
-                    specifier: resolution.specifier.clone(),
-                    phase: resolution.phase,
-                    kind: resolution.kind,
-                },
-                resolution.clone(),
-            );
+    ) -> Option<Vec<ResolutionFactKey>> {
+        let replacement = ExactOwnerBucket::from_resolutions(resolutions);
+        let stored = self.exact_owners.get(importer_id);
+        record_exact_publication_work(
+            stored.map_or(0, |bucket| bucket.routes.len()) + resolutions.len(),
+        );
+        if stored.map(Arc::as_ref) == replacement.as_ref() {
+            return None;
         }
+        let mut affected: Vec<ResolutionFactKey> = stored
+            .map(Arc::as_ref)
+            .into_iter()
+            .chain(replacement.as_ref())
+            .flat_map(|bucket| bucket.fact_keys(importer_id))
+            .collect();
+        affected.sort();
+        affected.dedup();
+        match replacement {
+            Some(bucket) => {
+                self.exact_owners
+                    .insert(importer_id.to_owned(), Arc::new(bucket));
+            }
+            None => {
+                self.exact_owners.remove(importer_id);
+            }
+        }
+        Some(affected)
     }
 
-    pub(crate) fn owner_exact_fact_keys(&self, importer_id: &str) -> Vec<ResolutionFactKey> {
-        self.exact_resolutions
-            .keys()
-            .filter(|key| key.importer_id == importer_id)
-            .map(|key| {
-                ResolutionFactKey::exact_importer(
-                    importer_id,
-                    &key.specifier,
-                    ResolutionContext {
-                        phase: key.phase,
-                        kind: key.kind,
-                    },
-                    ResolutionPopulation::Base,
-                )
-            })
-            .collect()
-    }
-
+    /// Every importer at or under `prefix` holding exact routes, in order:
+    /// one range seek, visiting no importer outside the subtree's key range.
     pub(crate) fn exact_owners_under(&self, prefix: &str) -> Vec<String> {
-        let mut owners = self
-            .exact_resolutions
-            .keys()
-            .filter(|key| crate::path_matches_prefix(&key.importer_id, prefix))
-            .map(|key| key.importer_id.clone())
-            .collect::<Vec<_>>();
-        owners.sort();
-        owners.dedup();
+        let base = prefix.strip_suffix('/').unwrap_or(prefix);
+        let mut visited = 0;
+        let owners = self
+            .exact_owners
+            .range(base.to_owned()..)
+            .map(|(owner, _)| owner)
+            .take_while(|owner| {
+                visited += 1;
+                owner.starts_with(base)
+            })
+            .filter(|owner| crate::path_matches_prefix(owner, prefix))
+            .cloned()
+            .collect();
+        record_exact_publication_work(visited);
         owners
-    }
-
-    pub(crate) fn owner_exacts_equal(
-        &self,
-        importer_id: &str,
-        resolutions: &[ExactResolution],
-    ) -> bool {
-        let stored = self
-            .exact_resolutions
-            .iter()
-            .filter(|(key, _)| key.importer_id == importer_id)
-            .collect::<Vec<_>>();
-        if stored.len() != resolutions.len() {
-            return false;
-        }
-        resolutions.iter().all(|resolution| {
-            self.exact_resolutions.get(&ExactResolutionKey {
-                importer_id: importer_id.to_owned(),
-                specifier: resolution.specifier.clone(),
-                phase: resolution.phase,
-                kind: resolution.kind,
-            }) == Some(resolution)
-        })
     }
 }
 

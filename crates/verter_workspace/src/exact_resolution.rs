@@ -14,7 +14,7 @@
 //! latent defect (ambient deps silently dropped on parse re-record) was
 //! caused by exactly this kind of routing.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
 use crate::path_matches_prefix;
@@ -256,25 +256,30 @@ impl EdgeStore {
         // their invalidation cascades for steady-state re-pushes.
         //
         // Duplicate-key safety: the input is a Vec, so the same key can
-        // appear twice (`[A→x, A→x]`). Comparing RAW input length against
-        // the stored table would judge that input "unchanged" against
-        // `{A→x, B→y}` while a real replace drops `B→y` — count DISTINCT
-        // input keys instead.
+        // appear twice. A replace keeps the LAST route per key, so the
+        // comparison is against exactly the table a replace would store:
+        // `[A→x, A→x]` against `{A→x, B→y}` is a change (the replace drops
+        // `B→y`), and `[A→x, A→y]` against `{A→y}` is not.
+        crate::resolution_currency::record_exact_publication_work(resolutions.len());
         if let Some(state) = self.files.get(canonical_id) {
             let stored = &state.deps.exact_resolutions;
-            let mut distinct_keys: FxHashSet<(String, ResolvePhase, ResolveRequestKind)> =
-                FxHashSet::default();
-            let every_entry_matches = resolutions.iter().all(|resolution| {
-                let key = (
-                    resolution.specifier.clone(),
-                    resolution.phase,
-                    resolution.kind,
+            let mut incoming: FxHashMap<
+                (&str, ResolvePhase, ResolveRequestKind),
+                &ExactResolution,
+            > = FxHashMap::default();
+            for resolution in &resolutions {
+                incoming.insert(
+                    (&resolution.specifier, resolution.phase, resolution.kind),
+                    resolution,
                 );
-                let matches = stored.get(&key) == Some(resolution);
-                distinct_keys.insert(key);
-                matches
-            });
-            if every_entry_matches && distinct_keys.len() == stored.len() {
+            }
+            let unchanged = incoming.len() == stored.len()
+                && incoming
+                    .iter()
+                    .all(|((specifier, phase, kind), resolution)| {
+                        stored.get(&(specifier.to_string(), *phase, *kind)) == Some(*resolution)
+                    });
+            if unchanged {
                 return ExactResolutionResult {
                     newly_resolved: Vec::new(),
                     changed: false,

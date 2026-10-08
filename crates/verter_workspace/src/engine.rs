@@ -1736,29 +1736,14 @@ impl Engine {
         canonical_id: &str,
         resolutions: &[ExactResolution],
     ) -> bool {
-        if world.owner_exacts_equal(canonical_id, resolutions) {
+        let Some(affected) = world.replace_owner_exacts(canonical_id, resolutions) else {
             return false;
-        }
-        let mut affected = world.owner_exact_fact_keys(canonical_id);
-        affected.extend(resolutions.iter().map(|resolution| {
-            ResolutionFactKey::exact_importer(
-                canonical_id,
-                &resolution.specifier,
-                verter_session_query::resolution::ResolutionContext {
-                    phase: resolution.phase,
-                    kind: resolution.kind,
-                },
-                ResolutionPopulation::Base,
-            )
-        }));
-        affected.sort();
-        affected.dedup();
+        };
         for key in affected {
             world
                 .facts
                 .advance(key, self.next_resolution_fact_version());
         }
-        world.replace_owner_exacts(canonical_id, resolutions);
         true
     }
 
