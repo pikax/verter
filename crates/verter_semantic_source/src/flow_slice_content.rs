@@ -1822,8 +1822,7 @@ pub(crate) fn nested_function_bodies(
 ) -> Vec<verter_span::Span> {
     entry
         .nested_captures()
-        .iter()
-        .filter_map(|child| index.get(&child.function))
+        .filter_map(|child| index.get(child.function()))
         .map(|child| child.entry().body_span())
         .collect()
 }
@@ -14278,7 +14277,7 @@ impl<'a> Lowerer<'a> {
         let mut gap = None;
         let mut declared_evolving_captures = Vec::new();
         let mut checked = rustc_hash::FxHashSet::default();
-        for read in entry.captured_reads().iter() {
+        for read in entry.captured_reads() {
             let identity = &read.binding;
             if !checked.insert(identity) {
                 continue;
@@ -14352,12 +14351,16 @@ impl<'a> Lowerer<'a> {
         let invoked_arguments =
             invocation.map(|call| oxc_span::Span::new(call.callee.span().end, call.span.end));
         let mut extended_captures: Vec<SkeletonBindingId> = Vec::new();
+        let mut extended: rustc_hash::FxHashSet<SkeletonBindingId> =
+            rustc_hash::FxHashSet::default();
+        let mut considered: rustc_hash::FxHashSet<SkeletonBindingId> =
+            rustc_hash::FxHashSet::default();
         if self.class_property_initializers == 0 {
-            for read in entry.captured_reads().iter() {
+            for read in entry.captured_reads() {
                 let Some(binding) = self.bindings.local(&read.binding) else {
                     continue;
                 };
-                if extended_captures.contains(&binding) {
+                if !considered.insert(binding) {
                     continue;
                 }
                 // A `var` is never a mutable local the checker extends
@@ -14390,6 +14393,7 @@ impl<'a> Lowerer<'a> {
                     _ => false,
                 };
                 if eligible {
+                    extended.insert(binding);
                     extended_captures.push(binding);
                 }
             }
@@ -14397,7 +14401,7 @@ impl<'a> Lowerer<'a> {
         let mut gap = None;
         let mut declared_evolving_captures = Vec::new();
         let mut checked = rustc_hash::FxHashSet::default();
-        for read in entry.captured_reads().iter() {
+        for read in entry.captured_reads() {
             let identity = &read.binding;
             if !checked.insert(identity) {
                 continue;
@@ -14430,7 +14434,7 @@ impl<'a> Lowerer<'a> {
             // initializer's widened type). Every other capture that is
             // mutable where the function is created — a destructured
             // element, a `catch` parameter — takes the typed gap.
-            if extended_captures.contains(&binding) || self.capture_reads_declared_type(binding) {
+            if extended.contains(&binding) || self.capture_reads_declared_type(binding) {
                 continue;
             }
             if self.active_guard_bindings.contains(&binding)

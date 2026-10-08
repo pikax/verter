@@ -781,6 +781,7 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
 }
 
 impl crate::traits::WorkspaceAccess for MemoryWorkspace {
+    #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,
         account: Arc<

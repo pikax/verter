@@ -386,7 +386,20 @@ type ResolutionEdgeMap = imbl::GenericHashMap<
     imbl::shared_ptr::DefaultSharedPtr,
 >;
 
-#[derive(Debug, Clone, Default)]
+/// Retired derived nodes below which [`ResolutionFactRoot`] never folds
+/// its history into the floor, however small the live graph is.
+pub(crate) const TOMBSTONE_RETIREMENT_MINIMUM: usize = 256;
+
+/// Occupancy of one root's derived graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DerivedGraphResidency {
+    pub(crate) derived_nodes: usize,
+    pub(crate) edges: usize,
+    pub(crate) dependency_buckets: usize,
+    pub(crate) retired_nodes: usize,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ResolutionFactRoot {
     versions: FactVersionLedger,
     /// derived node → its COMPLETE direct dependency set.
@@ -402,6 +415,33 @@ pub(crate) struct ResolutionFactRoot {
         rustc_hash::FxBuildHasher,
         imbl::shared_ptr::DefaultSharedPtr,
     >,
+    /// Removed derived nodes whose tombstone version is still stored in
+    /// [`Self::versions`]: the retirement history. A republished node
+    /// leaves it (its stored version is a live node's version again), and
+    /// [`Self::retire_tombstones_if_due`] drains it into
+    /// [`Self::derived_floor`].
+    retired_nodes: ResolutionEdgeSet,
+    /// The version every derived node with no stored version reads.
+    ///
+    /// [`ResolutionFactVersion::INITIAL`] until the first tombstone
+    /// retirement; each retirement raises it to a freshly minted version
+    /// no witness can hold, so a retired node reads a version different
+    /// from every one it ever had — the same no-ABA guarantee its stored
+    /// tombstone gave, without storing it.
+    derived_floor: ResolutionFactVersion,
+    /// Total direct edges across [`Self::forward`], maintained at every
+    /// attach and detach so the count is an occupancy read, not a scan.
+    edge_count: usize,
+    /// Each published decision's retention charge, shared with the
+    /// workspace-lane candidate that serves it. A root holds the charge for
+    /// as long as it holds the node, so a snapshot that outlives the
+    /// node's retirement keeps its bytes charged until the snapshot drops.
+    decision_charges: imbl::GenericHashMap<
+        ResolutionFactKey,
+        Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
+        rustc_hash::FxBuildHasher,
+        imbl::shared_ptr::DefaultSharedPtr,
+    >,
     /// Direct fact keys advanced since the enclosing mutation batch
     /// began, drained by [`Self::take_pending_seeds`] at the publication
     /// protocol's propagation step.
@@ -412,12 +452,29 @@ pub(crate) struct ResolutionFactRoot {
     pending_seeds: Vec<ResolutionFactKey>,
 }
 
+impl Default for ResolutionFactRoot {
+    fn default() -> Self {
+        Self {
+            versions: FactVersionLedger::default(),
+            forward: ResolutionEdgeMap::default(),
+            reverse: ResolutionEdgeMap::default(),
+            owner_decisions: imbl::GenericHashMap::default(),
+            retired_nodes: ResolutionEdgeSet::default(),
+            derived_floor: ResolutionFactVersion::INITIAL,
+            edge_count: 0,
+            decision_charges: imbl::GenericHashMap::default(),
+            pending_seeds: Vec::new(),
+        }
+    }
+}
+
 impl ResolutionFactRoot {
     pub(crate) fn version(&self, key: &ResolutionFactKey) -> ResolutionFactVersion {
-        self.versions
-            .get(key)
-            .copied()
-            .unwrap_or(ResolutionFactVersion::INITIAL)
+        match self.versions.get(key) {
+            Some(version) => *version,
+            None if key.is_derived_node() => self.derived_floor,
+            None => ResolutionFactVersion::INITIAL,
+        }
     }
 
     /// Semantic advance: the fact's observed meaning moved. Records the
@@ -477,6 +534,7 @@ impl ResolutionFactRoot {
         );
         let replaced = self.forward.contains_key(&node);
         self.detach_edges(&node);
+        self.retired_nodes.remove(&node);
         let mut direct = ResolutionEdgeSet::default();
         for dependency in dependencies {
             // A node is never its own dependency: a recompute of Q that
@@ -498,8 +556,22 @@ impl ResolutionFactRoot {
                 .or_default()
                 .insert(node.clone());
         }
+        self.edge_count += direct.len();
         self.forward.insert(node, direct);
         replaced
+    }
+
+    /// [`Self::publish_derived`] for a decision node whose bytes `charge`
+    /// covers: this root, and every root cloned from it while the node is
+    /// live, holds the charge with the node.
+    pub(crate) fn publish_charged_decision(
+        &mut self,
+        node: ResolutionFactKey,
+        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
+        charge: Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
+    ) -> bool {
+        self.decision_charges.insert(node.clone(), charge);
+        self.publish_derived(node, dependencies)
     }
 
     /// Drop a derived node: ADVANCE its version, then drop its complete
@@ -516,6 +588,13 @@ impl ResolutionFactRoot {
     /// Nothing is evicted. A dependent cache entry stays exactly where it
     /// is and goes cold only when its own recorded derived version fails
     /// ordinary read-side validation.
+    ///
+    /// Removing an owner's LAST decision also removes that owner's
+    /// `OwnerResolutionSet` node, under the same `version`: an owner set
+    /// with no child decision stands for nothing, and leaving it would
+    /// keep one node and its dangling edges per owner that ever resolved.
+    /// Sharing the version is sound because freshness is per key — the
+    /// version is newer than any the owner-set key ever had.
     pub(crate) fn remove_derived(
         &mut self,
         node: &ResolutionFactKey,
@@ -526,6 +605,8 @@ impl ResolutionFactRoot {
         }
         self.detach_edges(node);
         self.forward.remove(node);
+        self.decision_charges.remove(node);
+        let mut orphaned_owner_set = None;
         if let Some(owner) = node.owner_canonical() {
             let index_key = (owner.to_owned(), node.population());
             let empty = match self.owner_decisions.get_mut(&index_key) {
@@ -537,16 +618,70 @@ impl ResolutionFactRoot {
             };
             if empty {
                 self.owner_decisions.remove(&index_key);
+                orphaned_owner_set = Some(ResolutionFactKey::owner_resolution_set(
+                    CanonicalResolutionId::new(owner),
+                    node.population(),
+                ));
             }
         }
         self.advance(node.clone(), version);
+        self.retired_nodes.insert(node.clone());
+        if let Some(owner_set) = orphaned_owner_set {
+            self.remove_derived(&owner_set, version);
+        }
         true
+    }
+
+    /// Fold the retirement history into [`Self::derived_floor`] once it
+    /// outgrows the live graph.
+    ///
+    /// Every live derived node reading the current floor first stores that
+    /// value explicitly, so its witnesses keep validating; every retired
+    /// node's tombstone is then dropped and the floor raised to `fresh()`.
+    /// A retired node therefore reads a version no witness holds, exactly
+    /// as its tombstone did. The pass is `O(live + retired)` and runs only
+    /// once retired nodes outnumber both the live nodes and
+    /// [`TOMBSTONE_RETIREMENT_MINIMUM`], so its cost is amortised over the
+    /// removals that filled it and the history stays proportional to the
+    /// live graph.
+    ///
+    /// Returns whether it retired anything: the floor moved, which a
+    /// witness can observe, so the caller publishes a new world identity.
+    pub(crate) fn retire_tombstones_if_due(
+        &mut self,
+        fresh: impl FnOnce() -> ResolutionFactVersion,
+    ) -> bool {
+        if self.retired_nodes.len() <= self.forward.len().max(TOMBSTONE_RETIREMENT_MINIMUM) {
+            return false;
+        }
+        let floor = self.derived_floor;
+        for node in self.forward.keys() {
+            if !self.versions.contains_key(node) {
+                self.versions.insert(node.clone(), floor);
+            }
+        }
+        for node in std::mem::take(&mut self.retired_nodes) {
+            self.versions.remove(&node);
+        }
+        self.derived_floor = fresh();
+        true
+    }
+
+    /// Current occupancy of this root's derived graph.
+    pub(crate) fn residency(&self) -> DerivedGraphResidency {
+        DerivedGraphResidency {
+            derived_nodes: self.forward.len(),
+            edges: self.edge_count,
+            dependency_buckets: self.reverse.len(),
+            retired_nodes: self.retired_nodes.len(),
+        }
     }
 
     fn detach_edges(&mut self, node: &ResolutionFactKey) {
         let Some(previous) = self.forward.get(node).cloned() else {
             return;
         };
+        self.edge_count -= previous.len();
         for dependency in previous {
             let empty = match self.reverse.get_mut(&dependency) {
                 Some(dependents) => {
@@ -966,22 +1101,77 @@ impl RequestOverlayRoot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ExactResolutionKey {
-    importer_id: String,
-    specifier: String,
-    phase: ResolvePhase,
-    kind: ResolveRequestKind,
+// Exact-resolution entries one thread's exact publications touched: owner
+// routes compared, replaced or turned into fact keys, plus any entry of
+// another owner a scan visited.
+#[cfg(any(test, feature = "semantic-observe"))]
+thread_local! {
+    static EXACT_PUBLICATION_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-impl ExactResolutionKey {
-    fn new(importer_id: &str, specifier: &str, context: ResolutionContext) -> Self {
-        Self {
-            importer_id: importer_id.to_owned(),
-            specifier: specifier.to_owned(),
-            phase: context.phase,
-            kind: context.kind,
+// Measurement only: the hook and every call site, including the work count
+// each passes, are absent from default builds.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub(crate) fn record_exact_publication_work(entries: usize) {
+    EXACT_PUBLICATION_WORK.with(|work| work.set(work.get() + entries as u64));
+}
+
+/// Exact-resolution entries this thread's exact publications touched since
+/// the last call, then reset.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn take_exact_publication_work() -> u64 {
+    EXACT_PUBLICATION_WORK.with(|work| work.replace(0))
+}
+
+/// One route of an owner's exact table: `(raw specifier, phase, kind)`.
+type ExactRouteKey = (String, ResolvePhase, ResolveRequestKind);
+
+/// One importer's exact resolutions. Immutable once published: a refresh of
+/// that importer publishes a replacement bucket, and every other importer's
+/// bucket is the same allocation in the outgoing and the replacement root.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ExactOwnerBucket {
+    routes: rustc_hash::FxHashMap<ExactRouteKey, ExactResolution>,
+}
+
+impl ExactOwnerBucket {
+    /// The bucket `resolutions` publish — the last route for a key wins, as
+    /// in the edge store — or `None` when there is none.
+    fn from_resolutions(resolutions: &[ExactResolution]) -> Option<Self> {
+        if resolutions.is_empty() {
+            return None;
         }
+        let routes = resolutions
+            .iter()
+            .map(|resolution| {
+                (
+                    (
+                        resolution.specifier.clone(),
+                        resolution.phase,
+                        resolution.kind,
+                    ),
+                    resolution.clone(),
+                )
+            })
+            .collect();
+        Some(Self { routes })
+    }
+
+    fn fact_keys<'a>(
+        &'a self,
+        importer_id: &'a str,
+    ) -> impl Iterator<Item = ResolutionFactKey> + 'a {
+        self.routes.keys().map(move |(specifier, phase, kind)| {
+            ResolutionFactKey::exact_importer(
+                importer_id,
+                specifier,
+                ResolutionContext {
+                    phase: *phase,
+                    kind: *kind,
+                },
+                ResolutionPopulation::Base,
+            )
+        })
     }
 }
 
@@ -1005,7 +1195,9 @@ pub(crate) struct ResolutionWorldRoot {
     /// `package.json` reads as a first observation and advances nothing.
     pub(crate) manifest_fingerprints: HashMap<String, Option<[u8; 16]>>,
     context_versions: HashMap<ResolveContextId, ResolutionFactVersion>,
-    exact_resolutions: HashMap<ExactResolutionKey, ExactResolution>,
+    /// Importer → its exact-resolution bucket. Ordered so a subtree's
+    /// importers are one range seek.
+    exact_owners: imbl::OrdMap<String, Arc<ExactOwnerBucket>>,
 }
 
 impl ResolutionWorldRoot {
@@ -1018,7 +1210,7 @@ impl ResolutionWorldRoot {
             realpaths: HashMap::new(),
             manifest_fingerprints: HashMap::new(),
             context_versions: HashMap::new(),
-            exact_resolutions: HashMap::new(),
+            exact_owners: imbl::OrdMap::new(),
         }
     }
 
@@ -1099,81 +1291,104 @@ impl ResolutionWorldRoot {
         specifier: &str,
         context: ResolutionContext,
     ) -> Option<&ExactResolution> {
-        self.exact_resolutions
-            .get(&ExactResolutionKey::new(importer_id, specifier, context))
+        self.exact_owners.get(importer_id)?.routes.get(&(
+            specifier.to_owned(),
+            context.phase,
+            context.kind,
+        ))
     }
 
+    /// Whether `other` holds the same allocation of every recorded-observation
+    /// map — path probes, realpaths, manifest fingerprints and context
+    /// versions — so building one root from the other copied none of their
+    /// entries.
+    #[cfg(test)]
+    pub(crate) fn shares_observation_maps_with(&self, other: &Self) -> bool {
+        self.path_probes.ptr_eq(&other.path_probes)
+            && self.realpaths.ptr_eq(&other.realpaths)
+            && self
+                .manifest_fingerprints
+                .ptr_eq(&other.manifest_fingerprints)
+            && self.context_versions.ptr_eq(&other.context_versions)
+    }
+
+    /// The importer's published exact bucket.
+    #[cfg(test)]
+    pub(crate) fn exact_bucket(&self, importer_id: &str) -> Option<Arc<ExactOwnerBucket>> {
+        self.exact_owners.get(importer_id).cloned()
+    }
+
+    /// Replace `importer_id`'s exact routes with `resolutions`, touching
+    /// only that importer's bucket. Returns `None` when the published bucket
+    /// already holds exactly these routes; otherwise the exact fact keys of
+    /// every route the importer had before or has now, sorted, which the
+    /// caller advances in the same publication.
     pub(crate) fn replace_owner_exacts(
         &mut self,
         importer_id: &str,
         resolutions: &[ExactResolution],
-    ) {
-        self.exact_resolutions
-            .retain(|key, _| key.importer_id != importer_id);
-        for resolution in resolutions {
-            self.exact_resolutions.insert(
-                ExactResolutionKey {
-                    importer_id: importer_id.to_owned(),
-                    specifier: resolution.specifier.clone(),
-                    phase: resolution.phase,
-                    kind: resolution.kind,
-                },
-                resolution.clone(),
-            );
+    ) -> Option<Vec<ResolutionFactKey>> {
+        let replacement = ExactOwnerBucket::from_resolutions(resolutions);
+        let stored = self.exact_owners.get(importer_id);
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_exact_publication_work(
+            stored.map_or(0, |bucket| bucket.routes.len()) + resolutions.len(),
+        );
+        if stored.map(Arc::as_ref) == replacement.as_ref() {
+            return None;
         }
+        let mut affected: Vec<ResolutionFactKey> = stored
+            .map(Arc::as_ref)
+            .into_iter()
+            .chain(replacement.as_ref())
+            .flat_map(|bucket| bucket.fact_keys(importer_id))
+            .collect();
+        affected.sort();
+        affected.dedup();
+        match replacement {
+            Some(bucket) => {
+                self.exact_owners
+                    .insert(importer_id.to_owned(), Arc::new(bucket));
+            }
+            None => {
+                self.exact_owners.remove(importer_id);
+            }
+        }
+        Some(affected)
     }
 
-    pub(crate) fn owner_exact_fact_keys(&self, importer_id: &str) -> Vec<ResolutionFactKey> {
-        self.exact_resolutions
-            .keys()
-            .filter(|key| key.importer_id == importer_id)
-            .map(|key| {
-                ResolutionFactKey::exact_importer(
-                    importer_id,
-                    &key.specifier,
-                    ResolutionContext {
-                        phase: key.phase,
-                        kind: key.kind,
-                    },
-                    ResolutionPopulation::Base,
-                )
-            })
-            .collect()
-    }
-
+    /// Every importer at or under `prefix` holding exact routes, in order:
+    /// one point lookup for the directory's own path and one range seek over
+    /// its `base/` descendants, visiting no importer outside the subtree —
+    /// a component-prefix sibling such as `base-x` or `baseway/…` sorts
+    /// outside `base/`'s range and is never reached.
     pub(crate) fn exact_owners_under(&self, prefix: &str) -> Vec<String> {
-        let mut owners = self
-            .exact_resolutions
-            .keys()
-            .filter(|key| crate::path_matches_prefix(&key.importer_id, prefix))
-            .map(|key| key.importer_id.clone())
-            .collect::<Vec<_>>();
-        owners.sort();
-        owners.dedup();
+        let base = prefix.strip_suffix('/').unwrap_or(prefix);
+        let descendants = format!("{base}/");
+        #[cfg(any(test, feature = "semantic-observe"))]
+        let mut visited = 1;
+        let mut owners: Vec<String> = self
+            .exact_owners
+            .get_key_value(base)
+            .map(|(owner, _)| owner.clone())
+            .into_iter()
+            .collect();
+        owners.extend(
+            self.exact_owners
+                .range(descendants.clone()..)
+                .map(|(owner, _)| owner)
+                .take_while(|owner| {
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    {
+                        visited += 1;
+                    }
+                    owner.starts_with(&descendants)
+                })
+                .cloned(),
+        );
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_exact_publication_work(visited);
         owners
-    }
-
-    pub(crate) fn owner_exacts_equal(
-        &self,
-        importer_id: &str,
-        resolutions: &[ExactResolution],
-    ) -> bool {
-        let stored = self
-            .exact_resolutions
-            .iter()
-            .filter(|(key, _)| key.importer_id == importer_id)
-            .collect::<Vec<_>>();
-        if stored.len() != resolutions.len() {
-            return false;
-        }
-        resolutions.iter().all(|resolution| {
-            self.exact_resolutions.get(&ExactResolutionKey {
-                importer_id: importer_id.to_owned(),
-                specifier: resolution.specifier.clone(),
-                phase: resolution.phase,
-                kind: resolution.kind,
-            }) == Some(resolution)
-        })
     }
 }
 
@@ -1675,7 +1890,12 @@ impl CapturedResolutionWorld {
                 }
                 if let Some(session) = self.session.as_ref() {
                     let version = session.facts.version(key);
-                    if version != ResolutionFactVersion::INITIAL {
+                    // A session derived node is the session root's alone:
+                    // the session graph advances it when a base fact it
+                    // depends on moves, and its base twin is another
+                    // population's decision. Reading the twin would tie the
+                    // node to the base root's own retirement floor.
+                    if version != ResolutionFactVersion::INITIAL || key.is_derived_node() {
                         return version;
                     }
                 }
@@ -4070,6 +4290,116 @@ mod root_graph_tests {
             "a reintroduced node keeps its tombstone version — a witness recorded before \
              the removal must never validate again"
         );
+    }
+
+    /// **Folding the retirement history keeps every live node's version
+    /// and gives every retired node one no witness holds.**
+    ///
+    /// Live nodes reading the floor are stored at it before it moves, so
+    /// their witnesses survive the fold; a retired node loses its stored
+    /// tombstone and reads the raised floor, which is neither its tombstone
+    /// nor `INITIAL`. Removing an owner's last decision takes its owner set
+    /// along.
+    ///
+    /// Mutation recipe: drop the loop in `retire_tombstones_if_due` that
+    /// stores the old floor for live nodes. The live node then reads the
+    /// raised floor and the first assertion after the fold fails.
+    #[test]
+    fn folding_retired_nodes_keeps_live_versions_and_never_revisits_a_retired_one() {
+        let mut mint = minter();
+        let mut root = ResolutionFactRoot::default();
+        let live = node("./live");
+        root.publish_derived(live.clone(), [leaf("/p/live.ts")]);
+        let owner_set = ResolutionFactKey::owner_resolution_set(
+            CanonicalResolutionId::new("/p/main.ts"),
+            ResolutionPopulation::Base,
+        );
+        root.publish_derived(owner_set.clone(), [live.clone()]);
+
+        let first_retired = node("./retired-0");
+        root.publish_derived(first_retired.clone(), [leaf("/p/retired.ts")]);
+        root.remove_derived(&first_retired, mint());
+        let tombstone = root.version(&first_retired);
+        let mut folded = false;
+        for index in 1..=TOMBSTONE_RETIREMENT_MINIMUM {
+            let retired = node(&format!("./retired-{index}"));
+            root.publish_derived(retired.clone(), [leaf("/p/retired.ts")]);
+            root.remove_derived(&retired, mint());
+            folded |= root.retire_tombstones_if_due(&mut mint);
+        }
+        assert!(
+            folded,
+            "fixture invariant: the history outgrew the live graph"
+        );
+
+        assert_eq!(
+            root.version(&live),
+            ResolutionFactVersion::INITIAL,
+            "a live node's witnesses survive the fold"
+        );
+        let floor = root.version(&first_retired);
+        assert_ne!(floor, tombstone, "the tombstone itself is gone");
+        assert_ne!(floor, ResolutionFactVersion::INITIAL);
+        assert!(root.residency().retired_nodes < TOMBSTONE_RETIREMENT_MINIMUM);
+
+        assert!(root.remove_derived(&live, mint()));
+        assert!(
+            root.direct_dependencies(&owner_set).is_none(),
+            "the owner set leaves with its last decision"
+        );
+        assert_eq!(root.residency().derived_nodes, 0);
+        assert_eq!(root.residency().edges, 0);
+        assert_eq!(root.residency().dependency_buckets, 0);
+    }
+
+    /// **A base root's retirement fold leaves every session decision's
+    /// version where it was.**
+    ///
+    /// A session decision node is the session root's alone; its base twin
+    /// is another population's decision, so the base root raising its
+    /// derived floor must not move what the session node reads.
+    ///
+    /// Mutation recipe: let a session derived node that reads `INITIAL`
+    /// fall through to its base twin again. After the base fold the twin
+    /// reads the raised floor and the session version moves.
+    #[test]
+    fn a_base_fold_leaves_session_decisions_where_they_were() {
+        let mut mint = minter();
+        let session_population = ResolutionPopulation::Session(SessionFingerprint::from_raw(7));
+        let session_node = node("./session").in_population(session_population);
+        let mut session = ResolutionSessionRoot::bootstrap(ResolutionWorldId::from_raw(2));
+        session
+            .facts
+            .publish_derived(session_node.clone(), [leaf("/p/session.ts")]);
+        let world = |base: ResolutionWorldRoot| CapturedResolutionWorld {
+            base: Arc::new(base),
+            session: Some(Arc::new(session.clone())),
+            population: session_population,
+            overlay: None,
+            overlay_values: None,
+        };
+
+        let mut base = ResolutionWorldRoot::bootstrap(ResolutionWorldId::from_raw(1));
+        let before = world(base.clone()).fact_version(&session_node);
+        let mut folded = false;
+        for index in 0..=TOMBSTONE_RETIREMENT_MINIMUM {
+            let retired = node(&format!("./retired-{index}"));
+            base.facts
+                .publish_derived(retired.clone(), [leaf("/p/retired.ts")]);
+            base.facts.remove_derived(&retired, mint());
+            folded |= base.facts.retire_tombstones_if_due(&mut mint);
+        }
+        assert!(
+            folded,
+            "fixture invariant: the base root folded its history"
+        );
+        assert_ne!(
+            base.facts
+                .version(&session_node.in_population(ResolutionPopulation::Base)),
+            ResolutionFactVersion::INITIAL,
+            "fixture invariant: the base twin now reads the raised floor"
+        );
+        assert_eq!(world(base).fact_version(&session_node), before);
     }
 
     /// **Propagation advances each reachable derived node exactly once
