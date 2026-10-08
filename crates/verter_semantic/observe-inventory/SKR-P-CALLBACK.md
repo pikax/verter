@@ -7,7 +7,7 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `FunctionProgramIndex::expressions_by_point`: indexed expression program point → its record's position (first record in source order wins a shared point) | `FunctionProgramIndex::expression`, read per call argument by call resolution and per program-expression source by flow-return evaluation | REQUIRED | Built once when `FunctionProgramIndex::from_discovery` seals a parsed file version; shared by every clone of the index (including `map_stable_hashes`) and released with it | `src/function_program.rs` | always |
-| `PROGRAM_EXPRESSION_LOOKUP_VISITS` thread-local counter: records examined by `FunctionProgramIndex::expression` | none; linear-lookup tests and measurement only | OPTIONAL | Per thread; accumulates until a reader resets it | `src/function_program.rs` | `cfg(any(test, feature = "test-support", feature = "semantic-observe"))` |
+| `PROGRAM_EXPRESSION_LOOKUP_VISITS` thread-local counter: records yielded by `FunctionProgramIndex::expression` (per record examined, not per call) | none; linear-lookup tests and measurement only | OPTIONAL | Per thread; accumulates until a reader resets it | `src/function_program.rs` | `cfg(any(test, feature = "test-support", feature = "semantic-observe"))` |
 
 ## verter_semantic
 

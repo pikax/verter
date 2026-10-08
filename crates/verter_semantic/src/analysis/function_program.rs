@@ -1243,9 +1243,11 @@ fn link_callback_return_sources(
             .iter_mut()
             .filter(|argument| argument.is_function_value)
         {
-            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-            CALLBACK_LINK_PROBES.with(|probes| probes.set(probes.get() + 1));
             if let Some(&ordinal) = by_point.get(&argument.point) {
+                // One probe per callback candidate examined; the index
+                // yields at most the single candidate at this point.
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                CALLBACK_LINK_PROBES.with(|probes| probes.set(probes.get() + 1));
                 argument.function_return_source = Some(callbacks[ordinal].1.clone());
                 changed = true;
             }

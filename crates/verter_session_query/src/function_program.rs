@@ -1605,10 +1605,12 @@ impl FunctionProgramIndex {
         &self,
         point: &ProgramExpressionIdentity,
     ) -> Option<&ProgramExpressionRecord> {
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        PROGRAM_EXPRESSION_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
-        self.expressions_by_point
-            .get(point)
-            .map(|&ordinal| &self.expressions[ordinal])
+        self.expressions_by_point.get(point).map(|&ordinal| {
+            // One visit per record examined: the index yields only the
+            // record at this point.
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            PROGRAM_EXPRESSION_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
+            &self.expressions[ordinal]
+        })
     }
 }
