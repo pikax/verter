@@ -863,25 +863,45 @@ Every resolution producer resolves through ONE bounded candidate slot per
   supersedes it, so that demand can name every witness it rejected.
 - Every workspace-lane slot is OWNED by its importer
   (`verter_workspace` engine's `lazy_resolution_cache`). Each retained
-  candidate holds a retained reservation on the host's aggregate account —
-  covering its decision node and edges too — and a refused reservation serves
-  the complete answer uncached as `RetentionPressure`, with no slot, no
-  decision and an abandoned flight. An importer that leaves the workspace
-  (deleted, renamed away, or under a removed subtree) retires its slots and
-  their decisions in the same world mutation that retires its edges; the
-  session-population half waits while an open overlay still shows the
-  importer and retires when that overlay closes over a known-absent path.
-  Removing an owner's last decision removes its owner set. Owners that never
-  retire are bounded by the lane's slot cap (oldest admitted first), because
-  the per-slot candidate cap bounds one key, never the number of owners.
+  candidate holds a retained reservation on the process-local aggregate
+  account, which every Engine binds at construction (replacing it is a
+  test-support seam only). The reservation covers the candidate's decision
+  node and edges too, and it is shared with the node: every root that still
+  holds the node — a held snapshot included — keeps the bytes charged, and
+  they are released once, with the last owner. A refused reservation serves
+  the complete answer uncached as `RetentionPressure`, with no slot and no
+  decision, and delivers it to the flight's subscribers, which restate its
+  witness. An importer that leaves the workspace (deleted, renamed away, or
+  under a removed subtree) retires its slots and their decisions in the same
+  world mutation that retires its edges; the session-population half waits
+  while an open overlay still shows the importer and retires when that
+  overlay closes over a known-absent path. A demand naming an importer the
+  fenced world already records as gone is served, never retained. Removing
+  an owner's last decision removes its owner set. Owners that never retire
+  are bounded by the lane's slot cap (oldest admitted first), because the
+  per-slot candidate cap bounds one key, never the number of owners.
+- A resolution's `lazy_resolved` dependency edge belongs to the retained
+  answer behind it: it is recorded only while a workspace-lane candidate
+  backs it, and leaves with the last such candidate of its importer — an
+  importer left with no dependency state leaves the edge store — so evicted
+  unknown owners take their reverse-dependency membership with them. A warm
+  reuse whose candidate another admission evicted before its final fence
+  restates the candidate's own witness instead of rooting on the evicted
+  decision's tombstone.
 - A removed decision's tombstone is HISTORY, and it is bounded too: once a
   root's retired nodes outnumber its live nodes (and a fixed minimum), the
   tombstones fold into a per-root derived floor — live nodes reading the old
   floor store it explicitly first, then the floor is raised to a fresh
   version, so a retired node never reads a version a witness holds. Held
-  snapshots are immutable roots and keep validating what they validated.
+  snapshots are immutable roots and keep validating what they validated. An
+  admission publishes its decision before retiring the ones it evicted, so a
+  fold that eviction triggers pins the version the admitted witness read. A
+  session decision node reads the session root alone, never its base twin,
+  so a base fold cannot move it.
   `WorkspaceResourceSnapshot::resolution` reports current slots, candidates,
-  owners, derived nodes, edges, dependency buckets and retained tombstones.
+  owners, admission-queue entries, slot and queue backing capacity, derived
+  nodes, edges, dependency buckets and retained tombstones, read under the
+  base publication gate as one generation.
 - A cache-validation read path is an OBSERVER, never a producer — and after
   C4b it is not a resolver at all. C4a's interim `Route` edge-currency refresh
   needed an observe-but-do-not-admit mode (a validator that warmed the slot

@@ -711,8 +711,91 @@ fn unknown_owner_resolutions_stay_within_the_slot_cap() {
         "{after:?}"
     );
     assert!(
-        workspace.engine.lazy_resolution_cache.read().queue_len() <= 2 * CAP + 64,
-        "the admission queue stays proportional to the lane"
+        after.slot_queue_entries <= 2 * CAP + 64,
+        "the admission queue stays proportional to the lane: {after:?}"
+    );
+}
+
+/// Every evicted unknown-owner slot takes the dependency edge its answer
+/// recorded: the dependency store and the dependency's reverse set hold
+/// only the importers the lane still retains, however many came and went.
+///
+/// Mutation recipe: drop the `retract_lazy_dependencies` call from
+/// `retire_resolution_decisions`. Every distinct importer then stays an
+/// edge-store owner and a reverse dependent of the dependency.
+#[test]
+fn unknown_owner_dependency_edges_leave_with_their_evicted_slots() {
+    const CAP: usize = 16;
+    const IMPORTERS: usize = CAP * 8;
+    let workspace = ownership_workspace();
+    workspace
+        .engine
+        .lazy_resolution_cache
+        .write()
+        .set_slot_cap_for_test(CAP);
+    let baseline_files = WorkspaceRead::resource_snapshot(&workspace).edge_file_count;
+    let importer = |index: usize| format!("/ghost/importer-{index}.ts");
+    for index in 0..IMPORTERS {
+        let _ = admitted_signature(resolve_owned(&workspace, &importer(index), "../p/dep"));
+    }
+
+    let snapshot = WorkspaceRead::resource_snapshot(&workspace);
+    assert_eq!(
+        snapshot.edge_file_count,
+        baseline_files + CAP,
+        "one dependency owner per retained slot: {snapshot:?}"
+    );
+    let dependents = WorkspaceRead::reverse_deps_for(&workspace, OWNERSHIP_DEP);
+    let mut expected: Vec<String> = (IMPORTERS - CAP..IMPORTERS).map(importer).collect();
+    expected.sort();
+    let mut actual = dependents.clone();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "the dependency's reverse set is exactly the resident importers"
+    );
+}
+
+/// A lane drained after a large fill reports the backing storage it still
+/// holds, distinct from its occupancy, and gives the excess back.
+///
+/// Mutation recipe: delete the two `shrink_to` branches of
+/// `compact_order`. The drained slot capacity then stays at the fill's
+/// high-water mark.
+#[test]
+fn a_drained_lane_reports_and_returns_its_backing_storage() {
+    const FILL: usize = 1024;
+    let workspace = ownership_workspace();
+    let baseline = residency(&workspace);
+    let importers: Vec<String> = (0..FILL)
+        .map(|index| format!("/p/fill/importer-{index}.ts"))
+        .collect();
+    for importer in &importers {
+        workspace.inject_file(importer.clone(), Arc::from("import '../dep'\n"));
+        let _ = admitted_signature(resolve_owned(&workspace, importer, "../dep"));
+    }
+    let full = residency(&workspace);
+    assert_eq!(full.slots, baseline.slots + FILL, "{full:?}");
+    assert!(full.slot_capacity >= full.slots, "{full:?}");
+    assert!(full.slot_queue_entries >= FILL, "{full:?}");
+    assert!(
+        full.slot_queue_capacity >= full.slot_queue_entries,
+        "{full:?}"
+    );
+
+    for importer in &importers {
+        workspace.remove_file(importer);
+    }
+    let drained = residency(&workspace);
+    assert_owned_state_at_baseline(drained, baseline);
+    assert!(drained.slot_queue_entries <= 64, "{drained:?}");
+    assert!(
+        drained.slot_capacity <= 256 && drained.slot_capacity < full.slot_capacity,
+        "the drained slot table gave back its excess storage: {drained:?}"
+    );
+    assert!(
+        drained.slot_queue_capacity <= 4 * drained.slot_queue_entries + 256,
+        "the drained admission queue gave back its excess storage: {drained:?}"
     );
 }
 
@@ -922,4 +1005,322 @@ fn refused_retention_serves_complete_answers_uncached_and_owners_drain() {
     );
     workspace.remove_file(importer);
     assert_owned_state_at_baseline(residency(&workspace), baseline);
+}
+
+/// A snapshot that outlives an importer's retirement still holds the
+/// retired decision, so its bytes stay charged until that snapshot drops,
+/// and are then released exactly once.
+///
+/// Mutation recipe: in `publish_charged_decision`, drop the
+/// `decision_charges` insert. The charge then drains when the slot retires,
+/// while the held snapshot still holds the decision.
+#[test]
+fn a_held_snapshot_keeps_its_retired_decision_charged_until_it_drops() {
+    let workspace = ownership_workspace();
+    let baseline = residency(&workspace);
+    let charged = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    WorkspaceAccess::install_resolution_retention(
+        &workspace,
+        Arc::new(OwnershipAccount {
+            admit: true,
+            charged: Arc::clone(&charged),
+        }),
+    );
+    let importer = "/p/held-charge.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    let witness = admitted_signature(resolve_owned(&workspace, importer, "./dep"));
+    let resolved = charged.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(resolved > 0, "fixture invariant: the answer is charged");
+
+    let held = WorkspaceRead::capture_resolution_world(&workspace).expect("captured world");
+    workspace.remove_file(importer);
+    assert_owned_state_at_baseline(residency(&workspace), baseline);
+    assert!(
+        witness.validates(held.as_ref()),
+        "fixture invariant: the held snapshot still holds the decision"
+    );
+    assert_eq!(
+        charged.load(std::sync::atomic::Ordering::SeqCst),
+        resolved,
+        "the held snapshot keeps the retired decision's bytes charged"
+    );
+
+    drop(held);
+    assert_eq!(
+        charged.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the charge drains once, with its last owner"
+    );
+}
+
+/// A retention account with the production account's size rule: an entry
+/// above its per-entry target is refused however much headroom remains.
+struct SizedAccount(Arc<verter_session_query::retention::SemanticRetentionAccount>);
+
+impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+    for SizedAccount
+{
+    fn reserve_retained(
+        &self,
+        bytes: usize,
+    ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge> {
+        self.0
+            .reserve(
+                verter_session_query::retention::ChargeClass::Retained,
+                bytes,
+            )
+            .admitted()
+            .map(verter_session_query::retention::resolution_charge::ResolutionRetentionCharge::new)
+    }
+}
+
+/// An answer whose retained size exceeds the account's per-entry target is
+/// still served complete — never truncated or qualified by its size — and
+/// uncached: retention pressure, no slot, no decision, no charge. A small
+/// answer under the same account is retained, and every owner drains.
+///
+/// Mutation recipe: admit the candidate when the reservation is refused.
+/// The oversized importer then occupies a slot and a decision.
+#[test]
+fn an_answer_above_the_entry_target_is_served_complete_and_uncached() {
+    const ENTRY_TARGET: usize = 16 * 1024;
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits {
+            max_entry_bytes: ENTRY_TARGET,
+            ..verter_session_query::retention::RetentionLimits::defaults()
+        },
+    );
+    let workspace = ownership_workspace();
+    WorkspaceAccess::install_resolution_retention(
+        &workspace,
+        Arc::new(SizedAccount(Arc::clone(&account))),
+    );
+    let baseline = residency(&workspace);
+
+    let small = "/p/small.ts";
+    workspace.inject_file(small.to_string(), Arc::from("import './dep'\n"));
+    let _ = admitted_signature(resolve_owned(&workspace, small, "./dep"));
+    let small_bytes = account.snapshot().retained_bytes;
+    assert!(
+        small_bytes > 0 && small_bytes < ENTRY_TARGET,
+        "fixture invariant: the small answer fits under the target ({small_bytes})"
+    );
+    let retained_small = residency(&workspace);
+
+    let large = format!("/p/{}.ts", "x".repeat(4 * ENTRY_TARGET));
+    workspace.inject_file(large.clone(), Arc::from("import './dep'\n"));
+    for attempt in 1..=2 {
+        // `resolve_owned` asserts the complete answer.
+        let outcome = resolve_owned(&workspace, &large, "./dep");
+        assert_eq!(
+            outcome.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::RetentionPressure),
+            "an oversized complete answer is retention pressure, not a budget refusal"
+        );
+        let snapshot = account.snapshot();
+        assert_eq!(
+            snapshot.refusals_oversized, attempt,
+            "the size rule refused it, and the next demand computes it again"
+        );
+        assert_eq!(snapshot.retained_bytes, small_bytes, "{snapshot:?}");
+        let after = residency(&workspace);
+        assert_eq!(after.slots, retained_small.slots, "{after:?}");
+        assert_eq!(
+            after.derived_nodes, retained_small.derived_nodes,
+            "{after:?}"
+        );
+    }
+
+    workspace.remove_file(small);
+    workspace.remove_file(&large);
+    assert_eq!(account.snapshot().retained_bytes, 0);
+    assert_owned_state_at_baseline(residency(&workspace), baseline);
+}
+
+/// An admission whose slot eviction folds the retirement history into the
+/// floor still returns a witness valid in the world it published into.
+///
+/// Mutation recipe: in the admission fence, retire the evicted decisions
+/// before publishing the admitted one. The fold then moves the floor the
+/// unstored new decision reads, and the admission that folded returns a
+/// witness a fresh capture rejects.
+#[test]
+fn an_admission_that_folds_the_history_returns_a_current_witness() {
+    let workspace = ownership_workspace();
+    workspace
+        .engine
+        .lazy_resolution_cache
+        .write()
+        .set_slot_cap_for_test(1);
+    let mut previous = residency(&workspace).retired_decisions;
+    let mut folded = false;
+    for index in 0..(2 * crate::resolution_currency::TOMBSTONE_RETIREMENT_MINIMUM + 8) {
+        let importer = format!("/ghost/fold-{index}.ts");
+        let witness = admitted_signature(resolve_owned(&workspace, &importer, "../p/dep"));
+        let fresh = WorkspaceRead::capture_resolution_world(&workspace).expect("captured world");
+        assert!(
+            witness.validates(fresh.as_ref()),
+            "admission {index} returned a witness its own world rejects"
+        );
+        let retired = residency(&workspace).retired_decisions;
+        folded |= retired < previous;
+        previous = retired;
+    }
+    assert!(folded, "fixture invariant: an admission folded the history");
+}
+
+/// A residency read never pairs a lane whose slots already retired with a
+/// decision graph that still holds their decisions.
+///
+/// Mutation recipe: drop the publication-gate guard from
+/// `resolution_residency`. The read taken while the deletion is paused
+/// between slot retirement and root publication then reports the slot gone
+/// and its decision still live.
+#[test]
+fn a_residency_read_never_mixes_retirement_generations() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::time::Duration;
+
+    let workspace = ownership_workspace();
+    let baseline = residency(&workspace);
+    let importer = "/p/barrier.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    let _ = admitted_signature(resolve_owned(&workspace, importer, "./dep"));
+    let live = residency(&workspace);
+    assert!(
+        live.slots > baseline.slots && live.derived_nodes > baseline.derived_nodes,
+        "fixture invariant: {live:?}"
+    );
+
+    let (paused_tx, paused_rx) = std::sync::mpsc::channel::<()>();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+    let workspace = &workspace;
+    let read = std::thread::scope(|scope| {
+        let deleter = scope.spawn(move || {
+            resolution_test_hooks::with_hook(
+                ResolutionPhase::ImporterSlotsRetired,
+                move || {
+                    paused_tx.send(()).expect("test alive");
+                    resume_rx.recv().expect("test alive");
+                },
+                || workspace.remove_file(importer),
+            );
+        });
+        paused_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the deletion reaches its slot retirement");
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let reader = scope.spawn(move || {
+            read_tx.send(residency(workspace)).expect("test alive");
+        });
+        // A gated read cannot finish while the deletion is paused inside
+        // its window; an ungated one finishes at once with a mixed pair.
+        let early = read_rx.recv_timeout(Duration::from_millis(250)).ok();
+        resume_tx.send(()).expect("deleter alive");
+        let read = early.unwrap_or_else(|| read_rx.recv().expect("reader finishes"));
+        deleter.join().expect("deleter");
+        reader.join().expect("reader");
+        read
+    });
+    let before = read.slots == live.slots && read.derived_nodes == live.derived_nodes;
+    let after = read.slots == baseline.slots && read.derived_nodes == baseline.derived_nodes;
+    assert!(
+        before || after,
+        "the read mixed generations: {read:?} (live {live:?}, baseline {baseline:?})"
+    );
+}
+
+/// A warm reuse whose slot another admission evicted between the reuse and
+/// its final fence has no live decision to root on: it returns the
+/// candidate's own witness, which a later change to its target invalidates,
+/// and records no dependency edge for an answer the lane no longer holds.
+///
+/// Mutation recipe: drop the `serves` re-check under the final fence. The
+/// reuse then roots on the evicted decision's tombstone, which has no
+/// edges, and still validates after the target is deleted.
+#[test]
+fn a_reuse_evicted_before_its_fence_returns_its_own_witness() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+
+    let workspace = Arc::new(ownership_workspace());
+    workspace
+        .engine
+        .lazy_resolution_cache
+        .write()
+        .set_slot_cap_for_test(1);
+    let first = "/p/first.ts";
+    let second = "/p/second.ts";
+    for importer in [first, second] {
+        workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    }
+    let _ = admitted_signature(resolve_owned(&workspace, first, "./dep"));
+
+    let evictor = Arc::clone(&workspace);
+    let outcome = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let _ = admitted_signature(resolve_owned(&evictor, second, "./dep"));
+        },
+        || resolve_owned(&workspace, first, "./dep"),
+    );
+    assert!(
+        outcome.trace().reused(),
+        "fixture invariant: the first importer's demand reused its candidate"
+    );
+    let witness = admitted_signature(outcome);
+    let lazy = WorkspaceRead::dependency_snapshot(workspace.as_ref(), first)
+        .map(|snapshot| snapshot.lazy_resolved)
+        .unwrap_or_default();
+    assert!(
+        !lazy.contains(OWNERSHIP_DEP),
+        "an evicted answer records no dependency edge: {lazy:?}"
+    );
+
+    workspace.remove_file(OWNERSHIP_DEP);
+    let fresh =
+        WorkspaceRead::capture_resolution_world(workspace.as_ref()).expect("captured world");
+    assert!(
+        !witness.validates(fresh.as_ref()),
+        "the reuse's witness must see its target's deletion"
+    );
+}
+
+/// A demand naming an importer the workspace has already retired — an
+/// in-flight request for a just-deleted file — is answered complete, with
+/// its own precise witness, but leaves no slot, decision or dependency edge
+/// behind: nothing would retire them, since the importer's retirement
+/// already ran.
+///
+/// Mutation recipe: make `importer_known_absent` return `false`. The
+/// deleted importer then owns a slot and a decision again.
+#[test]
+fn a_demand_from_a_retired_importer_is_served_but_not_retained() {
+    let workspace = ownership_workspace();
+    let baseline = residency(&workspace);
+    let importer = "/p/gone.ts";
+    workspace.inject_file(importer.to_string(), Arc::from("import './dep'\n"));
+    let _ = admitted_signature(resolve_owned(&workspace, importer, "./dep"));
+    workspace.remove_file(importer);
+    assert_owned_state_at_baseline(residency(&workspace), baseline);
+
+    // `resolve_owned` asserts the complete answer.
+    let witness = admitted_signature(resolve_owned(&workspace, importer, "./dep"));
+    assert_owned_state_at_baseline(residency(&workspace), baseline);
+    assert!(
+        !WorkspaceRead::reverse_deps_for(&workspace, OWNERSHIP_DEP)
+            .iter()
+            .any(|dependent| dependent == importer),
+        "a retired importer records no dependency edge"
+    );
+    let fresh = WorkspaceRead::capture_resolution_world(&workspace).expect("captured world");
+    assert!(
+        witness.validates(fresh.as_ref()),
+        "the served answer's own witness is current"
+    );
+    workspace.remove_file(OWNERSHIP_DEP);
+    let moved = WorkspaceRead::capture_resolution_world(&workspace).expect("captured world");
+    assert!(
+        !witness.validates(moved.as_ref()),
+        "with no decision node behind it, the witness observes the target itself"
+    );
 }

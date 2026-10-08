@@ -71,6 +71,7 @@ test-support = [
   "verter_session_query/test-support",
   "verter_semantic_source/test-support",
   "verter_type_engine/test-support",
+  "verter_workspace/test-support",
 ]
 # Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
 # downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
@@ -272,6 +273,8 @@ uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 [dev-dependencies]
 verter_session_query = { workspace = true, features = ["test-support"] }
+# The retention-account replacement seam the overlay residency tests drive.
+verter_workspace = { path = "../verter_workspace", features = ["test-support"] }
 # Oracle harness snapshot-identity hashing (test-only — the harness lives under
 # `#[cfg(test)] mod typeinfo_tests`, so blake3 stays out of the production /
 # resolver dependency closure, preserving `tsgo_not_reachable_from_resolver`).

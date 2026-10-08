@@ -94,6 +94,18 @@ impl DependencySnapshot {
         out
     }
 
+    /// Whether the owner has no dependency state in any class.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.parsed_resolved.is_empty()
+            && self.parsed_unresolved_relatives.is_empty()
+            && self.exact_resolved.is_empty()
+            && self.lazy_resolved.is_empty()
+            && self.ambient_resolved.is_empty()
+            && self.semantic_transitive.is_empty()
+            && self.bare_specifiers.is_empty()
+            && self.exact_resolutions.is_empty()
+    }
+
     /// Active unresolved-stem set: `parsed_unresolved_relatives` minus
     /// specifiers dampened by a `CodegenBlocker` exact resolution. Drives
     /// `reverse_deps_by_stem`. R5 restricts dampening to
@@ -372,6 +384,33 @@ impl EdgeStore {
             inserted = snap.lazy_resolved.insert(dep_id.to_string());
         });
         inserted
+    }
+
+    /// Retract one lazy-resolved dep: the retained resolution answer that
+    /// recorded it left the workspace lane, and no remaining answer of the
+    /// owner resolves to it. Only the `lazy_resolved` class moves; the
+    /// reverse-axis bucket keeps the owner while another class still names
+    /// the dep. An owner left with no dependency state at all — an importer
+    /// known only through its resolutions — leaves the store, so owners the
+    /// workspace never learns about stay bounded by the retained answers.
+    pub fn retract_lazy_resolved_dep(&mut self, canonical_id: &str, dep_id: &str) {
+        if !self
+            .files
+            .get(canonical_id)
+            .is_some_and(|state| state.deps.lazy_resolved.contains(dep_id))
+        {
+            return;
+        }
+        self.write_pattern(canonical_id, |snap| {
+            snap.lazy_resolved.remove(dep_id);
+        });
+        if self
+            .files
+            .get(canonical_id)
+            .is_some_and(|state| state.deps.is_empty())
+        {
+            self.files.remove(canonical_id);
+        }
     }
 
     /// Replace `ambient_resolved` set wholesale.

@@ -64,6 +64,14 @@ pub struct ResolutionResidency {
     pub candidates: usize,
     /// Distinct importers owning at least one slot.
     pub owners: usize,
+    /// Entries in the lane's admission queue, including stale entries of
+    /// slots already retired (compacted once they dominate).
+    pub slot_queue_entries: usize,
+    /// Slots the lane's slot table holds storage for: allocated capacity,
+    /// distinct from [`Self::slots`] occupancy.
+    pub slot_capacity: usize,
+    /// Entries the lane's admission queue holds storage for.
+    pub slot_queue_capacity: usize,
     /// Live derived nodes (decisions and owner sets) across the base and
     /// session roots.
     pub derived_nodes: usize,
@@ -773,10 +781,12 @@ pub trait WorkspaceAccess: WorkspaceRead {
 
     fn end_strict_self_root_transition(&self) {}
 
-    /// Install the host's aggregate retention account, which the resident
-    /// request-overlay resolution state (the overlay lane and the overlay
-    /// value table) charges its entries to. Adapter workspaces with no
-    /// Engine retain no such state and ignore it.
+    /// Replace the retention account the resident resolution state charges
+    /// its entries to. Test-support only: an Engine-backed workspace charges
+    /// the process-local aggregate account from construction, so production
+    /// has nothing to install. Adapter workspaces with no Engine retain no
+    /// such state and ignore it.
+    #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,
         _account: std::sync::Arc<

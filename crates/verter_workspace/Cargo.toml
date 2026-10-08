@@ -35,7 +35,9 @@ external-corpus = []
 # `ResolutionBasis`-shaped value without minting through `Engine`/
 # `WorkspaceRead::capture_resolution_world` — production code never uses
 # these constructors. Matches the repo-wide `test-support` feature
-# convention (e.g. `verter_css_syntax`).
+# convention (e.g. `verter_css_syntax`). It also exposes the seam that
+# replaces the process-local retention account resident resolution state
+# charges, so a test can drive retention pressure deterministically.
 test-support = []
 
 [dependencies]
@@ -73,4 +75,7 @@ walkdir = "2.5"
 verter_tsgo_api = { path = "../verter_tsgo_api" }
 
 [dev-dependencies]
+# An isolated retention account with size-controlled limits for the
+# retention-refusal tests.
+verter_session_query = { workspace = true, features = ["test-support"] }
 tempfile = "3.27"

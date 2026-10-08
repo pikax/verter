@@ -15,6 +15,9 @@ pub(crate) enum ResolutionPhase {
     RequestCompletion,
     /// Inside a base resolution-world write, with the world epoch odd.
     WorldWriteHeld,
+    /// An importer's workspace-lane slots have left the lane; its decision
+    /// nodes have not yet left the root being built.
+    ImporterSlotsRetired,
     /// An importer resolution attempt begins, before its world capture.
     AttemptStart,
     /// The input driver begins one round of an attempt.

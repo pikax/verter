@@ -432,6 +432,16 @@ pub(crate) struct ResolutionFactRoot {
     /// Total direct edges across [`Self::forward`], maintained at every
     /// attach and detach so the count is an occupancy read, not a scan.
     edge_count: usize,
+    /// Each published decision's retention charge, shared with the
+    /// workspace-lane candidate that serves it. A root holds the charge for
+    /// as long as it holds the node, so a snapshot that outlives the
+    /// node's retirement keeps its bytes charged until the snapshot drops.
+    decision_charges: imbl::GenericHashMap<
+        ResolutionFactKey,
+        Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
+        rustc_hash::FxBuildHasher,
+        imbl::shared_ptr::DefaultSharedPtr,
+    >,
     /// Direct fact keys advanced since the enclosing mutation batch
     /// began, drained by [`Self::take_pending_seeds`] at the publication
     /// protocol's propagation step.
@@ -452,6 +462,7 @@ impl Default for ResolutionFactRoot {
             retired_nodes: ResolutionEdgeSet::default(),
             derived_floor: ResolutionFactVersion::INITIAL,
             edge_count: 0,
+            decision_charges: imbl::GenericHashMap::default(),
             pending_seeds: Vec::new(),
         }
     }
@@ -550,6 +561,19 @@ impl ResolutionFactRoot {
         replaced
     }
 
+    /// [`Self::publish_derived`] for a decision node whose bytes `charge`
+    /// covers: this root, and every root cloned from it while the node is
+    /// live, holds the charge with the node.
+    pub(crate) fn publish_charged_decision(
+        &mut self,
+        node: ResolutionFactKey,
+        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
+        charge: Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
+    ) -> bool {
+        self.decision_charges.insert(node.clone(), charge);
+        self.publish_derived(node, dependencies)
+    }
+
     /// Drop a derived node: ADVANCE its version, then drop its complete
     /// edge set in both directions.
     ///
@@ -581,6 +605,7 @@ impl ResolutionFactRoot {
         }
         self.detach_edges(node);
         self.forward.remove(node);
+        self.decision_charges.remove(node);
         let mut orphaned_owner_set = None;
         if let Some(owner) = node.owner_canonical() {
             let index_key = (owner.to_owned(), node.population());
@@ -1785,7 +1810,12 @@ impl CapturedResolutionWorld {
                 }
                 if let Some(session) = self.session.as_ref() {
                     let version = session.facts.version(key);
-                    if version != ResolutionFactVersion::INITIAL {
+                    // A session derived node is the session root's alone:
+                    // the session graph advances it when a base fact it
+                    // depends on moves, and its base twin is another
+                    // population's decision. Reading the twin would tie the
+                    // node to the base root's own retirement floor.
+                    if version != ResolutionFactVersion::INITIAL || key.is_derived_node() {
                         return version;
                     }
                 }
@@ -4240,6 +4270,56 @@ mod root_graph_tests {
         assert_eq!(root.residency().derived_nodes, 0);
         assert_eq!(root.residency().edges, 0);
         assert_eq!(root.residency().dependency_buckets, 0);
+    }
+
+    /// **A base root's retirement fold leaves every session decision's
+    /// version where it was.**
+    ///
+    /// A session decision node is the session root's alone; its base twin
+    /// is another population's decision, so the base root raising its
+    /// derived floor must not move what the session node reads.
+    ///
+    /// Mutation recipe: let a session derived node that reads `INITIAL`
+    /// fall through to its base twin again. After the base fold the twin
+    /// reads the raised floor and the session version moves.
+    #[test]
+    fn a_base_fold_leaves_session_decisions_where_they_were() {
+        let mut mint = minter();
+        let session_population = ResolutionPopulation::Session(SessionFingerprint::from_raw(7));
+        let session_node = node("./session").in_population(session_population);
+        let mut session = ResolutionSessionRoot::bootstrap(ResolutionWorldId::from_raw(2));
+        session
+            .facts
+            .publish_derived(session_node.clone(), [leaf("/p/session.ts")]);
+        let world = |base: ResolutionWorldRoot| CapturedResolutionWorld {
+            base: Arc::new(base),
+            session: Some(Arc::new(session.clone())),
+            population: session_population,
+            overlay: None,
+            overlay_values: None,
+        };
+
+        let mut base = ResolutionWorldRoot::bootstrap(ResolutionWorldId::from_raw(1));
+        let before = world(base.clone()).fact_version(&session_node);
+        let mut folded = false;
+        for index in 0..=TOMBSTONE_RETIREMENT_MINIMUM {
+            let retired = node(&format!("./retired-{index}"));
+            base.facts
+                .publish_derived(retired.clone(), [leaf("/p/retired.ts")]);
+            base.facts.remove_derived(&retired, mint());
+            folded |= base.facts.retire_tombstones_if_due(&mut mint);
+        }
+        assert!(
+            folded,
+            "fixture invariant: the base root folded its history"
+        );
+        assert_ne!(
+            base.facts
+                .version(&session_node.in_population(ResolutionPopulation::Base)),
+            ResolutionFactVersion::INITIAL,
+            "fixture invariant: the base twin now reads the raised floor"
+        );
+        assert_eq!(world(base).fact_version(&session_node), before);
     }
 
     /// **Propagation advances each reachable derived node exactly once

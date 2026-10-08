@@ -17,9 +17,17 @@
 //!
 //! Every removal reports the queries that no longer have a candidate
 //! behind them, so the caller removes their decision nodes under the same
-//! fence: a decision never outlives the candidate that serves it.
+//! fence: a decision never outlives the candidate that serves it. It also
+//! reports the resolved dependencies no remaining candidate of the same
+//! importer still answers, so the caller retracts the importer's
+//! resolution-owned dependency edge with them.
+//!
+//! A candidate's charge is shared with its decision node: the candidate and
+//! every resolution root that still holds the node keep it, so the bytes stay
+//! charged until the last of them — a held snapshot included — drops.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -32,6 +40,11 @@ use super::{LazyResolutionCacheEntry, LazyResolutionCacheKey};
 
 /// Default bound on the workspace lane's slot count.
 pub(crate) const WORKSPACE_LANE_SLOT_CAP: usize = 1 << 17;
+
+/// Backing capacity a drained lane may keep without giving it back: the
+/// slack that stops a lane hovering near empty from reallocating on every
+/// retirement.
+const SHRINK_FLOOR: usize = 256;
 
 /// Estimated bytes one decision edge holds: its key in the node's forward
 /// set and the node in the dependency's reverse set.
@@ -60,15 +73,38 @@ struct Slot {
 
 struct RetainedCandidate {
     entry: LazyResolutionCacheEntry,
-    _charge: Option<ResolutionRetentionCharge>,
+    _charge: Arc<ResolutionRetentionCharge>,
 }
 
-/// Occupancy of the workspace lane.
+/// Occupancy of the workspace lane: what it holds and the storage it keeps
+/// allocated for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SlotResidency {
     pub(crate) slots: usize,
     pub(crate) candidates: usize,
     pub(crate) owners: usize,
+    /// Admission-queue entries, stale ones (of retired slots) included.
+    pub(crate) queue_entries: usize,
+    /// Slots the slot table can hold without reallocating.
+    pub(crate) slot_capacity: usize,
+    /// Entries the admission queue can hold without reallocating.
+    pub(crate) queue_capacity: usize,
+}
+
+/// What one admission or retirement took out of the lane.
+#[derive(Debug, Default)]
+pub(crate) struct SlotRetirement {
+    /// Queries left with no candidate: their decision nodes go.
+    pub(crate) queries: Vec<ResolutionQueryKey>,
+    /// `(importer, dependency)` pairs no remaining candidate of that
+    /// importer resolves to: their resolution-owned dependency edges go.
+    pub(crate) dependencies: Vec<(String, String)>,
+}
+
+impl SlotRetirement {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.queries.is_empty() && self.dependencies.is_empty()
+    }
 }
 
 impl WorkspaceResolutionSlots {
@@ -94,19 +130,27 @@ impl WorkspaceResolutionSlots {
             .flat_map(|slot| slot.candidates.iter().map(|retained| &retained.entry))
     }
 
+    /// Whether `key` holds a candidate for `query` — under the publication
+    /// gate, whether that query's decision node is live.
+    pub(crate) fn serves(&self, key: &LazyResolutionCacheKey, query: &ResolutionQueryKey) -> bool {
+        self.candidates(key).any(|entry| entry.query == *query)
+    }
+
     /// Retain `entry` under `key` with the charge its bytes were admitted
-    /// under. The slot keeps its newest [`CANDIDATE_CAP`] candidates and
-    /// the store its newest `slot_cap` slots.
+    /// under, shared with the decision node it publishes. The slot keeps its
+    /// newest [`CANDIDATE_CAP`] candidates and the store its newest
+    /// `slot_cap` slots.
     ///
-    /// Returns the queries left with no candidate: an aged-out candidate
-    /// whose query no remaining sibling serves, and every query of an
-    /// evicted slot.
+    /// Returns what left: the queries left with no candidate (an aged-out
+    /// candidate whose query no remaining sibling serves, and every query
+    /// of an evicted slot) and the dependencies no remaining candidate of
+    /// their importer resolves to.
     pub(crate) fn admit(
         &mut self,
         key: LazyResolutionCacheKey,
         entry: LazyResolutionCacheEntry,
-        charge: Option<ResolutionRetentionCharge>,
-    ) -> Vec<ResolutionQueryKey> {
+        charge: Arc<ResolutionRetentionCharge>,
+    ) -> SlotRetirement {
         if !self.slots.contains_key(&key) {
             let generation = self.next_generation;
             self.next_generation += 1;
@@ -128,7 +172,7 @@ impl WorkspaceResolutionSlots {
         let slot = self.slots.get_mut(&key).expect("the slot was just ensured");
         let mut aged_out = Vec::new();
         while slot.candidates.len() >= CANDIDATE_CAP {
-            aged_out.push(slot.candidates.remove(0).entry.query);
+            aged_out.push(slot.candidates.remove(0).entry);
             self.candidates -= 1;
         }
         slot.candidates.push(RetainedCandidate {
@@ -138,16 +182,26 @@ impl WorkspaceResolutionSlots {
         self.candidates += 1;
         // An aged-out query that a remaining candidate (the incoming one
         // included) still serves keeps its decision.
-        aged_out.retain(|query| {
-            !slot
+        let mut retirement = SlotRetirement::default();
+        for entry in aged_out {
+            if !slot
                 .candidates
                 .iter()
-                .any(|retained| retained.entry.query == *query)
-        });
-        aged_out.sort();
-        aged_out.dedup();
-        self.enforce_slot_cap(&mut aged_out);
-        aged_out
+                .any(|retained| retained.entry.query == entry.query)
+            {
+                retirement.queries.push(entry.query);
+            }
+            if let Some(result) = entry.result {
+                retirement
+                    .dependencies
+                    .push((key.importer_id.clone(), result.source_id));
+            }
+        }
+        retirement.queries.sort();
+        retirement.queries.dedup();
+        self.enforce_slot_cap(&mut retirement);
+        self.keep_served_dependencies(&mut retirement.dependencies);
+        retirement
     }
 
     /// Retire every slot `owner` holds whose population `retire` accepts.
@@ -156,11 +210,11 @@ impl WorkspaceResolutionSlots {
         &mut self,
         owner: &str,
         retire: impl Fn(&str, ResolutionPopulation) -> bool,
-    ) -> Vec<ResolutionQueryKey> {
+    ) -> SlotRetirement {
         let owner = verter_session_query::resolution::normalize_canonical_id(owner);
-        let mut queries = Vec::new();
-        self.retire_owners(std::iter::once(owner), &retire, &mut queries);
-        queries
+        let mut retirement = SlotRetirement::default();
+        self.retire_owners(std::iter::once(owner), &retire, &mut retirement);
+        retirement
     }
 
     /// [`Self::retire_owner`] for every owner at or under `prefix`.
@@ -168,7 +222,7 @@ impl WorkspaceResolutionSlots {
         &mut self,
         prefix: &str,
         retire: impl Fn(&str, ResolutionPopulation) -> bool,
-    ) -> Vec<ResolutionQueryKey> {
+    ) -> SlotRetirement {
         let prefix = verter_session_query::resolution::normalize_canonical_id(prefix);
         let base = prefix.trim_end_matches('/');
         let directory = format!("{base}/");
@@ -180,9 +234,9 @@ impl WorkspaceResolutionSlots {
             .filter(|owner| owner.as_str() == base || owner.starts_with(&directory))
             .cloned()
             .collect();
-        let mut queries = Vec::new();
-        self.retire_owners(owners.into_iter(), &retire, &mut queries);
-        queries
+        let mut retirement = SlotRetirement::default();
+        self.retire_owners(owners.into_iter(), &retire, &mut retirement);
+        retirement
     }
 
     pub(crate) fn residency(&self) -> SlotResidency {
@@ -190,13 +244,10 @@ impl WorkspaceResolutionSlots {
             slots: self.slots.len(),
             candidates: self.candidates,
             owners: self.owners.len(),
+            queue_entries: self.order.len(),
+            slot_capacity: self.slots.capacity(),
+            queue_capacity: self.order.capacity(),
         }
-    }
-
-    /// Entries in the admission queue, stale ones included.
-    #[cfg(test)]
-    pub(crate) fn queue_len(&self) -> usize {
-        self.order.len()
     }
 
     /// Drop every slot without retiring a decision: a test seam that forces
@@ -218,7 +269,7 @@ impl WorkspaceResolutionSlots {
         &mut self,
         owners: impl Iterator<Item = String>,
         retire: &impl Fn(&str, ResolutionPopulation) -> bool,
-        queries: &mut Vec<ResolutionQueryKey>,
+        retirement: &mut SlotRetirement,
     ) {
         for owner in owners {
             let Some(keys) = self.owners.get(&owner) else {
@@ -230,13 +281,14 @@ impl WorkspaceResolutionSlots {
                 .cloned()
                 .collect();
             for key in retired {
-                self.remove_slot(&key, queries);
+                self.remove_slot(&key, retirement);
             }
         }
         self.compact_order();
+        self.keep_served_dependencies(&mut retirement.dependencies);
     }
 
-    fn remove_slot(&mut self, key: &LazyResolutionCacheKey, queries: &mut Vec<ResolutionQueryKey>) {
+    fn remove_slot(&mut self, key: &LazyResolutionCacheKey, retirement: &mut SlotRetirement) {
         let Some(slot) = self.slots.remove(key) else {
             return;
         };
@@ -249,17 +301,47 @@ impl WorkspaceResolutionSlots {
         self.candidates -= slot.candidates.len();
         // A query names its slot, so only candidates of this one slot can
         // repeat it.
-        let mut slot_queries: Vec<ResolutionQueryKey> = slot
-            .candidates
-            .into_iter()
-            .map(|retained| retained.entry.query)
-            .collect();
+        let mut slot_queries: Vec<ResolutionQueryKey> = Vec::with_capacity(slot.candidates.len());
+        for retained in slot.candidates {
+            slot_queries.push(retained.entry.query);
+            if let Some(result) = retained.entry.result {
+                retirement
+                    .dependencies
+                    .push((key.importer_id.clone(), result.source_id));
+            }
+        }
         slot_queries.sort();
         slot_queries.dedup();
-        queries.extend(slot_queries);
+        retirement.queries.extend(slot_queries);
     }
 
-    fn enforce_slot_cap(&mut self, queries: &mut Vec<ResolutionQueryKey>) {
+    /// Drop every `(importer, dependency)` pair a remaining candidate of
+    /// that importer still resolves to; the rest name dependency edges no
+    /// retained answer backs any more.
+    fn keep_served_dependencies(&self, dependencies: &mut Vec<(String, String)>) {
+        dependencies.sort();
+        dependencies.dedup();
+        dependencies.retain(|(importer, dependency)| {
+            let owner = verter_session_query::resolution::normalize_canonical_id(importer);
+            let Some(keys) = self.owners.get(&owner) else {
+                return true;
+            };
+            !keys
+                .iter()
+                .filter(|key| key.importer_id == *importer)
+                .filter_map(|key| self.slots.get(key))
+                .flat_map(|slot| slot.candidates.iter())
+                .any(|retained| {
+                    retained
+                        .entry
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.source_id == *dependency)
+                })
+        });
+    }
+
+    fn enforce_slot_cap(&mut self, retirement: &mut SlotRetirement) {
         while self.slots.len() > self.slot_cap {
             let Some((key, generation)) = self.order.pop_front() else {
                 break;
@@ -269,14 +351,15 @@ impl WorkspaceResolutionSlots {
                 .get(&key)
                 .is_some_and(|slot| slot.generation == generation)
             {
-                self.remove_slot(&key, queries);
+                self.remove_slot(&key, retirement);
             }
         }
         self.compact_order();
     }
 
     /// Drop the queue's stale entries once they outnumber the live ones,
-    /// so the queue stays proportional to the store.
+    /// so the queue stays proportional to the store, and give back backing
+    /// storage a drained lane no longer needs.
     fn compact_order(&mut self) {
         if self.order.len() > 2 * self.slots.len() + 64 {
             let slots = &self.slots;
@@ -285,6 +368,12 @@ impl WorkspaceResolutionSlots {
                     .get(key)
                     .is_some_and(|slot| slot.generation == *generation)
             });
+        }
+        if self.order.capacity() > 4 * self.order.len() + SHRINK_FLOOR {
+            self.order.shrink_to(2 * self.order.len());
+        }
+        if self.slots.capacity() > 4 * self.slots.len() + SHRINK_FLOOR {
+            self.slots.shrink_to(2 * self.slots.len());
         }
     }
 }
