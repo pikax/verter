@@ -551,57 +551,66 @@ impl<'s, 'p, 'alloc> Builder<'s, 'p, 'alloc> {
         function: OuterRefSource<'_, 'alloc>,
     ) -> Vec<OuterRef> {
         let base = parsed.offset;
-        let mut locals = Locals::default();
-        match function {
-            OuterRefSource::Function(CallbackShape::Arrow(arrow)) => {
-                locals.function(
-                    arrow.span,
-                    &arrow.params,
-                    arrow.get_function_body(),
-                    arrow.get_expression(),
-                );
-            }
-            OuterRefSource::Function(CallbackShape::Function(function)) => {
-                locals.function(
-                    function.span,
-                    &function.params,
-                    function.body.as_deref(),
-                    None,
-                );
-            }
-            OuterRefSource::Handler(expression) => {
-                locals.declare("$event", expression.span());
-                locals.visit_expression(expression);
-            }
-        }
-        let mut refs = Refs {
-            locals: &locals,
-            chains: Vec::new(),
+        let region = match &function {
+            OuterRefSource::Function(CallbackShape::Arrow(arrow)) => arrow.span,
+            OuterRefSource::Function(CallbackShape::Function(function)) => function.span,
+            OuterRefSource::Handler(expression) => expression.span(),
         };
-        match function {
-            OuterRefSource::Function(CallbackShape::Arrow(arrow)) => {
-                for param in &arrow.params.items {
-                    if let Some(initializer) = &param.initializer {
-                        refs.visit_expression(initializer);
+        let region = oxc_span::Span::new(base + region.start, base + region.end);
+        let refs_chains = verter_parser::oxc_parse::with_span_stack(self.source, region, || {
+            let mut locals = Locals::default();
+            match function {
+                OuterRefSource::Function(CallbackShape::Arrow(arrow)) => {
+                    locals.function(
+                        arrow.span,
+                        &arrow.params,
+                        arrow.get_function_body(),
+                        arrow.get_expression(),
+                    );
+                }
+                OuterRefSource::Function(CallbackShape::Function(function)) => {
+                    locals.function(
+                        function.span,
+                        &function.params,
+                        function.body.as_deref(),
+                        None,
+                    );
+                }
+                OuterRefSource::Handler(expression) => {
+                    locals.declare("$event", expression.span());
+                    locals.visit_expression(expression);
+                }
+            }
+            let mut refs = Refs {
+                locals: &locals,
+                chains: Vec::new(),
+            };
+            match function {
+                OuterRefSource::Function(CallbackShape::Arrow(arrow)) => {
+                    for param in &arrow.params.items {
+                        if let Some(initializer) = &param.initializer {
+                            refs.visit_expression(initializer);
+                        }
+                    }
+                    match (arrow.get_function_body(), arrow.get_expression()) {
+                        (_, Some(expression)) => refs.visit_expression(expression),
+                        (Some(body), None) => refs.statements(&body.statements),
+                        (None, None) => {}
                     }
                 }
-                match (arrow.get_function_body(), arrow.get_expression()) {
-                    (_, Some(expression)) => refs.visit_expression(expression),
-                    (Some(body), None) => refs.statements(&body.statements),
-                    (None, None) => {}
+                OuterRefSource::Function(CallbackShape::Function(function)) => {
+                    if let Some(body) = &function.body {
+                        refs.statements(&body.statements);
+                    }
                 }
+                OuterRefSource::Handler(expression) => refs.visit_expression(expression),
             }
-            OuterRefSource::Function(CallbackShape::Function(function)) => {
-                if let Some(body) = &function.body {
-                    refs.statements(&body.statements);
-                }
-            }
-            OuterRefSource::Handler(expression) => refs.visit_expression(expression),
-        }
 
+            refs.chains
+        });
         let mut seen: FxHashMap<String, usize> = FxHashMap::default();
         let mut out: Vec<(usize, OuterRef)> = Vec::new();
-        for chain in refs.chains {
+        for chain in refs_chains {
             let root_text = self.root_text(parsed, base + chain.root.start, chain.name);
             let mut text = root_text;
             let mut occurrence = Span::new(base + chain.root.start, base + chain.root.end);
