@@ -407,11 +407,5 @@
       "receivingAcceptance": "UAK2-AC1"
     }
   ],
-  "layerAssignmentRule": "Every workspace crate is assigned to exactly one layer above, or is a named role-shared crate whose halves are listed separately (verter_compiler: L3 + LC). The UAM0 structural check reads cargo metadata and fails on a crate in no layer.",
-  "graphValidation": {
-    "prerequisiteOwner": "UAG0",
-    "receivingAcceptance": ["UAG0-AC1", "UAG0-AC2", "UAG0-AC3", "UAG0-AC4"],
-    "consumptionAcceptance": "UAK1-AC1",
-    "requirement": "Before acceptance, consume the controller-recorded executable proof of acyclicity, independent vertical/product release terminals and non-gating soak joins; check these owner bindings against the applied graph. This inventory is contract data, not a graph-validation receipt."
-  }
+  "layerAssignmentRule": "Every workspace crate is assigned to exactly one layer above, or is a named role-shared crate whose halves are listed separately (verter_compiler: L3 + LC). The UAM0 structural check reads cargo metadata and fails on a crate in no layer."
 }

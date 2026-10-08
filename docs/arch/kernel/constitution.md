@@ -24,9 +24,9 @@ The reviewed contract data lives in `tests/kernel/UAK1/products/`:
 Every owner must exist in the controller-owned plan before acceptance. The
 receiving contracts below include the ratified additions FWC1, PPR0T and PUB0T;
 their creation and edges are part of the controller ruling, not this repository.
-Every `successorPath` starts at UAK1 and follows predecessor edges. UAG0 supplies
-the executable graph-validation method and result that UAK1 must consume before
-acceptance. The UAK0
+Every `successorPath` starts at UAK1 and follows predecessor edges. The
+controller validates its own plan (no cycles, no dangling edges) on every write,
+so no executable graph proof is a prerequisite of this decision. The UAK0
 rows (`B..`, `O..`, `C..`, `S..`, `D..`) keep their UAK0 owners; UAK1 only
 references them.
 
@@ -227,13 +227,11 @@ coverage and bounded inspection discriminate it. The diff adds no test.
   outcome, consumer and firewall breach to one receiving node, a successor
   path from UAK1 and a receiving acceptance ID. UAK0's rows are referenced,
   not re-owned, so no route has two owners. The executable validator and its
-  negative controls are UAM0's (`UAM0-AC-R1`). UAG0 owns the prerequisite
-  executable validation and controller-recorded result for acyclicity,
-  independent vertical/product release terminals and non-gating soak joins
-  (`UAG0-AC1`–`UAG0-AC4`). UAK1 must consume that result and verify its owner
-  bindings against the applied graph before acceptance. This candidate does
-  not claim that the prerequisite has passed. No repository DAG or validator
-  is introduced.
+  negative controls are UAM0's (`UAM0-AC-R1`). Every owner, successor
+  edge and receiving acceptance ID is checked against the controller-owned
+  plan at review; acyclicity and dangling edges are the controller's own
+  write-time validation, and UAK2 (`UAK2-AC1`) later confirms no global
+  release join across families. No repository DAG or validator is introduced.
 - **AC2 — positive contract.** The named boundaries' identity, provenance and
   ordering behaviour is pinned by the coverage UAK0 cites. The dependency
   directions are already held in part by `workspace_dependency_layers`, by the
