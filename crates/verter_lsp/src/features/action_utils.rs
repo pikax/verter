@@ -234,6 +234,195 @@ pub fn make_insert_action(
     })
 }
 
+/// How the client applies a `WorkspaceEdit`, negotiated once at `initialize`
+/// from `workspace.workspaceEdit.documentChanges`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceEditSupport {
+    /// The client accepts `documentChanges`: every text edit is delivered as a
+    /// `TextDocumentEdit` naming the version it was computed against, so the
+    /// client rejects an edit to a document that has since moved.
+    VersionedDocumentChanges,
+    /// The client did not advertise `documentChanges`, so the only shape it can
+    /// apply is `WorkspaceEdit.changes`. Every target is validated before
+    /// delivery, text edits are downgraded to `changes`, and an edit that
+    /// needs a resource operation (file creation) is withheld whole.
+    #[default]
+    Unversioned,
+}
+
+impl WorkspaceEditSupport {
+    /// Read the client's advertised `workspace.workspaceEdit.documentChanges`.
+    pub fn negotiate(capabilities: &ClientCapabilities) -> Self {
+        let document_changes = capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.workspace_edit.as_ref())
+            .and_then(|edit| edit.document_changes)
+            .unwrap_or(false);
+        if document_changes {
+            Self::VersionedDocumentChanges
+        } else {
+            Self::Unversioned
+        }
+    }
+}
+
+/// What a request's snapshot knows about one document an edit targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditTargetRevision {
+    /// Open in the client; the edit was computed against this captured
+    /// version.
+    Open(i32),
+    /// Not open in the client: the edit applies to the file on disk.
+    Closed,
+    /// Open in the client, but the request captured no revision of it, so
+    /// nothing proves which bytes the edit addresses.
+    Uncaptured,
+}
+
+/// Why an edit cannot be delivered to the client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditRefusal {
+    /// The request snapshot cannot bind this target to a revision.
+    UnboundTarget(Uri),
+    /// The edit carries a resource operation the client cannot apply.
+    ResourceOperation,
+}
+
+/// Bind every document `edit` touches to the revision the request computed it
+/// against — the one place an LSP edit's delivery shape is decided.
+///
+/// Every target is resolved through `revision_of` first; an
+/// [`EditTargetRevision::Uncaptured`] target refuses the whole edit, so a
+/// partial cross-file edit is never delivered. Then, for a
+/// [`WorkspaceEditSupport::VersionedDocumentChanges`] client, `changes` entries
+/// become `TextDocumentEdit`s (ordered by URI) and every `TextDocumentEdit`
+/// carries its target's captured version, `null` only for a closed target. An
+/// [`WorkspaceEditSupport::Unversioned`] client receives only `changes`: every
+/// `TextDocumentEdit` is downgraded to it, and an edit carrying a resource
+/// operation is refused whole with [`EditRefusal::ResourceOperation`] rather
+/// than delivered without its creation step.
+pub fn bind_workspace_edit(
+    edit: &mut WorkspaceEdit,
+    support: WorkspaceEditSupport,
+    revision_of: &mut dyn FnMut(&Uri) -> EditTargetRevision,
+) -> Result<(), EditRefusal> {
+    let mut revisions: Vec<(Uri, EditTargetRevision)> = Vec::new();
+    let mut resolve = |uri: &Uri| -> Result<EditTargetRevision, EditRefusal> {
+        if let Some((_, revision)) = revisions.iter().find(|(known, _)| known == uri) {
+            return Ok(*revision);
+        }
+        let revision = revision_of(uri);
+        if revision == EditTargetRevision::Uncaptured {
+            return Err(EditRefusal::UnboundTarget(uri.clone()));
+        }
+        revisions.push((uri.clone(), revision));
+        Ok(revision)
+    };
+
+    if let Some(changes) = &edit.changes {
+        for uri in changes.keys() {
+            resolve(uri)?;
+        }
+    }
+    let mut document_edits: Vec<&mut TextDocumentEdit> = match edit.document_changes.as_mut() {
+        Some(DocumentChanges::Edits(edits)) => edits.iter_mut().collect(),
+        Some(DocumentChanges::Operations(operations)) => operations
+            .iter_mut()
+            .filter_map(|operation| match operation {
+                DocumentChangeOperation::Edit(edit) => Some(edit),
+                DocumentChangeOperation::Op(_) => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut bound = Vec::with_capacity(document_edits.len());
+    for document_edit in &mut document_edits {
+        bound.push(resolve(&document_edit.text_document.uri)?);
+    }
+    if support == WorkspaceEditSupport::Unversioned {
+        drop(document_edits);
+        return downgrade_to_changes(edit);
+    }
+
+    for (document_edit, revision) in document_edits.into_iter().zip(bound) {
+        document_edit.text_document.version = captured_version(revision);
+    }
+    let Some(changes) = edit.changes.take() else {
+        return Ok(());
+    };
+    let mut changes: Vec<(Uri, Vec<TextEdit>)> = changes.into_iter().collect();
+    changes.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    let converted = changes
+        .into_iter()
+        .map(|(uri, edits)| {
+            let version = captured_version(resolve(&uri)?);
+            Ok(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier { uri, version },
+                edits: edits.into_iter().map(OneOf::Left).collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, EditRefusal>>()?;
+    match edit.document_changes.as_mut() {
+        None => edit.document_changes = Some(DocumentChanges::Edits(converted)),
+        Some(DocumentChanges::Edits(edits)) => edits.extend(converted),
+        Some(DocumentChanges::Operations(operations)) => {
+            operations.extend(converted.into_iter().map(DocumentChangeOperation::Edit))
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite `edit`'s `documentChanges` into `changes` for a client that cannot
+/// apply `documentChanges`. Every route builds all of an edit's text against
+/// the one captured revision of each target, so the edits of a target merge in
+/// order. Change annotations need `documentChanges` and are dropped with it.
+fn downgrade_to_changes(edit: &mut WorkspaceEdit) -> Result<(), EditRefusal> {
+    if let Some(DocumentChanges::Operations(operations)) = &edit.document_changes {
+        if operations
+            .iter()
+            .any(|operation| matches!(operation, DocumentChangeOperation::Op(_)))
+        {
+            return Err(EditRefusal::ResourceOperation);
+        }
+    }
+    let document_edits: Vec<TextDocumentEdit> = match edit.document_changes.take() {
+        None => return Ok(()),
+        Some(DocumentChanges::Edits(edits)) => edits,
+        Some(DocumentChanges::Operations(operations)) => operations
+            .into_iter()
+            .filter_map(|operation| match operation {
+                DocumentChangeOperation::Edit(edit) => Some(edit),
+                DocumentChangeOperation::Op(_) => None,
+            })
+            .collect(),
+    };
+    let changes = edit.changes.get_or_insert_with(Default::default);
+    for document_edit in document_edits {
+        changes
+            .entry(document_edit.text_document.uri)
+            .or_default()
+            .extend(
+                document_edit
+                    .edits
+                    .into_iter()
+                    .map(|text_edit| match text_edit {
+                        OneOf::Left(text_edit) => text_edit,
+                        OneOf::Right(annotated) => annotated.text_edit,
+                    }),
+            );
+    }
+    edit.change_annotations = None;
+    Ok(())
+}
+
+fn captured_version(revision: EditTargetRevision) -> Option<i32> {
+    match revision {
+        EditTargetRevision::Open(version) => Some(version),
+        EditTargetRevision::Closed | EditTargetRevision::Uncaptured => None,
+    }
+}
+
 /// Re-export for backwards compatibility.
 pub use super::sentinel_uris::PLACEHOLDER_URI_STR as SAME_FILE_URI;
 pub use super::sentinel_uris::{PLACEHOLDER_URI, PLACEHOLDER_URI_STR};
@@ -526,6 +715,276 @@ mod tests {
                 assert_ne!(edits[0].text_document.uri.as_str(), SAME_FILE_URI);
             }
         }
+    }
+
+    // ── bind_workspace_edit ─────────────────────────────────────────────
+
+    fn insert(line: u32, text: &str) -> TextEdit {
+        TextEdit {
+            range: Range {
+                start: Position { line, character: 0 },
+                end: Position { line, character: 0 },
+            },
+            new_text: text.to_string(),
+        }
+    }
+
+    #[allow(clippy::mutable_key_type)]
+    fn changes_edit(targets: &[(&Uri, TextEdit)]) -> WorkspaceEdit {
+        let mut changes = std::collections::HashMap::new();
+        for (uri, edit) in targets {
+            changes
+                .entry((*uri).clone())
+                .or_insert_with(Vec::new)
+                .push(edit.clone());
+        }
+        WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }
+    }
+
+    fn revisions<'a>(
+        open: &'a Uri,
+        closed: &'a Uri,
+    ) -> impl FnMut(&Uri) -> EditTargetRevision + 'a {
+        move |uri: &Uri| {
+            if uri == open {
+                EditTargetRevision::Open(4)
+            } else if uri == closed {
+                EditTargetRevision::Closed
+            } else {
+                EditTargetRevision::Uncaptured
+            }
+        }
+    }
+
+    #[test]
+    fn versioned_client_receives_one_versioned_document_edit_per_target() {
+        let open: Uri = "file:///b/Open.vue".parse().unwrap();
+        let closed: Uri = "file:///a/closed.ts".parse().unwrap();
+        let mut edit = changes_edit(&[(&open, insert(1, "x")), (&closed, insert(2, "y"))]);
+
+        bind_workspace_edit(
+            &mut edit,
+            WorkspaceEditSupport::VersionedDocumentChanges,
+            &mut revisions(&open, &closed),
+        )
+        .expect("every target is bound");
+
+        assert!(edit.changes.is_none(), "no unversioned `changes` survive");
+        let Some(DocumentChanges::Edits(edits)) = &edit.document_changes else {
+            panic!("expected TextDocumentEdits, got {edit:?}");
+        };
+        let delivered: Vec<(&str, Option<i32>, usize)> = edits
+            .iter()
+            .map(|edit| {
+                (
+                    edit.text_document.uri.as_str(),
+                    edit.text_document.version,
+                    edit.edits.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            delivered,
+            vec![
+                ("file:///a/closed.ts", None, 1),
+                ("file:///b/Open.vue", Some(4), 1)
+            ],
+            "ordered by URI; the open target names its captured version, the closed one null"
+        );
+    }
+
+    #[test]
+    fn versioned_client_versions_existing_document_changes() {
+        let open: Uri = "file:///Open.vue".parse().unwrap();
+        let closed: Uri = "file:///New.vue".parse().unwrap();
+        let mut edit = make_insert_edit(&open, Position::default(), "a".into());
+        let mut create = WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Operations(vec![
+                DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                    uri: closed.clone(),
+                    options: None,
+                    annotation_id: None,
+                })),
+                DocumentChangeOperation::Edit(TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: open.clone(),
+                        version: Some(99),
+                    },
+                    edits: vec![OneOf::Left(insert(0, "b"))],
+                }),
+            ])),
+            ..Default::default()
+        };
+
+        for edit in [&mut edit, &mut create] {
+            bind_workspace_edit(
+                edit,
+                WorkspaceEditSupport::VersionedDocumentChanges,
+                &mut revisions(&open, &closed),
+            )
+            .expect("bound");
+        }
+
+        let Some(DocumentChanges::Edits(edits)) = &edit.document_changes else {
+            panic!("expected edits");
+        };
+        assert_eq!(edits[0].text_document.version, Some(4));
+        let Some(DocumentChanges::Operations(operations)) = &create.document_changes else {
+            panic!("expected operations");
+        };
+        assert!(
+            matches!(
+                &operations[0],
+                DocumentChangeOperation::Op(ResourceOp::Create(_))
+            ),
+            "resource operations keep their place"
+        );
+        let DocumentChangeOperation::Edit(versioned) = &operations[1] else {
+            panic!("expected an edit operation");
+        };
+        assert_eq!(
+            versioned.text_document.version,
+            Some(4),
+            "the captured version replaces whatever version the route wrote"
+        );
+    }
+
+    #[test]
+    fn unversioned_client_keeps_changes_edits_as_they_are() {
+        let open: Uri = "file:///Open.vue".parse().unwrap();
+        let closed: Uri = "file:///closed.ts".parse().unwrap();
+        let mut edit = changes_edit(&[(&open, insert(1, "x"))]);
+        let before = edit.clone();
+
+        bind_workspace_edit(
+            &mut edit,
+            WorkspaceEditSupport::Unversioned,
+            &mut revisions(&open, &closed),
+        )
+        .expect("bound");
+
+        assert_eq!(edit, before);
+    }
+
+    #[test]
+    fn unversioned_client_receives_document_changes_as_changes() {
+        let open: Uri = "file:///Open.vue".parse().unwrap();
+        let closed: Uri = "file:///closed.ts".parse().unwrap();
+        let mut edit = make_insert_edit(&open, Position::default(), "a".into());
+        let Some(DocumentChanges::Edits(edits)) = edit.document_changes.as_mut() else {
+            panic!("expected edits");
+        };
+        edits.push(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: closed.clone(),
+                version: Some(7),
+            },
+            edits: vec![OneOf::Left(insert(2, "b"))],
+        });
+        edit.change_annotations = Some(Default::default());
+
+        bind_workspace_edit(
+            &mut edit,
+            WorkspaceEditSupport::Unversioned,
+            &mut revisions(&open, &closed),
+        )
+        .expect("bound");
+
+        assert!(edit.document_changes.is_none(), "{edit:?}");
+        assert!(edit.change_annotations.is_none(), "{edit:?}");
+        let changes = edit.changes.as_ref().expect("changes");
+        assert_eq!(changes.len(), 2, "{edit:?}");
+        assert_eq!(changes[&open].len(), 1);
+        assert_eq!(changes[&open][0].new_text, "a");
+        assert_eq!(changes[&closed][0].new_text, "b");
+    }
+
+    #[test]
+    fn unversioned_client_refuses_an_edit_that_needs_a_resource_operation() {
+        let open: Uri = "file:///Open.vue".parse().unwrap();
+        let closed: Uri = "file:///New.vue".parse().unwrap();
+        let mut edit = WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Operations(vec![
+                DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                    uri: closed.clone(),
+                    options: None,
+                    annotation_id: None,
+                })),
+                DocumentChangeOperation::Edit(TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: open.clone(),
+                        version: None,
+                    },
+                    edits: vec![OneOf::Left(insert(0, "b"))],
+                }),
+            ])),
+            ..Default::default()
+        };
+        let before = edit.clone();
+
+        let refused = bind_workspace_edit(
+            &mut edit,
+            WorkspaceEditSupport::Unversioned,
+            &mut revisions(&open, &closed),
+        );
+
+        assert_eq!(refused, Err(EditRefusal::ResourceOperation));
+        assert_eq!(edit, before, "a refused edit is not partially rewritten");
+    }
+
+    #[test]
+    fn an_uncaptured_open_target_refuses_the_whole_edit() {
+        let open: Uri = "file:///Open.vue".parse().unwrap();
+        let closed: Uri = "file:///closed.ts".parse().unwrap();
+        let uncaptured: Uri = "file:///Other.vue".parse().unwrap();
+        for support in [
+            WorkspaceEditSupport::VersionedDocumentChanges,
+            WorkspaceEditSupport::Unversioned,
+        ] {
+            let mut edit = changes_edit(&[(&open, insert(1, "x")), (&uncaptured, insert(2, "y"))]);
+            let before = edit.clone();
+
+            let refused = bind_workspace_edit(&mut edit, support, &mut revisions(&open, &closed));
+
+            assert_eq!(
+                refused,
+                Err(EditRefusal::UnboundTarget(uncaptured.clone())),
+                "{support:?}"
+            );
+            assert_eq!(
+                edit, before,
+                "{support:?}: a refused edit is not partially rewritten"
+            );
+        }
+    }
+
+    #[test]
+    fn negotiation_reads_workspace_edit_document_changes() {
+        let advertised = |document_changes: Option<bool>| ClientCapabilities {
+            workspace: Some(WorkspaceClientCapabilities {
+                workspace_edit: Some(WorkspaceEditClientCapabilities {
+                    document_changes,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            WorkspaceEditSupport::negotiate(&advertised(Some(true))),
+            WorkspaceEditSupport::VersionedDocumentChanges
+        );
+        assert_eq!(
+            WorkspaceEditSupport::negotiate(&advertised(Some(false))),
+            WorkspaceEditSupport::Unversioned
+        );
+        assert_eq!(
+            WorkspaceEditSupport::negotiate(&ClientCapabilities::default()),
+            WorkspaceEditSupport::Unversioned
+        );
     }
 
     // ── LiveEditTarget::anchor_position (F3) ────────────────────────────

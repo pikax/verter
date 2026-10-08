@@ -7850,6 +7850,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<SemanticNodeId> {
+        self.class_member_source_along(canonical, owner, class, args, name, &mut Vec::new())
+    }
+
+    /// [`Self::class_member_source`] for one class of the inheritance path
+    /// a read follows; `path` holds the classes already followed, so a
+    /// circular `extends` chain stops instead of re-entering a class.
+    fn class_member_source_along(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+        path: &mut Vec<(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>)>,
+    ) -> Option<SemanticNodeId> {
+        if path.len() >= MAX_CLASS_MEMBER_INHERITANCE_DEPTH
+            || path.iter().any(|(seen_canonical, seen_owner, seen_class)| {
+                seen_canonical.as_ref() == canonical
+                    && *seen_owner == owner
+                    && seen_class.as_ref() == class
+            })
+        {
+            return None;
+        }
+        path.push((Arc::from(canonical), owner, Arc::from(class)));
         let prepared = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, class)?;
@@ -7981,6 +8006,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 scope,
             ));
         }
+        // A class another module augments (`declare module "./c" {
+        // interface C { … } }`) declares members its own body does not, so a read its own body
+        // does not answer and that is about to follow `extends` decides it: only
+        // the whole declaration, which merges the augmentations, answers.
+        if self.class_takes_module_augmentation(canonical, class) {
+            return None;
+        }
         // An inherited member reads off the base the class extends: its
         // `extends` arm lowers to a lazy reference, which binds no `this`, so
         // the member keeps the polymorphic `this` the reading receiver binds.
@@ -7992,11 +8024,87 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         };
         super::raise::deref_slot_body(self.ctx, &heritage_slot)?;
-        Some(lower_at(
+        let heritage = lower_at(
             vec![verter_type_expr::locators::TypeBodyPathStep::ClassHeritage],
             &mut substitutions,
             context,
-        ))
+        );
+        // A base that is itself a class declaration answers through its own
+        // member position, applied to the arguments the `extends` clause
+        // passes: the read follows the demanded name up the inheritance path
+        // one class at a time and never lowers a base's other members. The
+        // member keeps the base as its declaring owner (its scope and
+        // declaration origin). A base the selective route cannot serve (a
+        // value-only base, a merged class, a circular chain) is read through
+        // the `extends` arm whole, as before.
+        let base = match self.graph().node_data(heritage).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => Some((identity.clone(), Vec::new())),
+            Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                Some((base.clone(), args.to_vec()))
+            }
+            _ => None,
+        };
+        let inherited = base.and_then(|(base, base_args)| {
+            self.class_member_source_along(
+                &base.canonical_id,
+                base.owner,
+                &base.decl_name,
+                &base_args,
+                name,
+                path,
+            )
+        });
+        Some(inherited.unwrap_or(heritage))
+    }
+
+    /// Whether another module's `declare module` block contributes to the
+    /// class `class` of `canonical` — the augmentation the whole
+    /// declaration's instantiation merges in. The augmenter population is
+    /// observed onto the active fact tracer, so an augmentation appearing
+    /// later misses a read that found none.
+    fn class_takes_module_augmentation(&self, canonical: &str, class: &str) -> bool {
+        // Candidate augmenters are the files that depend on the class's
+        // module, indexed before the augmentation index is read — as the
+        // declaration's own stitch reads it.
+        for rdep in self.ctx.reverse_dependency_canonicals(canonical) {
+            let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
+        }
+        let target =
+            verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(
+                Arc::from(canonical),
+            );
+        // The common case — no module augments this one — is decided from the
+        // augmenter set alone, observed so a later augmenter misses a warm
+        // read; only a module with augmenters pays for the contributor read.
+        let (_, augmenter_set) = self.ctx.augmentation_index(target.clone());
+        crate::resolver_core::resolver_context::observe_fan_out(
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
+                verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
+                    canonical_id: canonical.to_owned(),
+                    key: verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
+                        &target,
+                    ),
+                    lane: verter_session_query::facts::FactLane::Semantic,
+                    expected_hash: augmenter_set.fingerprint,
+                },
+            ),
+        );
+        if augmenter_set.entries.is_empty() {
+            return false;
+        }
+        self.collect_augmentation_contributions(
+            AugmentationContribution::TypeBody,
+            target,
+            class,
+            &[],
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            )
+            .into_structural_provenance(),
+            canonical,
+            None,
+        )
+        .is_some()
     }
 
     /// Whether the object surface `node` declares a member spelled `name`.
@@ -17365,6 +17473,12 @@ enum LibStep {
 /// TS2589, and a run entered through a callback union starts with one step
 /// already counted (998 further steps answer, 999 fail).
 const LIB_AWAITED_ENTRY_DEPTH: u32 = 2;
+
+/// How many classes one selective member read follows up an `extends`
+/// chain before reading the remaining base through its `extends` arm whole.
+/// The bound only caps the recursion's stack: a chain deeper than this still
+/// answers, through the whole-surface read of the class where it stopped.
+const MAX_CLASS_MEMBER_INHERITANCE_DEPTH: usize = 256;
 
 /// The lib conditional's recursion on one evaluation path, counted the way
 /// the checker counts it.
