@@ -20,6 +20,8 @@
 
 pub mod directives;
 pub mod emit;
+#[cfg(any(test, feature = "test-support"))]
+pub mod flow_check;
 pub mod props;
 mod slot_inference;
 pub mod vmodel;

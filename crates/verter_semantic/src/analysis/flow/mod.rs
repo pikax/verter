@@ -46,7 +46,7 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_session_query::function_program::{FunctionNestedCaptures, FunctionProgramEntry};
+use verter_session_query::function_program::{FunctionCaptures, FunctionProgramEntry};
 
 pub mod value_descent;
 
@@ -370,7 +370,7 @@ struct SkeletonBuilder<'entry> {
     return_sites: Vec<SkeletonReturnSite>,
     yield_sites: Vec<SkeletonExprSiteId>,
     writes: Vec<SkeletonWrite>,
-    nested_captures: FxHashMap<verter_span::Span, &'entry FunctionNestedCaptures>,
+    nested_captures: FxHashMap<verter_span::Span, FunctionCaptures<'entry>>,
     /// The exact captures of this frame's parameter-list callables, by span.
     parameter_callable_captures: FxHashMap<
         verter_span::Span,
@@ -424,8 +424,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 .map(|entry| {
                     entry
                         .nested_captures()
-                        .iter()
-                        .map(|child| (child.span, child))
+                        .map(|child| (child.span(), child))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -793,35 +792,36 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// indistinguishable from no callback at all, and a callable the index
     /// does not serve is silently invisible rather than a typed gap.
     fn push_nested_callable(&mut self, span: verter_span::Span) {
-        let (bindings, reads, correlation) = match self.nested_captures.get(&span).copied() {
-            Some(captures) => (
-                captures.bindings.clone(),
-                Arc::clone(&captures.reads),
-                if captures.exhaustive {
-                    SkeletonClosureCorrelation::Exact
-                } else {
-                    SkeletonClosureCorrelation::Partial
-                },
-            ),
-            // A parameter-list callable no entry serves, whose every
-            // reference the frame resolved: its capture set is exact.
-            None => match self.parameter_callable_captures.get(&span).copied() {
+        let (bindings, reads, correlation): (Vec<_>, Vec<_>, _) =
+            match self.nested_captures.get(&span).copied() {
                 Some(captures) => (
-                    captures.bindings.clone(),
-                    Arc::clone(&captures.reads),
-                    SkeletonClosureCorrelation::Exact,
+                    captures.bindings().collect(),
+                    captures.reads().collect(),
+                    if captures.exhaustive() {
+                        SkeletonClosureCorrelation::Exact
+                    } else {
+                        SkeletonClosureCorrelation::Partial
+                    },
                 ),
-                None => {
-                    self.push_unserved_callable(span);
-                    return;
-                }
-            },
-        };
+                // A parameter-list callable no entry serves, whose every
+                // reference the frame resolved: its capture set is exact.
+                None => match self.parameter_callable_captures.get(&span).copied() {
+                    Some(captures) => (
+                        captures.bindings.0.iter().collect(),
+                        captures.reads.iter().collect(),
+                        SkeletonClosureCorrelation::Exact,
+                    ),
+                    None => {
+                        self.push_unserved_callable(span);
+                        return;
+                    }
+                },
+            };
         let site = self.footprint_site(span);
         let closure_span = self.frame_span(span);
         let mut own: Vec<FlowBindingRef> = Vec::new();
         let mut own_seen = FxHashSet::default();
-        for identity in bindings.0.iter() {
+        for identity in bindings {
             let binding = FlowBindingRef::Captured(identity.clone());
             if own_seen.insert(binding.clone()) {
                 own.push(binding.clone());
@@ -840,7 +840,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         // this callable — is the one consuming the cell's value.
         let mut own_reads: Vec<FlowBindingRef> = Vec::new();
         let mut own_read_seen = FxHashSet::default();
-        for read in reads.iter() {
+        for read in &reads {
             let binding = FlowBindingRef::Captured(read.binding.clone());
             if own_read_seen.insert(binding.clone()) {
                 own_reads.push(binding);
@@ -1344,6 +1344,10 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// draft field that still held an absolute offset would not have the
     /// type its published counterpart needs.
     fn finish(self) -> FunctionBodySkeleton {
+        let name_index = verter_session_query::flow::skeleton::SkeletonNameIndex::build(
+            &self.names,
+            &self.bindings,
+        );
         FunctionBodySkeleton {
             kind: self.kind,
             names: Arc::from(self.names.into_boxed_slice()),
@@ -1372,6 +1376,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             writes: Arc::from(self.writes.into_boxed_slice()),
             closure_assignments: Arc::from([]),
             span_index: Default::default(),
+            name_index,
         }
     }
 }

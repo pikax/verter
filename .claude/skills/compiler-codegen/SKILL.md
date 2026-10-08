@@ -387,6 +387,24 @@ Three backends implement the `TemplateCodeGen` trait, called by `walker::walk_te
 - **VDOM** (`vdom/`): In-place source overwrites producing `_createElementVNode()` calls
 - **Vapor** (`vapor/`): Replaces entire template block with direct DOM manipulation code
 
+## Flow-Transparent Callback Check (`ide/template/flow_check/`)
+
+An exact, uncapped, linear-size representation of `v-if` narrowing for template callbacks, compiled only under `cfg(any(test, feature = "test-support"))` (re-exported as `verter_compiler::flow_check`). No production path calls it; the current IDE emitter still uses `ide/condition.rs`, which re-emits every enclosing positive and predecessor negation inside each nested chain and each callback (quadratic).
+
+**Why callbacks need it.** TypeScript starts every non-immediately-invoked function's flow from the declared type of each property-access reference (`checker.ts` `getFlowTypeOfReference`, the `FlowStart` arm), so a callback inside `if (__props.u.kind === 'a')` sees `__props.u` un-narrowed. Re-emitting the path inside the callback is exact but costs the path per callback.
+
+**Layout.** One check function per template. Chains are `if / else if / else` blocks and `v-for` / `v-slot` frames are `{ const <aliases> = __VerterFlow.eachN(<source>); … }` blocks, so every condition is emitted once and nested content inherits narrowing through flow. Each callback is wrapped in an immediately invoked arrow (flow-transparent, and it passes its call's contextual type to the returned callback): the wrapper snapshots every outer reference chain the body reads in its own flow (`const __verter_o0 = __props.u!.a;`), and the body opens with `!narrow<typeof o>(ref) || excluded<typeof o>()(ref)` per reference — `narrow` re-narrows to the snapshot type, `excluded` removes constituents the predicate re-admits only because they are subtypes of kept ones. Block bodies take `if (…) throw 0;`, expression bodies `(…) ? __VerterFlow.unreachable : body`, so the authored return type and contextual parameter typing (including async and generic contracts) are unchanged. Nested authored closures and mutations behave as with path replay. Bytes are bounded by helpers + declarations + per-branch, per-frame and per-callback constants + resolved authored text + three copies of each outer-reference chain; path depth never appears.
+
+**Seam.** `seam::CheckPlan` (resolved conditions with authored spans, ordered branches with explicit predecessor links, `ScopeKey`s minted one per template lexical-scope handle with parent links, callbacks with contract and outer references) → `generator::generate` → `seam::GeneratedCheck` (code, authored mappings, `GenerationWork`, `Layout`). The generator writes through one `CodeTransform` (authored spans moved to the end anchor in output order, synthetic text appended, unused bytes removed) and refuses inconsistent plans with a typed `PlanError`. `builder::build_plan` builds a plan from a real parse (parser `v_if_chains`, `OxcParsedAst::scopes`, the shared resolver, OXC expression ASTs; contracts per authored directive key). `GuardStrategy::ReplayPath` reproduces the current per-callback path replay as the equivalence and growth oracle. Integration point: collect a `CheckPlan` during `ide::template::walk_element` and call `generate` once per template in place of `generate_condition_text` and its guard builders.
+
+**Boundary.** `crates/verter_compiler/tests/cases/flow_check_boundary.rs` compiles `seam.rs` + `generator.rs` in the integration binary against the public `CodeTransform` only (a compiler-internal import there fails to build) and checks via `cargo metadata` that no production edge, default feature or forwarding feature activates `verter_compiler/test-support`.
+
+**Checks.**
+- Compiler: `cargo test -p verter_compiler --lib flow_check` (contract, planted branch/context faults, lexical identity, 128/256/512/1024 flat and nested growth ≤ 2.2× per doubling with the replay negative control, mappings incl. moved and non-ASCII) and `cargo test -p verter_compiler --test main flow_check_boundary`.
+- Providers (fixture `packages/vue-vscode/e2e/fixtures/flow-check`): `cargo test -p verter_lsp --lib real_provider_tests::flow_check -- --test-threads=1`, run per lane by `node scripts/provider-ci.mjs run tsserver` and `run tsgo`. Every provider diagnostic must map to the fixture's exact `(code, authored span)` set.
+
+**Known limits.** Multi-statement inline handlers are refused by the builder (`BuildError::MultiStatementHandler`). TypeScript's binder overflows the Node stack near 2k nested AST levels, so the nested matrix nests N/4 levels of four-branch chains.
+
 ## Two Template Codegen Paths (CRITICAL)
 
 The Rust compiler has **two separate template codegen paths**. Modifying one does NOT affect the other:
@@ -671,6 +689,7 @@ The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (an
 | `crates/verter_compiler/src/ide/script.rs` | IDE script codegen: TS annotations or JSDoc equivalents |
 | `crates/verter_compiler/src/ide/script_recover.rs` | Token scanner for macro binding recovery from broken tails |
 | `crates/verter_compiler/src/ide/condition.rs` | v-if/v-else-if/v-else condition chain codegen |
+| `crates/verter_compiler/src/ide/template/flow_check/` | Flow-transparent exact linear callback check (test-support only) |
 | `crates/verter_compiler/src/ide/template/mod.rs` | IDE template codegen: Vue -> JSX, StrictSlotEntry, emit_strict_slot_checks |
 | `crates/verter_compiler/src/ide/template/directives.rs` | IDE: v-if -> ternary, v-for -> .map(), v-show -> style |
 | `crates/verter_compiler/src/ide/template/props.rs` | IDE: :prop -> prop={}, @event -> onEvent={} |
