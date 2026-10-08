@@ -1189,7 +1189,7 @@ pub fn take_callback_link_probes() -> usize {
 }
 
 /// Callback position; equality is the unit of linking work.
-#[derive(Debug, Clone, Copy, Hash)]
+#[derive(Debug, Clone, Copy)]
 struct CallbackPoint(u32);
 
 impl PartialEq for CallbackPoint {
@@ -1201,6 +1201,12 @@ impl PartialEq for CallbackPoint {
 }
 
 impl Eq for CallbackPoint {}
+
+impl std::hash::Hash for CallbackPoint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 fn link_callback_return_sources(
     canonical_id: &Arc<str>,

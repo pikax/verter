@@ -1490,7 +1490,7 @@ std::thread_local! {
 
 /// Expression-point map key. Equality is the only way a lookup decides a
 /// record is the requested one, so each comparison is the unit of lookup work.
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone)]
 pub(crate) struct ExpressionPointKey(ProgramExpressionIdentity);
 
 impl PartialEq for ExpressionPointKey {
@@ -1502,6 +1502,12 @@ impl PartialEq for ExpressionPointKey {
 }
 
 impl Eq for ExpressionPointKey {}
+
+impl std::hash::Hash for ExpressionPointKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 impl FunctionProgramIndex {
     /// Locate one exact child position in the retained file inventory.
