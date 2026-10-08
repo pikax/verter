@@ -210,7 +210,7 @@ impl VerterLanguageServer {
     /// nothing, and the request is marked unsettled so it answers
     /// `ContentModified` rather than without the child it asked about —
     /// whatever content the child ends at.
-    fn read_child_at_one_revision<T>(
+    pub(super) fn read_child_at_one_revision<T>(
         &self,
         child_canonical_id: &str,
         mut read: impl FnMut() -> Option<T>,

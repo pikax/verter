@@ -862,6 +862,54 @@ async fn native_cross_file_definition_survives_movement_that_replaces_no_authori
     }
 }
 
+/// An export span and the source that indexes it describe one committed content
+/// of the declaring file: a commit landing between the two reads refuses the
+/// answer instead of mapping the span through other bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_import_definition_refuses_a_target_edited_between_span_and_source_reads() {
+    let util_source = "export const helper = 1\n";
+    let edited_util = "// moved\nexport const helper = 1\n";
+    let app_source = "<script setup lang=\"ts\">\nimport { helper } from './util'\nconsole.log(helper)\n</script>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/util.ts", "typescript", util_source),
+        ("src/App.vue", "vue", app_source),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let util_uri = workspace_uri(&workspace_id, "src/util.ts");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "helper }", 1);
+
+    let edited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let server_handle = server.clone();
+        let util_uri = util_uri.clone();
+        let edited = Arc::clone(&edited);
+        server.set_child_read_hook_for_test(Some(Box::new(move || {
+            if !edited.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                server_handle
+                    .documents
+                    .did_change(&util_uri, 2, edited_util);
+            }
+        })));
+    }
+    let raced = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+    server.set_child_read_hook_for_test(None);
+    assert!(
+        edited.load(std::sync::atomic::Ordering::SeqCst),
+        "the import target read runs through the one-revision bracket"
+    );
+    assert!(
+        matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a target edited between its span and source reads refuses the answer: {raced:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 #[tokio::test]
 async fn goto_definition_component_event_name_reaches_child_listener_prop() {
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{\n  label: string\n  onAlert?: (payload: string) => void\n}>()\n</script>\n";
