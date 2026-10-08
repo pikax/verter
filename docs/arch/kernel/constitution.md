@@ -19,7 +19,7 @@ The reviewed contract data lives in `tests/kernel/UAK1/products/`:
 | File | Holds |
 | ---- | ----- |
 | `constitution-inventory.v1.json` | Layers `L0`–`LR`, firewall rules `F01`–`F05`, constitution outcomes `U01`–`U12`, the UAK0 outcomes this decision relies on, consumers `K-C01`–`K-C04`, empty populations and transferred obligations |
-| `firewall-route-ledger.v1.json` | Firewall breaches at the described head (`K01`, `K02`) with one deletion owner each, plus UAK0's `D01`–`D19` mapped to the rule each one breaches |
+| `firewall-route-ledger.v1.json` | Firewall breaches at the described head (`K01`–`K04`) with one deletion owner each, plus UAK0's `D01`–`D19` mapped to the rule each one breaches |
 
 Every owner is an existing plan node. Every `successorPath` starts at UAK1 and
 follows predecessor edges in the controller-owned DAG at dispatch. The UAK0
@@ -30,8 +30,8 @@ references them.
 
 | Layer | Role | Holds | May import |
 | ----- | ---- | ----- | ---------- |
-| `L0` | kernel | Identity and source: `verter_identity`, `verter_span`, the registered source authority in `verter_language`, `verter_execution` and the leaf marker crates | nothing above `L0` |
-| `L1` | kernel | Kernel services: the one type-resolution engine, retained source lowering, neutral query DTOs, resolution, scheduler, workspace, `verter_protocol`, and `verter_session` apart from its composition root | `L0` |
+| `L0` | kernel | Identity and source: `verter_identity`, `verter_span`, the registered source authority in `verter_language`, `verter_execution` and the leaf marker crates | `L0` peers only (acyclic) |
+| `L1` | kernel | Kernel services: the one type-resolution engine, retained source lowering, neutral query DTOs, resolution, scheduler, workspace, `verter_protocol`, and `verter_session` apart from its composition root | `L0`, and acyclic `L1` peers |
 | `L2` | product | Horizontal products: TypeInfo/ComponentInfo, workspace index, diagnostics and native checker, lint/rules/actions, formatter, public request/result envelope | `L0`, `L1` |
 | `L3` | vertical | Carrier frontends and their semantic (framework) profiles, one family module each | `L0`–`L2` |
 | `L4` | project profile | Project-profile overlays | `L0`–`L3` |
@@ -39,7 +39,7 @@ references them.
 | `LH` | host / presentation | Editor hosts and clients, CLI command adapters and reporters, NAPI/WASM/FFI/MCP bindings | anything except routing by framework name (see `F04`) |
 | `LR` | registration | The one composition root that builds the `CatalogSnapshot` | `L0`–`L4`, `LC` |
 
-The layer is a role, not a crate. Today several roles share one crate:
+Every workspace crate belongs to exactly one layer (or is a named role-shared crate whose halves are listed separately); `constitution-inventory.v1.json` lists every crate, including `verter_audit`, `verter_ecma`, `verter_analysis_inputs`, `verter_tsgo_api`, `verter_type_runtime`, the derive crates, `verter_diagnostics` and `verter_actions`. Retained peer imports inside a layer are legal; the parser-free restriction stays (`verter_session_query`, `verter_type_engine` and `verter_type_expr` import neither `verter_parser` nor `verter_semantic`). The layer is a role, not a crate. Today several roles share one crate:
 `verter_compiler` holds both carrier frontends (`L3`) and runtime backends
 (`LC`), and `verter_session` holds kernel services, the framework registry and
 per-family modules. The rules below bind the roles. Splitting crates is the
@@ -100,7 +100,7 @@ ARH1 contracts in `architecture_dependencies.rs`.
   realms and generated facts. It never selects a TypeScript program (that is
   the project-bound external-TS contract), never owns resolution (PM), never
   mutates a carrier or semantic identity, and does no work when inapplicable.
-  Owner: PPR1 (`U05`, `PPR1-AC2`; contract PPR0). Derived project identity is
+  Verifier: PPR1 (`PPR1-AC2`; contract PPR0). PPR1 adds no profile semantics, so the generic overlay boundary is implemented by COX0 (`U05`, `COX0-AC2`), pending operator ruling `uak1-project-profile-implementation-owner`. Derived project identity is
   UAK0 `O10`.
 
 Each layer depends only on the one before it. No universal framework IR sits
@@ -111,8 +111,8 @@ between them, and no single parser implementation is required.
 - Every public result carries one typed outcome: success, partial, ambiguous,
   NeedInputs, unsupported, not-applicable, cancelled or stale. The vocabulary
   is the same on Rust, NAPI, WASM, LSP, MCP and CLI. A surface that lacks
-  inputs reports NeedInputs, never empty success. Owner: UAP0 (`U06`,
-  `UAP0-AC-R2`; contract PUB0).
+  inputs reports NeedInputs, never empty success. Verifier: UAP0 (`U06`,
+  `UAP0-AC-R2`; contract PUB0). UAP0 and PUB0 are docs-only contract locks, so the cross-surface vocabulary is implemented by LSO0 (`LSO0-AC-OUTCOMES`), pending operator ruling `uak1-public-outcome-implementation-owner`.
 - The per-surface capability/maturity matrix is generated from manifests and
   freshness-checked. There are no boolean capability lies and no registered
   no-op handlers. Owner: VIM1 (`U07`, `VIM1-AC1`).
@@ -169,16 +169,13 @@ landing. No identity-bound receipt is recorded.
 
 | Route | Breach | Rule | Deletion owner |
 | ----- | ------ | ---- | -------------- |
-| `K01` | `verter_session`'s production closure links the compiler's runtime/compile backends (`compile`, `compile_transaction`, `assembly`, `standalone`, `svelte::runtime`, `style_planner`, `framework_common::vue_bridge`). `workspace_dependency_layers` ranks the compiler beneath the session. | `F01` | CPF1 (`CPF1-AC1`) |
-| `K02` | The Svelte JSX shim assets are embedded in the kernel crate (`framework/svelte_jsx_assets`). `verter_lsp` and `verter_tsc` read them from there. | `F01` | CPF1 (`CPF1-AC1`) |
+| `K01` | `verter_session`'s production closure links the compiler's runtime/compile backends (`compile`, `compile_transaction`, `assembly`, `standalone`, `svelte::runtime`, `style_planner`, `framework_common::vue_bridge`). `workspace_dependency_layers` ranks the compiler beneath the session. | `F01` | FWC1 (`FWC1-AC1`) |
+| `K02` | The Svelte JSX shim assets are embedded in the kernel crate (`framework/svelte_jsx_assets`). `verter_lsp` and `verter_tsc` read them from there. | `F01` | FWC1 (`FWC1-AC2`) |
+| `K03` | The Vue/Svelte carrier frontend (`verter_parser`: Vue SFC parser, `svelte_reactivity`) sits in the kernel parse substrate, so every kernel consumer of `verter_parser` imports a vertical. | `F01` | FWC1 (`FWC1-AC3`) |
+| `K04` | Vue macro and framework semantics (`verter_semantic` `analysis::{macros,component_meta,classify}`, `analyzers::reactive_flow`) sit in the kernel semantic crate, so kernel consumers of `verter_semantic` import a vertical. | `F01` | FWC1 (`FWC1-AC4`) |
 | `D01`–`D19` | UAK0 routes, each mapped in the ledger to the rule it breaches | `F01`, `F02`, `F04`, `U05`, `U06` | UAK0 owners |
 
-No charter names removing the `K01` crate edge explicitly. CPF1 is recorded
-as its owner because CPF1 installs the optional backend registry, migrates the
-compile and IDE-projection routes, and must leave a frontend that imports no
-runtime codegen (CPF0's acceptance). Operator question
-`uak1-kernel-compiler-edge-owner` asks whether to keep CPF1 or add a dedicated
-firewall-cutover node.
+Operator ruling `uak1-kernel-compiler-edge-owner`: CPF1 can complete frontend/backend registration and carrier-route migration while the compiler dependency and vertical assets remain, so a dedicated firewall-cutover node `FWC1` follows CPF1. It removes the crate edge and any transitive kernel reach into compiler backends, moves vertical assets and the carrier frontend/semantic code out of the kernel crates, relocates their consumers, and retires `K01`–`K04`. It is a predecessor of UAI0 and UAM0 and carries explicit acceptance `FWC1-AC1`–`FWC1-AC4`. `FWC1` does not exist in the plan yet: the controller must create it, and until then the inventory validator rejects it as an unknown owner. Production extraction stays outside UAK1.
 
 Empty populations at this head:
 
