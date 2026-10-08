@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use super::dispatch_txn::{
-    CheckerDispatchTransaction, FlowReturnPendingOutcome, InferenceOccurrence,
-    InferenceSessionSetup, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    PendingVerdict, RelationPendingState, ResolveCallPendingState, ResolveCallSelection,
-    ReturnDomainMetadata, ReturnEquationFailure, ReturnEquationMember, ReturnObligationIdentity,
-    SessionId,
+    CheckerDispatchTransaction, FlowReturnPendingOutcome, InferenceOccurrence, ObligationIdentity,
+    PendingObligation, PendingObligationDomain, PendingVerdict, RelationPendingState,
+    ResolveCallPendingState, ResolveCallSelection, ReturnDomainMetadata, ReturnEquationFailure,
+    ReturnEquationMember, ReturnObligationIdentity, SessionId,
 };
+use super::inference::session::InferenceSessionSetup;
 use super::ProjectSemanticDispatch;
 use crate::{HostConfig, VerterHost};
 use verter_type_engine::semantic_query::{

@@ -16189,7 +16189,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
 /// and complete reverse recovery outranks partial recovery.
 #[test]
 fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
-    use super::dispatch_txn::InferenceCandidate;
+    use super::inference::session::InferenceCandidate;
     use verter_type_engine::semantic_query::InferenceCandidatePriority;
 
     let host = host();

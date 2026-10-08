@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use super::dispatch_txn::{InferenceOccurrence, InferenceSessionState, PendingObligationDomain};
+use super::dispatch_txn::{InferenceOccurrence, PendingObligationDomain};
+use super::inference::session::InferenceSessionState;
 use super::*;
 use crate::types::UpsertRequest;
 use crate::{HostConfig, VerterHost};
