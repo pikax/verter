@@ -1700,7 +1700,10 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     );
     assert!(
         matches!(
-            store.get_relation_payload(ctx, &key).map(|p| p.outcome),
+            store
+                .get_relation_payload(ctx, &key)
+                .map(|served| served.value)
+                .map(|p| p.outcome),
             Some(verter_type_engine::semantic_query::RelationOutcome::NotAssignable)
         ),
         "the same full identity must warm-hit after the cold insert",
@@ -1767,7 +1770,10 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
         .hits
         .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
-        store.get_relation_payload(ctx, &key).is_some(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_some(),
         "seeded relation entry must warm-hit"
     );
     let delta = rctx
@@ -1820,7 +1826,10 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
 
     // Production dispatch order: the modeless probe runs first.
     assert!(
-        store.get_relation_payload(ctx, &key).is_none(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_none(),
         "empty store must probe-miss"
     );
     assert_eq!(
@@ -1861,7 +1870,10 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
             .load(std::sync::atomic::Ordering::Relaxed)
     };
     assert!(
-        store.get_relation_payload(ctx, &key).is_some(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_some(),
         "cold-published entry must probe-hit"
     );
     assert_eq!(
@@ -1920,12 +1932,18 @@ fn relation_modeless_probe_rejects_entry_after_generation_bump() {
         gen0,
     );
     assert!(
-        store.get_relation_payload(ctx, &key).is_some(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_some(),
         "seeded entry must warm-hit before the bump"
     );
     host.project_type_store().bump_project_generation();
     assert!(
-        store.get_relation_payload(ctx, &key).is_none(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_none(),
         "post-bump entry is stale: the modeless probe must reject it, never promote it as complete"
     );
 }
@@ -2416,6 +2434,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         matches!(
             store
                 .get_relation_payload(ctx, &admit_key)
+                .map(|served| served.value)
                 .map(|p| p.outcome),
             Some(verter_type_engine::semantic_query::RelationOutcome::NotAssignable)
         ),
@@ -2507,7 +2526,10 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         "REFUSE: no BudgetExceeded entry may enter the relation memo",
     );
     assert!(
-        store.get_relation_payload(ctx, &refuse_key).is_none(),
+        store
+            .get_relation_payload(ctx, &refuse_key)
+            .map(|served| served.value)
+            .is_none(),
         "REFUSE: the refused key has no warm entry to serve",
     );
     assert!(
@@ -2559,7 +2581,10 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         "REFUSE: the fenced undecided member leaves the relation memo untouched",
     );
     assert!(
-        store.get_relation_payload(ctx, &flight_key).is_none(),
+        store
+            .get_relation_payload(ctx, &flight_key)
+            .map(|served| served.value)
+            .is_none(),
         "REFUSE: the refused member key has no warm entry to serve",
     );
     assert!(
@@ -3240,6 +3265,13 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                             ),
                         key: backfill_w,
                         node: child_node,
+                        cost_receipt: Some(verter_type_engine::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+                                verter_type_engine::project_semantic_dispatch::cost_receipt::CostIdentity::new(
+                                    b"prefix".to_vec(),
+                                ),
+                                Default::default(),
+                                Vec::new(),
+                            )),
                     }],
                     satisfied_projection:
                         verter_type_engine::semantic_query::demand::MaterializedSet::empty(),
@@ -4618,6 +4650,15 @@ fn prefix_backfill_carries_traced_facts() {
     let parent_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
         Arc::clone(&parent_traced_facts),
     );
+    // What the walk sealed for the prefix as it reached it.
+    let prefix_receipt =
+        verter_type_engine::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+            verter_type_engine::project_semantic_dispatch::cost_receipt::CostIdentity::new(
+                b"prefix".to_vec(),
+            ),
+            Default::default(),
+            Vec::new(),
+        );
     let _ = store.execute_cooperative(
         &host,
         parent_key.clone(),
@@ -4635,6 +4676,7 @@ fn prefix_backfill_carries_traced_facts() {
             pending_prefix_backfills: vec![PrefixBackfill {
                 key: prefix_key.clone(),
                 node: prefix_node,
+                cost_receipt: Some(Arc::clone(&prefix_receipt)),
                 satisfied_projection:
                     verter_type_engine::semantic_query::demand::MaterializedSet::single(
                         super::family::requested_point_for_key(&prefix_key),
@@ -4670,6 +4712,22 @@ fn prefix_backfill_carries_traced_facts() {
          `dep_signature` to `warm_publish_one_if_absent`, dropping \
          the parent's path-precise facts.",
         facts = prefix_carrier.facts.as_ref()
+    );
+    // A read of the prefix pays what reaching the prefix cost, never the
+    // whole parent build it was materialized on the way to.
+    let receipt_of = |key: &SemanticQueryKey| {
+        store
+            .published_carrier_for_tests(key)
+            .expect("the entry is published")
+            .cost_receipt
+    };
+    assert!(
+        Arc::ptr_eq(&receipt_of(&prefix_key), &prefix_receipt),
+        "the backfilled prefix carries its own receipt"
+    );
+    assert!(
+        !Arc::ptr_eq(&receipt_of(&prefix_key), &receipt_of(&parent_key)),
+        "not the publishing build's"
     );
 }
 

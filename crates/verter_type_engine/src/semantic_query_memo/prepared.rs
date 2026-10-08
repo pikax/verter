@@ -131,7 +131,7 @@ impl verter_execution::tasks::ProducerIdentity for PreparedQueryIdentity {
 impl PreparedKeyHandle {
     /// This handle as the producer a task opens: a refcount bump, never a
     /// new allocation.
-    pub(super) fn as_task_producer(&self) -> Arc<dyn verter_execution::tasks::ProducerIdentity> {
+    pub(crate) fn as_task_producer(&self) -> Arc<dyn verter_execution::tasks::ProducerIdentity> {
         Arc::clone(&self.0) as Arc<dyn verter_execution::tasks::ProducerIdentity>
     }
 

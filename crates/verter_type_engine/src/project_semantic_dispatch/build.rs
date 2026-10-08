@@ -5094,10 +5094,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         ),
                         None,
                     );
-                } else if let Err(refusal) = build.tail.step(
-                    self.connected_demand.tail_steps_budget(),
-                    CheckerDiagnosticOperation::ConditionalTail,
-                ) {
+                } else if let Err(refusal) = self
+                    .connected_demand
+                    .tail_step(&mut build.tail, CheckerDiagnosticOperation::ConditionalTail)
+                {
                     // Verter's tail budget stopped the run, not a proof:
                     // whether it is reached depends on the budget, so
                     // neither the recovery nor anything built from it is
@@ -11293,7 +11293,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (start_base, start_index) = if path.len() < 2 {
             (base, 0usize)
         } else {
-            find_longest_warm_prefix(self.graph(), self.ctx, base, path).unwrap_or((base, 0))
+            find_longest_warm_prefix(self.graph(), self.ctx, base, path, |receipt| {
+                self.admits_served(receipt)
+            })
+            .unwrap_or((base, 0))
         };
         let walker_path: Arc<[PathSegment]> = if start_index == 0 {
             Arc::clone(path)
@@ -11308,7 +11311,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // enumeration (per the boundary constraint that transit is the
         // non-publication rail).
         let mut walker = PathWalker::new(self, context, &fence);
+        walker.record_prefix_receipts(start_base, &walker_path);
         let result = walker.walk(start_base, walker_path.as_ref());
+        let prefix_receipts = walker.take_prefix_receipts();
+        let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
         // A member read through a class reference binds the member's
         // polymorphic `this` to that reference.
         let result = if path.len() == 1 && self.is_this_receiver(base) {
@@ -11333,6 +11339,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             other => other,
         };
+        drop(walker);
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` callers can
@@ -11391,8 +11398,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // here before the tracer finalises would attach a legacy-only
         // signature derived from the fence (the pre-carrier behaviour
         // flagged in `publish_warm_if_absent`).
-        let pending_prefix_backfills =
-            collect_prefix_backfills(start_base, &walker_path, &walker.intermediate_nodes);
+        let pending_prefix_backfills = collect_prefix_backfills(
+            start_base,
+            &walker_path,
+            &intermediate_nodes,
+            prefix_receipts,
+        );
         // §3.4 materialised-record set for the TERMINAL entry: the
         // terminal point at the FULL path (the caller's terminal mode)
         // PLUS one `Demand::navigate(prefix)` per CONTIGUOUS LINEAR walked
@@ -11406,7 +11417,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // materialisation per §3.4 and never inflate a prefix to the
         // terminal mode.
         let satisfied_projection =
-            path_walk_materialized_set(path, context.mode, start_index, &walker.intermediate_nodes);
+            path_walk_materialized_set(path, context.mode, start_index, &intermediate_nodes);
         // Self-version rooting: the projection result depends on the
         // file content the projection `base` was lowered from. The
         // base node's origin scope (recorded in the arena sidecar)
@@ -15486,8 +15497,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     break self.lib_awaited_nested(value, walk, false);
                 }
                 LibStep::Next(value) => {
-                    if let Err(refusal) = tail.step(
-                        self.connected_demand.tail_steps_budget(),
+                    if let Err(refusal) = self.connected_demand.tail_step(
+                        &mut tail,
                         crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
                     ) {
                         break LibAwaited::Reduced(self.lib_awaited_too_deep(refusal));
@@ -17003,6 +17014,7 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
+    admit: impl Fn(&crate::semantic_query::ReadReceipt) -> bool,
 ) -> Option<(SemanticNodeId, usize)> {
     for k in (1..path.len()).rev() {
         let prefix_path: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
@@ -17016,6 +17028,9 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
         // Validate-before-bubble: a stale prefix entry must neither
         // surface as a hit nor pollute the active fact tracer.
         if let Some(hit) = graph.get_validated(&prefix_key, ctx) {
+            if !admit(&hit.receipt) {
+                return None;
+            }
             if let QueryResult::Value(prefix_node) = hit.value {
                 #[cfg(any(test, feature = "test-support"))]
                 PREFIX_PEEK_HITS.with(|c| *c.borrow_mut() += 1);
@@ -17096,7 +17111,9 @@ fn collect_prefix_backfills(
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
     intermediates: &[Option<SemanticNodeId>],
+    receipts: Vec<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
 ) -> Vec<crate::project_semantic_dispatch::walk::PrefixBackfill> {
+    let mut receipts = receipts.into_iter();
     // Backfill is only meaningful for the contiguous LINEAR prefix of
     // the walk — the leading run of `Some(node)` entries before any
     // arm-split. Once the walker hits a Union / Intersection /
@@ -17139,6 +17156,7 @@ fn collect_prefix_backfills(
         out.push(crate::project_semantic_dispatch::walk::PrefixBackfill {
             key: prefix_key,
             node,
+            cost_receipt: receipts.next(),
             satisfied_projection,
         });
     }

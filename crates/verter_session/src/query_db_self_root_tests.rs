@@ -4456,7 +4456,10 @@ fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation()
     );
 
     assert!(
-        store.get_relation_payload(ctx, &key).is_some(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_some(),
         "a relation memo entry whose ProjectGeneration fact matches the \
          live generation must warm-hit",
     );
@@ -4471,7 +4474,10 @@ fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation()
     );
 
     assert!(
-        store.get_relation_payload(ctx, &key).is_none(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_none(),
         "STALE-GENERATION READ: `SemanticGraphStore::get_relation_payload` \
          served a relation memo entry whose `FactVersionRef::ProjectGeneration` \
          no longer matches the live generation. The fact rail is the \

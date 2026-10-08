@@ -555,6 +555,55 @@ fn a_budget_recovery_is_never_kept_in_the_memo() {
     assert_eq!(recovered_then_answered, (None, Some("\"ok\"".to_owned())));
 }
 
+/// A complete answer kept under the production budget is never served to
+/// a demand whose smaller instantiation budget its cold evaluation would
+/// have exhausted: its receipt names the instantiation depth the answer
+/// took, and that demand evaluates for itself and recovers exactly as it
+/// does cold.
+///
+/// TypeScript 7.0.2, `strict`: `E151<"ok">` is TS2589; Verter's full
+/// answer is `"ok"`.
+#[test]
+fn a_kept_answer_never_passes_a_smaller_instantiation_budget() {
+    use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    let answered_then_recovered = on_a_small_stack(|| {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let source = conditional_argument_chain(151);
+        let evaluate = || {
+            super::checker_probe_lane_tests::with_probe_on_host(
+                &host,
+                Default::default(),
+                &source,
+                "E151<\"ok\">",
+                |dispatch, node| {
+                    let value = dispatch
+                        .normalize_node_for_structural_fact_demand(
+                            node,
+                            ProjectionReductionContext::published(ProjectionMode::Expanded),
+                        )
+                        .into_usable_node()
+                        .expect("the probe answers");
+                    match dispatch.graph().node_data(value).as_deref() {
+                        Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. })) => None,
+                        _ => Some(
+                            crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                                dispatch, value, 0,
+                            ),
+                        ),
+                    }
+                },
+            )
+        };
+        let answered = evaluate();
+        let limited = {
+            let _budget = super::connected_demand::InstantiationBudgetForTests::install(150);
+            evaluate()
+        };
+        (answered, limited)
+    });
+    assert_eq!(answered_then_recovered, (Some("\"ok\"".to_owned()), None));
+}
+
 /// Whether `probe`'s evaluated type, under `options` and an instantiation
 /// budget of `budget`, holds the checker's TS2589 recovery anywhere in it.
 fn holds_a_ts2589(options: &'static str, budget: u32, source: String, probe: &str) -> bool {

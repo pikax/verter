@@ -78,6 +78,11 @@ pub(super) struct InflightState {
     /// walker queries.
     pub(super) walker_diagnostics:
         Option<std::sync::Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>>,
+    /// The receipt of the winner's build, when it sealed one: a
+    /// subscriber's demand replays it, exactly as a warm read does, so
+    /// waiting on another task's computation costs what computing it would.
+    pub(super) cost_receipt:
+        Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
     /// The winner build's `cache_suppress` flag. Set by the winner
     /// alongside `completed`; a joiner that observes `aborted == false`
     /// returns this verbatim in its `CacheRead.cache_suppress`. A
@@ -205,6 +210,7 @@ impl<'a> Drop for InflightPanicGuard<'a> {
             }
             state.aborted = true;
             state.graph_carrier = None;
+            state.cost_receipt = None;
             state.cache_suppress = true;
             state.result_is_partial = true;
             state.partial_reasons = crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT;
@@ -347,6 +353,7 @@ impl super::SemanticGraphStore {
                 state.dep_signature = Some(empty_signature());
             }
             state.graph_carrier = None;
+            state.cost_receipt = None;
             state.walker_diagnostics = None;
             state.cache_suppress = true;
             state.result_is_partial = true;

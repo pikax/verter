@@ -196,12 +196,14 @@ impl SemanticGraphStore {
         flow_members: Vec<PendingFlowReturnMember>,
         call_members: Vec<PendingResolveCallMember>,
     ) -> bool {
+        let cost_receipt = fixture_receipt(&required_root.family);
         self.publish_scc_members_fenced(
             ctx,
             required_root,
             carrier,
             self_root_canonicals,
             validated_at_generation,
+            &cost_receipt,
             relation_members,
             flow_members,
             call_members,
@@ -215,6 +217,7 @@ impl SemanticGraphStore {
         carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         validated_at_generation: u64,
+        cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         relation_members: Vec<PendingRelationMember>,
         flow_members: Vec<PendingFlowReturnMember>,
         call_members: Vec<PendingResolveCallMember>,
@@ -311,6 +314,7 @@ impl SemanticGraphStore {
                 self_root_canonicals,
                 &dispatch_dep_signature,
                 validated_at_generation,
+                cost_receipt,
             );
             prepared.push(PreparedMember {
                 family,
@@ -336,6 +340,7 @@ impl SemanticGraphStore {
                 self_root_canonicals,
                 &dispatch_dep_signature,
                 validated_at_generation,
+                cost_receipt,
             );
             prepared.push(PreparedMember {
                 family,
@@ -359,6 +364,7 @@ impl SemanticGraphStore {
                 self_root_canonicals,
                 &dispatch_dep_signature,
                 validated_at_generation,
+                cost_receipt,
             );
             prepared.push(PreparedMember {
                 family,
@@ -477,6 +483,7 @@ impl SemanticGraphStore {
                 state.completed = Some(completed);
                 state.dep_signature = Some(empty_signature());
                 state.graph_carrier = Some(Box::new(carrier.clone()));
+                state.cost_receipt = Some(Arc::clone(cost_receipt));
                 state.self_root_canonicals = Arc::clone(self_root_canonicals);
                 state.walker_diagnostics = Some(Arc::from([]));
                 state.cache_suppress = false;
@@ -498,6 +505,7 @@ impl SemanticGraphStore {
         self_root_canonicals: &Arc<[Arc<str>]>,
         dispatch_dep_signature: &DepSignature,
         validated_at_generation: u64,
+        cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     ) -> MemoEntry {
         MemoEntry {
             result: QueryResult::Value(value),
@@ -509,6 +517,7 @@ impl SemanticGraphStore {
             retention_charge,
             validated_at_generation,
             admission_seq: 0,
+            cost_receipt: Arc::clone(cost_receipt),
         }
     }
 
@@ -528,6 +537,15 @@ impl SemanticGraphStore {
     > {
         use verter_session_query::retention::{ChargeClass, RetentionAdmission};
         let account = self.retention_account();
+        // Each member's receipt is charged once, for as long as it lives.
+        for entry in members {
+            if let Err(refusal) = entry.cost_receipt.reserve_retention(account) {
+                crate::cache_runtime::admission::propagate_non_admission(
+                    refusal.non_admission_reason(),
+                );
+                return Err(refusal);
+            }
+        }
         // The published root already owns the SCC carrier and self-root
         // allocations. The member batch therefore reserves only each
         // member's distinct allocation; including the first member's
@@ -664,6 +682,7 @@ impl SemanticGraphStore {
             &self_root_canonicals,
             &dispatch_dep_signature,
             validated_at_generation,
+            &fixture_receipt(&family),
         );
         let admission_seq = self.alloc_candidate_admission_seq();
         let cap = family.candidate_cap();
@@ -696,4 +715,19 @@ impl SemanticGraphStore {
             self.record_family_admission_locked(&mut entries, &family);
         }
     }
+}
+
+/// A receipt recording no cost, for a fixture candidate seeded outside any
+/// connected demand.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn fixture_receipt(
+    family: &FamilyKey,
+) -> Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt> {
+    crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+        crate::project_semantic_dispatch::cost_receipt::CostIdentity::new(
+            format!("{family:?}").into_bytes(),
+        ),
+        Default::default(),
+        Vec::new(),
+    )
 }

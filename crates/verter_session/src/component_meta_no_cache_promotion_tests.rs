@@ -1344,6 +1344,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         cache_suppress: true,
         result_is_partial: true,
         partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
+        receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
     };
     assert!(
         !matches!(
@@ -1363,6 +1364,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         cache_suppress: true,
         result_is_partial: false,
         partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+        receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
     };
 
     // Gate behaviour for (2) — under its OWN request — must NOT suppress:
@@ -1456,6 +1458,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 cache_suppress: true,
                 result_is_partial: false,
                 partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
             },
         ),
         (
@@ -1467,6 +1470,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 cache_suppress: true,
                 result_is_partial: false,
                 partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
             },
         ),
         (
@@ -1478,6 +1482,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 cache_suppress: true,
                 result_is_partial: false,
                 partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
             },
         ),
     ];
@@ -1855,6 +1860,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
     assert!(
         graph
             .get_relation_payload(host.as_ref(), &dispatch.relate_key_for(check, extends),)
+            .map(|served| served.value)
             .is_none(),
         "a relation Unknown that arose from a PARTIAL nested read MUST NOT be admitted to the \
          relation memo (reverting the relation-memo partial-skip admits it here)"

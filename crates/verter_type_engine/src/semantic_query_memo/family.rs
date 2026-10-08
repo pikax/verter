@@ -109,6 +109,11 @@ pub(super) struct MemoEntry {
     /// `warm_publish_one_if_absent` / the test publish helpers — the
     /// only paths that create a `MemoEntry`.
     pub(super) admission_seq: u64,
+    /// What computing this candidate cost: the receipt every read of it
+    /// replays, so a warm read charges its consumer what the cold build
+    /// charged. Shared by the backfills and SCC members the same build
+    /// produced. A candidate cannot be admitted without one.
+    pub(super) cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
 }
 
 impl MemoEntry {

@@ -148,18 +148,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let inputs = {
             let txn = self.dispatch_txn.borrow();
             txn.relation
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
+                .session(session_id)
                 .and_then(|session| session.fixation_inputs())
         };
         if let Some(session) = self
             .dispatch_txn
             .borrow_mut()
             .relation
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
+            .session_mut(session_id)
         {
             session.abandon();
         }

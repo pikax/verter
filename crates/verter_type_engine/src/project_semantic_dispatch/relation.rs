@@ -1268,15 +1268,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(relation_step_from_payload(&payload));
             }
         }
-        let payload = self.graph().get_relation_payload(self.ctx, key)?;
+        let served = self.graph().get_relation_payload(self.ctx, key)?;
+        let payload = served.value;
         if measurement {
+            if !self.admits_served_as_own_check(&served.receipt) {
+                return None;
+            }
             self.dispatch_txn
                 .borrow_mut()
                 .relation
                 .last_relation_unreliable = payload.recursion.unreliable;
             return Some(relation_step_from_payload(&payload));
         }
-        if self.relation_replays_cold(&payload.recursion) {
+        // Only an entry this check replays is paid for: one it computes
+        // instead is charged as it computes.
+        if self.relation_replays_cold(&payload.recursion) && self.admits_served(&served.receipt) {
             self.note_relation_replay(&payload.recursion);
             return Some(relation_step_from_payload(&payload));
         }
@@ -1314,6 +1320,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         !(simple(source) && simple(target))
+    }
+
+    /// Run `admit` with the structured comparisons left to the relation
+    /// check the frame on top belongs to — the checker's whole allowance
+    /// outside any check — and record the comparisons it admits into that
+    /// check: a result served inside a check counts there exactly as
+    /// computing it there would have.
+    pub(super) fn admit_within_relation_check<E>(
+        &self,
+        admit: impl FnOnce(u32) -> Result<u32, E>,
+    ) -> Result<(), E> {
+        fn check_comparisons(
+            txn: &mut super::dispatch_txn::CheckerDispatchTransaction,
+            base: Option<usize>,
+        ) -> Option<&mut crate::semantic_query::checker_policy::RelationComplexity> {
+            let base = base?;
+            txn.relation
+                .chain_comparisons
+                .iter_mut()
+                .rev()
+                .find(|(chain, _)| *chain == base)
+                .map(|(_, comparisons)| comparisons)
+        }
+        let base = self.current_relation_chain().map(|chain| chain.base);
+        let room = check_comparisons(&mut self.dispatch_txn.borrow_mut(), base).map_or_else(
+            crate::semantic_query::checker_policy::relation_comparisons,
+            |comparisons| comparisons.remaining(),
+        );
+        let recorded = admit(room)?;
+        if recorded > 0 {
+            if let Some(comparisons) = check_comparisons(&mut self.dispatch_txn.borrow_mut(), base)
+            {
+                comparisons.record_replayed(recorded);
+            }
+        }
+        Ok(())
     }
 
     /// The relation chain a relation opened now joins — the chain of the
@@ -1420,6 +1462,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
             return Some(RelationResult::NotAssignable);
         }
+        self.connected_demand.accrue_comparison();
         // The pair's frame, memo entry and proof are reserved before the
         // pair is related; a refusal is resource incompleteness.
         if self
@@ -2725,7 +2768,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut session_abandoned = false;
         if let Some(sid) = opened_session {
             let mut txn = self.dispatch_txn.borrow_mut();
-            if let Some(position) = txn.relation.sessions.iter().position(|s| s.id == sid) {
+            if let Some(position) = txn.relation.session_position(sid) {
                 if budget_cap.is_some() {
                     txn.relation.sessions[position].abandon();
                     session_abandoned = true;
@@ -3318,14 +3361,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let ledgers_ready = {
             let txn = self.dispatch_txn.borrow();
             deferred_relation_sessions.iter().all(|(session, key)| {
-                let session_ok = txn
-                    .relation
-                    .sessions
-                    .iter()
-                    .find(|candidate| candidate.id == *session)
-                    .is_some_and(|candidate| {
-                        candidate.state == InferenceSessionState::CommittedDeterministic
-                    });
+                let session_ok = txn.relation.session(*session).is_some_and(|candidate| {
+                    candidate.state == InferenceSessionState::CommittedDeterministic
+                });
                 session_ok && txn.relation.session_admission.contains(*session, key)
             })
         };
@@ -3792,6 +3830,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &carrier.read_set_signature,
             &carrier.self_root_canonicals,
             carrier.validated_at_generation,
+            &carrier.cost_receipt,
             relation_members,
             flow_members,
             call_members,

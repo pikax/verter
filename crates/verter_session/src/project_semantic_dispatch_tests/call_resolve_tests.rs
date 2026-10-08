@@ -2223,6 +2223,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
+                .map(|served| served.value)
                 .is_some(),
             "the first revision's result is warm under the content-free key"
         );
@@ -2242,6 +2243,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
+                .map(|served| served.value)
                 .is_none(),
             "the value-side read set / self-roots REJECT the warm entry the \
              equal key would otherwise serve"
@@ -2255,6 +2257,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
+                .map(|served| served.value)
                 .is_some(),
             "the recomputed result warms under the same key"
         );
