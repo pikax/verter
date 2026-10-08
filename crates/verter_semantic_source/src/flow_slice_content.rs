@@ -3295,8 +3295,9 @@ fn suffix_return_of(statement: &Statement<'_>) -> SuffixReturn {
 /// Counts one slice lowering's work into the counters its scope installs
 /// on the lowering thread: the tests it classifies as guards
 /// ([`Lowerer::classify_guard`]), the expressions it lowers
-/// ([`Lowerer::lower_expr`]) and the classes its same-frame effect scans
-/// enter ([`LeafCallScanner`]); test-only.
+/// ([`Lowerer::lower_expr`]), the classes its same-frame effect scans
+/// enter ([`LeafCallScanner`]) and the entries its containment and read
+/// questions inspect in the skeleton's span index; test-only.
 #[cfg(any(test, feature = "test-support"))]
 pub mod lowering_probe {
     use std::cell::RefCell;
@@ -3310,18 +3311,33 @@ pub mod lowering_probe {
         pub expressions: AtomicUsize,
         pub declaration_lookup_visits: AtomicUsize,
         pub scanned_classes: AtomicUsize,
+        pub span_index_visits: AtomicUsize,
     }
     thread_local! {
         static ACTIVE: RefCell<Option<Arc<LoweringWork>>> = const { RefCell::new(None) };
     }
-    pub(crate) struct Scope(Option<Arc<LoweringWork>>);
+    pub(crate) struct Scope {
+        previous: Option<Arc<LoweringWork>>,
+        span_index_visits: u64,
+    }
     impl Drop for Scope {
         fn drop(&mut self) {
-            ACTIVE.with(|active| *active.borrow_mut() = self.0.take());
+            let visited = verter_session_query::flow::span_index::span_index_visits()
+                - self.span_index_visits;
+            ACTIVE.with(|active| {
+                if let Some(work) = active.borrow().as_ref() {
+                    work.span_index_visits
+                        .fetch_add(visited as usize, Ordering::Relaxed);
+                }
+                *active.borrow_mut() = self.previous.take();
+            });
         }
     }
     pub(crate) fn enter(work: Arc<LoweringWork>) -> Scope {
-        Scope(ACTIVE.with(|active| active.replace(Some(work))))
+        Scope {
+            previous: ACTIVE.with(|active| active.replace(Some(work))),
+            span_index_visits: verter_session_query::flow::span_index::span_index_visits(),
+        }
     }
     fn record(counter: fn(&LoweringWork) -> &AtomicUsize) {
         ACTIVE.with(|active| {
@@ -4317,15 +4333,13 @@ impl<'a> Lowerer<'a> {
         write_path: &[SkeletonPathSegment],
         loop_span: FrameSpan,
     ) -> bool {
+        let runtime = FlowBindingRef::Local(self.bindings.canonical_local(binding));
         self.binding_is_selected(binding)
-            && self.skeleton.expr_sites.iter().any(|site| {
-                !loop_span.contains(site.span)
-                    && site.span > loop_span
-                    && site.reads.iter().any(|read| {
-                        paths_may_overlap(write_path, &read.path)
-                            && matches!(read.binding, Some(FlowBindingRef::Local(local)) if self.bindings.canonical_local(local) == self.bindings.canonical_local(binding))
-                    })
-            })
+            && self
+                .skeleton
+                .span_index
+                .reads_after(&runtime, loop_span)
+                .any(|read| paths_may_overlap(write_path, &read.path))
     }
 
     /// Whether the reads anywhere under `span` resolve to a selected slot
@@ -4333,12 +4347,15 @@ impl<'a> Lowerer<'a> {
     /// own region, so a same-named loop local never aliases a downstream outer
     /// binding by name alone.
     fn span_reads_downstream_slot(&self, span: FrameSpan, loop_span: FrameSpan) -> bool {
-        self.skeleton.expr_sites.iter().any(|site| {
-            span.contains(site.span)
-                && site.reads.iter().any(|read| {
+        self.skeleton
+            .span_index
+            .sites_within(span)
+            .into_iter()
+            .any(|site| {
+                self.skeleton.expr_site(site).reads.iter().any(|read| {
                     matches!(read.binding, Some(FlowBindingRef::Local(binding)) if self.binding_is_read_after_loop(binding, loop_span))
                 })
-        })
+            })
     }
 
     /// Whether a return-free loop carries a transfer the transparent summary
@@ -4383,35 +4400,46 @@ impl<'a> Lowerer<'a> {
     /// loop head.
     fn loop_has_selected_write(&mut self, statement: &Statement<'_>) -> bool {
         let loop_span = self.rebase(statement.span());
-        self.skeleton.writes.iter().any(|write| {
-            if !loop_span.contains(write.span) {
-                return false;
-            }
-            if self.span_is_in_literal_dead_branch(statement, write.span) {
-                self.inert_write_spans.insert(write.span);
-                return false;
-            }
-            match &write.binding {
-                Some(FlowBindingRef::Local(binding)) => {
-                    self.binding_is_read_after_loop_at_path(*binding, &write.path, loop_span)
+        let skeleton = self.skeleton;
+        // Writes of one binding at one path share their answer: asking the
+        // read index again per write would cost the binding's reads per
+        // write.
+        let mut answered: FxHashMap<(SkeletonBindingId, Arc<[SkeletonPathSegment]>), bool> =
+            FxHashMap::default();
+        skeleton
+            .span_index
+            .writes_within(loop_span)
+            .into_iter()
+            .any(|write| {
+                let write = &skeleton.writes[write];
+                if self.span_is_in_literal_dead_branch(statement, write.span) {
+                    self.inert_write_spans.insert(write.span);
+                    return false;
                 }
-                // An operation on a captured EVOLVING array retypes this
-                // frame's input: a transfer when the frame reads it after
-                // the loop.
-                Some(captured @ FlowBindingRef::Captured(_)) => {
-                    self.is_evolving_binding(captured)
-                        && self.skeleton.expr_sites.iter().any(|site| {
-                            site.span > loop_span
-                                && !loop_span.contains(site.span)
-                                && site
-                                    .reads
-                                    .iter()
-                                    .any(|read| read.binding.as_ref() == Some(captured))
-                        })
+                match &write.binding {
+                    Some(FlowBindingRef::Local(binding)) => *answered
+                        .entry((*binding, Arc::clone(&write.path)))
+                        .or_insert_with(|| {
+                            self.binding_is_read_after_loop_at_path(
+                                *binding,
+                                &write.path,
+                                loop_span,
+                            )
+                        }),
+                    // An operation on a captured EVOLVING array retypes this
+                    // frame's input: a transfer when the frame reads it after
+                    // the loop.
+                    Some(captured @ FlowBindingRef::Captured(_)) => {
+                        self.is_evolving_binding(captured)
+                            && skeleton
+                                .span_index
+                                .reads_after(captured, loop_span)
+                                .next()
+                                .is_some()
+                    }
+                    None => false,
                 }
-                None => false,
-            }
-        })
+            })
     }
 
     /// Whether a loop test carries narrowing over a downstream-selected
@@ -6015,13 +6043,17 @@ impl<'a> Lowerer<'a> {
         statement: &Statement<'_>,
     ) -> (Arc<[SliceLoopWrite]>, Arc<[SliceLoopDependency]>) {
         let loop_span = self.rebase(statement.span());
-        let inferred: Vec<SliceLoopDependency> = self
-            .skeleton
-            .bindings
-            .iter()
+        let index = &self.skeleton.span_index;
+        verter_debug_assert!(
+            index.covers(self.skeleton),
+            "loop lowering needs a prepared skeleton: its span index is unbuilt"
+        );
+        let inferred: Vec<SliceLoopDependency> = index
+            .bindings_within(loop_span)
+            .into_iter()
+            .map(|binding| self.skeleton.binding(binding))
             .filter(|binding| {
-                loop_span.contains(binding.span)
-                    && !binding.destructured
+                !binding.destructured
                     && binding.annotation_span.is_none()
                     && matches!(
                         binding.kind,
@@ -6040,17 +6072,22 @@ impl<'a> Lowerer<'a> {
             })
             .collect();
         // A write with no value site (`x++`) reads what its own site does.
-        let writes: Vec<SliceLoopWrite> = self
-            .skeleton
-            .writes
-            .iter()
-            .filter(|write| loop_span.contains(write.span))
+        // Writes sharing a value site (a `for…of` head's targets) share its reads.
+        let mut site_reads: FxHashMap<_, Arc<[FlowBindingRef]>> = FxHashMap::default();
+        let writes: Vec<SliceLoopWrite> = index
+            .writes_within(loop_span)
+            .into_iter()
+            .map(|write| &self.skeleton.writes[write])
             .filter_map(|write| {
                 let binding = write.binding.as_ref()?;
                 (write.path.is_empty() || self.is_evolving_binding(binding)).then(|| {
                     SliceLoopWrite {
                         binding: self.canonical_binding_ref(binding),
-                        reads: self.site_reads(write.value.unwrap_or(write.site)),
+                        reads: Arc::clone(
+                            site_reads
+                                .entry(write.value.unwrap_or(write.site))
+                                .or_insert_with_key(|site| self.site_reads(*site)),
+                        ),
                     }
                 })
             })
@@ -6071,10 +6108,10 @@ impl<'a> Lowerer<'a> {
         let mut reads: Vec<FlowBindingRef> = Vec::new();
         for read in self
             .skeleton
-            .expr_sites
-            .iter()
-            .filter(|candidate| span.contains(candidate.span))
-            .flat_map(|candidate| candidate.reads.iter())
+            .span_index
+            .sites_within(span)
+            .into_iter()
+            .flat_map(|candidate| self.skeleton.expr_site(candidate).reads.iter())
         {
             if let Some(binding) = read.binding.as_ref() {
                 let binding = self.canonical_binding_ref(binding);
@@ -6106,10 +6143,10 @@ impl<'a> Lowerer<'a> {
         let span = self.skeleton.expr_site(site).span;
         let mut reads: Vec<SkeletonBindingId> = self
             .skeleton
-            .expr_sites
-            .iter()
-            .filter(|candidate| span.contains(candidate.span))
-            .flat_map(|candidate| candidate.reads.iter())
+            .span_index
+            .sites_within(span)
+            .into_iter()
+            .flat_map(|candidate| self.skeleton.expr_site(candidate).reads.iter())
             .filter_map(|read| match read.binding {
                 Some(FlowBindingRef::Local(binding)) => {
                     Some(self.bindings.canonical_local(binding))
