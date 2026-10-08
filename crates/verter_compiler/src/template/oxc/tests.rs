@@ -1,5 +1,92 @@
 use super::*;
 
+/// Parse expressions and elements inside a scope whose enclosing template
+/// names are `names` (one frame, as an enclosing `v-for` would open).
+struct TestScope<'alloc> {
+    pass: ScopePass<'alloc>,
+    scope: LexicalScopeId,
+}
+
+impl<'alloc> TestScope<'alloc> {
+    fn new(names: &[&'alloc str]) -> Self {
+        let mut pass = ScopePass::new();
+        let scope = pass
+            .scopes
+            .push(LexicalScopeId::ROOT, names.iter().copied());
+        Self { pass, scope }
+    }
+}
+
+fn parse_expression_in<'alloc>(
+    span: Span,
+    input: &'alloc str,
+    alloc: &'alloc Allocator,
+    source_type: SourceType,
+    names: &[&'alloc str],
+    ide_completion: bool,
+    grammar: ValueGrammar,
+) -> OxcParsedExpression<'alloc> {
+    let mut test_scope = TestScope::new(names);
+    let scope = test_scope.scope;
+    parse_expression(
+        span,
+        input,
+        alloc,
+        source_type,
+        &test_scope.pass.enter(scope),
+        ide_completion,
+        grammar,
+    )
+}
+
+/// An element parsed in a test scope, with the names its children see when
+/// it opens a frame of its own.
+struct ElementInScope<'alloc> {
+    parsed: OxcParsedElement<'alloc>,
+    children_locals: Option<Vec<&'alloc str>>,
+}
+
+impl<'alloc> std::ops::Deref for ElementInScope<'alloc> {
+    type Target = OxcParsedElement<'alloc>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.parsed
+    }
+}
+
+fn parse_element_in<'alloc>(
+    element: &crate::ast::types::ElementNode,
+    names: &[&'alloc str],
+    input: &'alloc str,
+    alloc: &'alloc Allocator,
+    source_type: SourceType,
+    ide_completion: bool,
+) -> ElementInScope<'alloc> {
+    let mut test_scope = TestScope::new(names);
+    let scope = test_scope.scope;
+    let (parsed, children_scope) = parse_element(
+        element,
+        scope,
+        &mut test_scope.pass,
+        input,
+        alloc,
+        source_type,
+        ide_completion,
+    );
+    let scopes = &test_scope.pass.scopes;
+    let children_locals = (children_scope != scope).then(|| {
+        std::iter::successors(Some(children_scope), |&frame| {
+            (frame != LexicalScopeId::ROOT).then(|| scopes.parent(frame))
+        })
+        .flat_map(|frame| scopes.own_names(frame).iter().copied())
+        .collect()
+    });
+    ElementInScope {
+        parsed,
+        children_locals,
+    }
+}
+
 mod parse_expression_tests {
     use super::*;
     use crate::utils::oxc::{is_global, is_keyword};
@@ -16,7 +103,7 @@ mod parse_expression_tests {
     #[test]
     fn empty_span_returns_static() {
         let alloc = Allocator::default();
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, 0),
             "",
             &alloc,
@@ -37,7 +124,7 @@ mod parse_expression_tests {
     fn simple_identifier_maybe_dynamic() {
         let alloc = Allocator::default();
         let input = "foo";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, 3),
             input,
             &alloc,
@@ -61,7 +148,7 @@ mod parse_expression_tests {
     fn string_literal_static() {
         let alloc = Allocator::default();
         let input = "'hello'";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -86,7 +173,7 @@ mod parse_expression_tests {
     fn numeric_literal_static() {
         let alloc = Allocator::default();
         let input = "42";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -107,7 +194,7 @@ mod parse_expression_tests {
     fn boolean_literal_static() {
         let alloc = Allocator::default();
         let input = "true";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -138,7 +225,7 @@ mod parse_expression_tests {
     fn ignored_identifier_dynamic() {
         let alloc = Allocator::default();
         let input = "item";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, 4),
             input,
             &alloc,
@@ -161,7 +248,7 @@ mod parse_expression_tests {
     fn member_expr_ignored_root_dynamic() {
         let alloc = Allocator::default();
         let input = "item.name";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -180,7 +267,7 @@ mod parse_expression_tests {
     fn binary_literals_static() {
         let alloc = Allocator::default();
         let input = "1 + 2";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -201,7 +288,7 @@ mod parse_expression_tests {
     fn script_level_identifier_maybe_dynamic() {
         let alloc = Allocator::default();
         let input = "cls";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -223,7 +310,7 @@ mod parse_expression_tests {
     fn mixed_injected_and_script_dynamic() {
         let alloc = Allocator::default();
         let input = "item.name + cls";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -243,7 +330,7 @@ mod parse_expression_tests {
     fn invalid_syntax_errors() {
         let alloc = Allocator::default();
         let input = "if (";
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(0, input.len() as u32),
             input,
             &alloc,
@@ -264,7 +351,7 @@ mod parse_expression_tests {
         let alloc = Allocator::default();
         let input = "prefix foo suffix";
         // "foo" at offset 7..10
-        let result = parse_expression(
+        let result = parse_expression_in(
             Span::new(7, 10),
             input,
             &alloc,
@@ -424,7 +511,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasStaticClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.condition.is_none());
         assert!(result.v_for.is_none());
@@ -434,7 +521,7 @@ mod parse_element_tests {
             "Plain attributes need no OXC parsing"
         );
         assert!(result.expression_flag.is_empty());
-        assert!(result.provided_locals.is_none());
+        assert!(result.children_locals.is_none());
     }
 
     // ── Test 2: :class with dynamic expression ──────────────────
@@ -455,7 +542,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0]
@@ -497,7 +584,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         // Dense table length matches the FULL element props, not the sparse parsed set.
         assert_eq!(
@@ -546,7 +633,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -575,7 +662,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicStyle),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -604,7 +691,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicKey),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -637,7 +724,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         let condition = result.condition.as_ref().expect("should have condition");
         assert_eq!(condition.dynamism, Dynamism::MaybeDynamic);
@@ -669,7 +756,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         let condition = result.condition.as_ref().expect("should have condition");
         assert_eq!(condition.dynamism, Dynamism::Static);
@@ -681,7 +768,7 @@ mod parse_element_tests {
 
     // ── Test 8: v-for provides locals ───────────────────────────
 
-    /// `<div v-for="item of items">` — v_for parsed, provided_locals has "item".
+    /// `<div v-for="item of items">` — v_for parsed, its children see "item".
     #[test]
     fn v_for_provides_locals() {
         //  <div v-for="item of items">
@@ -698,23 +785,23 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.v_for.is_some(), "should have parsed v-for");
         let locals = result
-            .provided_locals
+            .children_locals
             .as_ref()
-            .expect("v-for should produce provided_locals");
+            .expect("v-for should open a frame for its children");
         assert!(
             locals.contains(&"item"),
-            "provided_locals should contain 'item', got: {:?}",
+            "children scope should contain 'item', got: {:?}",
             locals
         );
     }
 
     // ── Test 9: v-slot provides locals ──────────────────────────
 
-    /// `<template #default="{ data }">` — v_slot parsed, provided_locals has "data".
+    /// `<template #default="{ data }">` — v_slot parsed, its children see "data".
     #[test]
     fn v_slot_provides_locals() {
         //  <template #default="{ data }">
@@ -731,16 +818,16 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.v_slot.is_some(), "should have parsed v-slot");
         let locals = result
-            .provided_locals
+            .children_locals
             .as_ref()
-            .expect("v-slot should produce provided_locals");
+            .expect("v-slot should open a frame for its children");
         assert!(
             locals.contains(&"data"),
-            "provided_locals should contain 'data', got: {:?}",
+            "children scope should contain 'data', got: {:?}",
             locals
         );
     }
@@ -770,7 +857,7 @@ mod parse_element_tests {
                 .add(PropFlags::HasDynamicBinding), // :id is a generic dynamic binding
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 2);
 
@@ -803,7 +890,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(result.condition.is_none());
         assert!(result.v_for.is_none());
@@ -835,7 +922,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.condition.is_some(),
@@ -873,7 +960,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -908,16 +995,16 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.v_for.is_some(),
             "v-once should not suppress v-for parsing"
         );
         let locals = result
-            .provided_locals
+            .children_locals
             .as_ref()
-            .expect("v-for should produce provided_locals");
+            .expect("v-for should open a frame for its children");
         assert!(
             locals.contains(&"item"),
             "v-for locals should still be provided, got: {:?}",
@@ -948,7 +1035,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.condition.is_none(),
@@ -983,7 +1070,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         let condition = result.condition.as_ref().expect("should have condition");
         assert_eq!(condition.dynamism, Dynamism::MaybeDynamic);
@@ -1022,7 +1109,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let prop = &result.props[0];
@@ -1057,7 +1144,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasShow),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let prop = &result.props[0];
@@ -1086,7 +1173,7 @@ mod parse_element_tests {
             PropFlag::empty(),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &[], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &[], input, &alloc, tsx(), false);
 
         assert!(
             result.props.is_empty(),
@@ -1114,7 +1201,7 @@ mod parse_element_tests {
             PropFlag::empty().add(PropFlags::HasDynamicClass),
         );
         let alloc = Allocator::default();
-        let result = parse_element(&el, &["item"], input, &alloc, tsx(), false);
+        let result = parse_element_in(&el, &["item"], input, &alloc, tsx(), false);
 
         assert_eq!(result.props.len(), 1);
         let exp = result.props[0].exp.as_ref().unwrap();
@@ -1468,24 +1555,23 @@ mod parse_template_expressions_tests {
             ),
         }
 
-        // Template element should have both locals (it has v-slot → Some)
+        // The template's children see both the inherited `item` and its own
+        // `data`; its own frame stores only `data`.
+        let children = result.children_scope(crate::types::NodeId(1));
+        assert!(
+            result.scopes.declares(children, "item"),
+            "template children should inherit 'item' from parent v-for"
+        );
+        assert!(
+            result.scopes.declares(children, "data"),
+            "template children should see 'data' from v-slot"
+        );
+        assert_eq!(result.scopes.own_names(children), ["data"]);
         match &result.data[1] {
-            OxcNodeData::Element(el) => {
-                let locals = el
-                    .provided_locals
-                    .as_ref()
-                    .expect("v-slot element should have provided_locals");
-                assert!(
-                    locals.contains(&"item"),
-                    "template should inherit 'item' from parent v-for, got: {:?}",
-                    locals
-                );
-                assert!(
-                    locals.contains(&"data"),
-                    "template should have 'data' from v-slot, got: {:?}",
-                    locals
-                );
-            }
+            OxcNodeData::Element(el) => assert!(
+                !result.scopes.declares(el.props_scope, "data"),
+                "the template's own props must not see its slot parameters"
+            ),
             other => panic!("expected Element, got {:?}", std::mem::discriminant(other)),
         }
     }
@@ -1884,5 +1970,249 @@ mod parse_template_expressions_tests {
             }
             other => panic!("expected Element, got {:?}", std::mem::discriminant(other)),
         }
+    }
+}
+
+// ── Test Group: shared lexical scopes ──────────────────────────
+
+mod lexical_scope_tests {
+    use super::*;
+    use crate::template::oxc::scope::take_scope_work;
+
+    /// Parse the template of `source` and hand the AST and its expression
+    /// overlay to `check`, with the scope-switch work counter reset first.
+    fn with_template<R>(
+        source: &str,
+        ide_completion: bool,
+        check: impl FnOnce(&TemplateAst, &OxcParsedAst<'_>) -> R,
+    ) -> R {
+        let alloc = Allocator::default();
+        let bytes = source.as_bytes();
+        let mut syntax = crate::parser::Syntax::new(false);
+        crate::tokenizer::byte::tokenize_sfc(bytes, |e| {
+            syntax.handle(
+                &e,
+                &crate::diagnostics::SyntaxPluginContext {
+                    input: source,
+                    bytes,
+                    options: &crate::diagnostics::SyntaxPluginOptions::default(),
+                    diagnostics: Vec::new(),
+                },
+            )
+        });
+        let ast = syntax.take_template_ast().expect("template ast");
+        take_scope_work();
+        let oxc =
+            parse_template_expressions(&ast, source, &alloc, SourceType::tsx(), ide_completion);
+        check(&ast, &oxc)
+    }
+
+    /// `(name, ignored)` for every identifier in the interpolations, in node order.
+    fn interpolation_bindings(oxc: &OxcParsedAst<'_>) -> Vec<(String, bool)> {
+        oxc.data
+            .iter()
+            .filter_map(|node| match node {
+                OxcNodeData::Interpolation(expr) => expr.bindings.as_ref(),
+                _ => None,
+            })
+            .flat_map(|bindings| {
+                bindings
+                    .bindings
+                    .iter()
+                    .map(|b| (b.name.to_string(), b.ignore))
+            })
+            .collect()
+    }
+
+    struct ScopeCost {
+        work: usize,
+        frames: usize,
+        stored_names: usize,
+    }
+
+    fn deep_static_template(depth: usize) -> String {
+        let mut s = String::from("<template><ul v-for=\"item in items\">");
+        for _ in 0..depth {
+            s.push_str("<div>{{ item }}");
+        }
+        for _ in 0..depth {
+            s.push_str("</div>");
+        }
+        s.push_str("</ul>{{ item }}</template>");
+        s
+    }
+
+    fn nested_loops_template(depth: usize) -> String {
+        let mut s = String::from("<template>");
+        for level in 0..depth {
+            let source = if level == 0 {
+                "rows".to_string()
+            } else {
+                format!("a{}", level - 1)
+            };
+            s.push_str(&format!("<div v-for=\"a{level} in {source}\">{{{{ a0 }}}}"));
+        }
+        for _ in 0..depth {
+            s.push_str("</div>");
+        }
+        s.push_str("{{ a0 }}</template>");
+        s
+    }
+
+    fn cost(source: &str) -> ScopeCost {
+        with_template(source, false, |_, oxc| {
+            let bindings = interpolation_bindings(oxc);
+            let (last, inner) = bindings.split_last().expect("interpolations");
+            assert!(
+                inner.iter().all(|(_, ignored)| *ignored),
+                "every interpolation inside the loops resolves to the template local"
+            );
+            assert!(
+                !last.1,
+                "an interpolation after the loops resolves to the instance, not a stale local"
+            );
+            ScopeCost {
+                work: take_scope_work(),
+                frames: oxc.scopes.frame_count(),
+                stored_names: oxc.scopes.stored_name_count(),
+            }
+        })
+    }
+
+    /// Scope metadata and scope-switch work grow linearly with nesting depth:
+    /// a nested node reads its scope from its parent's handle instead of
+    /// walking ancestors, and a nested `v-for` stores only its own alias.
+    #[test]
+    fn scope_cost_grows_linearly_with_depth() {
+        for (shape, build) in [
+            (
+                "deep static elements",
+                deep_static_template as fn(usize) -> String,
+            ),
+            ("nested loops", nested_loops_template),
+        ] {
+            let costs: Vec<(usize, ScopeCost)> = [128, 256, 512, 1024]
+                .into_iter()
+                .map(|depth| (depth, cost(&build(depth))))
+                .collect();
+            for (depth, cost) in &costs {
+                let loops = if shape == "nested loops" { *depth } else { 1 };
+                assert_eq!(
+                    cost.stored_names, loops,
+                    "{shape} @ {depth}: names stored once"
+                );
+                assert_eq!(
+                    cost.frames,
+                    loops + 1,
+                    "{shape} @ {depth}: one frame per v-for"
+                );
+                assert!(
+                    cost.work <= 4 * loops + 4,
+                    "{shape} @ {depth}: scope work {} is not linear in the frames entered",
+                    cost.work
+                );
+            }
+            for pair in costs.windows(2) {
+                let (small, large) = (&pair[0].1, &pair[1].1);
+                assert!(
+                    large.work <= 2 * small.work + 4,
+                    "{shape}: doubling depth {} → {} grew work {} → {}",
+                    pair[0].0,
+                    pair[1].0,
+                    small.work,
+                    large.work
+                );
+            }
+        }
+    }
+
+    /// A shadowing inner `v-for` alias leaves the outer alias visible to later
+    /// siblings, and nothing leaks past the outer loop.
+    #[test]
+    fn shadowed_alias_stays_visible_until_its_own_loop_ends() {
+        let source = r#"<template><div v-for="x in xs"><p v-for="x in x">{{ x }}</p><span>{{ x }}</span></div><i>{{ x }}</i></template>"#;
+        with_template(source, false, |_, oxc| {
+            assert_eq!(
+                interpolation_bindings(oxc),
+                [
+                    ("x".to_string(), true),
+                    ("x".to_string(), true),
+                    ("x".to_string(), false),
+                ]
+            );
+        });
+    }
+
+    /// Slot boundary: an element's props and dynamic slot name see its `v-for`
+    /// aliases but not its own slot parameters; its children see both.
+    #[test]
+    fn slot_parameters_reach_only_descendants() {
+        let source = r#"<template><Comp v-for="item in items" #[item.slot]="{ row }" :a="row">{{ row }}{{ item }}</Comp></template>"#;
+        with_template(source, false, |ast, oxc| {
+            let comp = ast
+                .nodes
+                .iter()
+                .position(|node| matches!(node.kind, AstNodeKind::Element(_)))
+                .expect("component");
+            let OxcNodeData::Element(el) = &oxc.data[comp] else {
+                panic!("component is parsed");
+            };
+            let prop_names: Vec<(String, bool)> = el
+                .props
+                .iter()
+                .filter_map(|prop| prop.exp.as_ref()?.bindings.as_ref())
+                .flat_map(|b| b.bindings.iter().map(|b| (b.name.to_string(), b.ignore)))
+                .collect();
+            assert_eq!(prop_names, [("row".to_string(), false)]);
+            let slot_name = el
+                .v_slot
+                .as_ref()
+                .and_then(|slot| slot.dynamic_name.as_ref())
+                .and_then(|expr| expr.bindings.as_ref())
+                .expect("dynamic slot name");
+            assert!(slot_name
+                .bindings
+                .iter()
+                .all(|b| b.name == "item" && b.ignore));
+            assert_eq!(
+                interpolation_bindings(oxc),
+                [("row".to_string(), true), ("item".to_string(), true)]
+            );
+            let id = crate::types::NodeId(comp);
+            assert_eq!(oxc.scopes.own_names(el.props_scope), ["item"]);
+            assert_eq!(oxc.scopes.own_names(oxc.children_scope(id)), ["row"]);
+            assert_eq!(oxc.scope_of(id, ast), LexicalScopeId::ROOT);
+        });
+    }
+
+    /// IDE completion: a partial identifier matching a visible template local
+    /// stays a local through the shared scope, and a broken expression keeps
+    /// its scope handle for recovery.
+    #[test]
+    fn ide_completion_and_recovery_read_the_shared_scope() {
+        let partial = r#"<template><div v-for="itemValue in items">{{ itemV }}</div></template>"#;
+        with_template(partial, true, |_, oxc| {
+            assert_eq!(interpolation_bindings(oxc), [("itemV".to_string(), true)]);
+        });
+        with_template(partial, false, |_, oxc| {
+            assert_eq!(interpolation_bindings(oxc), [("itemV".to_string(), false)]);
+        });
+
+        let broken =
+            r#"<template><div v-for="itemValue in items">{{ itemValue. }}</div></template>"#;
+        with_template(broken, true, |_, oxc| {
+            let expr = oxc
+                .data
+                .iter()
+                .find_map(|node| match node {
+                    OxcNodeData::Interpolation(expr) => Some(expr),
+                    _ => None,
+                })
+                .expect("interpolation");
+            assert!(expr.errors.is_some());
+            let scope = expr.ide_recovery_scope.expect("recovery scope");
+            assert!(oxc.scopes.declares_completion_of(scope, "itemV"));
+            assert!(!oxc.scopes.declares(scope, "items"));
+        });
     }
 }

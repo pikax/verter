@@ -40,8 +40,8 @@ mod vfor;
 
 // Re-export main types
 pub use types::{
-    Binding, BindingContext, BindingExtractionResult, Dynamism, FunctionBinding, LiteralBinding,
-    ParamBytes, ParameterBindingsResult,
+    Binding, BindingContext, BindingExtractionResult, Dynamism, EnclosingScope, FunctionBinding,
+    LiteralBinding, ParamBytes, ParameterBindingsResult,
 };
 
 // Re-export main functions

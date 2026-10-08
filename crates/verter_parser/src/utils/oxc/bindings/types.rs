@@ -6,6 +6,7 @@ use crate::common::RelativeSpan;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use super::keywords::{is_global, is_keyword};
 
@@ -193,11 +194,60 @@ impl<'a> BindingExtractionResult<'a> {
     }
 }
 
+/// Names declared by the template scopes enclosing an expression: the `v-for`
+/// aliases and `v-slot` parameters of every ancestor element.
+///
+/// The template pass owns ONE incrementally maintained table of these names
+/// and lends it to each extraction, which queries it in place. Implementations
+/// answer from that shared table; a consumer never copies the inherited names
+/// into a per-expression set.
+pub trait EnclosingScope {
+    /// An enclosing scope declares exactly `name`.
+    fn declares(&self, name: &str) -> bool;
+
+    /// An enclosing scope declares a name that starts with `partial` (an
+    /// identifier the user is still typing, in IDE completion mode).
+    fn declares_completion_of(&self, partial: &str) -> bool;
+}
+
+impl EnclosingScope for [&str] {
+    fn declares(&self, name: &str) -> bool {
+        self.contains(&name)
+    }
+
+    fn declares_completion_of(&self, partial: &str) -> bool {
+        self.iter().any(|declared| declared.starts_with(partial))
+    }
+}
+
+impl<const N: usize> EnclosingScope for [&str; N] {
+    fn declares(&self, name: &str) -> bool {
+        self.as_slice().declares(name)
+    }
+
+    fn declares_completion_of(&self, partial: &str) -> bool {
+        self.as_slice().declares_completion_of(partial)
+    }
+}
+
+impl EnclosingScope for Vec<&str> {
+    fn declares(&self, name: &str) -> bool {
+        self.as_slice().declares(name)
+    }
+
+    fn declares_completion_of(&self, partial: &str) -> bool {
+        self.as_slice().declares_completion_of(partial)
+    }
+}
+
 /// Context for binding extraction, tracking ignored identifiers in scope (byte-optimized version).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BindingContext<'a> {
     /// Identifiers that should be ignored (parameters, local variables) as str slices
     ignored_identifiers: FxHashSet<&'a str>,
+    /// Names declared by enclosing template scopes, borrowed from the template
+    /// pass's shared table and queried in place (see [`EnclosingScope`]).
+    enclosing: Option<Rc<dyn EnclosingScope + 'a>>,
     /// Base offset to add to all positions
     pub base_offset: u32,
     /// When set, an identifier that is a *prefix* of an in-scope local is also
@@ -211,6 +261,17 @@ pub struct BindingContext<'a> {
     completion_prefixes: bool,
 }
 
+impl std::fmt::Debug for BindingContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BindingContext")
+            .field("ignored_identifiers", &self.ignored_identifiers)
+            .field("has_enclosing_scope", &self.enclosing.is_some())
+            .field("base_offset", &self.base_offset)
+            .field("completion_prefixes", &self.completion_prefixes)
+            .finish()
+    }
+}
+
 impl Default for BindingContext<'_> {
     fn default() -> Self {
         Self::new(0)
@@ -222,6 +283,7 @@ impl<'a> BindingContext<'a> {
     pub fn new(base_offset: u32) -> Self {
         Self {
             ignored_identifiers: FxHashSet::default(),
+            enclosing: None,
             base_offset,
             completion_prefixes: false,
         }
@@ -231,9 +293,20 @@ impl<'a> BindingContext<'a> {
     pub fn with_ignored(base_offset: u32, ignored: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             ignored_identifiers: ignored.into_iter().collect(),
+            enclosing: None,
             base_offset,
             completion_prefixes: false,
         }
+    }
+
+    /// Resolve names declared by enclosing template scopes through `enclosing`.
+    ///
+    /// The table is shared, not copied: child contexts (arrow parameters, block
+    /// declarations) hold the same handle and add only their own locals.
+    #[inline]
+    pub fn within(mut self, enclosing: Rc<dyn EnclosingScope + 'a>) -> Self {
+        self.enclosing = Some(enclosing);
+        self
     }
 
     /// Enable or disable completion-prefix matching (see [`completion_prefixes`]).
@@ -257,6 +330,10 @@ impl<'a> BindingContext<'a> {
             || is_global(bytes)
             || name == "$event"
             || self.ignored_identifiers.contains(name)
+            || self
+                .enclosing
+                .as_ref()
+                .is_some_and(|enclosing| enclosing.declares(name))
             // In IDE completion mode, partial completions inside v-for / v-slot scopes
             // arrive as unfinished identifiers (`it`, `slotI`, etc.). Treat prefixes of
             // ignored locals as ignored too so the template codegen keeps them bare and
@@ -264,10 +341,14 @@ impl<'a> BindingContext<'a> {
             // Gated off for runtime codegen, where a partial identifier is a real
             // reference and the per-binding scan is wasted work.
             || (self.completion_prefixes
-                && self
+                && (self
                     .ignored_identifiers
                     .iter()
-                    .any(|ignored| ignored.starts_with(name)))
+                    .any(|ignored| ignored.starts_with(name))
+                    || self
+                        .enclosing
+                        .as_ref()
+                        .is_some_and(|enclosing| enclosing.declares_completion_of(name))))
     }
 
     /// Add an identifier to the ignore list
@@ -282,6 +363,7 @@ impl<'a> BindingContext<'a> {
         ignored.extend(additional);
         Self {
             ignored_identifiers: ignored,
+            enclosing: self.enclosing.clone(),
             base_offset: self.base_offset,
             completion_prefixes: self.completion_prefixes,
         }
