@@ -318,6 +318,16 @@ fn a_member_read_through_this_lowers_only_the_elements_declaring_it() {
     use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host, ProbeProject};
     let lowered_by = |source: &str, probe: &str| {
         let host = default_probe_host();
+        // A read of a class in the same module first populates the host's
+        // augmentation index, which a later request's store view validates
+        // against; the measured read is the steady-state one.
+        with_probe_on_host(
+            &host,
+            ProbeProject::default(),
+            "class Warm { w = 1; }\n",
+            "Warm['w']",
+            |_, _| (),
+        );
         host.provenance().reset();
         with_probe_on_host(&host, ProbeProject::default(), source, probe, |_, _| ());
         host.provenance().snapshot().class_elements_lowered

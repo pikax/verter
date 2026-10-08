@@ -8068,11 +8068,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for rdep in self.ctx.reverse_dependency_canonicals(canonical) {
             let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
         }
-        self.collect_augmentation_contributions(
-            AugmentationContribution::TypeBody,
+        let target =
             verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(
                 Arc::from(canonical),
+            );
+        // The common case — no module augments this one — is decided from the
+        // augmenter set alone, observed so a later augmenter misses a warm
+        // read; only a module with augmenters pays for the contributor read.
+        let (_, augmenter_set) = self.ctx.augmentation_index(target.clone());
+        crate::resolver_core::resolver_context::observe_fan_out(
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
+                verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
+                    canonical_id: canonical.to_owned(),
+                    key: verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
+                        &target,
+                    ),
+                    lane: verter_session_query::facts::FactLane::Semantic,
+                    expected_hash: augmenter_set.fingerprint,
+                },
             ),
+        );
+        if augmenter_set.entries.is_empty() {
+            return false;
+        }
+        self.collect_augmentation_contributions(
+            AugmentationContribution::TypeBody,
+            target,
             class,
             &[],
             crate::semantic_query::ProjectionReductionContext::published(

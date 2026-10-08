@@ -210,3 +210,17 @@ fn an_inherited_read_follows_edits_to_the_member_it_reads() {
     write("base.ts", &base("number", "2"));
     assert_eq!(answer(), "7", "an unrelated base edit keeps the answer");
 }
+
+/// A deep `extends` chain answers the inherited read at its far end: the
+/// selective read follows the demanded name through every class of the chain.
+#[test]
+fn a_deep_extends_chain_answers_the_inherited_read() {
+    let depth = 250;
+    let mut source = String::from("class C0 { a = 'deep' as const }\n");
+    for i in 1..=depth {
+        source.push_str(&format!("class C{i} extends C{} {{}}\n", i - 1));
+    }
+    source.push_str(&format!("function r(x: C{depth}) {{ return x.a }}\n"));
+    let failures = mismatches(&source, &[("ReturnType<typeof r>", "\"deep\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
