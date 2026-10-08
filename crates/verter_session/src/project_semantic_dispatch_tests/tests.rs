@@ -1523,6 +1523,10 @@ fn scc_member_drain_inherits_the_root_candidate_without_a_race() {
     let member = graph
         .relation_published_carrier(&member_key)
         .expect("member publication");
+    assert!(
+        Arc::ptr_eq(&member.cost_receipt, &root.cost_receipt),
+        "an SCC member shares the component root's sealed receipt"
+    );
     assert_eq!(
         (
             member.read_set_signature.facts,
