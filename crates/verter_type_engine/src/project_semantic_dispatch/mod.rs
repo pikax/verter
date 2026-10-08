@@ -129,7 +129,7 @@ pub(crate) mod flow_return_callee;
 mod flow_return_fact;
 pub mod flow_return_products;
 mod flow_return_widening;
-mod projection_fact;
+pub(crate) mod projection_fact;
 // The completeness-proof layer for flow-bearing operations: production-live
 // (the flow evaluator's demand preparation installs demands from here and
 // the component close finalizes through it), and the `FlowReturnKey`
@@ -2519,6 +2519,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             self.fold_into_top_build_local_taint(true, false);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let reasons = *self
+                .binding
+                .observers
+                .forcing
+                .force_result_partial_reasons_for_tests
+                .lock();
+            if !reasons.is_empty() {
+                self.fold_into_top_build_local_taint_with(true, false, reasons);
+            }
         }
         #[cfg(any(test, feature = "test-support"))]
         self.binding

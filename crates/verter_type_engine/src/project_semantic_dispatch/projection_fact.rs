@@ -26,8 +26,8 @@
 use super::walk::QueryBuildOutput;
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
-    ExecutionAbort, FactResult, PartialReason, ProjectionMode, QueryResult, ResultCompleteness,
-    SemanticQueryKey,
+    ExecutionAbort, FactResult, PartialReason, PartialReasonSet, ProjectionMode, QueryError,
+    QueryResult, ResultCompleteness, SemanticQueryKey,
 };
 
 /// What an unfinished projection of a given key can still honestly offer.
@@ -77,6 +77,47 @@ pub(crate) fn projection_fact<T>(
         },
         (None, causes) => FactResult::unavailable(causes.unwrap_or_else(fault)),
     })
+}
+
+/// The result an aborted projection build hands its readers.
+///
+/// A build whose read observed cancellation or a superseded/torn view is no
+/// fact ([`ExecutionAbort`]): whatever value it produced is discarded and
+/// every reader of the flight receives the abort's typed error instead,
+/// with the read still partial under the observed classes. Any other build
+/// keeps its result.
+///
+/// A `FlowReturn` build keeps its result here: its consumers read it
+/// through the flow producer's own fact (`flow_return_fact`), which
+/// classifies the same observed completeness at the point of use.
+pub(crate) fn withhold_aborted_projection<T>(
+    key: &SemanticQueryKey,
+    observed: ResultCompleteness,
+    result: QueryResult<T>,
+) -> QueryResult<T> {
+    if matches!(key, SemanticQueryKey::FlowReturn(_)) {
+        return result;
+    }
+    match ExecutionAbort::observed_in(observed) {
+        Some(abort) => QueryResult::Error(abort_error(abort, observed)),
+        None => result,
+    }
+}
+
+/// The typed error an aborted projection answers with.
+fn abort_error(abort: ExecutionAbort, observed: ResultCompleteness) -> QueryError {
+    match abort {
+        ExecutionAbort::Cancelled => QueryError::Cancelled,
+        ExecutionAbort::Superseded
+            if observed
+                .reasons()
+                .contains(PartialReasonSet::SUPERSEDED_GENERATION) =>
+        {
+            QueryError::StaleSemanticOperand
+        }
+        ExecutionAbort::Superseded => QueryError::UnstableState { attempts: 1 },
+        ExecutionAbort::Shutdown => QueryError::Cancelled,
+    }
 }
 
 impl<T> QueryBuildOutput<T> {
