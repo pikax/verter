@@ -1109,12 +1109,11 @@ thread_local! {
     static EXACT_PUBLICATION_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-#[inline]
+// Measurement only: the hook and every call site, including the work count
+// each passes, are absent from default builds.
+#[cfg(any(test, feature = "semantic-observe"))]
 pub(crate) fn record_exact_publication_work(entries: usize) {
-    #[cfg(any(test, feature = "semantic-observe"))]
     EXACT_PUBLICATION_WORK.with(|work| work.set(work.get() + entries as u64));
-    #[cfg(not(any(test, feature = "semantic-observe")))]
-    let _ = entries;
 }
 
 /// Exact-resolution entries this thread's exact publications touched since
@@ -1317,6 +1316,7 @@ impl ResolutionWorldRoot {
     ) -> Option<Vec<ResolutionFactKey>> {
         let replacement = ExactOwnerBucket::from_resolutions(resolutions);
         let stored = self.exact_owners.get(importer_id);
+        #[cfg(any(test, feature = "semantic-observe"))]
         record_exact_publication_work(
             stored.map_or(0, |bucket| bucket.routes.len()) + resolutions.len(),
         );
@@ -1344,21 +1344,35 @@ impl ResolutionWorldRoot {
     }
 
     /// Every importer at or under `prefix` holding exact routes, in order:
-    /// one range seek, visiting no importer outside the subtree's key range.
+    /// one point lookup for the directory's own path and one range seek over
+    /// its `base/` descendants, visiting no importer outside the subtree —
+    /// a component-prefix sibling such as `base-x` or `baseway/…` sorts
+    /// outside `base/`'s range and is never reached.
     pub(crate) fn exact_owners_under(&self, prefix: &str) -> Vec<String> {
         let base = prefix.strip_suffix('/').unwrap_or(prefix);
-        let mut visited = 0;
-        let owners = self
+        let descendants = format!("{base}/");
+        #[cfg(any(test, feature = "semantic-observe"))]
+        let mut visited = 1;
+        let mut owners: Vec<String> = self
             .exact_owners
-            .range(base.to_owned()..)
-            .map(|(owner, _)| owner)
-            .take_while(|owner| {
-                visited += 1;
-                owner.starts_with(base)
-            })
-            .filter(|owner| crate::path_matches_prefix(owner, prefix))
-            .cloned()
+            .get_key_value(base)
+            .map(|(owner, _)| owner.clone())
+            .into_iter()
             .collect();
+        owners.extend(
+            self.exact_owners
+                .range(descendants.clone()..)
+                .map(|(owner, _)| owner)
+                .take_while(|owner| {
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    {
+                        visited += 1;
+                    }
+                    owner.starts_with(&descendants)
+                })
+                .cloned(),
+        );
+        #[cfg(any(test, feature = "semantic-observe"))]
         record_exact_publication_work(visited);
         owners
     }

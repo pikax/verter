@@ -256,28 +256,34 @@ impl EdgeStore {
         // their invalidation cascades for steady-state re-pushes.
         //
         // Duplicate-key safety: the input is a Vec, so the same key can
-        // appear twice. A replace keeps the LAST route per key, so the
-        // comparison is against exactly the table a replace would store:
-        // `[A→x, A→x]` against `{A→x, B→y}` is a change (the replace drops
-        // `B→y`), and `[A→x, A→y]` against `{A→y}` is not.
+        // appear twice. A replace keeps only the LAST route per key — an
+        // earlier route for that key is superseded and stores nothing, not
+        // even its resolved target in `exact_resolved` — so the comparison
+        // is against exactly the table a replace would store: `[A→x, A→x]`
+        // against `{A→x, B→y}` is a change (the replace drops `B→y`), and
+        // `[A→x, A→y]` against `{A→y}` is not. An owner with no edge state
+        // stores the empty table, so an empty input for it is unchanged.
+        #[cfg(any(test, feature = "semantic-observe"))]
         crate::resolution_currency::record_exact_publication_work(resolutions.len());
-        if let Some(state) = self.files.get(canonical_id) {
-            let stored = &state.deps.exact_resolutions;
-            let mut incoming: FxHashMap<
-                (&str, ResolvePhase, ResolveRequestKind),
-                &ExactResolution,
-            > = FxHashMap::default();
-            for resolution in &resolutions {
-                incoming.insert(
+        let winners = {
+            let mut last_route: FxHashMap<(&str, ResolvePhase, ResolveRequestKind), usize> =
+                FxHashMap::default();
+            for (index, resolution) in resolutions.iter().enumerate() {
+                last_route.insert(
                     (&resolution.specifier, resolution.phase, resolution.kind),
-                    resolution,
+                    index,
                 );
             }
-            let unchanged = incoming.len() == stored.len()
-                && incoming
+            let stored = self
+                .files
+                .get(canonical_id)
+                .map(|state| &state.deps.exact_resolutions);
+            let unchanged = last_route.len() == stored.map_or(0, FxHashMap::len)
+                && last_route
                     .iter()
-                    .all(|((specifier, phase, kind), resolution)| {
-                        stored.get(&(specifier.to_string(), *phase, *kind)) == Some(*resolution)
+                    .all(|(&(specifier, phase, kind), &index)| {
+                        stored.and_then(|stored| stored.get(&(specifier.to_string(), phase, kind)))
+                            == Some(&resolutions[index])
                     });
             if unchanged {
                 return ExactResolutionResult {
@@ -285,7 +291,18 @@ impl EdgeStore {
                     changed: false,
                 };
             }
-        }
+            resolutions
+                .iter()
+                .enumerate()
+                .map(|(index, resolution)| {
+                    last_route[&(
+                        resolution.specifier.as_str(),
+                        resolution.phase,
+                        resolution.kind,
+                    )] == index
+                })
+                .collect::<Vec<bool>>()
+        };
 
         let mut newly_resolved = Vec::new();
         let pre_existing_other_class = {
@@ -304,7 +321,10 @@ impl EdgeStore {
             snap.exact_resolutions.clear();
             snap.exact_resolved.clear();
 
-            for resolution in resolutions {
+            for (resolution, winner) in resolutions.into_iter().zip(winners) {
+                if !winner {
+                    continue;
+                }
                 if let Some(ref id) = resolution.resolved_canonical_id {
                     if snap.exact_resolved.insert(id.clone())
                         && !pre_existing_other_class.contains(id)
