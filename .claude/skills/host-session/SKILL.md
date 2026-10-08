@@ -74,10 +74,11 @@ back into the host for a service it was not given.
   engine grants, the `OutputLease` and the `SurfaceClaimAuthority`, and keeps
   neither. The root hands both to `SessionAttachment` alone. Scheduler adoption
   of the same registry belongs to the parallel-execution work.
-- `WorkspaceServices` holds the resolve-extension policy and the one
-  process-local `ResolutionRetention` adapter. `WorkspaceServices::attach` is the
-  only route by which a workspace receives them, both at construction and on
-  `set_workspace`.
+- `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
+  is the only route by which a workspace receives it, both at construction and on
+  `set_workspace`. Resident resolution state needs no service: every workspace
+  Engine binds the process-local `ResolutionRetention` account at its own
+  construction, and replacing it is a `test-support` seam only.
 - Known-file dependency resolution probes `VerterHost::known_dependency_extensions()`:
   the bare specifier, then script extensions, then the admitted carriers. Carrier
   MEMBERSHIP comes from the composed admission (an unadmitted vertical's
@@ -96,7 +97,7 @@ called `RequestSession` or `ProjectSession` (the TypeScript `ProjectSession` in
 | --- | --- | --- |
 | `VerterHost` | `VerterHost` (`host_construction.rs`, `host_lifecycle.rs`) | One host; the composition root |
 | `HostServices` | `framework::HostServices` (`framework/registry.rs`): capability catalog, adapter registry, framework options | One host; composed once at construction |
-| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy plus the process-local `ResolutionRetention` adapter | One host; attached to each workspace through `WorkspaceServices::attach` |
+| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy | One host; attached to each workspace through `WorkspaceServices::attach` |
 | `RequestSession` | `resolver_core::request_bound::RequestBoundAdapter<L>` over a `RequestBoundLifecycle` — `SessionRequestLifecycle<'a>` (`SessionResolverContext<'a>`) or `HostRequestLifecycle<'a>` (`HostResolverContext<'a>`) | One request; host, session view and request view are borrowed for `'a` |
 | `ProjectSession` | `meta::MetaProject` (project lifetime; terminal `shutdown`) plus `meta::MetaSession` (session lifetime; `close`, and close on drop) | Project until shutdown; session until close or drop |
 

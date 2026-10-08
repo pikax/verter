@@ -112,6 +112,10 @@ enum ResolutionLane {
     Workspace,
     /// An overlay-lane candidate, with its admission sequence number.
     RequestOverlay(u64),
+    /// A complete workspace answer its producer could not retain (the
+    /// retention account refused it): no slot holds it and no decision node
+    /// speaks for it, so a subscriber that adopts it restates its witness.
+    Unretained,
 }
 
 /// The overlay lane: overlay answers held by the overlay authorities that
@@ -223,44 +227,6 @@ type ResolutionFlightKey = (LazyResolutionCacheKey, bool);
 struct FlightDelivery {
     lane: ResolutionLane,
     entry: LazyResolutionCacheEntry,
-}
-
-/// One bounded multi-candidate resolution slot.
-///
-/// Concurrent base/session/world resolutions of the same
-/// `(importer, specifier, phase, kind, population)` coexist as distinct
-/// candidates whose value-side `ReadSetSignature`s distinguish the
-/// resolution inputs they observed. Retention is the shared per-slot
-/// [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`] with FIFO eviction — the same policy the
-/// session `ValidatedFactCache` slot applies — so a retarget never
-/// silently discards the witness of the candidate it superseded.
-type LazyResolutionCandidates = SmallVec<[LazyResolutionCacheEntry; CANDIDATE_CAP]>;
-
-/// Push `candidate` onto a slot, evicting oldest-first at
-/// [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`]. Mirrors the session `ValidatedFactCache`
-/// admission policy exactly: append, then drain the front until the
-/// slot is at the cap.
-///
-/// Returns the queries whose candidates aged out, so the caller can
-/// remove their decision nodes in the same fence. An aged-out candidate
-/// no longer has an answer behind it, so leaving its decision published
-/// would let a consumer keep validating against a decision nothing can
-/// serve — and would grow the graph without bound.
-fn admit_resolution_candidate(
-    slot: &mut LazyResolutionCandidates,
-    candidate: LazyResolutionCacheEntry,
-) -> Vec<ResolutionQueryKey> {
-    let mut evicted = Vec::new();
-    if slot.len() >= CANDIDATE_CAP {
-        let drop_count = slot.len() - CANDIDATE_CAP + 1;
-        evicted.extend(slot.drain(..drop_count).map(|entry| entry.query));
-    }
-    // The incoming candidate republishes this query's decision, so an
-    // aged-out entry for the SAME query is a replacement rather than a
-    // removal.
-    evicted.retain(|query| *query != candidate.query);
-    slot.push(candidate);
-    evicted
 }
 
 /// Post-mutation realpath knowledge a content mutator can assert.
@@ -496,7 +462,10 @@ pub(crate) struct Engine {
     pub(crate) overlay: RwLock<OverlayStore>,
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
-    lazy_resolution_cache: RwLock<FxHashMap<LazyResolutionCacheKey, LazyResolutionCandidates>>,
+    /// The workspace lane: every importer's resolution slots, each
+    /// candidate charged to the installed retention account and retired
+    /// with its importer (see [`lazy_resolution_cache`]).
+    lazy_resolution_cache: RwLock<lazy_resolution_cache::WorkspaceResolutionSlots>,
     /// The overlay lane (see [`ResolutionLane`]): overlay answers, each held
     /// by the overlay authorities that produced or reused it and released
     /// with the last of them, charged to the installed retention account,
@@ -699,7 +668,11 @@ impl Engine {
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
-            lazy_resolution_cache: RwLock::new(FxHashMap::default()),
+            lazy_resolution_cache: RwLock::new(
+                lazy_resolution_cache::WorkspaceResolutionSlots::new(
+                    lazy_resolution_cache::WORKSPACE_LANE_SLOT_CAP,
+                ),
+            ),
             overlay_lane: Arc::new(OverlayLane::new(
                 Arc::clone(&retention),
                 CANDIDATE_CAP,
@@ -1140,6 +1113,9 @@ impl Engine {
             // session decision root.
             self.propagate_base_changes_into_sessions(&replacement, &base_seeds, held_session);
         }
+        let write = Self::with_tombstone_retirement(write, &mut replacement.facts, || {
+            self.next_resolution_fact_version()
+        });
         match write {
             WorldWrite::Discard => {}
             WorldWrite::Retain => {
@@ -1287,6 +1263,31 @@ impl Engine {
         )
     }
 
+    /// The last step of both publication protocols: a root whose retired
+    /// decision history outgrew its live graph folds it into the derived
+    /// floor (see
+    /// [`crate::resolution_currency::ResolutionFactRoot::retire_tombstones_if_due`]).
+    ///
+    /// A retirement moves what retired nodes read, so it publishes a new
+    /// identity even for a batch that would only have retained one. A
+    /// discarded batch never retires: its replacement root is dropped.
+    fn with_tombstone_retirement(
+        write: WorldWrite,
+        facts: &mut crate::resolution_currency::ResolutionFactRoot,
+        fresh: impl FnOnce() -> ResolutionFactVersion,
+    ) -> WorldWrite {
+        match write {
+            WorldWrite::Discard => WorldWrite::Discard,
+            write => {
+                if facts.retire_tombstones_if_due(fresh) {
+                    WorldWrite::Publish
+                } else {
+                    write
+                }
+            }
+        }
+    }
+
     pub(crate) fn default_resolution_population(&self) -> ResolutionPopulation {
         ResolutionPopulation::Session(self.default_resolution_session)
     }
@@ -1391,6 +1392,9 @@ impl Engine {
                 .facts
                 .propagate(seeds, || self.next_resolution_fact_version());
         }
+        let write = Self::with_tombstone_retirement(write, &mut replacement.facts, || {
+            self.next_resolution_fact_version()
+        });
         match write {
             WorldWrite::Discard => {}
             WorldWrite::Retain => {
@@ -1430,6 +1434,7 @@ impl Engine {
         captured: &CapturedResolutionFence,
         query: ResolutionQueryKey,
         direct_edges: Vec<ResolutionFactKey>,
+        charge: Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
     ) {
         let node = ResolutionFactKey::decision(query);
         match (node.population(), captured.session_domain.as_ref()) {
@@ -1437,7 +1442,9 @@ impl Engine {
                 self.mutate_resolution_world_locked_with_held_session(
                     Self::held_session_of(captured),
                     |world| {
-                        world.facts.publish_derived(node, direct_edges);
+                        world
+                            .facts
+                            .publish_charged_decision(node, direct_edges, charge);
                         ((), WorldWrite::Retain)
                     },
                 );
@@ -1447,7 +1454,9 @@ impl Engine {
                     domain,
                     captured.world.base.as_ref(),
                     |_base, session| {
-                        session.facts.publish_derived(node, direct_edges);
+                        session
+                            .facts
+                            .publish_charged_decision(node, direct_edges, charge);
                         ((), WorldWrite::Retain)
                     },
                 );
@@ -1459,39 +1468,162 @@ impl Engine {
         }
     }
 
-    /// Drop the decision node of a query whose candidate aged out of its
-    /// slot, under the same fence that admitted the replacement.
+    /// Drop the decision nodes of `queries` — queries whose last candidate
+    /// left the workspace lane — under the fence that admitted the
+    /// replacement.
     ///
-    /// Publishes a new world identity: the removal ADVANCES the node's
-    /// version, which every parent that recorded it must observe.
-    fn remove_resolution_decision(
+    /// Runs inside the resolve fence: the caller holds the base publication
+    /// gate and, for a session population, that session's write gate. A
+    /// query of another live session takes that session's gate here, the
+    /// same base gate → session order the publication protocol's fan-out
+    /// takes.
+    ///
+    /// Publishes a new world identity per changed root: a removal ADVANCES
+    /// each node's version, which every parent that recorded it must
+    /// observe.
+    fn retire_resolution_decisions(
         &self,
         captured: &CapturedResolutionFence,
-        query: ResolutionQueryKey,
+        retirement: lazy_resolution_cache::SlotRetirement,
     ) {
-        let node = ResolutionFactKey::decision(query);
-        let remove = |facts: &mut crate::resolution_currency::ResolutionFactRoot| {
-            if facts.remove_derived(&node, self.next_resolution_fact_version()) {
-                WorldWrite::Publish
-            } else {
-                WorldWrite::Discard
-            }
+        if retirement.is_empty() {
+            return;
+        }
+        self.retract_lazy_dependencies(retirement.dependencies);
+        let held_session = Self::held_session_of(captured);
+        let (base, sessions) = Self::decision_nodes_by_population(retirement.queries);
+        if !base.is_empty() {
+            self.mutate_resolution_world_locked_with_held_session(held_session, |world| {
+                ((), self.remove_decision_nodes(&mut world.facts, &base))
+            });
+        }
+        for (fingerprint, nodes) in sessions {
+            let held = match (held_session, captured.session_domain.as_ref()) {
+                (Some(held), Some(domain)) if held == fingerprint => Some(Arc::clone(domain)),
+                _ => None,
+            };
+            let domain = match held {
+                Some(domain) => domain,
+                None => match self.resolution_sessions.read().get(&fingerprint) {
+                    Some(domain) => Arc::clone(domain),
+                    None => continue,
+                },
+            };
+            let _session_write = (held_session != Some(fingerprint)).then(|| domain.write.lock());
+            self.mutate_resolution_session_write_held(
+                &domain,
+                captured.world.base.as_ref(),
+                |_base, session| ((), self.remove_decision_nodes(&mut session.facts, &nodes)),
+            );
+        }
+    }
+
+    /// Retire the decision nodes of `queries` from inside a base world
+    /// mutation, alongside the importer state that mutation retires.
+    ///
+    /// The caller holds the base publication gate with the base epoch ODD
+    /// and no session gate, so each session root it touches is published
+    /// inside the same window — no capture can pair the mutated base root
+    /// with a session root still holding a retired importer's decisions.
+    fn retire_resolution_decisions_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        retirement: lazy_resolution_cache::SlotRetirement,
+    ) {
+        if retirement.is_empty() {
+            return;
+        }
+        self.retract_lazy_dependencies(retirement.dependencies);
+        let (base, sessions) = Self::decision_nodes_by_population(retirement.queries);
+        self.remove_decision_nodes(&mut world.facts, &base);
+        for (fingerprint, nodes) in sessions {
+            let Some(domain) = self.resolution_sessions.read().get(&fingerprint).cloned() else {
+                continue;
+            };
+            let _session_write = domain.write.lock();
+            self.mutate_resolution_session_write_held(&domain, world, |_base, session| {
+                ((), self.remove_decision_nodes(&mut session.facts, &nodes))
+            });
+        }
+    }
+
+    /// Retract the resolution-owned dependency edges no retained answer
+    /// backs any more, for importers the workspace does not hold: a held
+    /// importer's edges are import-graph state its consumers read whatever
+    /// the lane retains, and leave with the importer's own retirement. Runs
+    /// under the publication gate, like every lane mutation, so it cannot
+    /// interleave with the admission that records one.
+    fn retract_lazy_dependencies(&self, dependencies: Vec<(String, String)>) {
+        if dependencies.is_empty() {
+            return;
+        }
+        let in_snapshot: Vec<bool> = {
+            let snapshot = self.snapshot.read();
+            dependencies
+                .iter()
+                .map(|(importer, _)| snapshot.contains(importer))
+                .collect()
         };
-        match (node.population(), captured.session_domain.as_ref()) {
-            (ResolutionPopulation::Base, _) => {
-                self.mutate_resolution_world_locked_with_held_session(
-                    Self::held_session_of(captured),
-                    |world| ((), remove(&mut world.facts)),
-                );
+        let mut edges = self.edges.write();
+        for ((importer, dependency), in_snapshot) in dependencies.into_iter().zip(in_snapshot) {
+            if in_snapshot || edges.holds_state_beyond_lazy_resolutions(&importer) {
+                continue;
             }
-            (ResolutionPopulation::Session(_), Some(domain)) => {
-                self.mutate_resolution_session_write_held(
-                    domain,
-                    captured.world.base.as_ref(),
-                    |_base, session| ((), remove(&mut session.facts)),
-                );
+            edges.retract_lazy_resolved_dep(&importer, &dependency);
+        }
+    }
+
+    /// Whether the workspace holds `importer` as one of its own files — its
+    /// content, or dependency state beyond resolution answers (its parsed
+    /// edges) — so that the importer's own retirement removes every edge it
+    /// owns.
+    fn importer_held_by_workspace(&self, importer: &str) -> bool {
+        self.snapshot.read().contains(importer)
+            || self
+                .edges
+                .read()
+                .holds_state_beyond_lazy_resolutions(importer)
+    }
+
+    /// Split `queries` into base and per-session decision nodes.
+    fn decision_nodes_by_population(
+        queries: Vec<ResolutionQueryKey>,
+    ) -> (
+        Vec<ResolutionFactKey>,
+        Vec<(SessionFingerprint, Vec<ResolutionFactKey>)>,
+    ) {
+        let mut base = Vec::new();
+        let mut sessions: Vec<(SessionFingerprint, Vec<ResolutionFactKey>)> = Vec::new();
+        for query in queries {
+            let node = ResolutionFactKey::decision(query);
+            match node.population() {
+                ResolutionPopulation::Base => base.push(node),
+                ResolutionPopulation::Session(fingerprint) => {
+                    match sessions.iter_mut().find(|(known, _)| *known == fingerprint) {
+                        Some((_, nodes)) => nodes.push(node),
+                        None => sessions.push((fingerprint, vec![node])),
+                    }
+                }
             }
-            (ResolutionPopulation::Session(_), None) => {}
+        }
+        (base, sessions)
+    }
+
+    /// Remove `nodes` from one root, each under a fresh version. Publishes
+    /// when any was present.
+    fn remove_decision_nodes(
+        &self,
+        facts: &mut crate::resolution_currency::ResolutionFactRoot,
+        nodes: &[ResolutionFactKey],
+    ) -> WorldWrite {
+        let mut removed = false;
+        for node in nodes {
+            removed |= facts.remove_derived(node, self.next_resolution_fact_version());
+        }
+        if removed {
+            WorldWrite::Publish
+        } else {
+            WorldWrite::Discard
         }
     }
 
@@ -1604,29 +1736,14 @@ impl Engine {
         canonical_id: &str,
         resolutions: &[ExactResolution],
     ) -> bool {
-        if world.owner_exacts_equal(canonical_id, resolutions) {
+        let Some(affected) = world.replace_owner_exacts(canonical_id, resolutions) else {
             return false;
-        }
-        let mut affected = world.owner_exact_fact_keys(canonical_id);
-        affected.extend(resolutions.iter().map(|resolution| {
-            ResolutionFactKey::exact_importer(
-                canonical_id,
-                &resolution.specifier,
-                verter_session_query::resolution::ResolutionContext {
-                    phase: resolution.phase,
-                    kind: resolution.kind,
-                },
-                ResolutionPopulation::Base,
-            )
-        }));
-        affected.sort();
-        affected.dedup();
+        };
         for key in affected {
             world
                 .facts
                 .advance(key, self.next_resolution_fact_version());
         }
-        world.replace_owner_exacts(canonical_id, resolutions);
         true
     }
 
@@ -2018,14 +2135,144 @@ impl Engine {
         self.replace_world_exact_resolutions(world, canonical_id, &[])
     }
 
-    fn remove_edges_under_in_world(&self, world: &mut ResolutionWorldRoot, prefix: &str) -> bool {
-        let exact_owners = world.exact_owners_under(prefix);
-        self.edges.write().remove_under(prefix);
-        let mut changed = false;
-        for owner in exact_owners {
-            changed |= self.replace_world_exact_resolutions(world, &owner, &[]);
+    /// Retire everything `canonical_id` owns as an importer: its
+    /// workspace-lane slots and their decision nodes (with its owner set,
+    /// which goes with its last decision). Called in the same world
+    /// mutation that removes its edges because the importer left the
+    /// workspace.
+    ///
+    /// Session-population slots stay while the session still sees the
+    /// importer through an open overlay: that view still resolves from it.
+    fn retire_importer_in_world(&self, world: &mut ResolutionWorldRoot, canonical_id: &str) {
+        let retirement = {
+            let overlay = self.overlay.read();
+            self.lazy_resolution_cache
+                .write()
+                .retire_owner(canonical_id, |owner, population| {
+                    Self::importer_retires(&overlay, owner, population)
+                })
+        };
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::ImporterSlotsRetired);
+        self.retire_resolution_decisions_in_world(world, retirement);
+    }
+
+    /// [`Self::retire_importer_in_world`] for every importer at or under
+    /// `prefix`. Returns every importer the lane held there.
+    fn retire_importers_under_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        prefix: &str,
+    ) -> Vec<String> {
+        let (owners, retirement) = {
+            let overlay = self.overlay.read();
+            self.lazy_resolution_cache
+                .write()
+                .retire_owners_under(prefix, |owner, population| {
+                    Self::importer_retires(&overlay, owner, population)
+                })
+        };
+        self.retire_resolution_decisions_in_world(world, retirement);
+        owners
+    }
+
+    /// An overlay closing over an importer the base world knows is absent
+    /// leaves the session no view of it: retire the session's slots and
+    /// decisions for it, the half [`Self::retire_importer_in_world`] kept
+    /// while the overlay was open. Runs inside the session's publication
+    /// window, so the slots and decisions go together.
+    ///
+    /// An importer the base world has no absence evidence for (never
+    /// probed, or still on disk) keeps its slots; the lane's slot cap and
+    /// the retention account bound those.
+    fn retire_closed_overlay_importer(
+        &self,
+        base: &ResolutionWorldRoot,
+        session: &mut ResolutionSessionRoot,
+        fingerprint: SessionFingerprint,
+        canonical_id: &str,
+    ) {
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
+        if base.path_probes.get(&canonical).copied()
+            != Some(verter_session_query::resolution::PathProbe::Absent)
+        {
+            return;
         }
-        changed
+        let population = ResolutionPopulation::Session(fingerprint);
+        let retirement = self
+            .lazy_resolution_cache
+            .write()
+            .retire_owner(&canonical, |_, slot_population| {
+                slot_population == population
+            });
+        self.retract_lazy_dependencies(retirement.dependencies);
+        let nodes: Vec<ResolutionFactKey> = retirement
+            .queries
+            .into_iter()
+            .map(ResolutionFactKey::decision)
+            .collect();
+        self.remove_decision_nodes(&mut session.facts, &nodes);
+    }
+
+    /// Whether `world` records `importer` as gone from the workspace for
+    /// `population`: absent on disk, and — for a session — not shown by an
+    /// open overlay either. The admission-side twin of the retirement
+    /// predicate [`Self::importer_retires`].
+    fn importer_known_absent(
+        &self,
+        world: &ResolutionWorldRoot,
+        importer: &str,
+        population: ResolutionPopulation,
+    ) -> bool {
+        let canonical = verter_session_query::resolution::normalize_canonical_id(importer);
+        world.path_probes.get(&canonical).copied()
+            == Some(verter_session_query::resolution::PathProbe::Absent)
+            && Self::importer_retires(&self.overlay.read(), &canonical, population)
+    }
+
+    fn importer_retires(
+        overlay: &OverlayStore,
+        owner: &str,
+        population: ResolutionPopulation,
+    ) -> bool {
+        match population {
+            ResolutionPopulation::Base => true,
+            ResolutionPopulation::Session(_) => !overlay.has_overlay(owner),
+        }
+    }
+
+    /// Remove the dependency and exact state of every owner at or under
+    /// `prefix`. Returns the dependency owners removed.
+    fn remove_edges_under_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        prefix: &str,
+    ) -> Vec<String> {
+        let exact_owners = world.exact_owners_under(prefix);
+        let removed = self.edges.write().remove_under(prefix);
+        for owner in exact_owners {
+            self.replace_world_exact_resolutions(world, &owner, &[]);
+        }
+        removed
+    }
+
+    /// Remove every importer at or under `prefix` from the world a recursive
+    /// deletion leaves: its edges, its slots and decisions, and — as a
+    /// per-file deletion does — its recorded absence, so a demand from one
+    /// of them still in flight is served at its fence but not retained
+    /// ([`Self::importer_known_absent`]).
+    fn remove_importers_under_in_world(&self, world: &mut ResolutionWorldRoot, prefix: &str) {
+        let mut removed = self.remove_edges_under_in_world(world, prefix);
+        removed.extend(self.retire_importers_under_in_world(world, prefix));
+        removed.sort();
+        removed.dedup();
+        for importer in removed {
+            self.update_base_path_facts(
+                world,
+                &importer,
+                verter_session_query::resolution::PathProbe::Absent,
+            );
+        }
     }
 
     /// Execute one canonical-scoped content mutation while the resolution
@@ -2047,6 +2294,9 @@ impl Engine {
             }
             if remove_edges {
                 self.remove_file_edges_in_world(world, canonical_id);
+            }
+            if path_after == Some(verter_session_query::resolution::PathProbe::Absent) {
+                self.retire_importer_in_world(world, canonical_id);
             }
             if let Some(path_after) = path_after {
                 self.update_base_path_facts(world, canonical_id, path_after);
@@ -2150,12 +2400,13 @@ impl Engine {
     ) -> R {
         let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
-        self.mutate_resolution_session(fingerprint, |_base, session| {
+        self.mutate_resolution_session(fingerprint, |base, session| {
             let (result, changed) = mutation();
             if !changed {
                 return (result, false);
             }
             let revealed = Self::reveal_session_overlay_facts(session, fingerprint, canonical_id);
+            self.retire_closed_overlay_importer(base, session, fingerprint, canonical_id);
             let generation = self.bump_content_generation_in_world();
             self.record_content_transition_at(canonical_id, generation);
             (result, revealed || changed)
@@ -2176,7 +2427,7 @@ impl Engine {
             if !changed {
                 return (result, false);
             }
-            self.remove_edges_under_in_world(world, prefix);
+            self.remove_importers_under_in_world(world, prefix);
             let generation = self.bump_content_generation_in_world();
             for canonical_id in transitioned {
                 self.update_base_path_facts(
@@ -2212,7 +2463,7 @@ impl Engine {
                 return (result, false);
             }
             if remove_edges {
-                self.remove_edges_under_in_world(world, prefix);
+                self.remove_importers_under_in_world(world, prefix);
             }
             let normalized = verter_session_query::resolution::normalize_canonical_id(prefix);
             self.advance_resolution_fact(
@@ -2545,14 +2796,14 @@ impl Engine {
     ) -> Option<ResolutionQueryKey> {
         self.lazy_resolution_cache
             .read()
-            .get(&LazyResolutionCacheKey {
+            .candidates(&LazyResolutionCacheKey {
                 importer_id: importer_id.to_owned(),
                 specifier: specifier.to_owned(),
                 phase: context.phase,
                 kind: context.kind,
                 population,
             })
-            .and_then(|slot| slot.last())
+            .last()
             .map(|entry| entry.query.clone())
     }
 
@@ -2568,14 +2819,14 @@ impl Engine {
     ) -> usize {
         self.lazy_resolution_cache
             .read()
-            .get(&LazyResolutionCacheKey {
+            .candidates(&LazyResolutionCacheKey {
                 importer_id: importer_id.to_owned(),
                 specifier: specifier.to_owned(),
                 phase: context.phase,
                 kind: context.kind,
                 population,
             })
-            .map_or(0, |slot| slot.len())
+            .count()
     }
 
     /// [`Self::lazy_resolution_slot_len_for_test`] for the overlay lane.
@@ -2632,9 +2883,11 @@ impl Engine {
         self.overlay_lane.queue_len() + self.overlay_values.queue_len()
     }
 
-    /// Install the host's aggregate retention account: from here on the
-    /// overlay lane and the overlay value table charge each entry they
-    /// retain to it, and retain nothing it refuses.
+    /// Replace the retention account the resident resolution state (the
+    /// workspace lane, the overlay lane and the overlay value table)
+    /// charges from here on. Test-support only: every Engine charges the
+    /// process-local account from construction.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install_resolution_retention(
         &self,
         account: Arc<
@@ -2652,16 +2905,53 @@ impl Engine {
         self.published_state.load_full()
     }
 
+    /// Current occupancy of the workspace lane and of every live resolution
+    /// root's derived graph — base and session — read as one coherent
+    /// generation: every lane and root mutation runs under the base
+    /// publication gate (session writers included), so holding it pins the
+    /// lane and every root together.
+    pub(crate) fn resolution_residency(&self) -> crate::traits::ResolutionResidency {
+        let _publication = self.resolution_world_write.try_lock().unwrap_or_else(|| {
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::ResidencyGateContended,
+            );
+            self.resolution_world_write.lock()
+        });
+        let mut derived = self.resolution_world.load().facts.residency();
+        for domain in self.resolution_sessions.read().values() {
+            let session = domain.root.load().facts.residency();
+            derived.derived_nodes += session.derived_nodes;
+            derived.edges += session.edges;
+            derived.dependency_buckets += session.dependency_buckets;
+            derived.retired_nodes += session.retired_nodes;
+        }
+        let slots = self.lazy_resolution_cache.read().residency();
+        crate::traits::ResolutionResidency {
+            slots: slots.slots,
+            candidates: slots.candidates,
+            owners: slots.owners,
+            slot_queue_entries: slots.queue_entries,
+            slot_capacity: slots.slot_capacity,
+            slot_queue_capacity: slots.queue_capacity,
+            derived_nodes: derived.derived_nodes,
+            decision_edges: derived.edges,
+            dependency_buckets: derived.dependency_buckets,
+            retired_decisions: derived.retired_nodes,
+        }
+    }
+
     pub(crate) fn resource_snapshot(&self) -> WorkspaceResourceSnapshot {
+        let resolution = self.resolution_residency();
         let overlay = self.overlay.read();
         let snapshot = self.snapshot.read();
         let edges = self.edges.read();
         let package_index = self.package_index.read();
         let published = self.load_published();
-        let resolution_slots = self.lazy_resolution_cache.read().len();
 
         WorkspaceResourceSnapshot {
-            resolution_slots,
+            resolution_slots: resolution.slots,
+            resolution,
             overlay_resolution_slots: self.overlay_lane.len(),
             overlay_value_versions: self.overlay_values.len(),
             resolution_flights: self.flights.len(),
@@ -2863,11 +3153,17 @@ impl Engine {
                         let changed = self.mutate_resolution_session_locked(
                             &session_domain,
                             world,
-                            |_base, session| {
+                            |base, session| {
                                 self.invalidate_package_manifest(&canonical_id);
                                 let changed = self.overlay.write().clear(&canonical_id);
                                 if changed {
                                     Self::reveal_session_overlay_facts(
+                                        session,
+                                        session_fingerprint,
+                                        &canonical_id,
+                                    );
+                                    self.retire_closed_overlay_importer(
+                                        base,
                                         session,
                                         session_fingerprint,
                                         &canonical_id,
@@ -2937,6 +3233,7 @@ impl Engine {
                         self.invalidate_package_manifest(&canonical_id);
                         self.mark_parent_dir_dirty(&canonical_id);
                         self.remove_file_edges_in_world(world, &canonical_id);
+                        self.retire_importer_in_world(world, &canonical_id);
                         self.snapshot.write().remove(&canonical_id);
                         self.update_base_path_facts(
                             world,
@@ -2995,13 +3292,29 @@ impl Engine {
     }
 
     /// Set exact resolutions for a file.
+    ///
+    /// An unchanged refresh writes nothing anywhere, so it is decided under
+    /// the publication gate before a publication window opens: it builds no
+    /// replacement root and never turns the epoch odd, so no concurrent
+    /// capture is refused for it.
     pub(crate) fn set_exact_resolutions(
         &self,
         canonical_id: &str,
         resolutions: Vec<ExactResolution>,
     ) -> ExactResolutionResult {
+        let _write = self.resolution_world_write.lock();
+        if self
+            .edges
+            .read()
+            .exact_resolutions_unchanged(canonical_id, &resolutions)
+        {
+            return ExactResolutionResult {
+                newly_resolved: Vec::new(),
+                changed: false,
+            };
+        }
         let retained = resolutions.clone();
-        self.mutate_resolution_world(|world| {
+        self.mutate_resolution_world_locked(|world| {
             let result = self
                 .edges
                 .write()
@@ -3656,9 +3969,7 @@ impl Engine {
                 let mut candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> =
                     self.lazy_resolution_cache
                         .read()
-                        .get(&cache_key)
-                        .into_iter()
-                        .flatten()
+                        .candidates(&cache_key)
                         .map(|entry| (ResolutionLane::Workspace, entry.clone()))
                         .collect();
                 if overlay_lane {
@@ -3728,6 +4039,10 @@ impl Engine {
             let mut reused = false;
             let mut restated_witness = false;
             let mut publish_candidate = false;
+            // The query of a reused workspace-lane candidate whose decision
+            // node this demand roots on: re-checked under the final fence,
+            // where another admission may have evicted it.
+            let mut reused_decision: Option<ResolutionQueryKey> = None;
 
             // Reader-driven evidence refresh for the retained candidates' own
             // recorded canonicals; a refreshed (changed) world means the
@@ -3866,11 +4181,15 @@ impl Engine {
                 let mut transaction = transaction.lock();
                 transaction.set_query(entry.query.clone());
                 let node = ResolutionFactKey::decision(entry.query.clone());
-                if matches!(lane, ResolutionLane::RequestOverlay(_))
-                    || captured.world.request_overlay_reaches(&node)
+                if matches!(
+                    lane,
+                    ResolutionLane::RequestOverlay(_) | ResolutionLane::Unretained
+                ) || captured.world.request_overlay_reaches(&node)
                 {
                     transaction.adopt_witness(&entry.signature);
                     restated_witness = true;
+                } else {
+                    reused_decision = Some(entry.query.clone());
                 }
                 reused = true;
                 entry.result.clone()
@@ -4006,12 +4325,29 @@ impl Engine {
                     session_domain.as_ref().map(|domain| domain.write.lock()),
                 )
             };
-            let admission_fence = self.admission_fence_under_gate(
-                &captured,
-                population,
-                request_overlay,
-                &transaction.lock(),
-            );
+            let admission_fence = self
+                .admission_fence_under_gate(
+                    &captured,
+                    population,
+                    request_overlay,
+                    &transaction.lock(),
+                )
+                .filter(|latest| {
+                    // A reuse rooted on its decision is stamped with the
+                    // decision's version in the fenced world, which its
+                    // transaction never observed: a later world is
+                    // compatible only while that decision has not advanced
+                    // since the reuse validated its candidate. A retired
+                    // decision is not rooted on (the reuse restates its
+                    // candidate's witness below), so it is not compared.
+                    reused_decision.as_ref().is_none_or(|query| {
+                        if !self.lazy_resolution_cache.read().serves(&cache_key, query) {
+                            return true;
+                        }
+                        let node = ResolutionFactKey::decision(query.clone());
+                        latest.world.fact_version(&node) == captured.world.fact_version(&node)
+                    })
+                });
             match admission_fence {
                 Some(latest) => {
                     transaction.lock().rebase_onto(Arc::clone(&latest.world));
@@ -4048,6 +4384,38 @@ impl Engine {
             if !reader.resolution_event_bridge_complete() {
                 transaction.lock().mark_untracked_backend();
             }
+            // Under the fence the lane and the decision graph agree: a
+            // decision is live exactly while a candidate serves its query.
+            // A reused candidate another admission evicted since this demand
+            // read it has no live decision to root on — its tombstone has no
+            // edges, so nothing would ever invalidate a witness on it. Such a
+            // reuse restates the candidate's own witness instead, which the
+            // finish below validates against the fenced world.
+            let mut slot_backed = false;
+            if let Some(reused_query) = reused_decision.as_ref() {
+                if self
+                    .lazy_resolution_cache
+                    .read()
+                    .serves(&cache_key, reused_query)
+                {
+                    slot_backed = true;
+                } else if let Some((_, entry)) = reusable.as_ref() {
+                    transaction.lock().adopt_witness(&entry.signature);
+                    restated_witness = true;
+                }
+            }
+            // A workspace answer for an importer the fenced world already
+            // records as gone is served with its own witness, never
+            // retained: its importer's retirement has run, and nothing would
+            // retire a slot admitted after it. A session keeps the importer
+            // while an open overlay still shows it, as retirement does.
+            let importer_retired = publish_candidate
+                && !overlay_lane
+                && self.importer_known_absent(
+                    captured.world.base.as_ref(),
+                    importer_id,
+                    population,
+                );
             #[cfg(test)]
             resolution_test_hooks::record_completed_outputs_at_final_fence(
                 input_ledger.applied_output_count_for_test(),
@@ -4105,6 +4473,8 @@ impl Engine {
                 SignatureAdmission::Cacheable(signature) => Some(signature.clone()),
                 SignatureAdmission::NonCacheable(_) => None,
             };
+            // Complete and current, before any retention decision.
+            let complete_answer = cacheable_signature.is_some();
 
             let mut published = false;
             if reused {
@@ -4157,27 +4527,71 @@ impl Engine {
                         query: query.clone(),
                         signature,
                     };
-                    let evicted = admit_resolution_candidate(
-                        self.lazy_resolution_cache
-                            .write()
-                            .entry(cache_key.clone())
-                            .or_default(),
-                        entry.clone(),
-                    );
-                    // The candidate, its decision node and the removal of
-                    // every aged-out sibling's decision all land under the
-                    // same fence, so a slot can never hold an answer whose
-                    // decision has no edges recorded, and no decision can
-                    // outlive the candidate that serves it.
-                    for query in evicted {
-                        self.remove_resolution_decision(&captured, query);
+                    // The candidate owns its decision node and edges, so
+                    // one charge covers all three.
+                    let bytes = entry.retained_bytes(&cache_key)
+                        + direct_edges.len() * lazy_resolution_cache::DECISION_EDGE_BYTES;
+                    // A retired importer's answer keeps its own precise
+                    // witness — valid, and invalidated by the facts it
+                    // observed — but takes no slot and no decision node.
+                    let reservation = if importer_retired {
+                        Err(None)
+                    } else {
+                        self.retention.reserve(bytes).map_err(
+                            |crate::overlay_residency::RetentionRefused| {
+                                Some(verter_audit::NonAdmissionReason::RetentionPressure)
+                            },
+                        )
+                    };
+                    match reservation {
+                        Ok(charge) => {
+                            // One charge, shared by the candidate and by
+                            // every root that holds its decision node.
+                            let charge = Arc::new(charge);
+                            let retirement = self.lazy_resolution_cache.write().admit(
+                                cache_key.clone(),
+                                entry.clone(),
+                                Arc::clone(&charge),
+                            );
+                            // The candidate, its decision node and the
+                            // removal of every decision it left without a
+                            // candidate all land under the same fence, so a
+                            // slot can never hold an answer whose decision
+                            // has no edges recorded, and no decision can
+                            // outlive the candidate that serves it. The
+                            // node is published first: a retirement that
+                            // folds the root's history then pins the version
+                            // this attempt's captured world reads for it.
+                            self.publish_resolution_decision(
+                                &captured,
+                                query,
+                                direct_edges,
+                                charge,
+                            );
+                            self.retire_resolution_decisions(&captured, retirement);
+                            published = true;
+                            slot_backed = true;
+                            delivery = Some(FlightDelivery {
+                                lane: ResolutionLane::Workspace,
+                                entry,
+                            });
+                        }
+                        // The answer is complete; it is not kept. It is
+                        // served uncached, with no slot and no decision
+                        // node, and delivered to the flight's subscribers
+                        // as an unretained answer, whose witness each
+                        // restates rather than rooting on a node that was
+                        // never published.
+                        Err(refusal) => {
+                            if let Some(reason) = refusal {
+                                admission = SignatureAdmission::NonCacheable(reason);
+                            }
+                            delivery = Some(FlightDelivery {
+                                lane: ResolutionLane::Unretained,
+                                entry,
+                            });
+                        }
                     }
-                    self.publish_resolution_decision(&captured, query, direct_edges);
-                    published = true;
-                    delivery = Some(FlightDelivery {
-                        lane: ResolutionLane::Workspace,
-                        entry,
-                    });
                 }
             }
             // Settle the flight this demand leads: deliver its candidate,
@@ -4235,10 +4649,21 @@ impl Engine {
             // importer's overlay-only specifier.
             if request_overlay.is_none() && matches!(&admission, SignatureAdmission::Cacheable(_)) {
                 input_ledger.commit_loaded_inputs(reader);
-                if let Some(ref result) = result {
-                    self.edges
-                        .write()
-                        .add_lazy_resolved_dep(importer_id, &result.source_id);
+            }
+            // The dependency edge is import-graph bookkeeping for every
+            // complete answer, retained or refused retention: an importer
+            // the workspace holds keeps it until its own retirement removes
+            // every edge it owns. An importer the workspace does not hold
+            // has nothing else to retire it, so its edge is recorded only
+            // while a workspace-lane candidate backs it, under the same gate
+            // that retracts it with that candidate.
+            if request_overlay.is_none() && complete_answer {
+                if let Some(result) = result.as_ref() {
+                    if slot_backed || self.importer_held_by_workspace(importer_id) {
+                        self.edges
+                            .write()
+                            .add_lazy_resolved_dep(importer_id, &result.source_id);
+                    }
                 }
             }
 
@@ -5744,6 +6169,8 @@ pub(crate) fn workspace_default_project_identity_hash_for_engine(_engine: &Engin
     })
 }
 
+#[path = "lazy_resolution_cache.rs"]
+mod lazy_resolution_cache;
 #[cfg(test)]
 #[path = "resolution_candidate_slot_tests.rs"]
 mod resolution_candidate_slot_tests;
