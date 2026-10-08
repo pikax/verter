@@ -361,7 +361,7 @@ pub(super) async fn handle_code_action(
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     server
-        .answer_repaired_foreground(
+        .answer_repaired_edit_foreground(
             crate::documents::ForegroundRoute::CodeAction,
             &params.text_document.uri,
             handle_code_action_attempt(server, &params),
@@ -643,11 +643,7 @@ async fn handle_code_action_attempt(
                             }),
                             &carrier_source_exists,
                             negotiated_encoding,
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
+                            &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                             preamble_reanchor.as_ref(),
                         );
                         all_actions.extend(actions);

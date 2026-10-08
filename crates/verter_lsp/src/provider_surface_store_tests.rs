@@ -340,6 +340,114 @@ fn captured_foreign_ide_surface_maps_when_imported_carrier_is_closed() {
     );
 }
 
+/// A captured carrier whose open document is spelled differently from the
+/// snapshot's canonical id (drive-letter case) is still the open document: a
+/// stale snapshot is refused rather than decoded against bytes the client no
+/// longer holds, and a coherent one maps.
+#[test]
+fn captured_surfaces_find_the_open_carrier_by_filesystem_identity() {
+    use crate::type_provider::merge::ApiSurfaceResolution;
+    use tower_lsp_server::ls_types::{PositionEncodingKind, TextDocumentItem, Uri};
+
+    let documents = crate::documents::DocumentRegistry::new(Arc::new(
+        verter_session::VerterHost::new_standalone(verter_session::HostConfig::default()),
+    ));
+    let uri: Uri = "file:///c:/ws/Child.vue".parse().unwrap();
+    let open_source = "<template><div/></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: open_source.to_string(),
+    });
+    let open_canonical = documents
+        .get_canonical_id(&"file:///c:/ws/Child.vue".parse().unwrap())
+        .expect("the open carrier has a canonical id");
+    let respelled: String = {
+        let mut chars = open_canonical.chars();
+        let first = chars.next().expect("a non-empty canonical id");
+        let flipped = if first.is_ascii_lowercase() {
+            first.to_ascii_uppercase()
+        } else {
+            first.to_ascii_lowercase()
+        };
+        std::iter::once(flipped).chain(chars).collect()
+    };
+    assert_ne!(respelled, open_canonical);
+    assert!(
+        verter_span::path::fs_paths_equal(&respelled, &open_canonical),
+        "the respelling names the same file"
+    );
+    assert!(
+        documents.canonical_id_to_uri(&respelled).is_none(),
+        "the exact-id lookup misses the respelled path"
+    );
+
+    let record = |carrier_source: &str| {
+        let (store, ledger) = witnessed_store();
+        let provider_path = format!("{respelled}.ts");
+        let api = "declare const Child: {}\n";
+        ledger.apply(&provider_path, api);
+        let source_map = crate::documents::provider_projection::ProviderPositionMapper::source_map(
+            crate::documents::position_map::PositionMapper::from_json(
+                r#"{"version":3,"sources":["Child.vue"],"names":[],"mappings":"AAAA"}"#,
+            )
+            .expect("valid source map"),
+        );
+        store.record(RecordSurface::carrier_api_legacy(
+            provider_path.clone(),
+            respelled.clone(),
+            Arc::from(api),
+            Some(source_map),
+            Arc::from(carrier_source),
+        ));
+        (
+            store.capture_current_carrier_api_set(),
+            provider_path,
+            store,
+        )
+    };
+
+    let (stale, stale_path, stale_store) = record("<template><span/></template>\n");
+    assert!(
+        matches!(
+            classify_captured_api_surface(
+                Some(&documents),
+                &stale,
+                &stale_path,
+                PositionEncodingKind::UTF16
+            ),
+            ApiSurfaceResolution::VirtualDrop
+        ),
+        "a snapshot of other bytes than the open document holds is never decoded"
+    );
+    assert!(
+        foreign_ide_context_from_captured(
+            &stale_store,
+            &documents,
+            &stale,
+            &stale_path,
+            PositionEncodingKind::UTF16,
+        )
+        .is_none(),
+        "a foreign surface of other bytes than the open document holds is never mapped"
+    );
+
+    let (current, current_path, _store) = record(open_source);
+    assert!(
+        matches!(
+            classify_captured_api_surface(
+                Some(&documents),
+                &current,
+                &current_path,
+                PositionEncodingKind::UTF16
+            ),
+            ApiSurfaceResolution::Vouched(_)
+        ),
+        "a snapshot of the open document's bytes maps"
+    );
+}
+
 #[test]
 fn each_record_advances_generation() {
     let store = ProviderSurfaceStore::new();
@@ -1210,7 +1318,7 @@ fn classify_captured_miss_routes_known_virtual_to_drop_and_unknown_to_not_virtua
 
     // A Closing-at-capture virtual surface → captured KnownNonMappable → VirtualDrop (NEVER
     // edit a real same-named file). Classify reads ONLY the captured snapshot now (no `store`).
-    let known = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let known = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(known, ApiSurfaceResolution::VirtualDrop),
         "a captured-miss path the store KNOWS as a virtual surface (tombstone) must route \
@@ -1221,7 +1329,7 @@ fn classify_captured_miss_routes_known_virtual_to_drop_and_unknown_to_not_virtua
     // its own real file).
     let unknown_path = "/src/Unknown.vue.ts";
     let unknown =
-        classify_captured_api_surface(&captured, unknown_path, PositionEncodingKind::UTF16);
+        classify_captured_api_surface(None, &captured, unknown_path, PositionEncodingKind::UTF16);
     assert!(
         matches!(unknown, ApiSurfaceResolution::NotVirtual),
         "a captured-miss path the store does NOT know as virtual must route NotVirtual"
@@ -1784,7 +1892,7 @@ fn captured_miss_during_closing_then_finalize_still_drops_not_not_virtual() {
 
     // CLASSIFY from the captured snapshot. The captured KnownNonMappable state must
     // drive VirtualDrop (fail closed) WITHOUT consulting the now-cleared live store.
-    let res = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let res = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(res, ApiSurfaceResolution::VirtualDrop),
         "a path that was Closing at capture and finalized before classify MUST classify \
@@ -1864,7 +1972,7 @@ fn classify_ignores_live_mutation_after_capture_for_current_path() {
         "carrier B\n",
     ));
 
-    let res = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let res = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(res, ApiSurfaceResolution::Vouched(_)),
         "classify must map through the CAPTURED generation-A snapshot regardless of a live \
@@ -2773,7 +2881,7 @@ fn the_captured_api_classifier_decodes_only_through_delivered_surfaces() {
     use crate::type_provider::merge::ApiSurfaceResolution;
     use tower_lsp_server::ls_types::PositionEncodingKind;
     let classify = |captured: &ProviderQuerySnapshot| {
-        classify_captured_api_surface(captured, VPATH, PositionEncodingKind::UTF16)
+        classify_captured_api_surface(None, captured, VPATH, PositionEncodingKind::UTF16)
     };
     let api_a = "declare const Child: { new(props?: { foo: string }): {} }\n";
     let api_b = "declare const Child: { new(props?: { bar: number; foo: string }): {} }\n";

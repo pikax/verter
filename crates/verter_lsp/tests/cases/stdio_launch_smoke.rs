@@ -46,7 +46,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// or a fatal reader-side condition (EOF / malformed frame / IO error). The
 /// reader thread sends these over a channel so the test side can apply a hard
 /// `recv_timeout` to every read.
-enum ReaderEvent {
+pub(super) enum ReaderEvent {
     /// A successfully parsed Content-Length-framed JSON-RPC message.
     Message(Value),
     /// The reader hit a fatal condition (EOF, a malformed header/frame, or an IO
@@ -56,7 +56,7 @@ enum ReaderEvent {
 
 /// Encode a JSON-RPC message as an LSP `Content-Length`-framed payload and write
 /// it to the child's stdin.
-fn write_message(stdin: &mut impl Write, message: &Value) {
+pub(super) fn write_message(stdin: &mut impl Write, message: &Value) {
     let body = serde_json::to_vec(message).expect("serialize JSON-RPC message");
     write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).expect("write LSP frame header");
     stdin.write_all(&body).expect("write LSP frame body");
@@ -69,7 +69,7 @@ fn write_message(stdin: &mut impl Write, message: &Value) {
 /// The thread treats EOF and any malformed framing as a [`ReaderEvent::Fatal`] —
 /// it never silently stops, so the test side always learns why a response did not
 /// arrive (rather than blocking forever waiting on a dead stream).
-fn spawn_reader(stdout: impl Read + Send + 'static) -> Receiver<ReaderEvent> {
+pub(super) fn spawn_reader(stdout: impl Read + Send + 'static) -> Receiver<ReaderEvent> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -147,7 +147,7 @@ fn spawn_reader(stdout: impl Read + Send + 'static) -> Receiver<ReaderEvent> {
 }
 
 /// Best-effort kill + reap so a failed assertion never leaks the child process.
-fn kill_child(child: &mut Child) {
+pub(super) fn kill_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -155,7 +155,7 @@ fn kill_child(child: &mut Child) {
 /// Block for the next message with a hard deadline. On timeout or a fatal reader
 /// condition the child is killed and the test FAILS with a clear reason — this is
 /// the discrimination guarantee (a broken/hung handshake can never hang or pass).
-fn next_message(rx: &Receiver<ReaderEvent>, child: &mut Child, context: &str) -> Value {
+pub(super) fn next_message(rx: &Receiver<ReaderEvent>, child: &mut Child, context: &str) -> Value {
     match rx.recv_timeout(READ_TIMEOUT) {
         Ok(ReaderEvent::Message(value)) => value,
         Ok(ReaderEvent::Fatal(reason)) => {
@@ -397,7 +397,7 @@ fn verter_lsp_initialize_handshake_returns_capabilities() {
 /// `verter_lsp`'s private `uri` module / `main.rs`, neither of which is reachable
 /// from this integration-test crate, and the `rootUri` it produces is not
 /// load-bearing for the handshake (the hermetic `off` init never resolves it).
-fn path_to_file_uri(path: &str) -> String {
+pub(super) fn path_to_file_uri(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     if normalized.starts_with('/') {
         format!("file://{normalized}")

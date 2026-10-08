@@ -443,6 +443,10 @@ pub struct ServerCore {
     pub(crate) client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool,
     /// The editor re-pulls inlay hints when asked to (`workspace.inlayHint.refreshSupport`).
     pub(crate) client_refreshes_inlay_hints: std::sync::atomic::AtomicBool,
+    /// Whether the editor applies versioned `documentChanges`
+    /// (`workspace.workspaceEdit.documentChanges`). Every foreground request
+    /// captures it at admission, so one request delivers its edits in one shape.
+    pub(crate) client_applies_versioned_edits: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document:
     /// URI → (document_version, diagnostics_generation, diagnostics).
     /// Avoids re-running host + lint + component diagnostics when both push and
@@ -708,6 +712,20 @@ impl VerterLanguageServer {
         }
     }
 
+    /// How the editor applies a workspace edit, as negotiated at `initialize`.
+    pub(super) fn workspace_edit_support(
+        &self,
+    ) -> crate::features::action_utils::WorkspaceEditSupport {
+        if self
+            .client_applies_versioned_edits
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            crate::features::action_utils::WorkspaceEditSupport::VersionedDocumentChanges
+        } else {
+            crate::features::action_utils::WorkspaceEditSupport::Unversioned
+        }
+    }
+
     /// Admit one foreground request: capture its document revision and
     /// project authority, once, before any of its computation reads them.
     pub(super) async fn admit_foreground(
@@ -715,7 +733,12 @@ impl VerterLanguageServer {
         route: crate::documents::ForegroundRoute,
         uri: &Uri,
     ) -> Arc<crate::documents::ForegroundRequest> {
-        let request = crate::documents::ForegroundRequest::admit(&self.documents, route, uri);
+        let request = crate::documents::ForegroundRequest::admit(
+            &self.documents,
+            route,
+            uri,
+            self.workspace_edit_support(),
+        );
         self.captured_foreground(request).await
     }
 
@@ -732,7 +755,12 @@ impl VerterLanguageServer {
     ) -> Arc<crate::documents::ForegroundRequest> {
         let request = {
             let _edit_commit = self.did_change_mutex.lock().await;
-            crate::documents::ForegroundRequest::admit(&self.documents, route, uri)
+            crate::documents::ForegroundRequest::admit(
+                &self.documents,
+                route,
+                uri,
+                self.workspace_edit_support(),
+            )
         };
         self.captured_foreground(request).await
     }
@@ -819,6 +847,44 @@ impl VerterLanguageServer {
         self.settle_foreground(request, response)
             .await
             .into_result()
+    }
+
+    /// [`Self::answer_repaired_foreground`] for an edit-bearing route: the
+    /// settled answer's edits are bound to the revisions the request captured
+    /// ([`crate::documents::ForegroundRequest::bind_edits`]). An edit to an open
+    /// document the request never captured answers `ContentModified`.
+    pub(super) fn answer_repaired_edit_foreground<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: crate::documents::EditBearing + 'a,
+    {
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground(route, uri).await;
+            let response = request
+                .compute(async {
+                    self.prepare_foreground(uri).await?;
+                    compute.await
+                })
+                .await?;
+            let mut response = self
+                .settle_foreground(&request, response)
+                .await
+                .into_result()?;
+            if let Some(response) = response.as_mut() {
+                if request.bind_edits(&self.documents, response).is_err() {
+                    return Err(tower_lsp_server::jsonrpc::Error::new(
+                        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                    ));
+                }
+            }
+            Ok(response)
+        }
     }
 
     /// [`Self::answer_foreground`] for request-answering routes that repair the
@@ -1257,6 +1323,7 @@ impl VerterLanguageServer {
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool::new(false),
             client_refreshes_inlay_hints: std::sync::atomic::AtomicBool::new(false),
+            client_applies_versioned_edits: std::sync::atomic::AtomicBool::new(false),
             cached_verter_diags,
             provider_sync_states,
             decl_overlay_owner,
