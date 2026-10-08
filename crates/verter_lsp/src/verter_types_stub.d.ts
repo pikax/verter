@@ -208,6 +208,7 @@ export declare function flowNarrow<S>(reference: unknown, snapshot: S): referenc
 export declare function flowExcluded<S>(
   snapshot: S,
 ): <R>(reference: R) => reference is FlowExcluded<R, S>;
+export declare const flowBranch: boolean;
 export declare function flowEach1<V>(source: readonly V[] | null | undefined): V;
 export declare function flowEach1<V>(source: Iterable<V> | null | undefined): V;
 export declare function flowEach1(source: number | null | undefined): number;

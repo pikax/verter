@@ -144,6 +144,7 @@ export declare function instantiateComponent<T, P>(comp: T, props: P): T extends
   export type FlowExcluded<R, S> = R extends unknown ? ([FlowKept<R, S>] extends [never] ? R : never) : never;
   export declare function flowNarrow<S>(reference: unknown, snapshot: S): reference is S;
   export declare function flowExcluded<S>(snapshot: S): <R>(reference: R) => reference is FlowExcluded<R, S>;
+  export declare const flowBranch: boolean;
   export declare function flowEach1<V>(source: readonly V[] | null | undefined): V;
   export declare function flowEach1<V>(source: Iterable<V> | null | undefined): V;
   export declare function flowEach1(source: number | null | undefined): number;
@@ -225,6 +226,7 @@ export type FlowKept<R, S> = S extends unknown ? (FlowSame<R, S> extends true ? 
 export type FlowExcluded<R, S> = R extends unknown ? ([FlowKept<R, S>] extends [never] ? R : never) : never;
 export declare function flowNarrow<S>(reference: unknown, snapshot: S): reference is S;
 export declare function flowExcluded<S>(snapshot: S): <R>(reference: R) => reference is FlowExcluded<R, S>;
+export declare const flowBranch: boolean;
 export declare function flowEach1<V>(source: readonly V[] | null | undefined): V;
 export declare function flowEach1<V>(source: Iterable<V> | null | undefined): V;
 export declare function flowEach1(source: number | null | undefined): number;
@@ -562,7 +564,7 @@ fn emit_helper_imports_inner(
     if template_ast.is_some_and(template_uses_flow_helpers) {
         writeln!(
             imports,
-            "import {{ flowNarrow as {P}flowNarrow, flowExcluded as {P}flowExcluded, flowEach1 as {P}flowEach1, flowEach2 as {P}flowEach2, flowEach3 as {P}flowEach3 }} from \"{}\";",
+            "import {{ flowNarrow as {P}flowNarrow, flowExcluded as {P}flowExcluded, flowBranch as {P}flowBranch, flowEach1 as {P}flowEach1, flowEach2 as {P}flowEach2, flowEach3 as {P}flowEach3 }} from \"{}\";",
             options.types_module_name,
             P = PREFIX,
         )

@@ -87,16 +87,6 @@ async fn checked_errors(
                 diagnostics.iter().any(|d| code_of(d) == 2322)
             })
             .await;
-        if std::env::var("FLOW_DEBUG").is_ok() {
-            eprintln!(
-                "DIAGS {}: {:?}",
-                fixture.name,
-                diagnostics
-                    .iter()
-                    .map(|d| (code_of(d), d.severity, d.message.clone()))
-                    .collect::<Vec<_>>()
-            );
-        }
         let errors: Vec<Expected> = diagnostics
             .iter()
             .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
@@ -154,10 +144,6 @@ fn check_exact(fixture: &SfcFixture, reported: &[Expected]) -> Result<(), String
 
 async fn assert_fixture(session: &RealProviderTestSession, fixture: &SfcFixture) -> Uri {
     let (uri, reported) = checked_errors(session, fixture).await;
-    if std::env::var("FLOW_DUMP").is_ok_and(|v| fixture.name.contains(&v)) {
-        let surface = session.server().test_current_ide_surface(&uri);
-        eprintln!("SURFACE {}:\n{}", fixture.name, surface.provider_content);
-    }
     if let Err(mismatch) = check_exact(fixture, &reported) {
         panic!("[{}] {mismatch}", session.provider_kind().label());
     }

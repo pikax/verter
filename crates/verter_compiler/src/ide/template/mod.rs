@@ -23,6 +23,8 @@ pub mod emit;
 pub(crate) mod flow;
 #[cfg(any(test, feature = "test-support"))]
 pub mod flow_check;
+#[cfg(test)]
+mod flow_tests;
 pub mod props;
 mod slot_inference;
 pub mod vmodel;

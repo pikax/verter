@@ -461,7 +461,9 @@ pub fn contextual(root: SfcRoot, broken: bool) -> SfcFixture {
     d.mark_if(broken, TS2345, "$event");
     d.sfc.push(&format!(", {r}.a)\"></button>\n"));
     d.sfc.push("  </div>\n");
-    d.guarded_callbacks = 6;
+    // The broken value contract `(id) => id` reads no outer reference, so it
+    // needs no re-narrowing.
+    d.guarded_callbacks = if broken { 5 } else { 6 };
     d.finish()
 }
 
@@ -529,7 +531,9 @@ pub fn mutation_and_nested_closure() -> SfcFixture {
     d.sfc
         .push("    <i @click=\"() => take(state.note)\"></i>\n");
     d.sfc.push("  </div>\n");
-    d.guarded_callbacks = 3;
+    // The nested-closure callback reads nothing in its own flow (the read sits
+    // in the nested closure, which starts its own flow), so it is not guarded.
+    d.guarded_callbacks = 2;
     d.conditions = 1;
     d.finish()
 }
@@ -709,24 +713,37 @@ pub fn flat_matrix(n: usize, broken: bool) -> SfcFixture {
     d.finish()
 }
 
-/// The nested-scope matrix: `n` branches as `n / 4` nested levels under one
-/// outermost `v-if` on the `reactive` member `top`. Level `i` is a four-branch chain on `s{i}` whose
-/// opening branch holds level `i + 1` (every fourth level inside a `v-for`
-/// frame); every branch has a callback reading the outermost positive and its
-/// own narrowed member. With `broken`, each callback reads the next level's
-/// (not yet narrowed) member instead.
+/// Branches per level of [`nested_matrix`].
+pub const NESTED_BRANCHES: usize = 8;
+
+/// The values a level's member discriminates, one per branch.
+const LEVEL_VALUES: [&str; NESTED_BRANCHES] = ["a", "b", "c", "d", "e", "f", "g", "h"];
+
+/// The nested-scope matrix: `n` branches as `n / 8` nested levels under one
+/// outermost `v-if` on the `reactive` member `top`. Level `i` is an
+/// eight-branch chain on `s{i}` whose opening branch holds level `i + 1`
+/// (every fourth level inside a `v-for` frame); every branch has a callback
+/// reading the outermost positive and its own narrowed member. With `broken`,
+/// each callback reads the next level's (not yet narrowed) member instead.
+///
+/// Eight branches per level keep the 1024-branch matrix at 128 nested levels:
+/// TypeScript's binder exhausts the Node stack near 2k nested syntax levels,
+/// and the language server's IDE template walk recurses once per element level.
 pub fn nested_matrix(n: usize, broken: bool) -> SfcFixture {
-    assert!(n.is_multiple_of(4) && n >= 8);
-    let levels = n / 4;
+    assert!(n.is_multiple_of(NESTED_BRANCHES) && n >= 2 * NESTED_BRANCHES);
+    let levels = n / NESTED_BRANCHES;
     let mut d = Draft::new(
         format!("NestedMatrix{n}{}", if broken { "Broken" } else { "" }),
         true,
         |s| {
-            s.push("type S = 'a' | 'b' | 'c' | 'd';\n");
-            s.push("function takeA(top: 'on', own: 'a', row: number): void {}\n");
-            s.push("function takeB(top: 'on', own: 'b'): void {}\n");
-            s.push("function takeC(top: 'on', own: 'c'): void {}\n");
-            s.push("function takeD(top: 'on', own: 'd'): void {}\n");
+            let values: Vec<String> = LEVEL_VALUES.iter().map(|v| format!("'{v}'")).collect();
+            s.push(&format!("type S = {};\n", values.join(" | ")));
+            s.push("function takeOpening(top: 'on', own: 'a', row: number): void {}\n");
+            // The expected value alone fixes `V`, so `own` must already be
+            // narrowed to it.
+            s.push(
+                "function take<V extends S>(top: 'on', own: NoInfer<V>, expected: V): void {}\n",
+            );
             s.push("const rows = [] as number[];\n");
             s.push("const state = reactive({\n  top: 'on' as 'on' | 'off',\n");
             for i in 0..=levels {
@@ -753,7 +770,7 @@ pub fn nested_matrix(n: usize, broken: bool) -> SfcFixture {
             d.sfc.push(&format!("<template v-for=\"r{i} in rows\">"));
             row = format!("r{i}");
         }
-        d.sfc.push("<i @click=\"() => takeA(state.top, ");
+        d.sfc.push("<i @click=\"() => takeOpening(state.top, ");
         read(&mut d, i);
         d.sfc.push(&format!(", {row})\"></i>\n"));
     }
@@ -762,19 +779,18 @@ pub fn nested_matrix(n: usize, broken: bool) -> SfcFixture {
             d.sfc.push("</template>");
         }
         d.sfc.push("</div>\n");
-        for (directive, take, condition) in [
-            (format!("v-else-if=\"state.s{i} === 'b'\""), "takeB", true),
-            (format!("v-else-if=\"state.s{i} === 'c'\""), "takeC", true),
-            ("v-else".to_string(), "takeD", false),
-        ] {
-            if condition {
+        for (index, value) in LEVEL_VALUES.iter().enumerate().skip(1) {
+            let last = index == NESTED_BRANCHES - 1;
+            if last {
+                d.sfc.push("<div v-else>");
+            } else {
+                d.sfc
+                    .push(&format!("<div v-else-if=\"state.s{i} === '{value}'\">"));
                 d.conditions += 1;
             }
-            d.sfc.push(&format!(
-                "<div {directive}><i @click=\"() => {take}(state.top, "
-            ));
+            d.sfc.push("<i @click=\"() => take(state.top, ");
             read(&mut d, i);
-            d.sfc.push(")\"></i></div>\n");
+            d.sfc.push(&format!(", '{value}')\"></i></div>\n"));
         }
     }
     d.sfc.push("</main>\n");

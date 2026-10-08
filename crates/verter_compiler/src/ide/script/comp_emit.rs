@@ -102,7 +102,7 @@ pub(super) fn emit_comp_functions_to_string(
         ast,
         source,
         root_children,
-        &[],
+        &mut Vec::new(),
         &[],
         &mut root_comp_entries,
         &mut all_comp_offsets,
@@ -384,7 +384,12 @@ fn find_scope_for_tag<'a>(tag_name: &str, comp_scopes: &'a [CompScope]) -> Optio
 }
 
 /// Emit Comp{offset} functions for template elements.
-/// Recursively walk children to emit Comp functions with condition scope tracking.
+/// Recursively walk children to emit Comp functions with condition tracking.
+///
+/// `conditional_ancestors` is the stack of enclosing elements that carry a
+/// `v-if` / `v-else-if` / `v-else` (the current element included while its
+/// children are walked). Their condition text is materialized only for a
+/// component function, whose props read narrowed values.
 #[allow(clippy::too_many_arguments)]
 fn walk_children_for_comp(
     buf: &mut String,
@@ -393,7 +398,7 @@ fn walk_children_for_comp(
     ast: &TemplateAst,
     source: &str,
     children: &[crate::types::NodeId],
-    parent_scopes: &[crate::ide::condition::ConditionScope],
+    conditional_ancestors: &mut Vec<crate::types::NodeId>,
     comp_scopes: &[CompScope],
     root_comp_entries: &mut Vec<(u32, String, Option<String>)>,
     all_comp_offsets: &mut Vec<u32>,
@@ -404,11 +409,9 @@ fn walk_children_for_comp(
     for &child_id in children {
         let node = &ast.nodes[child_id.0];
         if let AstNodeKind::Element(el) = &node.kind {
-            // Build condition scope using raw expressions (no binding prefixes)
-            // because Comp functions receive variables from the enclosing scope
-            let mut scopes = parent_scopes.to_vec();
-            if let Some(scope) = build_condition_scope_raw(el, ast, child_id, source) {
-                scopes.push(scope);
+            let conditional = el.v_condition.is_some();
+            if conditional {
+                conditional_ancestors.push(child_id);
             }
 
             // Build comp scope chain for v-slot and v-for
@@ -492,9 +495,10 @@ fn walk_children_for_comp(
                     gs,
                     gn,
                     el,
+                    ast,
                     source,
                     offset,
-                    &scopes,
+                    conditional_ancestors,
                     &new_comp_scopes,
                     is_jsx,
                     &props_lit,
@@ -580,7 +584,7 @@ fn walk_children_for_comp(
                     ast,
                     source,
                     &content.children,
-                    &scopes,
+                    conditional_ancestors,
                     &child_comp_scopes,
                     root_comp_entries,
                     all_comp_offsets,
@@ -589,8 +593,27 @@ fn walk_children_for_comp(
                     prop_names,
                 );
             }
+            if conditional {
+                conditional_ancestors.pop();
+            }
         }
     }
+}
+
+/// The accumulated condition scopes of `conditional_ancestors`, in raw source
+/// text, for a component function's guard.
+fn condition_scopes_raw(
+    conditional_ancestors: &[crate::types::NodeId],
+    ast: &TemplateAst,
+    source: &str,
+) -> Vec<crate::ide::condition::ConditionScope> {
+    conditional_ancestors
+        .iter()
+        .filter_map(|&id| match &ast.nodes[id.0].kind {
+            AstNodeKind::Element(el) => build_condition_scope_raw(el, ast, id, source),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build a condition scope using raw source expressions (no binding prefixes).
@@ -1063,9 +1086,10 @@ fn emit_comp_function_for_element(
     gs: &str,
     _gn: &str,
     el: &ElementNode,
+    ast: &TemplateAst,
     source: &str,
     offset: u32,
-    condition_scopes: &[crate::ide::condition::ConditionScope],
+    conditional_ancestors: &[crate::types::NodeId],
     comp_scopes: &[CompScope],
     is_jsx: bool,
     props_literal: &str,
@@ -1080,12 +1104,16 @@ fn emit_comp_function_for_element(
     // so that getRootComponent/void chains still resolve.
     if raw_tag == "component" {
         use std::fmt::Write;
-        let guard = crate::ide::condition::generate_condition_text(condition_scopes)
-            .map(|text| {
-                let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
-                format!("\n  if(!({})) return null;", resolved)
-            })
-            .unwrap_or_default();
+        let guard = crate::ide::condition::generate_condition_text(&condition_scopes_raw(
+            conditional_ancestors,
+            ast,
+            source,
+        ))
+        .map(|text| {
+            let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
+            format!("\n  if(!({})) return null;", resolved)
+        })
+        .unwrap_or_default();
         write!(
             buf,
             "\nfunction {P}Comp{offset}{gs}() {{{guard}\
@@ -1111,15 +1139,28 @@ fn emit_comp_function_for_element(
         raw_tag
     };
 
-    // Generate narrowing guard from condition scopes.
-    // Resolve prop names to __props.propName since Comp functions are outside the
-    // template block scope where __props destructuring is available.
-    let guard = crate::ide::condition::generate_condition_text(condition_scopes)
+    // The guard under a condition. An element function's body reads nothing
+    // the conditions narrow, so its guard only contributes `| null` to the
+    // return type and stays constant-size. A component function's props read
+    // narrowed values: its guard re-states the condition path, with prop names
+    // resolved to `__props.propName` because Comp functions are outside the
+    // template block scope where `__props` destructuring is available.
+    let guard = if conditional_ancestors.is_empty() {
+        String::new()
+    } else if el.tag_type == TagType::Element {
+        "\n  if(!___VERTER___flowBranch) return null;".to_string()
+    } else {
+        crate::ide::condition::generate_condition_text(&condition_scopes_raw(
+            conditional_ancestors,
+            ast,
+            source,
+        ))
         .map(|text| {
             let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
             format!("\n  if(!({})) return null;", resolved)
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
     match el.tag_type {
         TagType::Element => {

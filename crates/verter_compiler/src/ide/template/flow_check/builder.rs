@@ -6,8 +6,7 @@
 //! `BindingResolver` through `build_prefixed_expr_segments`, and callback
 //! shapes and outer references from the OXC expression ASTs the template
 //! parse already produced. Contextual contracts are supplied by the caller
-//! per authored directive (the production emitter derives them from the
-//! component/element typing it already performs).
+//! per authored directive.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ArrowFunctionExpression, Expression, Function};

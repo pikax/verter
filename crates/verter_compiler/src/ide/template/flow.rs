@@ -47,9 +47,9 @@ use crate::template::code_gen::types::{CodeGenOutput, ReservedPrepend};
 use crate::template::oxc::types::OxcParsedExpression;
 
 /// Re-narrows a reference to the type of its snapshot.
-pub(crate) const NARROW_HELPER: &str = "___VERTER___flowNarrow";
+const NARROW_HELPER: &str = "___VERTER___flowNarrow";
 /// Removes constituents `flowNarrow` re-admits only as subtypes of kept ones.
-pub(crate) const EXCLUDED_HELPER: &str = "___VERTER___flowExcluded";
+const EXCLUDED_HELPER: &str = "___VERTER___flowExcluded";
 /// Prefix of every snapshot declaration.
 const SNAPSHOT_PREFIX: &str = "___VERTER___o";
 /// Prefix of every evaluated `v-for` source.
