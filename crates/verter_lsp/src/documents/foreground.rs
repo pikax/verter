@@ -349,7 +349,7 @@ impl ForegroundRequest {
                 return Some(Some(identity.clone()));
             }
             drop(targets);
-            match documents.canonical_id_to_uri(path) {
+            match documents.open_uri_for_fs_path(path) {
                 Some(uri) => uri,
                 None => return Some(None),
             }
@@ -402,7 +402,7 @@ impl ForegroundRequest {
             return EditTargetRevision::Open(identity.version);
         }
         if documents.snapshot_identity(target).is_some()
-            || documents.canonical_id_to_uri(&target_path).is_some()
+            || documents.open_uri_for_fs_path(&target_path).is_some()
         {
             EditTargetRevision::Uncaptured
         } else {

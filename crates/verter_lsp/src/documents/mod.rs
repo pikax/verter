@@ -1582,6 +1582,20 @@ impl DocumentRegistry {
         None
     }
 
+    /// The open document's URI for `path` under filesystem identity
+    /// ([`verter_span::path::fs_paths_equal`]): a spelling of the file that
+    /// differs in case from the client's `didOpen` URI still names the open
+    /// document on a case-insensitive host. An exact canonical-id match wins.
+    pub(crate) fn open_uri_for_fs_path(&self, path: &str) -> Option<Uri> {
+        self.canonical_id_to_uri(path).or_else(|| {
+            self.documents.iter().find_map(|entry| {
+                verter_span::path::fs_paths_equal(&entry.value().canonical_id, path)
+                    .then(|| entry.key().parse().ok())
+                    .flatten()
+            })
+        })
+    }
+
     /// Get the IDE output (TSX or JSX) for a document.
     ///
     /// If compile_slots were cleared (e.g., by dependency invalidation via `did_open`

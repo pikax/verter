@@ -238,11 +238,13 @@ fn a_client_without_document_changes_keeps_unversioned_edits() {
         replies.rename
     );
 
+    // The organize-imports route builds `documentChanges`; an unversioned
+    // client receives that shape unchanged, with no version attached.
     let edit = organize_imports_edit(&replies.code_actions);
-    assert!(
-        document_edit_versions(&edit)
-            .iter()
-            .all(|(_, version)| version.is_null()),
-        "a client without documentChanges is never handed a version: {edit}"
+    let versions = document_edit_versions(&edit);
+    assert_eq!(
+        versions,
+        vec![(replies.uri.clone(), Value::Null)],
+        "the route's `documentChanges` shape is kept with a null version: {edit}"
     );
 }
