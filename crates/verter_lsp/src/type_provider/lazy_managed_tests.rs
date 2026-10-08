@@ -735,16 +735,14 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
             "ready_files": ready_files,
         }),
     );
-    std::fs::write(
-        carrier_store_dir.join("manifest.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "epoch": 1,
-            "host_version": "real-lazy-recovery-test",
-            "projects": projects,
-        }))
-        .expect("serialize lazy carrier manifest"),
-    )
-    .expect("publish lazy carrier manifest");
+    let manifest: crate::external_ts::Manifest = serde_json::from_value(serde_json::json!({
+        "epoch": 1,
+        "host_version": "real-lazy-recovery-test",
+        "projects": projects,
+    }))
+    .expect("lazy carrier manifest matches the published schema");
+    crate::external_ts::carrier_publish_store::seed_published_store(&carrier_store_dir, &manifest)
+        .expect("publish lazy carrier manifest");
     let node_path = verter_type_runtime::find_node()
         .expect("real lazy recovery test requires the workspace Node.js runtime");
     let tsserver_path = {

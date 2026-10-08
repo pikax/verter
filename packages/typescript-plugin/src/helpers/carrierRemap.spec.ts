@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { writeCarrierStoreFixture } from "./carrierStoreFixture";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -26,7 +27,7 @@ function writeStore(manifest: Manifest, files: Record<string, string>): string {
     mkdirSync(join(abs, ".."), { recursive: true });
     writeFileSync(abs, content, "utf8");
   }
-  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest), "utf8");
+  writeCarrierStoreFixture(dir, manifest);
   return dir;
 }
 

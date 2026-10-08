@@ -432,13 +432,19 @@ fn republish_overwrites_manifest_with_valid_json() {
     store.publish_batch(&mk("v1")).expect("publish v1");
     store.publish_batch(&mk("v2")).expect("publish v2");
 
-    // The final manifest is valid JSON, never truncated.
-    let bytes = std::fs::read(store.manifest_path()).expect("manifest readable");
-    let parsed: Manifest = serde_json::from_slice(&bytes).expect("manifest is valid JSON");
+    // The published state reads back strictly (never truncated).
+    let parsed = store
+        .read_published()
+        .expect("store readable")
+        .expect("published");
     assert_eq!(parsed.epoch, 2, "second publish epoch");
+    let leftover_temp = std::fs::read_dir(store.workspace_dir())
+        .expect("store dir")
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with(".tmp"));
     assert!(
-        !store.manifest_path().with_extension("json.tmp").exists(),
-        "the temp manifest must NOT remain after an atomic swap"
+        !leftover_temp,
+        "no temp file may remain after the atomic writes"
     );
 }
 
@@ -476,10 +482,9 @@ fn concurrent_publishes_never_leave_a_torn_manifest() {
                 );
                 store.publish_batch(&batch).expect("publish");
                 // Every observation of the manifest is valid JSON (never torn).
-                if let Ok(bytes) = std::fs::read(store.manifest_path()) {
-                    serde_json::from_slice::<Manifest>(&bytes)
-                        .expect("manifest is always valid JSON, never torn");
-                }
+                store
+                    .read_published()
+                    .expect("the published state always reads back, never torn");
             }
         }));
     }
@@ -833,7 +838,7 @@ fn store_writes_only_under_its_store_root_never_the_user_tree() {
     );
     // And the store DID write under its own root.
     assert!(
-        store.manifest_path().exists(),
+        store.head_path().exists(),
         "manifest written under the store root"
     );
     assert!(
@@ -1221,7 +1226,7 @@ fn corrupt_manifest_does_not_erase_known_entries_on_next_publish() {
     );
 
     // Corrupt the manifest on disk (a torn / partially-written / garbage file).
-    std::fs::write(store.manifest_path(), b"{ this is not valid json").expect("corrupt write");
+    std::fs::write(store.head_path(), b"{ this is not valid json").expect("corrupt write");
 
     // A publish for a DIFFERENT project P2 must FAIL (the corrupt manifest is not
     // silently reset to empty) rather than succeed by erasing P1.
@@ -1259,7 +1264,7 @@ fn missing_manifest_yields_fresh_default() {
     // The ONLY case that yields a fresh default: NotFound. A brand-new store has no
     // manifest; `current_manifest` returns a fresh (empty) one rather than erroring.
     let (store, _ut) = fresh_store();
-    assert!(!store.manifest_path().exists(), "no manifest yet");
+    assert!(!store.head_path().exists(), "no manifest yet");
     let m = store.current_manifest();
     assert!(m.projects.is_empty(), "fresh manifest is empty");
     assert_eq!(m.epoch, 0, "fresh manifest seeds epoch 0");

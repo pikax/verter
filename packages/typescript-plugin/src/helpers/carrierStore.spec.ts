@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from "node:fs";
+import { CARRIER_STORE_HEAD_FILE, frameCarrierJournalRecord } from "./carrierJournal";
+import {
+  appendCarrierStoreRecord,
+  carrierStoreJournalPath,
+  writeCarrierStoreFixture,
+} from "./carrierStoreFixture";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveCarrierImportTarget } from "@verter/language-shared";
@@ -9,19 +15,6 @@ import {
   resolveCarrierStoreDir,
   resolveResponseRemap,
 } from "./carrierStore";
-
-/**
- * Pad `json` with insignificant whitespace until it serializes to EXACTLY
- * `length` bytes, so a manifest replacement can be made stat-identical to the
- * file it replaces. Throws when the payload is already longer — a silently
- * shorter/longer replacement would make the equal-stat test prove nothing.
- */
-function padToLength(json: string, length: number): string {
-  if (json.length > length) {
-    throw new Error(`cannot pad ${json.length} bytes down to ${length}`);
-  }
-  return json + " ".repeat(length - json.length);
-}
 
 /** Write a manifest + the named blob/map files into a fresh store dir. */
 function makeStore(manifest: Manifest, blobs: Record<string, string> = {}): string {
@@ -33,7 +26,7 @@ function makeStore(manifest: Manifest, blobs: Record<string, string> = {}): stri
     mkdirSync(join(abs, ".."), { recursive: true });
     writeFileSync(abs, content, "utf8");
   }
-  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest), "utf8");
+  writeCarrierStoreFixture(dir, manifest);
   return dir;
 }
 
@@ -225,75 +218,194 @@ describe("DiskCarrierStoreReader.readManifest", () => {
     expect(new DiskCarrierStoreReader(undefined).readManifest()).toBeUndefined();
   });
 
-  it("tolerates a torn (unparseable) manifest without throwing", () => {
+  it("tolerates a torn (unparseable) head without throwing", () => {
     const dir = track(makeStore(baseManifest()));
-    // Overwrite with a half-written JSON.
-    writeFileSync(join(dir, "manifest.json"), '{ "epoch": 7, "projects":', "utf8");
+    const following = new DiskCarrierStoreReader(dir);
+    expect(following.readManifest()?.epoch).toBe(7);
+    // Overwrite with a half-written head.
+    writeFileSync(join(dir, CARRIER_STORE_HEAD_FILE), '{ "format": 2, "generation":', "utf8");
     const reader = new DiskCarrierStoreReader(dir);
     expect(() => reader.readManifest()).not.toThrow();
     expect(reader.readManifest()).toBeUndefined();
+    // A reader that already folded the store keeps its last good state.
+    expect(following.readManifest()?.epoch).toBe(7);
   });
 
-  it("caches by mtime/size and re-reads only when the file changes", () => {
+  it("reloads the base when a compaction moves the store to a new generation", () => {
     const dir = track(makeStore(baseManifest()));
     const reader = new DiskCarrierStoreReader(dir);
     expect(reader.readManifest()?.epoch).toBe(7);
 
-    // Rewrite with a new epoch + a bumped mtime so the change is detected.
     const next = baseManifest();
     next.epoch = 9;
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(next), "utf8");
-    const future = Date.now() / 1000 + 100;
-    utimesSync(join(dir, "manifest.json"), future, future);
+    writeCarrierStoreFixture(dir, next);
 
     expect(reader.readManifest()?.epoch).toBe(9);
   });
 
-  it("invalidateManifest forces a re-read of a replacement with an IDENTICAL stat tuple", () => {
-    // The `(mtimeMs, size)` change key cannot see an atomic replacement that
-    // preserves both — a same-length manifest written within one filesystem
-    // timestamp tick. The Rust publisher swaps the manifest atomically, so a
-    // publication whose serialized length is unchanged (the common case: a
-    // ready-file entry replaced, not added) is exactly that shape. Nothing
-    // downstream may rely on the stat key alone to observe a publication.
-    const first = baseManifest();
-    const second = baseManifest();
-    second.epoch = 9;
-    const width = Math.max(JSON.stringify(first).length, JSON.stringify(second).length);
-
-    const dir = track(makeStore(first));
-    const manifestPath = join(dir, "manifest.json");
-    // Pin both writes to the SAME whole-second timestamp so the stat tuple is
-    // exactly reproducible (sub-millisecond mtime precision is not).
-    const pinnedSeconds = Math.floor(Date.now() / 1000) - 60;
-    writeFileSync(manifestPath, padToLength(JSON.stringify(first), width), "utf8");
-    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
-
+  it("observes an appended publication with no invalidation, even a same-shape replacement", () => {
+    const dir = track(makeStore(baseManifest()));
     const reader = new DiskCarrierStoreReader(dir);
-    expect(reader.readManifest()?.epoch).toBe(7);
-    const before = statSync(manifestPath);
+    expect(reader.readyFile("d:/ws/src/A.vue.tsx")?.content_hash).toBe("aaaa");
 
-    writeFileSync(manifestPath, padToLength(JSON.stringify(second), width), "utf8");
-    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
+    // A publication that REPLACES a ready entry with one of identical shape.
+    appendCarrierStoreRecord(dir, {
+      epoch: 8,
+      ops: [
+        {
+          op: "ready_put",
+          project: "d:/ws/tsconfig.json",
+          provider_uri: "d:/ws/src/A.vue.tsx",
+          file: {
+            ...baseManifest().projects["d:/ws/tsconfig.json"]!.ready_files["d:/ws/src/A.vue.tsx"]!,
+            content_hash: "cccc",
+          },
+        },
+      ],
+    });
 
-    // The replacement really is stat-identical — otherwise this test would be
-    // exercising the ordinary mtime-changed path and prove nothing.
-    const after = statSync(manifestPath);
-    expect(after.size).toBe(before.size);
-    expect(after.mtimeMs).toBe(before.mtimeMs);
-
-    // The cached snapshot is genuinely stale…
-    expect(reader.readManifest()?.epoch).toBe(7);
-    // …and only an explicit invalidation can observe the publication.
-    reader.invalidateManifest();
-    expect(reader.readManifest()?.epoch).toBe(9);
+    expect(reader.currentEpoch()).toBe(8);
+    expect(reader.readyFile("d:/ws/src/A.vue.tsx")?.content_hash).toBe("cccc");
   });
 
-  it("invalidateManifest is safe with no store dir and with no prior read", () => {
-    expect(() => new DiskCarrierStoreReader(undefined).invalidateManifest()).not.toThrow();
-    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
-    reader.invalidateManifest();
-    expect(reader.readManifest()?.epoch).toBe(7);
+  it("reads only the records appended since its last read, never the base again", () => {
+    const dir = track(makeStore(baseManifest()));
+    const reader = new DiskCarrierStoreReader(dir);
+    appendCarrierStoreRecord(dir, {
+      epoch: 8,
+      ops: [
+        { op: "ready_del", project: "d:/ws/tsconfig.json", provider_uri: "d:/ws/src/A.vue.tsx" },
+      ],
+    });
+    expect(reader.currentEpoch()).toBe(8);
+    expect(reader.readyFile("d:/ws/src/A.vue.tsx")).toBeUndefined();
+
+    // Destroy everything the reader already consumed: the base and the journal
+    // prefix (same length, so the offset still lines up).
+    rmSync(join(dir, "snapshot-1.json"));
+    const journal = carrierStoreJournalPath(dir);
+    writeFileSync(journal, "x".repeat(statSync(journal).size), "utf8");
+    appendCarrierStoreRecord(dir, {
+      epoch: 9,
+      ops: [
+        {
+          op: "ready_put",
+          project: "d:/ws/tsconfig.json",
+          provider_uri: "d:/ws/src/B.vue.tsx",
+          file: {
+            content_hash: "dddd",
+            version: 1,
+            script_kind: "TSX",
+            role: "CarrierIde",
+            map_hash: "0",
+            blob_rel: "blobs/blake3-dddd.tsx",
+          },
+        },
+      ],
+    });
+
+    expect(reader.currentEpoch()).toBe(9);
+    expect(reader.readyFile("d:/ws/src/B.vue.tsx")?.content_hash).toBe("dddd");
+    expect(reader.readyFile("d:/ws/src/A.vue.tsx")).toBeUndefined();
+    expect(reader.ownedSourceFor("d:/ws/src/A.vue")?.provider_uri).toBe("d:/ws/src/A.vue.tsx");
+  });
+
+  it("never applies a torn tail, and applies it once the line completes", () => {
+    const dir = track(makeStore(baseManifest()));
+    const reader = new DiskCarrierStoreReader(dir);
+    const line = frameCarrierJournalRecord({
+      epoch: 8,
+      ops: [{ op: "owned_del", project: "d:/ws/tsconfig.json", source_uri: "d:/ws/src/B.vue" }],
+    });
+    appendCarrierStoreRecord(dir, line.subarray(0, line.length - 5));
+    expect(reader.currentEpoch()).toBe(7);
+    expect(reader.ownedSourceFor("d:/ws/src/B.vue")).toBeDefined();
+
+    appendCarrierStoreRecord(dir, line.subarray(line.length - 5));
+    expect(reader.currentEpoch()).toBe(8);
+    expect(reader.ownedSourceFor("d:/ws/src/B.vue")).toBeUndefined();
+    expect(reader.ownedSourceFor("d:/ws/src/B.vue.tsx")).toBeUndefined();
+  });
+
+  it("stops at a corrupt record instead of applying past it", () => {
+    const dir = track(makeStore(baseManifest()));
+    const reader = new DiskCarrierStoreReader(dir);
+    const line = frameCarrierJournalRecord({
+      epoch: 8,
+      ops: [{ op: "owned_del", project: "d:/ws/tsconfig.json", source_uri: "d:/ws/src/B.vue" }],
+    });
+    line[12] ^= 0x01;
+    appendCarrierStoreRecord(dir, line);
+    appendCarrierStoreRecord(dir, {
+      epoch: 9,
+      ops: [
+        { op: "ready_del", project: "d:/ws/tsconfig.json", provider_uri: "d:/ws/src/A.vue.tsx" },
+      ],
+    });
+    expect(reader.currentEpoch()).toBe(7);
+    expect(reader.readyFile("d:/ws/src/A.vue.tsx")).toBeDefined();
+  });
+
+  it("folds owned replacements and retractions through the canonical index", () => {
+    const dir = track(makeStore(baseManifest()));
+    const reader = new DiskCarrierStoreReader(dir, "d:/ws/tsconfig.json", false);
+    expect(reader.readyIdeCompanions()).toEqual(["d:/ws/src/A.vue.tsx"]);
+    appendCarrierStoreRecord(dir, {
+      epoch: 8,
+      ops: [
+        {
+          op: "owned_put",
+          project: "d:/ws/tsconfig.json",
+          source_uri: "d:/ws/src/A.vue",
+          rows: [
+            {
+              source_uri: "d:/ws/src/A.vue",
+              provider_uri: "d:/ws/src/A.vue.jsx",
+              role: "CarrierIde",
+              script_kind: "JSX",
+            },
+          ],
+        },
+        { op: "ready_del", project: "d:/ws/tsconfig.json", provider_uri: "d:/ws/src/A.vue.tsx" },
+      ],
+    });
+    expect(reader.ownedSourceFor("D:/WS/src/a.vue")?.provider_uri).toBe("d:/ws/src/A.vue.jsx");
+    expect(reader.ownedSourceFor("d:/ws/src/A.vue.tsx")).toBeUndefined();
+    expect(reader.readyIdeCompanions()).toEqual([]);
+    expect(reader.ownedSources().map((owned) => owned.source_uri)).toEqual([
+      "d:/ws/src/B.vue",
+      "d:/ws/src/A.vue",
+    ]);
+  });
+
+  it("reloads a re-created store instead of tailing it from a stale offset", () => {
+    const dir = track(makeStore(baseManifest()));
+    const reader = new DiskCarrierStoreReader(dir);
+    appendCarrierStoreRecord(dir, {
+      epoch: 8,
+      ops: [
+        { op: "ready_del", project: "d:/ws/tsconfig.json", provider_uri: "d:/ws/src/A.vue.tsx" },
+      ],
+    });
+    expect(reader.currentEpoch()).toBe(8);
+
+    // The store vanishes and a new instance re-creates generation 1.
+    rmSync(dir, { recursive: true, force: true });
+    const recreated = baseManifest();
+    recreated.epoch = 0;
+    writeCarrierStoreFixture(dir, recreated);
+    writeFileSync(
+      join(dir, CARRIER_STORE_HEAD_FILE),
+      JSON.stringify({
+        format: 2,
+        generation: 1,
+        instance: "re-created",
+        host_version: "test-host",
+      }),
+      "utf8",
+    );
+    expect(reader.currentEpoch()).toBe(0);
+    expect(reader.readyFile("d:/ws/src/A.vue.tsx")?.content_hash).toBe("aaaa");
   });
 });
 
