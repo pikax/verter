@@ -3064,6 +3064,59 @@ fn inference_deposits_have_no_call_quota() {
     deposits_select_number(&[1025, 5000]);
 }
 
+/// The same call written in source and read the way a consumer reads it
+/// (`resolve_named_symbol` over `typeof r`). Each call argument lowers
+/// through value inference, whose work fuse a 5,000-element array literal
+/// exhausts: the exhausted argument is unfinished inference, so the call
+/// is refused rather than inferring `T` from a fabricated `any` argument
+/// and completing with no candidate (`unknown`). Below the fuse the
+/// source-written call selects `T := number` like the synthesized one.
+///
+/// Measured on TypeScript 7.0.2: `typeof r` is `number` at both sizes; the
+/// refusal at 5,000 is this engine's fuse, never a different answer.
+#[test]
+fn a_source_call_past_the_argument_fuse_is_refused_not_inferred_from_any() {
+    for (element_count, expect_number) in [(1025, true), (5000, false)] {
+        let canonical = "/w/inference_deposits.ts";
+        let source = format!(
+            "export declare function f<T>(xs: [{}]): T;\n\
+             export const r = f([{}]);\n\
+             export type R = typeof r;\n",
+            vec!["T"; element_count].join(", "),
+            vec!["1"; element_count].join(", "),
+        );
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: canonical.to_string(),
+                source: std::sync::Arc::from(source.as_str()),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert the fixture");
+        let (outcome, _record) = host
+            .resolve_named_symbol_with_audit(canonical, "R", None)
+            .into_parts();
+        let node = outcome.ok().flatten().expect("R resolves to a node");
+        let data = host.project_type_store().semantic_graph().node_data(node);
+        if expect_number {
+            assert!(
+                matches!(
+                    data.as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                ),
+                "{element_count} positions select T := number, got {data:?}"
+            );
+        } else {
+            assert!(
+                matches!(data.as_deref(), Some(SemanticNodeData::Opaque(_))),
+                "{element_count} positions past the argument fuse refuse the call, got {data:?}"
+            );
+        }
+    }
+}
+
 /// `f<T>(xs: [T, …, T]): T` over each of `counts` positions, called with as
 /// many `1`s, selects `T := number`.
 fn deposits_select_number(counts: &[usize]) {
