@@ -77,7 +77,7 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<crate::semantic_query::RelationPayload> {
+    ) -> Option<CacheRead<crate::semantic_query::RelationPayload>> {
         let family = FamilyKey::Relate {
             key: super::family_intern::InternedRelateKey::intern(key.clone()),
         };
@@ -91,25 +91,23 @@ impl SemanticGraphStore {
         // Miss-neutral probe: a miss falls through to the owning
         // cooperative dispatch, which records the single miss (see
         // `get_validated_value_impl`'s `record_miss` contract).
-        let hit = self
-            .get_validated_value_impl(
-                &family,
-                ModeSlot::Single,
-                &requested,
-                ctx,
-                None,
-                None,
-                false,
-            )?
-            .value;
-        match hit {
-            QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(payload),
+        let hit = self.get_validated_value_impl(
+            &family,
+            ModeSlot::Single,
+            &requested,
+            ctx,
+            None,
+            None,
+            false,
+        )?;
+        Some(hit.map_value(|value| match value {
+            QueryResult::Value(SemanticQueryValue::Relation(payload)) => payload,
             // Structural invariant: the relation authority only ever
             // stores `Relation` payloads in `Relate` family entries.
             other => {
                 unreachable!("Relate family entries store Relation payloads only; found {other:?}")
             }
-        }
+        }))
     }
 
     /// Read back the just-published carrier (read-set signature,
@@ -135,6 +133,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
             validated_at_generation: entry.validated_at_generation,
             admission_seq: entry.admission_seq,
+            cost_receipt: Arc::clone(&entry.cost_receipt),
         })
     }
 

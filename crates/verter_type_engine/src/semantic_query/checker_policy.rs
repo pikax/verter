@@ -264,6 +264,11 @@ impl ConditionalTail {
         Self { steps }
     }
 
+    /// The tail steps the run has counted.
+    pub(crate) const fn steps(&self) -> u32 {
+        self.steps
+    }
+
     /// Take one more tail step of `operation`: its refusal when the run
     /// reaches `budget` there.
     pub(crate) fn step(
@@ -297,7 +302,7 @@ thread_local! {
 
 /// The allowance a relation check records against: the checker's, or a
 /// lower one a test installs on this thread to reach it quickly.
-fn relation_comparisons() -> u32 {
+pub(crate) fn relation_comparisons() -> u32 {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(allowance) = RELATION_COMPARISONS_FOR_TESTS.with(std::cell::Cell::get) {
         return allowance;
@@ -327,6 +332,17 @@ impl RelationComplexity {
         }
         self.recorded += 1;
         Ok(())
+    }
+
+    /// The structured comparisons the check may still record.
+    pub(crate) fn remaining(&self) -> u32 {
+        relation_comparisons().saturating_sub(self.recorded)
+    }
+
+    /// Record `comparisons` structured comparisons a replayed result's cold
+    /// run recorded, already checked against [`Self::remaining`].
+    pub(crate) fn record_replayed(&mut self, comparisons: u32) {
+        self.recorded = self.recorded.saturating_add(comparisons);
     }
 }
 

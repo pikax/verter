@@ -436,7 +436,11 @@ pub const LAYOUT_QUERY_OUTCOME_SET: usize = 32;
 /// the memo would need a parallel side-table keyed by admission seq — a
 /// second structure to keep consistent with `entries`. One word per
 /// candidate, at the family caps, is a few hundred KiB process-wide.
-pub const LAYOUT_MEMO_ENTRY: usize = 168;
+///
+/// It also includes the candidate's `Arc` cost receipt: a stored result
+/// that carried no receipt could only be served free, so the word is the
+/// price of every warm read charging what its computation cost.
+pub const LAYOUT_MEMO_ENTRY: usize = 176;
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
