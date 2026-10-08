@@ -35,7 +35,7 @@ impl ResultDemand {
 /// projection, the body/return evaluation context, and the semantic
 /// context. No content version or edit counter is part of it — freshness is
 /// dependency evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReadSignatureResultKey {
     pub descriptor: SignatureDescriptorId,
     pub call_substitution: CallSubstitutionId,

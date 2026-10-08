@@ -2293,7 +2293,7 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
         policy: key.policy,
         source_freshness: key.source_freshness,
         inference_context: key.inference_context.clone(),
-        context: key.context,
+        context: key.context.clone(),
     };
     assert_eq!(
         store.family_candidate_cap_for_tests(&query_key),
@@ -9926,6 +9926,26 @@ mod release_embedded_node_family_tests {
                         ..Default::default()
                     }),
                     context: RelationContext::default(),
+                }),
+            ),
+            (
+                "ReduceIntersection nested subgroup operand",
+                Box::new(move |node| {
+                    use verter_type_engine::semantic_query::{
+                        IntersectionInputRef, IntersectionPurpose, IntersectionTerm,
+                        SemanticContextId,
+                    };
+                    SemanticQueryKey::ReduceIntersection {
+                        input: IntersectionInputRef::from_steps(&[
+                            IntersectionTerm::Value(live),
+                            IntersectionTerm::EvaluateSubgroup {
+                                input: IntersectionInputRef::from_operands(&[live, live, node]),
+                                purpose: IntersectionPurpose::CheckerReduction,
+                            },
+                        ]),
+                        purpose: IntersectionPurpose::CheckerReduction,
+                        context: SemanticContextId::production(),
+                    }
                 }),
             ),
             (

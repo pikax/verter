@@ -942,7 +942,7 @@ fn signatures_of_type_do_not_warm_hit_across_semantic_contexts() {
     let loose = options.intern();
 
     let before = d.graph().stats_snapshot();
-    let first = signature_set_of(&d, sig, production);
+    let first = signature_set_of(&d, sig, production.clone());
     let after_cold = d.graph().stats_snapshot();
     assert_eq!(after_cold.misses, before.misses + 1);
     let second = signature_set_of(&d, sig, production);
