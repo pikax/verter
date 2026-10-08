@@ -2363,9 +2363,15 @@ impl Engine {
     /// publication gate (every writer is out of its window): the captured
     /// fence while its world is still current, else the latest coherent
     /// world when every fact the attempt observed still holds there — an
-    /// advance that touched nothing this attempt read is compatible, and
-    /// admitting into it reruns nothing. `None` when an observed fact
-    /// changed, or the request overlay's lane did: a genuine conflict.
+    /// advance that transitioned nothing this attempt read is compatible,
+    /// and admitting into it reruns nothing. `None` when an observed fact
+    /// changed or the request overlay's lane did (a genuine conflict), or
+    /// when an observed canonical reads as transitioned since the capture.
+    /// The last case is conservative: an observed canonical no view lease
+    /// holds answers the content-transition history's retirement floor, so
+    /// a retirement pass raising that floor past the captured generation
+    /// refuses the attempt and costs an outer restart even though nothing
+    /// it read changed.
     fn admission_fence_under_gate(
         &self,
         captured: &CapturedResolutionFence,

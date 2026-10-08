@@ -94,8 +94,11 @@ fn a_held_revision_survives_unrelated_retirement_and_still_sees_its_own_edit() {
 
 /// Two overlapping `set_workspace` calls: the first is held open while it
 /// installs its workspace's history, and the second is started meanwhile.
-/// Whatever the interleaving, the workspace that ends up live is the one
-/// whose history newly stored artifacts lease.
+/// While the first install is held, the host's workspace slot must still be
+/// write-held — a competing swap cannot publish its workspace until the
+/// first swap's history is installed — and whatever order the swaps then
+/// complete in, the workspace that ends up live is the one whose history
+/// newly stored artifacts lease.
 #[test]
 fn overlapping_workspace_swaps_install_the_live_workspace_history() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -123,22 +126,27 @@ fn overlapping_workspace_swaps_install_the_live_workspace_history() {
             .recv_timeout(Duration::from_secs(30))
             .expect("the first swap reaches its history installation");
 
-        let (done_tx, done_rx) = mpsc::channel::<()>();
+        // The first swap is inside its history installation. A swap that
+        // publishes its workspace apart from its history has released the
+        // slot by now, so a competing swap could publish its own workspace
+        // and history before this one installs, leaving them mismatched.
+        // The probe guard drops at once, and the first swap is resumed
+        // before asserting so a failure surfaces instead of deadlocking.
+        let competing_swap_admitted = host.workspace.try_write().is_some();
+
         let second_swap = {
             let workspace: Arc<dyn WorkspaceAccess> = second.clone();
             let host = &host;
-            scope.spawn(move || {
-                host.set_workspace(workspace);
-                let _ = done_tx.send(());
-            })
+            scope.spawn(move || host.set_workspace(workspace))
         };
-        // A swap that publishes its workspace apart from its history runs
-        // the second swap to completion here; one that publishes them
-        // together blocks it until the first is resumed.
-        let _ = done_rx.recv_timeout(Duration::from_millis(500));
         resume_tx.send(()).expect("the first swap is paused");
         first_swap.join().expect("first swap");
         second_swap.join().expect("second swap");
+        assert!(
+            !competing_swap_admitted,
+            "a competing workspace swap must not be admitted while the first \
+             swap is still installing its history"
+        );
     });
 
     let live = host.ws();
