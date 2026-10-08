@@ -138,15 +138,17 @@ impl VerterLanguageServer {
         let stamp = committed
             .commit_stamp
             .expect("the owned carrier was committed through the admission gate");
+        let host = self.documents.host();
+        let env = host.host_view_env_hashes_for(&canonical);
         let binding = verter_session::external_ts::ProjectBinding::new_for_test(
             "/",
             owner,
             "test",
             verter_session::external_ts::EnvDims {
-                parse_env_hash: [0u8; 16],
-                resolve_env_hash: [0u8; 16],
-                lib_env_hash: [0u8; 16],
-                project_identity: verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
+                parse_env_hash: env.parse_env_hash,
+                resolve_env_hash: env.resolve_env_hash,
+                lib_env_hash: env.lib_env_hash,
+                project_identity: host.host_view_project_identity_for(&canonical),
             },
             Vec::new(),
             verter_session_query::resolution::ProjectId(0),
@@ -166,7 +168,7 @@ impl VerterLanguageServer {
             },
         );
         let outcome = self.carrier_transaction_coordinator.admit_owned(
-            &self.documents.host(),
+            &host,
             &self.provider_sync_states,
             &canonical,
             committed,
