@@ -5,8 +5,11 @@
 //! [`OxcNodeData`] entry with parsed expressions, extracted bindings, and
 //! dynamism classification.
 
+pub mod scope;
 pub(crate) mod slot_summary;
 pub mod types;
+
+use std::rc::Rc;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Program, Statement};
@@ -18,7 +21,59 @@ use crate::utils::oxc::{
     BindingContext,
 };
 
+use self::scope::ActiveScope;
 use self::types::*;
+
+/// Lexical-scope state of the forward pass: the persistent frames it builds
+/// and the incrementally maintained set of names visible at the current node.
+struct ScopePass<'alloc> {
+    scopes: LexicalScopes<'alloc>,
+    active: Rc<ActiveScope<'alloc>>,
+}
+
+impl<'alloc> ScopePass<'alloc> {
+    fn new() -> Self {
+        Self {
+            scopes: LexicalScopes::new(),
+            active: Rc::new(ActiveScope::default()),
+        }
+    }
+
+    /// Make `id` the active scope and lend it to the expressions parsed next.
+    fn enter(&mut self, id: LexicalScopeId) -> ExprScope<'_, 'alloc> {
+        Rc::get_mut(&mut self.active)
+            .expect("a binding context never outlives the extraction it was built for")
+            .enter(&self.scopes, id);
+        ExprScope {
+            id,
+            active: &self.active,
+        }
+    }
+}
+
+/// The lexical scope an expression is parsed in.
+struct ExprScope<'p, 'alloc> {
+    id: LexicalScopeId,
+    active: &'p Rc<ActiveScope<'alloc>>,
+}
+
+impl<'alloc> ExprScope<'_, 'alloc> {
+    /// A binding context that resolves enclosing template-scope names through
+    /// the shared active set rather than a copy of it.
+    fn binding_ctx(&self, base_offset: u32, ide_completion: bool) -> BindingContext<'alloc> {
+        let ctx = BindingContext::new(base_offset).completion_aware(ide_completion);
+        if self.active.is_empty() {
+            ctx
+        } else {
+            ctx.within(self.active.clone())
+        }
+    }
+
+    /// The scope kept for IDE recovery of an expression that did not parse.
+    fn ide_recovery(&self, ide_completion: bool) -> Option<LexicalScopeId> {
+        ide_completion.then_some(self.id)
+    }
+}
 
 /// The JavaScript grammar a template value is parsed under.
 ///
@@ -69,7 +124,7 @@ fn parse_expression<'alloc>(
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
-    ignored: &[&'alloc str],
+    scope: &ExprScope<'_, 'alloc>,
     ide_completion: bool,
     grammar: ValueGrammar,
 ) -> OxcParsedExpression<'alloc> {
@@ -86,7 +141,7 @@ fn parse_expression<'alloc>(
             multi_statement: false,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Default::default(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Static,
         };
     }
@@ -107,7 +162,7 @@ fn parse_expression<'alloc>(
             source_slice,
             alloc,
             source_type,
-            ignored,
+            scope,
             ide_completion,
         );
     }
@@ -120,8 +175,7 @@ fn parse_expression<'alloc>(
             // Don't adjust expression AST spans — keep substring-relative.
             // Bindings get file-relative positions via base_offset.
             // Dynamism is computed incrementally during extraction.
-            let binding_ctx = BindingContext::with_ignored(span.start, ignored.iter().copied())
-                .completion_aware(ide_completion);
+            let binding_ctx = scope.binding_ctx(span.start, ide_completion);
             let bindings = extract_bindings_from_expression(&expr, source_slice, binding_ctx);
 
             OxcParsedExpression {
@@ -131,7 +185,7 @@ fn parse_expression<'alloc>(
                 errors: None,
                 dynamism: bindings.dynamism,
                 bindings: Some(bindings),
-                ide_recovery_scope: Default::default(),
+                ide_recovery_scope: None,
             }
         }
         Err(mut errors) => {
@@ -142,11 +196,7 @@ fn parse_expression<'alloc>(
                 multi_statement: false,
                 errors: Some(errors),
                 bindings: None,
-                ide_recovery_scope: if ide_completion {
-                    ignored.to_vec()
-                } else {
-                    Default::default()
-                },
+                ide_recovery_scope: scope.ide_recovery(ide_completion),
                 dynamism: Dynamism::Static,
             }
         }
@@ -198,11 +248,10 @@ fn parse_statement_list<'alloc>(
     source_slice: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
-    ignored: &[&'alloc str],
+    scope: &ExprScope<'_, 'alloc>,
     ide_completion: bool,
 ) -> OxcParsedExpression<'alloc> {
-    let binding_ctx = BindingContext::with_ignored(span.start, ignored.iter().copied())
-        .completion_aware(ide_completion);
+    let binding_ctx = scope.binding_ctx(span.start, ide_completion);
 
     verter_audit::attribute_n!(CompilerExpressionParse, source_slice.len());
     let ret = verter_parser::oxc_parse::Parser::new(alloc, source_slice, source_type).parse();
@@ -224,11 +273,7 @@ fn parse_statement_list<'alloc>(
             multi_statement: true,
             errors: Some(errors),
             bindings: None,
-            ide_recovery_scope: if ide_completion {
-                ignored.to_vec()
-            } else {
-                Default::default()
-            },
+            ide_recovery_scope: scope.ide_recovery(ide_completion),
             dynamism: Dynamism::Static,
         };
     }
@@ -249,7 +294,7 @@ fn parse_statement_list<'alloc>(
                 errors: None,
                 dynamism: bindings.dynamism,
                 bindings: Some(bindings),
-                ide_recovery_scope: Default::default(),
+                ide_recovery_scope: None,
             };
         }
     }
@@ -266,7 +311,7 @@ fn parse_statement_list<'alloc>(
         errors: None,
         dynamism: bindings.dynamism,
         bindings: Some(bindings),
-        ide_recovery_scope: Default::default(),
+        ide_recovery_scope: None,
     }
 }
 
@@ -278,58 +323,43 @@ use crate::utils::oxc::vue::{parse_vfor_with_bindings_sliced, parse_vslot_with_b
 /// Parse all expressions on a single element node.
 ///
 /// Processes structural directives (v-if/v-for/v-slot) and regular props
-/// in Vue priority order. Accumulates provided locals from v-for/v-slot
-/// for children. Computes [`ExpressionFlag`] for codegen optimization.
+/// in Vue priority order, each in its lexical scope: the condition and the
+/// `v-for` source in `scope`; the props, dynamic slot name and `v-slot` value
+/// after this element's `v-for` aliases; and only descendants after its
+/// `v-slot` parameters. Each alias / parameter list opens one frame holding
+/// only its own names. Computes [`ExpressionFlag`] for codegen optimization.
 ///
-/// Returns an [`OxcParsedElement`] with parsed expressions, provided locals,
-/// and expression flags.
+/// Returns the [`OxcParsedElement`] and the scope this element's children see.
 fn parse_element<'alloc>(
     element: &ElementNode,
-    parent_ignored: &[&'alloc str],
+    scope: LexicalScopeId,
+    pass: &mut ScopePass<'alloc>,
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
     ide_completion: bool,
-) -> OxcParsedElement<'alloc> {
+) -> (OxcParsedElement<'alloc>, LexicalScopeId) {
     // Fast path: plain element with no directives → empty result.
     // Plain elements carry only static attributes, so no prop produces a parsed
     // expression and the dense lookup is empty — `OxcParsedElement::prop` returns
     // `None` for every index regardless.
     if element.is_plain() {
-        return OxcParsedElement {
+        let parsed = OxcParsedElement {
             condition: None,
             v_for: None,
             v_slot: None,
             props: Vec::new(),
             prop_lookup: Vec::new(),
-            provided_locals: None,
+            props_scope: scope,
             expression_flag: ExpressionFlag::empty(),
         };
+        return (parsed, scope);
     }
 
     let mut expression_flag = ExpressionFlag::empty();
-    let has_scoping_directives = element.v_for.is_some() || element.v_slot.is_some();
-
-    // Only clone parent_ignored when we need a mutable Vec to push v-for/v-slot
-    // locals into. Most elements have neither, so this avoids the Vec allocation.
-    let mut owned_locals: Option<Vec<&'alloc str>> = if has_scoping_directives {
-        Some(parent_ignored.to_vec())
-    } else {
-        None
-    };
-
-    // Active locals: either the owned mutable Vec or the parent slice.
-    // Use a macro to avoid borrow-checker issues with conditional references.
-    macro_rules! active_locals {
-        () => {
-            match &owned_locals {
-                Some(v) => v.as_slice(),
-                None => parent_ignored,
-            }
-        };
-    }
 
     // ── 1. v-if / v-else-if condition ───────────────────────────
+    let outer = pass.enter(scope);
     let condition = match &element.v_condition {
         Some(cond) if !matches!(cond.kind, ElementNodeConditionKind::Else) => {
             if let (Some(vs), Some(ve)) = (cond.prop.value_start, cond.prop.value_end) {
@@ -338,7 +368,7 @@ fn parse_element<'alloc>(
                     input,
                     alloc,
                     source_type,
-                    active_locals!(),
+                    &outer,
                     ide_completion,
                     ValueGrammar::Expression,
                 );
@@ -355,29 +385,30 @@ fn parse_element<'alloc>(
 
     // ── 2. v-for ────────────────────────────────────────────────
     let v_for = match &element.v_for {
-        Some(prop) => {
-            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                let parsed = parse_vfor_with_bindings_sliced(
+        Some(prop) => match (prop.value_start, prop.value_end) {
+            (Some(vs), Some(ve)) => Some(OxcParsedVFor {
+                parsed: parse_vfor_with_bindings_sliced(
                     alloc,
                     Span::new(vs, ve),
                     input,
                     source_type,
-                    active_locals!(),
-                );
-                // Add v-for locals to owned_locals for subsequent parsing
-                let locals = owned_locals.as_mut().unwrap();
-                for local_span in &parsed.locals {
-                    locals.push(local_span.slice(input));
-                }
-                Some(OxcParsedVFor { parsed })
-            } else {
-                None
-            }
-        }
+                    &**outer.active,
+                ),
+            }),
+            _ => None,
+        },
         None => None,
+    };
+    let props_scope = match &v_for {
+        Some(v_for) => pass.scopes.push(
+            scope,
+            v_for.parsed.locals.iter().map(|local| local.slice(input)),
+        ),
+        None => scope,
     };
 
     // ── 3. v-slot ───────────────────────────────────────────────
+    let inner = pass.enter(props_scope);
     let v_slot = match &element.v_slot {
         Some(prop) => {
             let slot_span = match (prop.value_start, prop.value_end) {
@@ -386,9 +417,8 @@ fn parse_element<'alloc>(
             };
             // Dynamic slot NAME (`#[expr]`): parse the inner expression in
             // the scope OUTSIDE the slot — enclosing v-for aliases apply
-            // (already in active locals), the slot's own params do NOT (the
-            // name computes before they bind), so this parse runs BEFORE
-            // the params push locals below.
+            // (`props_scope`), the slot's own params do NOT (the name computes
+            // before they bind; they open a frame only for descendants).
             let dynamic_name = if prop.is_dynamic == Some(true) {
                 match (prop.arg_start, prop.arg_end) {
                     (Some(as_), Some(ae)) if ae > as_ => {
@@ -404,7 +434,7 @@ fn parse_element<'alloc>(
                                 input,
                                 alloc,
                                 source_type,
-                                active_locals!(),
+                                &inner,
                                 ide_completion,
                                 ValueGrammar::Expression,
                             )
@@ -420,7 +450,7 @@ fn parse_element<'alloc>(
                 slot_span,
                 input,
                 source_type,
-                active_locals!(),
+                &**inner.active,
             );
             Some(OxcParsedVSlot {
                 parsed,
@@ -453,7 +483,7 @@ fn parse_element<'alloc>(
                     input,
                     alloc,
                     source_type,
-                    active_locals!(),
+                    &inner,
                     ide_completion,
                     value_grammar(directive_name, prop.arg_start.is_some()),
                 );
@@ -492,7 +522,7 @@ fn parse_element<'alloc>(
                 input,
                 alloc,
                 source_type,
-                active_locals!(),
+                &inner,
                 ide_completion,
                 ValueGrammar::Expression,
             )),
@@ -511,22 +541,24 @@ fn parse_element<'alloc>(
     }
 
     // Props use the parent scope; only descendants see this element's slot parameters.
-    if let Some(slot) = &v_slot {
-        let locals = owned_locals.as_mut().unwrap();
-        for local_span in &slot.parsed.locals {
-            locals.push(local_span.slice(input));
-        }
-    }
+    let children_scope = match &v_slot {
+        Some(slot) => pass.scopes.push(
+            props_scope,
+            slot.parsed.locals.iter().map(|local| local.slice(input)),
+        ),
+        None => props_scope,
+    };
 
-    OxcParsedElement {
+    let parsed = OxcParsedElement {
         condition,
         v_for,
         v_slot,
         props: oxc_props,
         prop_lookup,
-        provided_locals: owned_locals,
+        props_scope,
         expression_flag,
-    }
+    };
+    (parsed, children_scope)
 }
 
 /// Parse all template expressions in a single forward pass over the AST nodes vec.
@@ -536,8 +568,11 @@ fn parse_element<'alloc>(
 /// indices than their children (allocated at `open_element`), so a forward
 /// scan guarantees parent data is available when processing children.
 ///
-/// Scope cascade: v-for/v-slot locals from a parent element are propagated
-/// to children via `provided_locals`. Sibling elements do NOT share scopes.
+/// Scope cascade: each node records the scope handle its children see; a node
+/// reads its own scope from its parent's handle in O(1), with no ancestor walk.
+/// v-for/v-slot locals open persistent frames holding only their own names, so
+/// nested scopes never copy inherited names. Sibling elements do NOT share
+/// scopes.
 ///
 /// `AllInterpolationsStatic` is set optimistically on elements with
 /// interpolation children, then removed if any interpolation is non-Static.
@@ -567,29 +602,14 @@ pub fn parse_template_expressions<'alloc>(
     }
 
     let mut data: Vec<OxcNodeData<'alloc>> = Vec::with_capacity(ast.nodes.len());
+    let mut children_scopes: Vec<LexicalScopeId> = Vec::with_capacity(ast.nodes.len());
+    let mut pass = ScopePass::new();
 
     for node in &ast.nodes {
-        // Get nearest ancestor's provided_locals for scope cascade.
-        // Parents always have lower indices, so data[pid.0] is already populated.
-        // Walk up past OxcNodeData::None entries (plain elements that skipped
-        // expression parsing) to find the nearest ancestor with scope info.
-        let parent_locals: &[&'alloc str] = {
-            let mut ancestor = node.parent;
-            loop {
-                match ancestor {
-                    Some(pid) => match &data[pid.0] {
-                        // Only stop at elements that added v-for/v-slot locals.
-                        // Elements with `None` have no locals of their own — walk through.
-                        OxcNodeData::Element(el) => match &el.provided_locals {
-                            Some(locals) => break locals.as_slice(),
-                            None => ancestor = ast.nodes[pid.0].parent,
-                        },
-                        _ => ancestor = ast.nodes[pid.0].parent,
-                    },
-                    None => break &[],
-                }
-            }
-        };
+        // Parents always have lower indices, so their children scope is set.
+        let scope = node
+            .parent
+            .map_or(LexicalScopeId::ROOT, |pid| children_scopes[pid.0]);
 
         match &node.kind {
             AstNodeKind::Element(el) => {
@@ -605,11 +625,19 @@ pub fn parse_template_expressions<'alloc>(
                 });
                 if !el.needs_expression_parsing() && !has_memo {
                     data.push(OxcNodeData::None);
+                    children_scopes.push(scope);
                     continue;
                 }
 
-                let mut parsed =
-                    parse_element(el, parent_locals, input, alloc, source_type, ide_completion);
+                let (mut parsed, children_scope) = parse_element(
+                    el,
+                    scope,
+                    &mut pass,
+                    input,
+                    alloc,
+                    source_type,
+                    ide_completion,
+                );
 
                 // Optimistically set AllInterpolationsStatic if element has
                 // interpolation children (from pre-computed children_flag).
@@ -620,6 +648,7 @@ pub fn parse_template_expressions<'alloc>(
                 }
 
                 data.push(OxcNodeData::Element(Box::new(parsed)));
+                children_scopes.push(children_scope);
             }
             AstNodeKind::Interpolation(interp) => {
                 let expr = parse_expression(
@@ -627,7 +656,7 @@ pub fn parse_template_expressions<'alloc>(
                     input,
                     alloc,
                     source_type,
-                    parent_locals,
+                    &pass.enter(scope),
                     ide_completion,
                     ValueGrammar::Expression,
                 );
@@ -644,14 +673,16 @@ pub fn parse_template_expressions<'alloc>(
                 }
 
                 data.push(OxcNodeData::Interpolation(expr));
+                children_scopes.push(scope);
             }
             AstNodeKind::Text(_) | AstNodeKind::Comment(_) => {
                 data.push(OxcNodeData::None);
+                children_scopes.push(scope);
             }
         }
     }
 
-    OxcParsedAst::new(data)
+    OxcParsedAst::with_scopes(data, pass.scopes, children_scopes)
 }
 
 #[cfg(test)]
