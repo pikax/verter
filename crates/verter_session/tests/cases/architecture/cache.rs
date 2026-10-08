@@ -295,47 +295,59 @@ fn guard9_predicate_rejects_missing_invalidation_by_canonical_impl() {
 /// `RESOLUTION_DEPTH`, `LAST_BUDGET_EXCEEDED`, etc.
 #[test]
 fn no_thread_local_oxc_caches() {
-    let banned_idents = [
+    let hits = thread_local_oxc_cache_hits_under(&workspace_root());
+    assert!(
+        hits.is_empty(),
+        "Tier 1A guard `no_thread_local_oxc_caches`: forbidden thread-local OXC caches \
+         re-introduced in production source: {hits:#?}"
+    );
+}
+
+/// The `no_thread_local_oxc_caches` scan over the workspace rooted at `root`.
+/// Test-source classification reads paths relative to `root`.
+fn thread_local_oxc_cache_hits_under(root: &std::path::Path) -> Vec<(String, &'static str)> {
+    const BANNED_IDENTS: [&str; 2] = [
         "HOST_PARSED_EVAL_PROGRAM_CACHE",
         "HOST_PARSED_TYPE_CONTEXT_CACHE",
     ];
-    let mut hits: Vec<(String, &str)> = Vec::new();
+    let mut hits: Vec<(String, &'static str)> = Vec::new();
+    let mut scanned_files = 0usize;
     // The session crate and the type engine it builds on.
     let crate_roots = [
-        workspace_path("crates/verter_session/src"),
-        workspace_path("crates/verter_type_engine/src"),
+        root.join("crates/verter_session/src"),
+        root.join("crates/verter_type_engine/src"),
     ];
-    for root in &crate_roots {
-        assert!(root.is_dir(), "source root {} is missing", root.display());
+    for crate_root in &crate_roots {
+        assert!(
+            crate_root.is_dir(),
+            "source root {} is missing",
+            crate_root.display()
+        );
     }
     for entry in crate_roots
         .iter()
-        .flat_map(|root| walkdir::WalkDir::new(root).into_iter())
+        .flat_map(|crate_root| walkdir::WalkDir::new(crate_root).into_iter())
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file())
     {
         let path = entry.path();
-        let path_str = path.to_string_lossy().replace('\\', "/");
-        // Skip test sources — only production rs files participate.
-        if path_str.ends_with("_tests.rs")
-            || path_str.ends_with("/tests.rs")
-            || path_str.contains("/tests/")
-        {
-            continue;
-        }
-        if path.ends_with("crates/verter_session/tests/cases/architecture/cache.rs") {
-            continue;
-        }
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = rel_path_under(root, path);
+        // Skip test sources — only production rs files participate.
+        if rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || is_src_test_module_path(&rel)
+        {
             continue;
         }
         let body = std::fs::read_to_string(path).unwrap_or_else(|err| {
             panic!(
-                "guard scanner could not read {path_str}: {err} — an \
+                "guard scanner could not read {rel}: {err} — an \
                  unreadable file must fail the guard, not silently pass"
             )
         });
-        for ident in banned_idents {
+        scanned_files += 1;
+        for ident in BANNED_IDENTS {
             // Only count hits OUTSIDE comments. The retirement note
             // in `host_manage.rs` references the names in a
             // documentation comment; that's not a re-introduction.
@@ -347,14 +359,35 @@ fn no_thread_local_oxc_caches() {
                 if trimmed.starts_with("//") || trimmed.starts_with("///") {
                     continue;
                 }
-                hits.push((format!("{path_str}:{}", lineno + 1), ident));
+                hits.push((format!("{rel}:{}", lineno + 1), ident));
             }
         }
     }
     assert!(
-        hits.is_empty(),
-        "Tier 1A guard `no_thread_local_oxc_caches`: forbidden thread-local OXC caches \
-         re-introduced in production source: {hits:#?}"
+        scanned_files > 0,
+        "no_thread_local_oxc_caches found no production files under {} — an \
+         empty universe passes vacuously",
+        root.display()
+    );
+    hits
+}
+
+#[test]
+fn no_thread_local_oxc_caches_scans_production_under_a_tests_directory() {
+    let ws = PlantedWorkspace::new();
+    ws.plant_production_and_listed_test_module(
+        "thread_local! { static HOST_PARSED_EVAL_PROGRAM_CACHE: () = (); }\n",
+    );
+    let hits = thread_local_oxc_cache_hits_under(ws.root());
+    let flagged: Vec<&str> = hits
+        .iter()
+        .map(|(loc, _)| loc.rsplit_once(':').map_or(loc.as_str(), |(p, _)| p))
+        .collect();
+    assert_eq!(
+        flagged,
+        [PlantedWorkspace::PRODUCTION_UNDER_TESTS_DIR],
+        "the production file under an unlisted `tests` directory must be \
+         flagged and the listed test-module file skipped"
     );
 }
 
@@ -587,9 +620,15 @@ mod content_pinned_artifact_read_guards {
 
     /// Repo-relative `.rs` files under `crates/verter_session/src` and
     /// `crates/verter_type_engine/src` (the type engine the session builds
-    /// on), excluding test files (`*_tests.rs`, `tests.rs`).
+    /// on), excluding test files (`*_tests.rs`, `tests.rs`, the
+    /// `SRC_TEST_MODULE_DIRS` trees).
     fn verter_session_production_rs_files() -> Vec<(PathBuf, String)> {
-        let root = super::super::workspace_root();
+        verter_session_production_rs_files_under(&super::super::workspace_root())
+    }
+
+    /// [`verter_session_production_rs_files`] over the workspace rooted at
+    /// `root`. Test-source classification reads paths relative to `root`.
+    fn verter_session_production_rs_files_under(root: &std::path::Path) -> Vec<(PathBuf, String)> {
         let mut files: Vec<PathBuf> = Vec::new();
         for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
             let src_dir = root.join(krate);
@@ -602,18 +641,22 @@ mod content_pinned_artifact_read_guards {
         }
         let mut out: Vec<(PathBuf, String)> = Vec::new();
         for f in files {
-            let rel = f
-                .strip_prefix(&root)
-                .unwrap_or(&f)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = super::super::rel_path_under(root, &f);
             let basename = rel.rsplit('/').next().unwrap_or("");
-            if basename.ends_with("_tests.rs") || basename == "tests.rs" || rel.contains("/tests/")
+            if basename.ends_with("_tests.rs")
+                || basename == "tests.rs"
+                || super::super::is_src_test_module_path(&rel)
             {
                 continue;
             }
             out.push((f, rel));
         }
+        assert!(
+            !out.is_empty(),
+            "no production files found under {} — an empty universe passes \
+             vacuously",
+            root.display()
+        );
         out
     }
 
@@ -653,6 +696,29 @@ mod content_pinned_artifact_read_guards {
     /// Static allowlist guard — no `verter_session` production file
     /// outside [`GET_ANY_ALLOWLIST`] calls `indexed().get_any(` /
     /// `indexed().get_artifacts_any(` directly.
+    #[test]
+    fn get_any_scan_covers_production_under_a_tests_directory() {
+        use super::super::PlantedWorkspace;
+        let ws = PlantedWorkspace::new();
+        ws.plant_production_and_listed_test_module(
+            "fn read(s: &Store) { let _ = s.indexed().get_any(c); }\n",
+        );
+        let files: Vec<(String, String)> = verter_session_production_rs_files_under(ws.root())
+            .into_iter()
+            .map(|(path, rel)| {
+                let src = fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                (rel, src)
+            })
+            .collect();
+        assert_eq!(
+            unallowlisted_get_any_files(&files, &[]),
+            [PlantedWorkspace::PRODUCTION_UNDER_TESTS_DIR],
+            "the production file under an unlisted `tests` directory must be \
+             flagged and the listed test-module file skipped"
+        );
+    }
+
     #[test]
     fn no_direct_file_artifact_get_any_outside_allowlist() {
         let allow: Vec<&str> = GET_ANY_ALLOWLIST.iter().map(|(p, _)| *p).collect();
@@ -1959,7 +2025,9 @@ pub(super) mod component_meta_scope_shadowing_memo {
     use syn::visit::Visit;
     use syn::{ExprPath, ItemMod, Type};
 
-    use super::super::{attrs_test_gate, read_workspace_file, workspace_root};
+    use std::path::Path;
+
+    use super::super::{attrs_test_gate, is_src_test_module_path, rel_path_under, workspace_root};
 
     /// The four `ScopeShadowing` associated constructors a component-meta hot
     /// path must NOT call directly — it must obtain the per-scope
@@ -2313,12 +2381,19 @@ pub(super) mod component_meta_scope_shadowing_memo {
 
     /// The production sources in scope: the `meta_resolve` shell module plus
     /// every `.rs` under `meta_resolve/`, EXCLUDING colocated test modules
-    /// (`*_tests.rs` / `tests.rs`).
+    /// (`*_tests.rs` / `tests.rs` / the `SRC_TEST_MODULE_DIRS` trees).
     pub(in super::super) fn production_sources() -> Vec<(String, String)> {
-        let root = workspace_root();
+        production_sources_under(&workspace_root())
+    }
+
+    /// [`production_sources`] over the workspace rooted at `root`.
+    /// Test-source classification reads paths relative to `root`.
+    pub(in super::super) fn production_sources_under(root: &Path) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         const SHELL: &str = "crates/verter_session/src/meta_resolve.rs";
-        out.push((SHELL.to_string(), read_workspace_file(SHELL)));
+        let shell = std::fs::read_to_string(root.join(SHELL))
+            .unwrap_or_else(|e| panic!("scope-shadowing memo guard: read `{SHELL}` failed: {e}"));
+        out.push((SHELL.to_string(), shell));
         // The `meta_resolve` module tree spans the session crate and the type
         // engine it builds on.
         let dirs = [
@@ -2341,19 +2416,24 @@ pub(super) mod component_meta_scope_shadowing_memo {
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                 continue;
             }
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = rel_path_under(root, path);
             // Production source only — colocated test modules are out of scope.
-            if rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+            if rel.ends_with("_tests.rs")
+                || rel.ends_with("/tests.rs")
+                || is_src_test_module_path(&rel)
+            {
                 continue;
             }
             let src = std::fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("scope-shadowing memo guard: read `{rel}` failed: {e}"));
             out.push((rel, src));
         }
+        assert!(
+            out.len() > 1,
+            "scope-shadowing memo guard found no `meta_resolve/` production \
+             files under {} — an empty universe passes vacuously",
+            root.display()
+        );
         out
     }
 }
@@ -2508,6 +2588,36 @@ fn component_meta_hot_paths_obtain_scope_shadowing_from_the_per_scope_memo() {
          `project_expr_class_a_node_via_dispatch_threaded`). \
          Non-allowlisted direct construction(s):\n{}",
         messages.join("\n")
+    );
+}
+
+#[test]
+fn component_meta_hot_paths_scan_production_under_a_tests_directory() {
+    use component_meta_scope_shadowing_memo as guard;
+    const PLANTED: &str = "crates/verter_session/src/meta_resolve/planted/tests/production.rs";
+    let ws = PlantedWorkspace::new();
+    ws.plant("crates/verter_session/src/meta_resolve.rs", "");
+    ws.plant("crates/verter_type_engine/src/meta_resolve/mod.rs", "");
+    let direct_build = r#"
+        fn publish_field(ctx: &dyn ResolverContext, scope: &HostScope) {
+            let _ = ScopeShadowing::from_host_scope(ctx, scope);
+        }
+    "#;
+    ws.plant(PLANTED, direct_build);
+    ws.plant(
+        "crates/verter_session/src/meta_resolve/planted/planted_tests.rs",
+        direct_build,
+    );
+    let flagged: Vec<String> = guard::production_sources_under(ws.root())
+        .iter()
+        .filter(|(rel, src)| !guard::violations_in(rel, src).is_empty())
+        .map(|(rel, _)| rel.clone())
+        .collect();
+    assert_eq!(
+        flagged,
+        [PLANTED],
+        "a production `meta_resolve` file under an unlisted `tests` directory \
+         must be scanned and flagged; colocated `*_tests.rs` stays skipped"
     );
 }
 
