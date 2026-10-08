@@ -32,7 +32,7 @@ use crate::features::action_utils::{
 };
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
 use verter_session::framework::api_projector::ComponentApiProjectionWitness;
-use verter_session_query::analysis::types::Hash16;
+use verter_session::CommittedSourceContent;
 
 /// Every foreground LSP route whose answer is settled against a request
 /// snapshot.
@@ -170,7 +170,7 @@ pub(crate) struct ForegroundRequest {
     /// provider answer it is delivered beside. Two reads of one source with
     /// different content cannot both settle; an eviction and identical reload
     /// of the source, which re-commits the same bytes, keeps the evidence.
-    dependencies: parking_lot::Mutex<Vec<(Box<str>, Hash16)>>,
+    dependencies: parking_lot::Mutex<Vec<(Box<str>, CommittedSourceContent)>>,
     /// The producer witness of every published child contract a native
     /// contribution of this request was read from. The witness carries the
     /// contract's complete read sets, so a change to anything the contract
@@ -245,15 +245,15 @@ impl ForegroundRequest {
 
     /// Record that the current task's foreground request read a native
     /// contribution from the imported source `canonical_id` committed with
-    /// content hash `revision`. A no-op outside a foreground request.
-    pub(crate) fn bracket_dependency(canonical_id: &str, revision: Hash16) {
+    /// content `content`. A no-op outside a foreground request.
+    pub(crate) fn bracket_dependency(canonical_id: &str, content: CommittedSourceContent) {
         let _ = ACTIVE_REQUEST.try_with(|request| {
             let mut dependencies = request.dependencies.lock();
             if !dependencies
                 .iter()
-                .any(|(known, at)| **known == *canonical_id && *at == revision)
+                .any(|(known, at)| **known == *canonical_id && *at == content)
             {
-                dependencies.push((Box::from(canonical_id), revision));
+                dependencies.push((Box::from(canonical_id), content));
             }
         });
     }

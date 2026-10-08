@@ -1101,11 +1101,7 @@ fn authority_view_survives_eviction_and_row_removal_but_not_replacement() {
         .expect("upsert");
 
     let view = host.capture_authority_view();
-    assert!(view.published_root().is_some());
-    assert_eq!(
-        view.authority().workspace(),
-        Some(view.published_root().unwrap().authority())
-    );
+    assert!(view.authority().workspace().is_some());
 
     host.bump_diagnostics_generation("/w/a.ts");
     host.evict("/w/a.ts");

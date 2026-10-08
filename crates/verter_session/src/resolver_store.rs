@@ -4715,17 +4715,14 @@ impl HostAuthority {
 /// One capture of the authority a foreground read answers under, shared by
 /// `Arc` with everything that reads on the request's behalf.
 ///
-/// The view pins the published root it captured, so a reader resolving
-/// through [`Self::published_root`] reads the captured authority even after a
-/// replacement, and releases it when the last holder — the request — ends.
-/// It never populates a cache: whether an answer computed under it is still
+/// The view holds only the captured identity, so it retains no workspace
+/// state. It never populates a cache: whether an answer computed under it is still
 /// the host's answer is [`Self::is_current`], and any read that went to live
 /// state instead is covered by the same check, because a live read that
 /// observed another authority can only have done so after the captured one
 /// stopped being current, and an authority never returns once replaced.
 #[derive(Debug)]
 pub struct HostAuthorityView {
-    published_root: Option<Arc<verter_workspace::PublishedRoot>>,
     authority: HostAuthority,
 }
 
@@ -4734,12 +4731,6 @@ impl HostAuthorityView {
     #[must_use]
     pub fn authority(&self) -> HostAuthority {
         self.authority
-    }
-
-    /// The published workspace root the view captured.
-    #[must_use]
-    pub fn published_root(&self) -> Option<&Arc<verter_workspace::PublishedRoot>> {
-        self.published_root.as_ref()
     }
 
     /// Whether `host` still answers under the captured authority.
@@ -4767,8 +4758,8 @@ impl VerterHost {
         }
     }
 
-    /// Capture the authority a foreground read answers under. Costs one root
-    /// `Arc` clone and one counter read; copies no workspace state.
+    /// Capture the authority a foreground read answers under. Costs one
+    /// root read and one counter read; retains no workspace state.
     #[must_use]
     pub fn capture_authority_view(&self) -> Arc<HostAuthorityView> {
         let project_generation = self.project_type_store.current_project_generation();
@@ -4778,7 +4769,6 @@ impl VerterHost {
                 workspace: published_root.as_ref().map(|root| root.authority()),
                 project_generation,
             },
-            published_root,
         })
     }
 }

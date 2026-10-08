@@ -17,7 +17,6 @@ counter or trace is added.
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `HostAuthority` (workspace authority + project generation) | `HostAuthorityView::is_current`, the foreground settlement authority gate and the LSP imported-child-contract freshness key | REQUIRED | A copy; recomputed from the live root and store on every read, retained only inside the captures and keys that hold it | `src/resolver_store.rs` | always |
-| `HostAuthorityView::published_root` (`Arc<PublishedRoot>`) | foreground reads that resolve through the captured root | REQUIRED-lifetime | One strong pin per captured view, shared by `Arc` with the request that captured it; keeps a replaced root alive only until that request completes or is cancelled | `src/resolver_store.rs` | always |
 | `VerterHost::registered_source_whole_hash` (read of the committed source record's whole hash) | the LSP foreground dependency gate, the child-read bracket and the published child-contract, failure and barrel-route snapshots | REQUIRED | No state of its own: reads the scheduler source record, which an identical re-commit after eviction leaves unchanged | `src/host_views.rs` | always |
 
 ## verter_lsp

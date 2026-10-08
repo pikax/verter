@@ -14,6 +14,14 @@ use crate::host_executor;
 use crate::types::{DiagnosticsSnapshot, EffectiveFileState, FileMeta};
 use crate::VerterHost;
 
+/// The content identity of one committed source record: its whole hash.
+///
+/// A distinct type, not the bare `Hash16` representation shared with
+/// declaration and fact hashes, so a value of another hash space cannot be
+/// recorded as, or compared against, a source's committed content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CommittedSourceContent(verter_session_query::analysis::types::Hash16);
+
 impl VerterHost {
     /// Get the scheduler instance.
     pub fn scheduler(&self) -> &Arc<verter_scheduler::scheduler::Scheduler> {
@@ -89,9 +97,11 @@ impl VerterHost {
     pub fn registered_source_whole_hash(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_session_query::analysis::types::Hash16> {
+    ) -> Option<CommittedSourceContent> {
         let canonical_id = self.resolve_alias_or_canonical(canonical_id);
-        Some(self.scheduler.try_get_source(&canonical_id)?.whole_hash)
+        Some(CommittedSourceContent(
+            self.scheduler.try_get_source(&canonical_id)?.whole_hash,
+        ))
     }
 
     /// Return the content-free schema-8 projection for one committed carrier.

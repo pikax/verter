@@ -114,7 +114,7 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> Option<(
-        verter_session_query::analysis::types::Hash16,
+        verter_session::CommittedSourceContent,
         super::ImportedChildContractFreshnessKey,
     )> {
         let source_hash = self

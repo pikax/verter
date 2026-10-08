@@ -334,14 +334,14 @@ struct ChildPublicContractSnapshot {
     contract: verter_session::framework::ComponentContractAvailability,
     publication_witness:
         Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
-    source_hash: verter_session_query::analysis::types::Hash16,
+    source_hash: verter_session::CommittedSourceContent,
     freshness: ImportedChildContractFreshnessKey,
 }
 
 #[derive(Clone)]
 struct ChildPublicContractFailureSnapshot {
     error: verter_session::PublicApiProjectionError,
-    source_hash: verter_session_query::analysis::types::Hash16,
+    source_hash: verter_session::CommittedSourceContent,
     freshness: ImportedChildContractFreshnessKey,
     workspace_content_generation: u64,
 }
@@ -363,7 +363,7 @@ struct BarrelComponentRouteSnapshot {
     contract: verter_session::framework::ComponentContractAvailability,
     publication_witness:
         Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
-    terminal_source_hash: verter_session_query::analysis::types::Hash16,
+    terminal_source_hash: verter_session::CommittedSourceContent,
     freshness: ImportedChildContractFreshnessKey,
 }
 
