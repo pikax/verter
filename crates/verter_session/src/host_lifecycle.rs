@@ -46,7 +46,19 @@ impl VerterHost {
     /// LSP/test workspace swaps.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         self.workspace_services.attach(workspace.as_ref());
-        *self.workspace.write() = workspace;
+        let freshness_readers = workspace.freshness_readers();
+        {
+            // Artifacts published from here on own their freshness evidence
+            // in the new workspace; the clear below releases the old leases.
+            // The history is installed under the same write as the workspace
+            // it belongs to, so overlapping swaps can never leave one
+            // workspace live with another's history installed.
+            let mut live = self.workspace.write();
+            *live = workspace;
+            self.project_type_store
+                .indexed()
+                .install_freshness_readers(freshness_readers);
+        }
         // SWAP-FIRST, then clear — the order is load-bearing. Clearing
         // before the swap would be unsound: a concurrent reader could
         // repopulate a just-cleared cache from the OLD workspace, and
@@ -142,6 +154,24 @@ impl VerterHost {
     /// advanced and the requeued transaction mints a strictly-newer key.
     pub fn record_content_transition(&self, canonical_id: &str) {
         self.ws().record_content_transition(canonical_id);
+    }
+
+    /// Own `canonical_id`'s content-transition evidence in the live
+    /// workspace for as long as the returned lease lives.
+    ///
+    /// A consumer that captures [`Self::last_content_transition_generation`]
+    /// and later compares it for equality takes this lease FIRST: while it
+    /// lives, retiring unrelated workspace history never moves the
+    /// canonical's answer, so only a transition of the canonical itself
+    /// reads as a change. `None` when the workspace keeps no history.
+    #[must_use]
+    pub fn lease_content_transition(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_workspace::CanonicalFreshnessLease> {
+        self.ws()
+            .freshness_readers()
+            .map(|readers| readers.lease_canonical(canonical_id))
     }
 
     pub(crate) fn current_store_view_epoch(&self) -> u64 {

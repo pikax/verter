@@ -180,6 +180,69 @@ fn carrier_source_revision_tracks_the_host_content_authority() {
     );
 }
 
+/// The drain refuses a pending tsgo receipt whose captured source revision no
+/// longer equals the live rail. Unrelated churn that retires workspace history
+/// must not read as a transition of the source while the pending is held, or
+/// an otherwise unchanged delivery is refused; an edit to the source still is.
+#[test]
+fn a_held_carrier_source_revision_ignores_unrelated_history_retirement() {
+    use verter_workspace::{WorkspaceAccess, WorkspaceRead};
+
+    let canonical = "/workspace/src/App.vue";
+    let unrelated = "/workspace/src/Other.vue";
+    let memory = Arc::new(MemoryWorkspace::new(MemoryOptions {
+        roots: vec!["/workspace".to_string()],
+        default_resolve_extensions: None,
+    }));
+    let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = memory.clone();
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    host.notify_upsert(
+        canonical,
+        Arc::<str>::from("<script>let count = 1;</script>"),
+    );
+
+    let (revision, evidence) = held_carrier_source_revision(&host, canonical);
+    let pending = PendingProviderReady::authorize(
+        &test_binding("/workspace/tsconfig.json"),
+        revision,
+        0,
+        "tsgo",
+        &[],
+    )
+    .holding_source_evidence(evidence);
+    let unrelated_before = memory.last_content_transition_generation(unrelated);
+
+    let churn: Vec<(String, Arc<str>)> = (0..verter_workspace::freshness::DEFAULT_RETIRE_TRIGGER
+        + 64)
+        .map(|index| {
+            (
+                format!("/workspace/churn/{index}.ts"),
+                Arc::from("export {};"),
+            )
+        })
+        .collect();
+    memory.notify_upsert_many(&churn);
+    assert!(
+        memory.last_content_transition_generation(unrelated) > unrelated_before,
+        "the churn must have retired history past the trigger for this test to \
+         prove anything"
+    );
+    assert_eq!(
+        host.last_content_transition_generation(canonical),
+        pending.source_revision(),
+        "unrelated retirement must not move a held source revision"
+    );
+
+    host.notify_upsert(
+        canonical,
+        Arc::<str>::from("<script>let count = 2;</script>"),
+    );
+    assert!(
+        host.last_content_transition_generation(canonical) > pending.source_revision(),
+        "an edit to the held source must still read as its transition"
+    );
+}
+
 #[test]
 fn commit_carrier_provider_state_requires_a_receipt_and_commits() {
     // The receipt-gated commit writes the carrier state into the shared map. The

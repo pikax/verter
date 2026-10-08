@@ -927,10 +927,86 @@ pub(super) fn store_view_guard_production_rs_files() -> Vec<std::path::PathBuf> 
 }
 
 pub(super) fn rel_path(path: &std::path::Path) -> String {
-    path.strip_prefix(workspace_root())
+    rel_path_under(&workspace_root(), path)
+}
+
+/// `path` relative to `root`, `/`-separated on every platform.
+pub(super) fn rel_path_under(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// Workspace-relative test-module directories inside crate `src/` trees whose
+/// files are not named `*_tests.rs` / `tests.rs`. Production-source scanners
+/// exclude EXACTLY these trees: a production module that merely sits under
+/// some other directory named `tests` is still production source and stays in
+/// scope, and a checkout under a `tests` ancestor excludes nothing.
+pub(super) const SRC_TEST_MODULE_DIRS: [&str; 8] = [
+    "crates/verter_compiler/src/ide/template/tests",
+    "crates/verter_compiler/src/template/code_gen/ssr/tests",
+    "crates/verter_execution/src/tasks/tests",
+    "crates/verter_lsp/src/server/tests",
+    "crates/verter_session/src/tests/host_manage",
+    "crates/verter_session/src/tests/meta",
+    "crates/verter_type_engine/src/project_semantic_dispatch/tests",
+    "crates/verter_type_engine/src/semantic_query_memo/tests",
+];
+
+/// Whether `rel` — a `/`-separated path relative to the workspace root — lies
+/// inside one of [`SRC_TEST_MODULE_DIRS`].
+pub(super) fn is_src_test_module_path(rel: &str) -> bool {
+    SRC_TEST_MODULE_DIRS.iter().any(|dir| {
+        rel.strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// A throwaway workspace for scanner controls. Its root sits under a `tests`
+/// ancestor, so a scanner that classifies test sources by an unanchored
+/// `/tests/` substring excludes every planted file and its control fails.
+pub(super) struct PlantedWorkspace {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl PlantedWorkspace {
+    /// A production file under a `src/` subdirectory named `tests` that is NOT
+    /// one of [`SRC_TEST_MODULE_DIRS`]; scanners must still scan it.
+    pub(super) const PRODUCTION_UNDER_TESTS_DIR: &'static str =
+        "crates/verter_session/src/planted/tests/production.rs";
+    /// A file inside a listed test-module directory; scanners must skip it.
+    pub(super) const LISTED_TEST_MODULE_FILE: &'static str =
+        "crates/verter_session/src/tests/meta/planted.rs";
+
+    pub(super) fn new() -> Self {
+        let dir = tempfile::tempdir().expect("create planted workspace");
+        let root = dir.path().join("tests").join("checkout");
+        fs::create_dir_all(&root).expect("create planted workspace root");
+        Self { _dir: dir, root }
+    }
+
+    pub(super) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Write `body` at workspace-relative `rel`, creating parent directories.
+    pub(super) fn plant(&self, rel: &str, body: &str) {
+        let path = self.root.join(rel);
+        fs::create_dir_all(path.parent().expect("planted file has a parent"))
+            .expect("create planted parent directory");
+        fs::write(&path, body).unwrap_or_else(|e| panic!("plant {rel}: {e}"));
+    }
+
+    /// Plant `body` at both [`Self::PRODUCTION_UNDER_TESTS_DIR`] and
+    /// [`Self::LISTED_TEST_MODULE_FILE`], alongside an empty type-engine crate
+    /// root so session + engine scanners find both source roots.
+    pub(super) fn plant_production_and_listed_test_module(&self, body: &str) {
+        self.plant("crates/verter_type_engine/src/lib.rs", "");
+        self.plant(Self::PRODUCTION_UNDER_TESTS_DIR, body);
+        self.plant(Self::LISTED_TEST_MODULE_FILE, body);
+    }
 }
 
 /// Whether a `src/**` file is a test/debug module (inline `#[cfg(test)]`
@@ -1595,47 +1671,13 @@ pub(super) fn ident_hits_in_production_body(
 
 /// Scan production `.rs` sources under `crates/verter_session/src` for a
 /// banned identifier, skipping comment lines, file-level test sources
-/// (`*_tests.rs` / `tests.rs`), and `#[cfg(test)]`-gated ITEMS (modules,
-/// fns, uses — stripped by extent, NOT by truncating the file at the
-/// first marker). An unreadable file is a hard failure — silent green on
-/// I/O errors would make the guard decorative.
+/// (`*_tests.rs` / `tests.rs`, the [`SRC_TEST_MODULE_DIRS`] trees), and
+/// `#[cfg(test)]`-gated ITEMS (modules, fns, uses — stripped by extent, NOT by
+/// truncating the file at the first marker). An unreadable file is a hard
+/// failure — silent green on I/O errors would make the guard decorative.
 pub(super) fn session_production_ident_hits(banned_idents: &[&str]) -> Vec<(String, String)> {
-    // The session crate and the type engine it builds on: both hold the
-    // production code these bans protect.
-    let crate_roots = [
-        workspace_path("crates/verter_session/src"),
-        workspace_path("crates/verter_type_engine/src"),
-    ];
-    for root in &crate_roots {
-        assert!(root.is_dir(), "source root {} is missing", root.display());
-    }
-    let mut hits: Vec<(String, String)> = Vec::new();
-    let mut scanned_files = 0usize;
-    for entry in crate_roots
-        .iter()
-        .flat_map(|root| walkdir::WalkDir::new(root).into_iter())
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_file())
-    {
-        let path = entry.path();
-        let path_str = path.to_string_lossy().replace('\\', "/");
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        if path_str.ends_with("_tests.rs")
-            || path_str.ends_with("/tests.rs")
-            || path_str.contains("/tests/")
-            || path_str.contains("/typeinfo_tests/")
-        {
-            continue;
-        }
-        let body = std::fs::read_to_string(path)
-            .unwrap_or_else(|err| panic!("guard scanner could not read {path_str}: {err}"));
-        scanned_files += 1;
-        for (lineno, ident) in ident_hits_in_production_body(&body, banned_idents) {
-            hits.push((format!("{path_str}:{lineno}"), ident));
-        }
-    }
+    let (hits, scanned_files) =
+        session_production_ident_hits_under(&workspace_root(), banned_idents);
     assert!(
         scanned_files > 100,
         "guard scanner found only {scanned_files} production files under \
@@ -1643,6 +1685,63 @@ pub(super) fn session_production_ident_hits(banned_idents: &[&str]) -> Vec<(Stri
          walk itself is broken",
     );
     hits
+}
+
+/// [`session_production_ident_hits`] over the workspace rooted at `root`:
+/// returns the `(workspace-relative path:line, ident)` hits and the number of
+/// production files scanned. Test-source classification reads paths relative
+/// to `root`, never the absolute checkout path.
+pub(super) fn session_production_ident_hits_under(
+    root: &std::path::Path,
+    banned_idents: &[&str],
+) -> (Vec<(String, String)>, usize) {
+    // The session crate and the type engine it builds on: both hold the
+    // production code these bans protect.
+    let crate_roots = [
+        root.join("crates/verter_session/src"),
+        root.join("crates/verter_type_engine/src"),
+    ];
+    for crate_root in &crate_roots {
+        assert!(
+            crate_root.is_dir(),
+            "source root {} is missing",
+            crate_root.display()
+        );
+    }
+    let mut hits: Vec<(String, String)> = Vec::new();
+    let mut scanned_files = 0usize;
+    for entry in crate_roots
+        .iter()
+        .flat_map(|crate_root| walkdir::WalkDir::new(crate_root).into_iter())
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = rel_path_under(root, path);
+        if rel.ends_with("_tests.rs")
+            || rel.ends_with("/tests.rs")
+            || is_src_test_module_path(&rel)
+            || rel.contains("/typeinfo_tests/")
+        {
+            continue;
+        }
+        let body = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("guard scanner could not read {rel}: {err}"));
+        scanned_files += 1;
+        for (lineno, ident) in ident_hits_in_production_body(&body, banned_idents) {
+            hits.push((format!("{rel}:{lineno}"), ident));
+        }
+    }
+    assert!(
+        scanned_files > 0,
+        "guard scanner found no production files under {} — an empty universe \
+         passes vacuously",
+        root.display()
+    );
+    (hits, scanned_files)
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -3164,16 +3263,24 @@ pub(super) fn is_ident_byte(b: u8) -> bool {
 /// Walk every non-test `verter_session/src/**.rs` and
 /// `verter_type_engine/src/**.rs` production file, returning
 /// `(workspace-relative path, body)` pairs. Skips `*_tests.rs` / `tests.rs` /
-/// `typeinfo_tests/` (mirrors the production scan scope in
-/// [`session_production_ident_hits`]).
+/// the [`SRC_TEST_MODULE_DIRS`] trees / `typeinfo_tests/` (mirrors the
+/// production scan scope in [`session_production_ident_hits`]).
 pub(super) fn session_production_src_files() -> Vec<(String, String)> {
+    let out = session_production_src_files_under(&workspace_root());
+    assert!(
+        out.len() > 100,
+        "guard scanner found only {} production files — the walk is broken",
+        out.len()
+    );
+    out
+}
+
+/// [`session_production_src_files`] over the workspace rooted at `root`.
+/// Test-source classification reads paths relative to `root`.
+pub(super) fn session_production_src_files_under(root: &std::path::Path) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    for crate_dir in [
-        "crates/verter_session/src/",
-        "crates/verter_type_engine/src/",
-    ] {
-        let crate_root = workspace_path(crate_dir.trim_end_matches('/'));
-        for entry in walkdir::WalkDir::new(&crate_root)
+    for crate_dir in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        for entry in walkdir::WalkDir::new(root.join(crate_dir))
             .into_iter()
             .filter_map(Result::ok)
             .filter(|e| e.path().is_file())
@@ -3182,27 +3289,24 @@ pub(super) fn session_production_src_files() -> Vec<(String, String)> {
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                 continue;
             }
-            let path_str = path.to_string_lossy().replace('\\', "/");
-            if path_str.ends_with("_tests.rs")
-                || path_str.ends_with("/tests.rs")
-                || path_str.contains("/tests/")
-                || path_str.contains("/typeinfo_tests/")
+            let rel = rel_path_under(root, path);
+            if rel.ends_with("_tests.rs")
+                || rel.ends_with("/tests.rs")
+                || is_src_test_module_path(&rel)
+                || rel.contains("/typeinfo_tests/")
             {
                 continue;
             }
             if let Ok(body) = std::fs::read_to_string(path) {
-                let rel = path_str
-                    .rsplit_once(crate_dir)
-                    .map(|(_, s)| format!("{crate_dir}{s}"))
-                    .unwrap_or(path_str);
                 out.push((rel, body));
             }
         }
     }
     assert!(
-        out.len() > 100,
-        "guard scanner found only {} production files — the walk is broken",
-        out.len()
+        !out.is_empty(),
+        "guard scanner found no production files under {} — an empty universe \
+         passes vacuously",
+        root.display()
     );
     out
 }
