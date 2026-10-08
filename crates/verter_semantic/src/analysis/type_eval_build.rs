@@ -1845,6 +1845,48 @@ fn statement_class<'s, 'a>(stmt: &'s Statement<'a>, class_name: &str) -> Option<
     (named || default_export).then_some(class)
 }
 
+/// The class a namespace statement declares under the qualified name
+/// `qualified` (`N.C`, `A.B.C`), walking the dotted and nested namespaces
+/// the name's leading segments spell.
+fn namespaced_class<'s, 'a>(stmt: &'s Statement<'a>, qualified: &str) -> Option<&'s Class<'a>> {
+    use crate::analysis::namespace_walk::nested_namespace;
+    let (class_name, namespaces) = {
+        let mut segments: Vec<&str> = qualified.split('.').collect();
+        let class_name = segments.pop()?;
+        (class_name, segments)
+    };
+    if namespaces.is_empty() {
+        return None;
+    }
+    let (mut decl, _) = nested_namespace(stmt)?;
+    let mut depth = 0;
+    loop {
+        if namespaces.get(depth).copied() != Some(decl.id.name.as_str()) {
+            return None;
+        }
+        depth += 1;
+        match &decl.body {
+            TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => decl = inner,
+            TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+                if depth == namespaces.len() {
+                    return block
+                        .body
+                        .iter()
+                        .find_map(|statement| statement_class(statement, class_name));
+                }
+                decl = block
+                    .body
+                    .iter()
+                    .filter_map(|statement| nested_namespace(statement))
+                    .map(|(module, _)| module)
+                    .find(|module| {
+                        namespaces.get(depth).copied() == Some(module.id.name.as_str())
+                    })?;
+            }
+        }
+    }
+}
+
 /// Lower one selected position of the class declaration `class_name` that
 /// the top-level statement `stmt` declares — the demanded members, or the
 /// `extends` reference — leaving every other member unlowered. `None` when
@@ -1857,10 +1899,14 @@ pub fn lower_class_body_selection(
     class_fields: &Arc<ClassFieldValues>,
     select: ClassBodySelect,
 ) -> Option<ClassBodySelection> {
-    let class = statement_class(stmt, class_name)?;
+    let class = statement_class(stmt, class_name).or_else(|| namespaced_class(stmt, class_name))?;
     // An `export default class C` serves the name `default` too: the class
-    // lowers under its own name, as the whole declaration does.
-    let class_name = class.id.as_ref().map_or(class_name, |id| id.name.as_str());
+    // lowers under its own name, as the whole declaration does. A namespaced
+    // class keeps its qualified name, which its field values register under.
+    let class_name = match class.id.as_ref() {
+        Some(id) if class_name == "default" => id.name.as_str(),
+        _ => class_name,
+    };
     let type_parameters = class
         .type_parameters
         .as_ref()

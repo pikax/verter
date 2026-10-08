@@ -2308,8 +2308,7 @@ impl DeclBodyMemo {
     /// class declaration `name`: the instance members `member` names (every
     /// overload and accessor of it), or the `extends` reference — the class's other
     /// members are never lowered. `Ready(None)` when the symbol is not a
-    /// class one top-level statement declares (a merged or namespaced
-    /// class), or has no such position.
+    /// class one top-level statement declares (a merged class), or has no such position.
     pub(crate) fn transient_class_body_selection(
         &self,
         owner: TopLevelOwnerId,

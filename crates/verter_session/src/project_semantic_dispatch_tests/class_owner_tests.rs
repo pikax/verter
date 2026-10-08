@@ -370,3 +370,18 @@ class D extends KO { p = 1 }
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A class a namespace holds reads its own members through `this`: the
+/// selective member route serves a namespace member class as it does a
+/// file-scope one.
+#[test]
+fn a_namespaced_class_reads_its_own_member_through_this() {
+    let source = "\
+namespace N { export class C { x = 'x' as const; read() { return this.x } y = this.x } }
+";
+    let failures = mismatches(
+        source,
+        &[("N.C['y']", "\"x\""), ("ReturnType<N.C['read']>", "\"x\"")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
