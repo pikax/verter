@@ -1312,3 +1312,63 @@ fn distinct_case_roots_get_distinct_store_dirs_on_case_sensitive_fs() {
         );
     }
 }
+
+// ── upgrade: a store written before the journal format is migrated, not dropped ──
+
+#[test]
+fn legacy_manifest_membership_survives_the_first_journal_publish() {
+    let (store, _ut) = fresh_store();
+    let ws = _ut.path().to_string_lossy().to_string();
+    let project = "d:/ws/tsconfig.json";
+    let legacy_row = |name: &str| {
+        owned(
+            &format!("d:/ws/src/{name}.vue"),
+            &format!("d:/ws/src/{name}.vue.tsx"),
+        )
+    };
+    let mut entry = ProjectEntry::default();
+    entry.owned_sources = vec![legacy_row("A"), legacy_row("B")];
+    let legacy = Manifest {
+        epoch: 7,
+        host_version: HOST_VERSION.to_owned(),
+        projects: std::iter::once((project.to_owned(), entry)).collect(),
+    };
+    std::fs::create_dir_all(store.workspace_dir()).expect("store dir");
+    std::fs::write(
+        store.workspace_dir().join("manifest.json"),
+        serde_json::to_vec(&legacy).expect("legacy json"),
+    )
+    .expect("write legacy manifest");
+
+    let snap = snapshot(
+        project,
+        vec![file(
+            "d:/ws/src/C.vue.tsx",
+            "d:/ws/src/C.vue",
+            SnapshotRole::CarrierIde,
+            ScriptKind::Tsx,
+            "export const c = 1;",
+            None,
+            1,
+        )],
+    );
+    store
+        .publish_batch(&PublishBatch::from_snapshot(
+            ws,
+            snap,
+            None,
+            OwnedSetScope::SourceDelta,
+        ))
+        .expect("delta publish over a legacy store");
+
+    let manifest = store.current_manifest();
+    assert!(manifest.epoch > 7, "epoch continues past the legacy epoch");
+    let sources: Vec<&str> = manifest.projects[project]
+        .owned_sources
+        .iter()
+        .map(|r| r.source_uri.as_str())
+        .collect();
+    for expected in ["d:/ws/src/A.vue", "d:/ws/src/B.vue", "d:/ws/src/C.vue"] {
+        assert!(sources.contains(&expected), "{expected} kept: {sources:?}");
+    }
+}

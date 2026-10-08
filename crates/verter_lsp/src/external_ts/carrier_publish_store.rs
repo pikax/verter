@@ -833,7 +833,25 @@ impl CarrierPublishStore {
         let dir = &self.workspace_dir;
         let generation = 1;
         let instance = mint_store_instance(dir);
-        let state = StoreState::empty(w.last_epoch, self.host_version.clone());
+        let mut state = match std::fs::read(dir.join("manifest.json")) {
+            // A store written before the journal format holds its membership in
+            // `manifest.json` alone; fold it into the first base so no published
+            // source/provider row is lost. Unparseable fails the publish rather
+            // than silently erasing it.
+            Ok(bytes) => StoreState::from_manifest(
+                serde_json::from_slice::<Manifest>(&bytes).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("legacy carrier manifest is present but unparseable: {e}"),
+                    )
+                })?,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                StoreState::empty(w.last_epoch, self.host_version.clone())
+            }
+            Err(e) => return Err(e),
+        };
+        state.epoch = state.epoch.max(w.last_epoch);
         self.write_generation(generation, &instance, &state)?;
         w.forget();
         w.cursor = Some(StoreCursor {

@@ -24,7 +24,12 @@
 //! verify, in order, and never advances past the first line that does not; so a
 //! crash mid-append (a torn tail) is invisible to every reader, and the next
 //! writer truncates it before appending. A complete invalid line FOLLOWED by more
-//! bytes is corruption, not a torn tail, and fails closed. Compaction writes the
+//! bytes is corruption, not a torn tail, and fails closed. A complete invalid line
+//! that is the LAST bytes of the journal is treated as a torn tail (a crash on a
+//! filesystem without ordered appends can leave a newline-terminated partial
+//! record), so the next writer truncates it and that record's row operations —
+//! including any retraction — are lost, not deferred; failing closed there would
+//! wedge the store permanently on one bad record. Compaction writes the
 //! next base and an empty next journal BEFORE the atomic `head.json` swap, so a
 //! crash at any compaction step leaves the previous generation authoritative and
 //! complete. The previous generation's files are retained across one compaction so
