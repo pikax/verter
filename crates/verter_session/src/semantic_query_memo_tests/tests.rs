@@ -962,7 +962,10 @@ pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     // GATE: an Expanded request MISSES — the recorded `Navigate` point does
     // NOT dominate the `Expanded` request (`Navigate ⊅ Expanded`).
     assert!(
-        store.get_validated(&key_expanded, &host).is_none(),
+        store
+            .get_validated(&key_expanded, &host)
+            .map(|served| served.read)
+            .is_none(),
         "recorded Navigate point must NOT satisfy an Expanded request \
          (materialised-point satisfaction, not nominal slot presence)",
     );
@@ -972,7 +975,10 @@ pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     // the MISS above is recorded-point discrimination, not a blanket
     // reject of the published entry.
     assert!(
-        store.get_validated(&key_navigate, &host).is_some(),
+        store
+            .get_validated(&key_navigate, &host)
+            .map(|served| served.read)
+            .is_some(),
         "recorded Navigate point MUST satisfy a Navigate request at the same path",
     );
 }
@@ -1104,7 +1110,10 @@ fn cold_build_default_records_slot_mode_terminal_not_sub_slot() {
     );
     // Sanity: the entry self-satisfies its own Expanded request.
     assert!(
-        store.get_validated(&key_expanded, &host).is_some(),
+        store
+            .get_validated(&key_expanded, &host)
+            .map(|served| served.read)
+            .is_some(),
         "the entry must serve its own Expanded request",
     );
 }
@@ -1160,7 +1169,10 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
         "a Navigate compute must NOT backfill the broader Shallow slot (directional gate)",
     );
     assert!(
-        store.get_validated(&key_shallow, &host).is_none(),
+        store
+            .get_validated(&key_shallow, &host)
+            .map(|served| served.read)
+            .is_none(),
         "a Shallow request must MISS — a carrier-stopping Navigate result must not serve a \
          Shallow shell surface",
     );
@@ -1168,7 +1180,10 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
     // Positive controls: the Navigate request HITS, and the narrower
     // Identity slot IS backfilled (`Navigate ⊒ Identity`).
     assert!(
-        store.get_validated(&key_navigate, &host).is_some(),
+        store
+            .get_validated(&key_navigate, &host)
+            .map(|served| served.read)
+            .is_some(),
         "the Navigate request HITS its own compute",
     );
     assert_eq!(
@@ -1235,7 +1250,10 @@ pub(crate) fn backfill_writes_only_recorded_materialized_points() {
         "Shallow must NOT backfill the Navigate slot (Shallow ⊅ Navigate in the lattice)",
     );
     assert!(
-        store.get_validated(&key_navigate, &host).is_none(),
+        store
+            .get_validated(&key_navigate, &host)
+            .map(|served| served.read)
+            .is_none(),
         "a Navigate request must MISS — the Shallow compute never materialised a Navigate point",
     );
 
@@ -1259,7 +1277,10 @@ pub(crate) fn backfill_writes_only_recorded_materialized_points() {
          never a synthesised Identity/meet point",
     );
     assert!(
-        store.get_validated(&key_identity, &host).is_some(),
+        store
+            .get_validated(&key_identity, &host)
+            .map(|served| served.read)
+            .is_some(),
         "an Identity request HITS the backfilled entry (Shallow ⊒ Identity)",
     );
 }
@@ -1700,7 +1721,10 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     );
     assert!(
         matches!(
-            store.get_relation_payload(ctx, &key).map(|p| p.outcome),
+            store
+                .get_relation_payload(ctx, &key)
+                .map(|served| served.read)
+                .map(|p| p.outcome),
             Some(verter_type_engine::semantic_query::RelationOutcome::NotAssignable)
         ),
         "the same full identity must warm-hit after the cold insert",
@@ -1767,7 +1791,10 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
         .hits
         .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
-        store.get_relation_payload(ctx, &key).is_some(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.read)
+            .is_some(),
         "seeded relation entry must warm-hit"
     );
     let delta = rctx
@@ -1820,7 +1847,10 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
 
     // Production dispatch order: the modeless probe runs first.
     assert!(
-        store.get_relation_payload(ctx, &key).is_none(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.read)
+            .is_none(),
         "empty store must probe-miss"
     );
     assert_eq!(
@@ -1861,7 +1891,10 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
             .load(std::sync::atomic::Ordering::Relaxed)
     };
     assert!(
-        store.get_relation_payload(ctx, &key).is_some(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.read)
+            .is_some(),
         "cold-published entry must probe-hit"
     );
     assert_eq!(
@@ -1920,12 +1953,18 @@ fn relation_modeless_probe_rejects_entry_after_generation_bump() {
         gen0,
     );
     assert!(
-        store.get_relation_payload(ctx, &key).is_some(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.read)
+            .is_some(),
         "seeded entry must warm-hit before the bump"
     );
     host.project_type_store().bump_project_generation();
     assert!(
-        store.get_relation_payload(ctx, &key).is_none(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.read)
+            .is_none(),
         "post-bump entry is stale: the modeless probe must reject it, never promote it as complete"
     );
 }
@@ -2416,6 +2455,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         matches!(
             store
                 .get_relation_payload(ctx, &admit_key)
+                .map(|served| served.read)
                 .map(|p| p.outcome),
             Some(verter_type_engine::semantic_query::RelationOutcome::NotAssignable)
         ),
@@ -2507,7 +2547,10 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         "REFUSE: no BudgetExceeded entry may enter the relation memo",
     );
     assert!(
-        store.get_relation_payload(ctx, &refuse_key).is_none(),
+        store
+            .get_relation_payload(ctx, &refuse_key)
+            .map(|served| served.read)
+            .is_none(),
         "REFUSE: the refused key has no warm entry to serve",
     );
     assert!(
@@ -2559,7 +2602,10 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         "REFUSE: the fenced undecided member leaves the relation memo untouched",
     );
     assert!(
-        store.get_relation_payload(ctx, &flight_key).is_none(),
+        store
+            .get_relation_payload(ctx, &flight_key)
+            .map(|served| served.read)
+            .is_none(),
         "REFUSE: the refused member key has no warm entry to serve",
     );
     assert!(
@@ -4670,6 +4716,18 @@ fn prefix_backfill_carries_traced_facts() {
          `dep_signature` to `warm_publish_one_if_absent`, dropping \
          the parent's path-precise facts.",
         facts = prefix_carrier.facts.as_ref()
+    );
+    // The prefix is a product of the parent's build: a read of it pays
+    // what that build cost, never nothing.
+    let receipt_of = |key: &SemanticQueryKey| {
+        store
+            .published_carrier_for_tests(key)
+            .expect("the entry is published")
+            .cost_receipt
+    };
+    assert!(
+        Arc::ptr_eq(&receipt_of(&prefix_key), &receipt_of(&parent_key)),
+        "the backfilled prefix carries the publishing build's receipt"
     );
 }
 
@@ -9457,7 +9515,10 @@ fn warm_read_refuses_a_candidate_whose_result_was_released() {
         "the unchecked probe still sees the raw slot (it is a test-only reader)"
     );
     assert!(
-        store.get_validated(&stale_key, &host).is_none(),
+        store
+            .get_validated(&stale_key, &host)
+            .map(|served| served.read)
+            .is_none(),
         "the production warm read must refuse a result naming a released node"
     );
 
@@ -9469,7 +9530,10 @@ fn warm_read_refuses_a_candidate_whose_result_was_released() {
         no_roots,
     );
     assert!(
-        store.get_validated(&live_key, &host).is_some(),
+        store
+            .get_validated(&live_key, &host)
+            .map(|served| served.read)
+            .is_some(),
         "a live result is still served through the same read"
     );
 }

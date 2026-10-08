@@ -249,7 +249,10 @@ fn relate_family_execute_warm_replays_decided_payload() {
         "fixture: the cold decide admitted one relation entry",
     );
     assert!(
-        graph.get_relation_payload(host.as_ref(), &key).is_some(),
+        graph
+            .get_relation_payload(host.as_ref(), &key)
+            .map(|served| served.read)
+            .is_some(),
         "fixture: the admitted entry warm-serves through the payload read",
     );
     assert!(
@@ -295,7 +298,10 @@ fn relate_family_execute_warm_replays_decided_payload() {
     // (the entry stays but recomputes on next ask).
     host.project_type_store().bump_project_generation();
     assert!(
-        graph.get_relation_payload(host.as_ref(), &key).is_none(),
+        graph
+            .get_relation_payload(host.as_ref(), &key)
+            .map(|served| served.read)
+            .is_none(),
         "a project-generation bump must miss the warm relation read",
     );
 }

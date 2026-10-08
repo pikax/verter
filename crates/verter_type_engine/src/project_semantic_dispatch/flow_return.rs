@@ -2437,7 +2437,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The warm, carrier-validated memo read of `key` under this
     /// dispatch's view: step (2) of [`Self::execute_flow_return`].
     pub fn warm_flow_return_read(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
-        self.graph().get_flow_return_result(self.ctx, key)
+        let served = self.graph().get_flow_return_result(self.ctx, key)?;
+        self.admits_served(&served.receipt).then_some(served.read)
     }
 
     /// The proven value of `key` when it already completed on this
@@ -2513,10 +2514,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let uninstantiated = schedule::uninstantiated(key);
-        let result = match self
-            .graph()
-            .get_flow_return_result(self.ctx, &uninstantiated)
-        {
+        let result = match self.warm_flow_return_read(&uninstantiated) {
             Some(result) => result,
             None => self.reusable_completed_flow_member(&uninstantiated)?,
         };

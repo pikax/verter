@@ -64,11 +64,16 @@ pub enum Recursion {
 
 /// What a read captures besides its value: the publication its cold build
 /// admitted, or the operand evidence of whichever result answers it.
+///
+/// Every read that delivers a stored or computed result also captures the
+/// result's cost receipt ([`Self::take_receipt`]): the consumer replays a
+/// served one and records either as its prerequisite.
 #[derive(Default)]
 pub struct ReadCapture<'a> {
     publication: Option<&'a mut Option<PublishedMemoCandidate>>,
     evidence: Option<&'a mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
     carrier: Option<&'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
+    receipt: Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
 }
 
 impl<'a> ReadCapture<'a> {
@@ -78,6 +83,7 @@ impl<'a> ReadCapture<'a> {
             publication: Some(slot),
             evidence: None,
             carrier: None,
+            receipt: None,
         }
     }
 
@@ -91,6 +97,7 @@ impl<'a> ReadCapture<'a> {
             publication: None,
             evidence: Some(slot),
             carrier: None,
+            receipt: None,
         }
     }
 
@@ -105,17 +112,26 @@ impl<'a> ReadCapture<'a> {
             publication: None,
             evidence: None,
             carrier: Some(slot),
+            receipt: None,
         }
     }
 
-    /// The evidence and carrier slots together.
-    pub(super) fn parts(
+    /// The evidence, carrier and receipt slots together.
+    pub(super) fn parts(&mut self) -> CaptureParts<'_> {
+        CaptureParts {
+            evidence: self.evidence.as_deref_mut(),
+            carrier: self.carrier.as_deref_mut(),
+            receipt: &mut self.receipt,
+        }
+    }
+
+    /// The cost receipt of the result this read delivered, if it
+    /// delivered one: a stored candidate's, a subscription's producer's,
+    /// or the receipt this read's own build sealed.
+    pub fn take_receipt(
         &mut self,
-    ) -> (
-        Option<&mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
-        Option<&mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
-    ) {
-        (self.evidence.as_deref_mut(), self.carrier.as_deref_mut())
+    ) -> Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>> {
+        self.receipt.take()
     }
 
     /// Deliver the answering result's carrier: into the deferred slot, or
@@ -137,6 +153,17 @@ impl<'a> ReadCapture<'a> {
     }
 }
 
+/// The slots a warm read fills: the answering result's operand evidence,
+/// its deferred carrier, and its cost receipt.
+pub(super) struct CaptureParts<'c> {
+    pub(super) evidence:
+        Option<&'c mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
+    pub(super) carrier:
+        Option<&'c mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
+    pub(super) receipt:
+        &'c mut Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
+}
+
 /// One logical claim of one key: the prepared key and what earlier attempts
 /// of the same claim already counted.
 pub struct ClaimAttempt {
@@ -146,6 +173,24 @@ pub struct ClaimAttempt {
     independent: bool,
     miss_recorded: bool,
     retries: usize,
+    /// The claimant could not pay for the stored result: it computes the
+    /// key itself rather than read it warm again, so it trips where a cold
+    /// evaluation would. The stored candidate stays for any claimant that
+    /// can pay.
+    recompute: bool,
+}
+
+impl ClaimAttempt {
+    /// Compute the key on the next claim instead of reading it warm: the
+    /// claimant was refused the stored result's receipt.
+    pub(crate) fn recompute(&mut self) {
+        self.recompute = true;
+    }
+
+    /// Whether the claim computes the key rather than reads it warm.
+    pub(crate) fn is_recomputing(&self) -> bool {
+        self.recompute
+    }
 }
 
 /// The outcome of one claim attempt.
@@ -218,6 +263,9 @@ pub struct SettledProducer<'s> {
     partial_reasons: PartialReasonSet,
     admissible: bool,
     admission_linearized: bool,
+    /// The result entered the family memo.
+    published: bool,
+    cost_receipt: Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
     _stats: InFlightStatsGuard<'s>,
 }
 
@@ -253,7 +301,9 @@ impl SemanticGraphStore {
     }
 
     /// Lookup, claim and wait: the synchronous acquisition of `key`. Never
-    /// returns a subscription — it waits each one out.
+    /// returns a subscription — it waits each one out. With `recompute` the
+    /// claim computes the key rather than reads it warm: the claimant was
+    /// refused the stored result's receipt.
     ///
     /// A claim needs the synchronous entry's task: `execution` is entered
     /// only once the warm lookup misses, so a warm read takes no task, and
@@ -266,8 +316,14 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         execution: &mut Option<ExecutionScope>,
         capture: &mut ReadCapture<'_>,
+        recompute: bool,
     ) -> Acquired<'s> {
-        let mut attempt = match self.begin_query_claim(ctx, flags, key, capture) {
+        let begun = if recompute {
+            self.begin_query_recompute(flags, key)
+        } else {
+            self.begin_query_claim(ctx, flags, key, capture)
+        };
+        let mut attempt = match begun {
             Ok(attempt) => attempt,
             Err(read) => return Acquired::Read(read),
         };
@@ -365,6 +421,34 @@ impl SemanticGraphStore {
             independent,
             miss_recorded: false,
             retries: 0,
+            recompute: false,
+        })
+    }
+
+    /// Begin one logical claim of `key` that computes it rather than read
+    /// it warm: the claimant was refused the stored result's receipt.
+    /// `Err` is the cancellation read.
+    pub fn begin_query_recompute(
+        &self,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        key: SemanticQueryKey,
+    ) -> Result<ClaimAttempt, ValueRead> {
+        if flags.is_cancelled() {
+            return Err(cancelled_cache_read());
+        }
+        let independent = matches!(
+            &key,
+            SemanticQueryKey::Relate {
+                inference_context: Some(_),
+                ..
+            }
+        );
+        Ok(ClaimAttempt {
+            prepared: PreparedKeyHandle::prepare(key),
+            independent,
+            miss_recorded: false,
+            retries: 0,
+            recompute: true,
         })
     }
 
@@ -383,8 +467,14 @@ impl SemanticGraphStore {
         let prepared = &attempt.prepared;
         // 1. Warm re-read: reached on the rare race where another producer
         //    published after the lookup, or on a retry after an abort. The
-        //    read validates strictly for this claimant's view.
-        if let Some(hit) = self.get_validated_value_prepared(prepared, ctx, capture) {
+        //    read validates strictly for this claimant's view. A claimant
+        //    refused the stored result's receipt computes instead.
+        let warm = if attempt.recompute {
+            None
+        } else {
+            self.get_validated_value_prepared(prepared, ctx, capture)
+        };
+        if let Some(hit) = warm {
             self.stats.hits.fetch_add(1, Ordering::Relaxed);
             if let Some(sched_ctx) = verter_execution::request_context::current_context() {
                 sched_ctx
@@ -589,6 +679,7 @@ impl Subscription<'_> {
             .walker_diagnostics
             .clone()
             .unwrap_or_else(|| Arc::from([]));
+        let cost_receipt = state.cost_receipt.clone();
         // Release the flight lock before any tracer fan-out.
         drop(state);
 
@@ -647,6 +738,7 @@ impl Subscription<'_> {
             prov.execute_cooperative_joiner_path
                 .fetch_add(1, Ordering::Relaxed);
         }
+        capture.receipt = cost_receipt;
         Joined::Read(CacheRead {
             value: result,
             dep_signature,
@@ -659,14 +751,42 @@ impl Subscription<'_> {
 }
 
 impl<'s> ProducerLease<'s> {
-    /// Close the producer with its build's output. `Err` is the cancellation
-    /// read: a producer whose request was cancelled owns no publish right,
-    /// so its flight is aborted and its value discarded.
+    /// The identity of the computation this producer runs, for its cost
+    /// recording: the prepared key, shared.
+    pub(crate) fn cost_identity(
+        &self,
+    ) -> crate::project_semantic_dispatch::cost_receipt::CostIdentity {
+        crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
+            self.prepared.as_task_producer(),
+        )
+    }
+
+    /// A receipt recording no cost for this producer's computation: a
+    /// fixture build that runs outside any connected demand.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fixture_receipt(
+        &self,
+    ) -> Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt> {
+        crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+            self.cost_identity(),
+            Default::default(),
+            Vec::new(),
+        )
+    }
+
+    /// Close the producer with its build's output and the receipt its
+    /// recording sealed. `Err` is the cancellation read: a producer whose
+    /// request was cancelled owns no publish right, so its flight is aborted
+    /// and its value discarded. A build without a receipt never admits: no
+    /// stored result may be served without the cost of computing it.
     pub fn settle<C: crate::resolver_core::ResolverCapabilities>(
         self,
         _ctx: &dyn crate::resolver_core::ResolverContext<C>,
         flags: &crate::resolver_core::resolver_context::RequestFlags,
         output: BuildOutput,
+        cost_receipt: Option<
+            Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        >,
     ) -> Result<SettledProducer<'s>, ValueRead> {
         let Self {
             store,
@@ -772,7 +892,8 @@ impl<'s> ProducerLease<'s> {
             } else {
                 (cache_suppress, result_is_partial, partial_reasons)
             };
-        let admissible = !(cache_suppress || result_is_partial || !flow_proof_ok);
+        let admissible =
+            !(cache_suppress || result_is_partial || !flow_proof_ok) && cost_receipt.is_some();
         Ok(SettledProducer {
             store,
             prepared,
@@ -790,6 +911,8 @@ impl<'s> ProducerLease<'s> {
             partial_reasons,
             admissible,
             admission_linearized: false,
+            published: false,
+            cost_receipt,
             _stats: stats,
         })
     }
@@ -812,7 +935,7 @@ impl SettledProducer<'_> {
             return Err(self.abort_for_cancellation());
         }
         let mut root_publication = None;
-        if self.admissible {
+        if let (true, Some(cost_receipt)) = (self.admissible, self.cost_receipt.clone()) {
             let outcome = store.warm_publish_one(
                 ctx,
                 flags,
@@ -823,11 +946,13 @@ impl SettledProducer<'_> {
                 &self.dep_signature,
                 &self.self_root_canonicals,
                 &self.satisfied_projection,
+                &cost_receipt,
                 &self.inflight,
             );
             let published = match outcome {
                 WarmPublishOutcome::Published(candidate) => {
                     self.admission_linearized = true;
+                    self.published = true;
                     root_publication = Some(candidate);
                     #[cfg(any(test, feature = "test-support"))]
                     {
@@ -877,6 +1002,7 @@ impl SettledProducer<'_> {
                         self.dep_signature.clone(),
                         Arc::clone(&self.self_root_canonicals),
                         backfill.satisfied_projection,
+                        Arc::clone(&cost_receipt),
                         &self.inflight,
                         self.admission_linearized,
                     );
@@ -904,6 +1030,14 @@ impl SettledProducer<'_> {
             *slot = Some(candidate);
         }
         Ok(())
+    }
+
+    /// The published result's fact carrier, when [`Self::admit`] entered
+    /// it into the family memo.
+    pub(crate) fn published_carrier(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
+        self.published.then(|| self.carrier.clone())
     }
 
     fn abort_for_cancellation(&self) -> ValueRead {
@@ -936,6 +1070,7 @@ impl SettledProducer<'_> {
             cache_suppress,
             result_is_partial,
             partial_reasons,
+            cost_receipt,
             ..
         } = self;
         if let Some(slot) = capture.evidence() {
@@ -967,9 +1102,11 @@ impl SettledProducer<'_> {
                 state.result_is_partial = result_is_partial;
                 state.partial_reasons = partial_reasons;
                 state.walker_diagnostics = Some(Arc::clone(&walker_diagnostics));
+                state.cost_receipt = cost_receipt.clone();
             }
         }
         inflight.ready.notify_all();
+        capture.receipt = cost_receipt;
 
         // Retire the flight whatever the admission decided: a flight left
         // behind would let a later claim — after an invalidation evicted the
@@ -1088,16 +1225,19 @@ impl SemanticGraphStore {
         // fields exactly as the production dispatch path does.
         let flags = crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx);
         let mut execution = None;
-        match self.acquire_query(ctx, flags, key, &mut execution, capture) {
+        match self.acquire_query(ctx, flags, key, &mut execution, capture, false) {
             Acquired::Read(read) => read,
             Acquired::Recursive(recursion) => Self::recursion_read(recursion, recursion_sentinel()),
-            Acquired::Produce(lease) => match lease.settle(ctx, flags, build().into()) {
-                Err(read) => read,
-                Ok(mut settled) => match settled.admit(ctx, flags, capture) {
+            Acquired::Produce(lease) => {
+                let receipt = lease.fixture_receipt();
+                match lease.settle(ctx, flags, build().into(), Some(receipt)) {
                     Err(read) => read,
-                    Ok(()) => settled.complete(ctx, capture),
-                },
-            },
+                    Ok(mut settled) => match settled.admit(ctx, flags, capture) {
+                        Err(read) => read,
+                        Ok(()) => settled.complete(ctx, capture),
+                    },
+                }
+            }
         }
     }
 }

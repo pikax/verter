@@ -109,12 +109,18 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
         panic!("another task's claim subscribes to the open producer");
     };
 
+    let receipt = lease.fixture_receipt();
     let produced = std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 let mut capture = ReadCapture::default();
                 let flags = host.request_flags();
-                let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash)) else {
+                let Ok(mut settled) = lease.settle(
+                    &host,
+                    flags,
+                    keyed_output(&store, hash),
+                    Some(Arc::clone(&receipt)),
+                ) else {
                     panic!("an uncancelled producer settles");
                 };
                 settled
@@ -136,10 +142,18 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
         &mut second_attempt,
         &mut capture,
     ) {
-        Joined::Read(read) => assert!(
-            matches!(read.value, QueryResult::Value(joined) if joined == value),
-            "the subscriber reads the producer's value"
-        ),
+        Joined::Read(read) => {
+            assert!(
+                matches!(read.value, QueryResult::Value(joined) if joined == value),
+                "the subscriber reads the producer's value"
+            );
+            assert!(
+                capture
+                    .take_receipt()
+                    .is_some_and(|delivered| Arc::ptr_eq(&delivered, &receipt)),
+                "the subscriber receives the producer's receipt, to replay it as a warm read would"
+            );
+        }
         Joined::Retry => panic!("a same-view subscriber reuses the delivered result"),
         Joined::Recursive(recursion) => panic!("no cycle of waits exists: {recursion:?}"),
     }
@@ -223,6 +237,7 @@ fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
                 key(),
                 &mut execution,
                 &mut capture,
+                false,
             ) {
                 super::producer::Acquired::Produce(_) => "produce",
                 super::producer::Acquired::Read(_) => "read",

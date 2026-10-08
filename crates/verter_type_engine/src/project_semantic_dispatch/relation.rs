@@ -1268,7 +1268,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(relation_step_from_payload(&payload));
             }
         }
-        let payload = self.graph().get_relation_payload(self.ctx, key)?;
+        let served = self.graph().get_relation_payload(self.ctx, key)?;
+        if !self.admits_served(&served.receipt) {
+            return None;
+        }
+        let payload = served.read;
         if measurement {
             self.dispatch_txn
                 .borrow_mut()
@@ -2725,7 +2729,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut session_abandoned = false;
         if let Some(sid) = opened_session {
             let mut txn = self.dispatch_txn.borrow_mut();
-            if let Some(position) = txn.relation.sessions.iter().position(|s| s.id == sid) {
+            if let Some(position) = txn.relation.session_position(sid) {
                 if budget_cap.is_some() {
                     txn.relation.sessions[position].abandon();
                     session_abandoned = true;
@@ -3318,14 +3322,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let ledgers_ready = {
             let txn = self.dispatch_txn.borrow();
             deferred_relation_sessions.iter().all(|(session, key)| {
-                let session_ok = txn
-                    .relation
-                    .sessions
-                    .iter()
-                    .find(|candidate| candidate.id == *session)
-                    .is_some_and(|candidate| {
-                        candidate.state == InferenceSessionState::CommittedDeterministic
-                    });
+                let session_ok = txn.relation.session(*session).is_some_and(|candidate| {
+                    candidate.state == InferenceSessionState::CommittedDeterministic
+                });
                 session_ok && txn.relation.session_admission.contains(*session, key)
             })
         };
@@ -3792,6 +3791,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &carrier.read_set_signature,
             &carrier.self_root_canonicals,
             carrier.validated_at_generation,
+            &carrier.cost_receipt,
             relation_members,
             flow_members,
             call_members,

@@ -758,7 +758,10 @@ pub fn get_validated_with_host(
     key: &verter_type_engine::semantic_query::SemanticQueryKey,
     host: &crate::VerterHost,
 ) -> bool {
-    graph.get_validated(key, host).is_some()
+    graph
+        .get_validated(key, host)
+        .map(|served| served.read)
+        .is_some()
 }
 
 /// The signature-kernel contention probe's isolation variants

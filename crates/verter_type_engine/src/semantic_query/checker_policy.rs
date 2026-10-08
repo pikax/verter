@@ -297,7 +297,7 @@ thread_local! {
 
 /// The allowance a relation check records against: the checker's, or a
 /// lower one a test installs on this thread to reach it quickly.
-fn relation_comparisons() -> u32 {
+pub(crate) fn relation_comparisons() -> u32 {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(allowance) = RELATION_COMPARISONS_FOR_TESTS.with(std::cell::Cell::get) {
         return allowance;

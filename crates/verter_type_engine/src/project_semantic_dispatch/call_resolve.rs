@@ -208,8 +208,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return ResolveCallStep::Complete(result.clone());
             }
         }
-        if let Some(result) = self.graph().get_resolve_call_result(self.ctx, &key) {
-            return ResolveCallStep::Complete(result);
+        if let Some(served) = self.graph().get_resolve_call_result(self.ctx, &key) {
+            if self.admits_served(&served.receipt) {
+                return ResolveCallStep::Complete(served.read);
+            }
         }
         if self.dispatch_txn.borrow().obligations.decides_root() {
             self.execute_resolve_call_root(key)
@@ -926,9 +928,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         unique.dedup();
         if !unique.iter().all(|session_id| {
             txn.relation
-                .sessions
-                .iter()
-                .find(|session| session.id == *session_id)
+                .session(*session_id)
                 .is_some_and(|session| session.state == InferenceSessionState::StagedDeterministic)
         }) {
             return false;
@@ -936,9 +936,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for session_id in unique {
             let session = txn
                 .relation
-                .sessions
-                .iter_mut()
-                .find(|session| session.id == session_id)
+                .session_mut(session_id)
                 .expect("validated staged call session remains present");
             // The commit is the `StagedDeterministic → CommittedDeterministic`
             // transition itself, so it runs in EVERY build; only its verdict
@@ -2132,12 +2130,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .collect();
         let inputs = {
             let txn = self.dispatch_txn.borrow();
-            let Some(session) = txn
-                .relation
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
-            else {
+            let Some(session) = txn.relation.session(session_id) else {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
             session.fixation_inputs()
@@ -2184,12 +2177,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .collect();
         let bindings = {
             let mut txn = self.dispatch_txn.borrow_mut();
-            let Some(session) = txn
-                .relation
-                .sessions
-                .iter_mut()
-                .find(|session| session.id == session_id)
-            else {
+            let Some(session) = txn.relation.session_mut(session_id) else {
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
             session.stage_fixation_bindings(fixed)
@@ -3004,9 +2992,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let inputs = {
             let txn = self.dispatch_txn.borrow();
             txn.relation
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
+                .session(session_id)
                 .and_then(|session| session.fixation_inputs())
         };
         let Some(inputs) = inputs else {
@@ -3215,12 +3201,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         checkpoint: &super::dispatch_txn::SessionCheckpoint,
     ) -> CandidateVerdict {
         let mut txn = self.dispatch_txn.borrow_mut();
-        if let Some(session) = txn
-            .relation
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
+        if let Some(session) = txn.relation.session_mut(session_id) {
             session.rollback_to(checkpoint);
             session.abandon();
         }
@@ -3232,9 +3213,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .dispatch_txn
             .borrow_mut()
             .relation
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
+            .session_mut(session_id)
         {
             session.abandon();
         }
@@ -3303,9 +3282,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.dispatch_txn
             .borrow()
             .relation
-            .sessions
-            .iter()
-            .any(|session| session.id == session_id && session.fresh_literal_deposit(param, bound))
+            .session(session_id)
+            .is_some_and(|session| session.fresh_literal_deposit(param, bound))
     }
 
     /// Whether one fresh-literal deposit is KEPT at the call boundary:

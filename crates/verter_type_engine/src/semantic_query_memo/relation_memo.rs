@@ -77,7 +77,7 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<crate::semantic_query::RelationPayload> {
+    ) -> Option<Served<crate::semantic_query::RelationPayload>> {
         let family = FamilyKey::Relate {
             key: super::family_intern::InternedRelateKey::intern(key.clone()),
         };
@@ -91,6 +91,7 @@ impl SemanticGraphStore {
         // Miss-neutral probe: a miss falls through to the owning
         // cooperative dispatch, which records the single miss (see
         // `get_validated_value_impl`'s `record_miss` contract).
+        let mut receipt = None;
         let hit = self
             .get_validated_value_impl(
                 &family,
@@ -99,11 +100,16 @@ impl SemanticGraphStore {
                 ctx,
                 None,
                 None,
+                &mut receipt,
                 false,
             )?
             .value;
+        let receipt = receipt.expect("a served candidate carries its receipt");
         match hit {
-            QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(payload),
+            QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(Served {
+                read: payload,
+                receipt,
+            }),
             // Structural invariant: the relation authority only ever
             // stores `Relation` payloads in `Relate` family entries.
             other => {
@@ -135,6 +141,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
             validated_at_generation: entry.validated_at_generation,
             admission_seq: entry.admission_seq,
+            cost_receipt: Arc::clone(&entry.cost_receipt),
         })
     }
 

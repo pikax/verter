@@ -11166,7 +11166,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (start_base, start_index) = if path.len() < 2 {
             (base, 0usize)
         } else {
-            find_longest_warm_prefix(self.graph(), self.ctx, base, path).unwrap_or((base, 0))
+            find_longest_warm_prefix(self.graph(), self.ctx, base, path, |receipt| {
+                self.admits_served(receipt)
+            })
+            .unwrap_or((base, 0))
         };
         let walker_path: Arc<[PathSegment]> = if start_index == 0 {
             Arc::clone(path)
@@ -16876,6 +16879,7 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
+    admit: impl Fn(&Arc<super::cost_receipt::DemandCostReceipt>) -> bool,
 ) -> Option<(SemanticNodeId, usize)> {
     for k in (1..path.len()).rev() {
         let prefix_path: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
@@ -16889,7 +16893,10 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
         // Validate-before-bubble: a stale prefix entry must neither
         // surface as a hit nor pollute the active fact tracer.
         if let Some(hit) = graph.get_validated(&prefix_key, ctx) {
-            if let QueryResult::Value(prefix_node) = hit.value {
+            if !admit(&hit.receipt) {
+                return None;
+            }
+            if let QueryResult::Value(prefix_node) = hit.read.value {
                 #[cfg(any(test, feature = "test-support"))]
                 PREFIX_PEEK_HITS.with(|c| *c.borrow_mut() += 1);
                 return Some((prefix_node, k));

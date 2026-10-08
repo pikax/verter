@@ -7,10 +7,12 @@
 use std::sync::Arc;
 
 use super::cost_receipt::{
-    CostDelivery, CostIdentity, DemandCostReceipt, LogicalUsage, ReplayRefusal,
+    BudgetProfile, BudgetProfileSpec, CostIdentity, DemandCostReceipt, LogicalUsage, ReplayRefusal,
+    COST_MODEL_REVISION,
 };
 use super::ProjectSemanticDispatch;
 use crate::{HostConfig, VerterHost};
+use verter_type_engine::request_budget::RequestBudget;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -21,7 +23,11 @@ fn identity(name: &str) -> CostIdentity {
 }
 
 fn usage(work: u64, bytes: u64) -> LogicalUsage {
-    LogicalUsage { work, bytes }
+    LogicalUsage {
+        work,
+        bytes,
+        operations: 0,
+    }
 }
 
 /// `T0 … Tn`, each `Tk` consuming `T(k-1)` twice, each costing one unit
@@ -74,7 +80,7 @@ fn a_diamond_replays_in_linear_cost() {
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
         .connected_demand()
-        .replay_admit(top)
+        .replay_admit(top, None)
         .expect("21 units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
     assert_eq!(dispatch.connected_demand().bytes_used_for_tests(), 210);
@@ -83,7 +89,7 @@ fn a_diamond_replays_in_linear_cost() {
     }
     dispatch
         .connected_demand()
-        .replay_admit(top)
+        .replay_admit(top, None)
         .expect("a paid closure costs nothing more");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
 }
@@ -99,12 +105,12 @@ fn a_partly_paid_diamond_charges_the_rest_once() {
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[10])
+        .replay_admit(&receipts[10], None)
         .expect("11 units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 11);
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[20])
+        .replay_admit(&receipts[20], None)
         .expect("10 more units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
 }
@@ -127,7 +133,7 @@ fn a_cold_diamond_records_exclusive_costs() {
         ledger.open_cost_scope(identity("T0"));
         ledger.charge_units(3).expect("T0's own units");
         ledger.reserve_bytes(30).expect("T0's own bytes");
-        let t0 = ledger.seal_cost_scope().expect("T0 seals");
+        let t0 = ledger.seal_cost_scope(None).expect("T0 seals");
         ledger.record_prerequisite(&t0, 1);
         assert!(
             ledger.is_paid(t0.identity()),
@@ -135,10 +141,10 @@ fn a_cold_diamond_records_exclusive_costs() {
         );
         // The second read of T0 finds it paid and records it again.
         ledger.record_prerequisite(&t0, 1);
-        let t1 = ledger.seal_cost_scope().expect("T1 seals");
+        let t1 = ledger.seal_cost_scope(None).expect("T1 seals");
         ledger.record_prerequisite(&t1, 1);
         ledger.record_prerequisite(&t1, 1);
-        let t2 = ledger.seal_cost_scope().expect("T2 seals");
+        let t2 = ledger.seal_cost_scope(None).expect("T2 seals");
         assert_eq!(t0.exclusive(), usage(3, 30));
         assert_eq!(t1.exclusive(), usage(2, 0));
         assert_eq!(t2.exclusive(), usage(1, 0));
@@ -151,7 +157,7 @@ fn a_cold_diamond_records_exclusive_costs() {
         !ledger.is_paid(top.identity()),
         "a new connected demand has paid nothing"
     );
-    ledger.replay_admit(&top).expect("six units fit");
+    ledger.replay_admit(&top, None).expect("six units fit");
     assert_eq!(
         ledger.work_used_for_tests(),
         cold_work,
@@ -171,7 +177,9 @@ fn a_refused_replay_charges_and_marks_nothing() {
     dispatch.set_connected_limits_for_tests(10, 24);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     assert_eq!(
-        dispatch.connected_demand().replay_admit(&receipts[20]),
+        dispatch
+            .connected_demand()
+            .replay_admit(&receipts[20], None),
         Err(ReplayRefusal::Work)
     );
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 0);
@@ -180,7 +188,7 @@ fn a_refused_replay_charges_and_marks_nothing() {
         .all(|receipt| !dispatch.connected_demand().is_paid(receipt.identity())));
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[9])
+        .replay_admit(&receipts[9], None)
         .expect("ten units fit exactly");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 10);
 }
@@ -196,16 +204,20 @@ fn a_paid_receipt_still_answers_to_the_depth_rail() {
     dispatch.set_connected_limits_for_tests(1_000, 10);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     assert_eq!(
-        dispatch.connected_demand().replay_admit(&receipts[20]),
+        dispatch
+            .connected_demand()
+            .replay_admit(&receipts[20], None),
         Err(ReplayRefusal::Depth),
         "a depth-20 receipt does not fit a depth-10 rail"
     );
     dispatch
         .connected_demand()
-        .replay_admit(&receipts[10])
+        .replay_admit(&receipts[10], None)
         .expect("depth 10 fits");
     assert_eq!(
-        dispatch.connected_demand().replay_admit(&receipts[20]),
+        dispatch
+            .connected_demand()
+            .replay_admit(&receipts[20], None),
         Err(ReplayRefusal::Depth),
         "paying part of the closure does not waive the depth"
     );
@@ -254,28 +266,63 @@ fn a_lattice_of_shared_results_replays_each_once() {
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
         .connected_demand()
-        .replay_admit(&top)
+        .replay_admit(&top, None)
         .expect("43 units fit");
     assert_eq!(dispatch.connected_demand().work_used_for_tests(), 43);
 }
 
 /// A computation that does not complete leaves no receipt and is never
-/// paid: its charges stay spent, and nothing about it is served warm.
+/// paid: its charges stay spent, and are its consumer's own cost — a
+/// consumer's receipt owes what it spent on a computation it then had to
+/// do without, so serving the consumer warm charges what its cold run did.
 #[test]
-fn an_abandoned_computation_is_never_paid() {
+fn an_abandoned_computation_is_its_consumers_cost() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let ledger = &dispatch.connected_demand();
     let (_guard, _) = dispatch.enter_connected_demand(false);
+    ledger.open_cost_scope(identity("P"));
     ledger.open_cost_scope(identity("X"));
     ledger.charge_units(5).expect("X's own units");
     ledger.abandon_cost_scope();
     assert!(!ledger.is_paid(&identity("X")));
+    ledger.charge().expect("P's own unit");
+    let parent = ledger.seal_cost_scope(None).expect("P seals");
+    assert_eq!(ledger.work_used_for_tests(), 6, "the work stays spent");
+    assert_eq!(
+        parent.exclusive(),
+        usage(6, 0),
+        "the abandoned computation's charges are the consumer's"
+    );
     assert!(
-        ledger.seal_cost_scope().is_none(),
+        ledger.seal_cost_scope(None).is_none(),
         "nothing is left recording"
     );
-    assert_eq!(ledger.work_used_for_tests(), 5, "the work stays spent");
+}
+
+/// A computation run again in the same demand — its result could not be
+/// served — is charged again: the demand pays for the work it does, so a
+/// demand that recomputes a result is bounded by its allowance however
+/// often it recomputes. Each run's receipt costs the computation.
+#[test]
+fn a_recomputation_is_charged_as_the_work_it_is() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let ledger = &dispatch.connected_demand();
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    ledger.open_cost_scope(identity("P"));
+    for _ in 0..2 {
+        ledger.open_cost_scope(identity("C"));
+        ledger.charge_units(4).expect("C's own units");
+        ledger.reserve_bytes(8).expect("C's own bytes");
+        let run = ledger.seal_cost_scope(None).expect("C seals");
+        assert_eq!(run.exclusive(), usage(4, 8), "each run's receipt costs C");
+        ledger.record_prerequisite(&run, 1);
+    }
+    let parent = ledger.seal_cost_scope(None).expect("P seals");
+    assert_eq!(ledger.work_used_for_tests(), 8, "both runs are charged");
+    assert_eq!(ledger.bytes_used_for_tests(), 16);
+    assert_eq!(parent.closure_usage(), usage(4, 8), "C is one computation");
 }
 
 /// The rule a consumer follows for a delivered result: a result computed
@@ -283,14 +330,19 @@ fn an_abandoned_computation_is_never_paid() {
 /// served from a store is admitted by replaying its receipt, then
 /// recorded. Either way the consumer's receipt owes it. A refused replay is
 /// plain resource incompleteness for this consumer.
+enum Delivery {
+    Fresh(Arc<DemandCostReceipt>),
+    Replayed(Arc<DemandCostReceipt>),
+}
+
 fn consume(
     ledger: &super::connected_demand::ConnectedDemandLedger<'_>,
-    delivery: &CostDelivery,
+    delivery: &Delivery,
 ) -> Result<(), ReplayRefusal> {
     let receipt = match delivery {
-        CostDelivery::Fresh(receipt) => receipt,
-        CostDelivery::Replayed(receipt) => {
-            ledger.replay_admit(receipt)?;
+        Delivery::Fresh(receipt) => receipt,
+        Delivery::Replayed(receipt) => {
+            ledger.replay_admit(receipt, None)?;
             receipt
         }
     };
@@ -311,19 +363,19 @@ fn a_fresh_delivery_is_not_charged_twice() {
         ledger.open_cost_scope(identity("P"));
         ledger.open_cost_scope(identity("C"));
         ledger.charge_units(4).expect("C's own units");
-        let child = ledger.seal_cost_scope().expect("C seals");
-        consume(ledger, &CostDelivery::Fresh(Arc::clone(&child))).expect("fresh is free");
+        let child = ledger.seal_cost_scope(None).expect("C seals");
+        consume(ledger, &Delivery::Fresh(Arc::clone(&child))).expect("fresh is free");
         ledger.charge().expect("P's own unit");
-        let parent = ledger.seal_cost_scope().expect("P seals");
+        let parent = ledger.seal_cost_scope(None).expect("P seals");
         assert_eq!(ledger.work_used_for_tests(), 5, "C is paid once");
         assert_eq!(parent.exclusive(), usage(1, 0));
         child
     };
     let (_guard, _) = dispatch.enter_connected_demand(false);
     ledger.open_cost_scope(identity("P"));
-    consume(ledger, &CostDelivery::Replayed(child)).expect("four units fit");
+    consume(ledger, &Delivery::Replayed(child)).expect("four units fit");
     ledger.charge().expect("P's own unit");
-    let parent = ledger.seal_cost_scope().expect("P seals");
+    let parent = ledger.seal_cost_scope(None).expect("P seals");
     assert_eq!(
         ledger.work_used_for_tests(),
         5,
@@ -353,4 +405,423 @@ fn a_wide_fan_out_keeps_each_prerequisite_once() {
         .collect();
     let wide = DemandCostReceipt::new(identity("W"), usage(1, 0), prerequisites);
     assert_eq!(wide.prerequisites().len(), 20_000);
+}
+
+/// A receipt chain as deep as the computations it costs is released
+/// without a native frame per level: a 100,000-deep chain drops on a
+/// 256 KiB stack.
+#[test]
+fn a_deep_receipt_chain_drops_in_constant_stack() {
+    std::thread::Builder::new()
+        .stack_size(256 << 10)
+        .spawn(|| {
+            let mut top = DemandCostReceipt::new(identity("D0"), usage(1, 0), Vec::new());
+            for level in 1..100_000 {
+                top = DemandCostReceipt::new(
+                    identity(&format!("D{level}")),
+                    usage(1, 0),
+                    vec![super::cost_receipt::CostDependency {
+                        receipt: top,
+                        nesting: 0,
+                    }],
+                );
+            }
+            drop(top);
+        })
+        .expect("spawn the small-stack thread")
+        .join()
+        .expect("the chain drops without overflowing");
+}
+
+/// A receipt's request operations are charged to the request's projection
+/// fuse once per request — across its connected demands — and a replay the
+/// fuse cannot pay is refused whole, spending and marking nothing.
+#[test]
+fn a_replay_spends_request_operations_once_per_request() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let ledger = &dispatch.connected_demand();
+    let request = RequestBudget::new(5);
+    let operations = |name: &str, count: u64| {
+        DemandCostReceipt::new(
+            identity(name),
+            LogicalUsage {
+                work: 1,
+                bytes: 0,
+                operations: count,
+            },
+            Vec::new(),
+        )
+    };
+    let first = operations("A", 3);
+    {
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        ledger
+            .replay_admit(&first, Some(&request))
+            .expect("three operations fit five");
+    }
+    assert_eq!(request.projection_ops_executed_count(), 3);
+    {
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        ledger
+            .replay_admit(&first, Some(&request))
+            .expect("a paid computation spends no operations again");
+        assert_eq!(
+            ledger.work_used_for_tests(),
+            1,
+            "the new demand still pays its work"
+        );
+    }
+    assert_eq!(request.projection_ops_executed_count(), 3);
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    assert_eq!(
+        ledger.replay_admit(&operations("B", 3), Some(&request)),
+        Err(ReplayRefusal::Operations),
+        "three more operations do not fit the two left"
+    );
+    assert_eq!(request.projection_ops_executed_count(), 3);
+    assert_eq!(
+        ledger.work_used_for_tests(),
+        0,
+        "the refusal charged nothing"
+    );
+}
+
+/// Allowances intern to one profile identity: equal allowances are one
+/// profile, any differing allowance — an operation cap, a connected cap,
+/// a cost-model revision — another.
+#[test]
+fn a_budget_profile_is_one_interned_identity() {
+    let spec = BudgetProfileSpec {
+        work: 100,
+        bytes: 1_000,
+        query_depth: 24,
+        instantiation_depth: 10,
+        tail_steps: 10,
+        request_operations: 2_000,
+        relation_comparisons: 600,
+        cost_model_revision: COST_MODEL_REVISION,
+    };
+    assert_eq!(BudgetProfile::intern(spec), BudgetProfile::intern(spec));
+    for other in [
+        BudgetProfileSpec { work: 101, ..spec },
+        BudgetProfileSpec {
+            request_operations: 2_001,
+            ..spec
+        },
+        BudgetProfileSpec {
+            cost_model_revision: COST_MODEL_REVISION + 1,
+            ..spec
+        },
+    ] {
+        assert_ne!(BudgetProfile::intern(spec), BudgetProfile::intern(other));
+    }
+}
+
+// ── The public boundary ──────────────────────────────────────────────────
+
+const BENCH_ROOT: &str = "/bench";
+const BENCH_SCENARIO: &str = "/bench/scenario.ts";
+
+/// `type S = { p0: 0 } | …` against `type T = { p(n-1): number } | …`:
+/// every arm of `S` fits an arm of `T`, but never at its own position.
+fn reversed_unions(arms: usize) -> String {
+    let source: Vec<String> = (0..arms).map(|i| format!("{{ p{i}: {i} }}")).collect();
+    let target: Vec<String> = (0..arms)
+        .rev()
+        .map(|i| format!("{{ p{i}: number }}"))
+        .collect();
+    format!(
+        "type S = {};\ntype T = {};\ntype __Probe = [S] extends [T] ? 1 : 2;\nexport {{}};\n",
+        source.join(" | "),
+        target.join(" | ")
+    )
+}
+
+/// A host configured the way the semantic benchmark configures one: a
+/// project whose library is a root file under `noLib`, and a per-request
+/// projection fuse of `projection_op_budget`.
+fn bench_host(projection_op_budget: usize, scenario: &str) -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone_with_tsconfig_projects(
+        HostConfig {
+            projection_op_budget,
+            ..HostConfig::default()
+        },
+        &[(
+            BENCH_ROOT,
+            r#"{ "compilerOptions": { "strict": true, "noLib": true }, "files": ["lib.bench.d.ts", "scenario.ts"] }"#,
+        )],
+    ));
+    let lib = "/bench/lib.bench.d.ts";
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        lib,
+        "interface Object { toString(): string; }\n",
+        crate::LanguageRegistry::global()
+            .classify_static(lib)
+            .static_resolution(),
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        BENCH_SCENARIO,
+        scenario,
+        crate::FileLanguage::script_ts(),
+    );
+    host
+}
+
+/// The answer one request for `__Probe` gives: its wire bytes, or why
+/// there are none.
+fn probe_answer(host: &VerterHost) -> Result<Vec<u8>, String> {
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(BENCH_SCENARIO, "__Probe", None)
+        .into_parts();
+    match outcome {
+        Ok(Some(node)) => host
+            .project_node_to_type_expr_json_bytes(node)
+            .ok_or_else(|| "the answer did not materialise".to_owned()),
+        Ok(None) => Err("miss".to_owned()),
+        Err(fault) => Err(format!("{fault:?}")),
+    }
+}
+
+fn semantic_misses(host: &VerterHost) -> u64 {
+    host.project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .misses
+}
+
+/// A request repeated warm answers exactly as it answered cold. Its
+/// sub-results were charged to the request as they were computed; served
+/// warm, their receipts charge the same, and a result the cold request
+/// already computed is read again rather than recomputed, so the
+/// projection fuse cannot trip on one and not the other. Reversed object
+/// unions are the shape that showed it: the cold request ran out of
+/// operations recomputing a library interface its warm repeat read once.
+#[test]
+fn a_warm_repeat_answers_as_its_cold_request() {
+    let host = bench_host(200, &reversed_unions(40));
+    let cold = probe_answer(&host);
+    for repeat in 1..=3 {
+        assert_eq!(
+            probe_answer(&host),
+            cold,
+            "warm repeat {repeat} answers as the cold request did"
+        );
+    }
+    let rendered = cold.ok().map(|bytes| {
+        let expr: verter_type_expr::TypeExpr =
+            serde_json::from_slice(&bytes).expect("the answer decodes");
+        verter_type_expr::render_type_expr_display(&expr)
+            .expect("the answer renders")
+            .text
+    });
+    assert_eq!(
+        rendered.as_deref(),
+        Some("1"),
+        "every arm of S fits an arm of T, as the checker relates them"
+    );
+}
+
+/// An isolated root that runs out of its allowance seals its refusal: an
+/// exact repeat under the same allowances answers it again without
+/// evaluating anything, and an edit to what it read evaluates afresh.
+#[test]
+fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
+    let host = bench_host(1, &reversed_unions(4));
+    let refused = probe_answer(&host).expect("the refusal is a typed partial value");
+    assert!(
+        host.project_type_store()
+            .semantic_graph()
+            .refusal_summary_count_for_tests()
+            >= 1,
+        "the refused root sealed its refusal"
+    );
+    let misses = semantic_misses(&host);
+    assert_eq!(
+        probe_answer(&host),
+        Ok(refused.clone()),
+        "the repeat answers the sealed refusal"
+    );
+    assert_eq!(
+        semantic_misses(&host),
+        misses,
+        "the repeat evaluated nothing"
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        BENCH_SCENARIO,
+        &reversed_unions(4).replace("p0: 0", "p0: 10"),
+        crate::FileLanguage::script_ts(),
+    );
+    let _ = probe_answer(&host);
+    assert!(
+        semantic_misses(&host) > misses,
+        "an edit to what the refusal read evaluates afresh"
+    );
+}
+
+/// A refusal is sealed under the allowances it was decided by and answers
+/// only those: a demand with any other allowance evaluates for itself —
+/// with enough, it completes, and the completed result is kept for any
+/// demand that can pay for it — while the original allowances keep
+/// answering their refusal without evaluating, even once a complete result
+/// is stored.
+#[test]
+fn a_refusal_answers_only_its_own_allowances() {
+    let source = reversed_unions(40);
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = super::checker_probe_lane_tests::with_probe_on_host(
+        &host,
+        Default::default(),
+        &source,
+        "[S, T]",
+        |dispatch, node| {
+            let elements = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads the pair [S, T], got {other:?}"),
+            };
+            dispatch
+                .relate_key_for(elements[0], elements[1])
+                .to_query_key()
+        },
+    );
+    let misses = || semantic_misses(&host);
+    // Each read is its own request-less root demand over a fresh view, as
+    // a repeat request would be.
+    let read = |work: usize| {
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        dispatch.set_connected_limits_for_tests(work, 24);
+        let read = dispatch.execute_via_cold_build_helper(key.clone());
+        (format!("{:?}", read.value), read.result_is_partial)
+    };
+
+    let refused = read(64);
+    assert!(refused.1, "64 units cannot relate 40 arms");
+    let before = misses();
+    assert_eq!(read(64), refused, "the same allowances answer the refusal");
+    assert_eq!(misses(), before, "and evaluate nothing");
+
+    let other = read(65);
+    assert!(other.1, "65 units cannot relate 40 arms either");
+    assert!(misses() > before, "another allowance evaluates for itself");
+
+    let complete = read(super::connected_demand::MAX_CONNECTED_PROJECTION_WORK);
+    assert!(!complete.1, "the production allowance relates them");
+    let healed = misses();
+    assert_eq!(
+        read(super::connected_demand::MAX_CONNECTED_PROJECTION_WORK),
+        complete,
+        "the completed relation is kept"
+    );
+    assert_eq!(misses(), healed, "for a demand that can pay for it");
+
+    assert_eq!(
+        read(64),
+        refused,
+        "a stored complete result never answers a demand that cannot pay for it"
+    );
+}
+
+/// The refusal table is bounded: past its cap the oldest refusal is
+/// dropped (its root evaluates again), the newest kept. An evaluation the
+/// project moved under is torn and never becomes a refusal.
+#[test]
+fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+    use verter_type_engine::semantic_query::{
+        CacheRead, PartialReasonSet, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryKey,
+        SemanticQueryValue,
+    };
+    use verter_type_engine::semantic_query_memo::refusal_summary::REFUSAL_SUMMARY_CAP;
+
+    let host = host();
+    let store = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
+    let profile = BudgetProfile::intern(BudgetProfileSpec {
+        work: 64,
+        bytes: 1_024,
+        query_depth: 24,
+        instantiation_depth: 10,
+        tail_steps: 10,
+        request_operations: 0,
+        relation_comparisons: 600,
+        cost_model_revision: COST_MODEL_REVISION,
+    });
+    let key = |name: usize| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: Arc::from("/refusals.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                local_scope: None,
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+            },
+            name: Arc::from(format!("R{name}")),
+        })
+    };
+    let refusal = || CacheRead {
+        value: QueryResult::<SemanticQueryValue>::Error(
+            verter_type_engine::semantic_query::QueryError::Miss,
+        ),
+        dep_signature: verter_type_engine::semantic_query_memo::empty_signature(),
+        walker_diagnostics: Arc::from([]),
+        cache_suppress: true,
+        result_is_partial: true,
+        partial_reasons: PartialReasonSet::PROJECTION_WORK_LIMIT,
+    };
+    let carrier =
+        || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));
+    let generation = host.request_flags().current_project_generation();
+    for name in 0..=REFUSAL_SUMMARY_CAP {
+        assert!(store.seal_refusal_for_tests(
+            &host,
+            key(name),
+            profile.clone(),
+            generation,
+            refusal(),
+            carrier(),
+        ));
+    }
+    assert_eq!(store.refusal_summary_count_for_tests(), REFUSAL_SUMMARY_CAP);
+    assert!(
+        !store.has_sealed_refusal_for_tests(&host, key(0), &profile),
+        "the oldest refusal was dropped"
+    );
+    assert!(store.has_sealed_refusal_for_tests(&host, key(REFUSAL_SUMMARY_CAP), &profile));
+    assert!(
+        !store.has_sealed_refusal_for_tests(
+            &host,
+            key(REFUSAL_SUMMARY_CAP),
+            &BudgetProfile::intern(BudgetProfileSpec {
+                work: 65,
+                ..*profile.spec()
+            }),
+        ),
+        "another profile never inherits the refusal"
+    );
+
+    let torn = key(REFUSAL_SUMMARY_CAP + 1);
+    assert!(
+        !store.seal_refusal_for_tests(
+            &host,
+            torn.clone(),
+            profile.clone(),
+            generation.wrapping_sub(1),
+            refusal(),
+            carrier(),
+        ),
+        "an evaluation the project moved under is never sealed"
+    );
+    assert!(!store.has_sealed_refusal_for_tests(&host, torn, &profile));
 }

@@ -28,6 +28,11 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
     let store = SemanticGraphStore::with_account(
         verter_session_query::retention::StoreAccount::new(Arc::clone(&account)),
     );
+    let receipt = crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+        crate::project_semantic_dispatch::cost_receipt::CostIdentity::new(b"scc-root".to_vec()),
+        Default::default(),
+        Vec::new(),
+    );
     let root = store.stage_entry(
         None,
         SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
@@ -36,6 +41,7 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
         &roots,
         &empty_signature(),
         0,
+        &receipt,
     );
     let member = store.stage_entry(
         None,
@@ -45,6 +51,7 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
         &roots,
         &empty_signature(),
         0,
+        &receipt,
     );
     let root_charge = account
         .reserve(ChargeClass::Retained, root.retained_footprint_bytes())

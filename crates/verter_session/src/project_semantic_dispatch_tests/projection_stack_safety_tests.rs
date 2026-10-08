@@ -599,7 +599,7 @@ fn connected_query_depth_limit_allows_boundary_and_trips_at_plus_one() {
 }
 
 #[test]
-fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
+fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusal() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _update = host
         .upsert(UpsertRequest {
@@ -694,13 +694,21 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
         }]
     );
     assert!(
-        after_first.misses > before.misses && after_second.misses > after_first.misses,
-        "a limited result must never enter the warm query memo; each request must recompute"
+        after_first.misses > before.misses,
+        "the first request evaluates"
+    );
+    assert!(
+        !graph.contains_key(&key),
+        "a limited result never enters the warm query memo"
+    );
+    assert_eq!(
+        after_second.misses, after_first.misses,
+        "the exact repeat answers its sealed refusal without evaluating again"
     );
 }
 
 #[test]
-fn connected_query_depth_limit_is_distinct_diagnostic_and_is_not_cached() {
+fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     let host = build_host("export type Deep = keyof { x: string };\n".to_string());
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     dispatch.set_connected_limits_for_tests(128, 1);
@@ -760,8 +768,16 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_is_not_cached() {
         }]
     );
     assert!(
-        after_first.misses > before.misses && after_second.misses > after_first.misses,
+        after_first.misses > before.misses,
+        "the first request evaluates"
+    );
+    assert!(
+        !graph.contains_key(&key),
         "query-depth-limited outcomes must stay out of the warm memo"
+    );
+    assert_eq!(
+        after_second.misses, after_first.misses,
+        "the exact repeat answers its sealed refusal without evaluating again"
     );
 }
 

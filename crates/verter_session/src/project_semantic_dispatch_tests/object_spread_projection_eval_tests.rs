@@ -1714,7 +1714,10 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
         "identical unresolved programs stay Unknown, got {step:?}"
     );
     assert!(
-        graph.get_relation_payload(&host, &key).is_none(),
+        graph
+            .get_relation_payload(&host, &key)
+            .map(|served| served.read)
+            .is_none(),
         "an unresolved Unknown must never publish to the relation memo"
     );
 }
@@ -2464,7 +2467,10 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
     let key = dispatch.relate_key_for(carrier, carrier);
     let step = dispatch.execute_relate(key.clone());
     assert!(
-        graph.get_relation_payload(&host, &key).is_none(),
+        graph
+            .get_relation_payload(&host, &key)
+            .map(|served| served.read)
+            .is_none(),
         "the unresolved Unknown never publishes: {step:?}"
     );
 

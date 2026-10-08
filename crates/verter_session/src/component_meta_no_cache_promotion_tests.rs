@@ -1855,6 +1855,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
     assert!(
         graph
             .get_relation_payload(host.as_ref(), &dispatch.relate_key_for(check, extends),)
+            .map(|served| served.read)
             .is_none(),
         "a relation Unknown that arose from a PARTIAL nested read MUST NOT be admitted to the \
          relation memo (reverting the relation-memo partial-skip admits it here)"

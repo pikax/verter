@@ -63,6 +63,7 @@ pub use nodes::AliasChainEnd;
 mod observability;
 mod origin_edges;
 pub mod prepared;
+pub mod refusal_summary;
 pub(crate) mod relation_memo;
 pub(crate) mod release;
 mod resolve_call_memo;
@@ -654,7 +655,10 @@ pub struct SemanticGraphStore {
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
         ),
-        SemanticNodeId,
+        (
+            SemanticNodeId,
+            std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        ),
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(
@@ -673,6 +677,8 @@ pub struct SemanticGraphStore {
         DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>,
     pub(super) member_ordinal_index_fifo:
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
+    /// Sealed refusals of isolated root demands — see `refusal_summary`.
+    pub(super) refusal_summaries: refusal_summary::RefusalSummaryTable,
 }
 
 /// Exact memo candidate admitted by one cold-winner publication.
@@ -686,6 +692,16 @@ pub struct PublishedMemoCandidate {
     pub self_root_canonicals: Arc<[Arc<str>]>,
     pub validated_at_generation: u64,
     pub admission_seq: u64,
+    /// The receipt of the build that published the candidate: an SCC
+    /// component's members share it.
+    pub cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+}
+
+/// A stored result and the receipt its consumer must replay to use it.
+#[derive(Debug, Clone)]
+pub struct Served<T> {
+    pub read: T,
+    pub receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
 }
 
 /// Non-identity runtime evidence retained with a store-local node handle.
@@ -1452,6 +1468,7 @@ impl SemanticGraphStore {
     /// in the family memo) — no separate relation gate exists.
     pub fn invalidate_all(&self) -> usize {
         let _ = self.signatures.replace_epoch();
+        self.clear_refusal_summaries();
         let removed: usize = {
             let mut entries = self.entries_lock_diagnosed();
             let count = entries.values().map(FamilySlots::populated_count).sum();
@@ -1812,15 +1829,28 @@ impl SemanticGraphStore {
         &self,
         key: &SemanticQueryKey,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+    ) -> Option<Served<CacheRead<QueryResult<SemanticNodeId>>>> {
         let (family, slot) = family_and_slot(key);
         // Same formula as `requested_point_for_key`, reusing the
         // `family_and_slot` projection above instead of re-running it.
         let requested = crate::semantic_query::demand::MaterializedPoint::new(
             family::point_for_slot(slot, &requested_path_for_key(key)),
         );
-        self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, true)
-            .map(narrow_cache_read)
+        let mut receipt = None;
+        let read = self.get_validated_value_impl(
+            &family,
+            slot,
+            &requested,
+            ctx,
+            None,
+            None,
+            &mut receipt,
+            true,
+        )?;
+        Some(Served {
+            read: narrow_cache_read(read),
+            receipt: receipt.expect("a served candidate carries its receipt"),
+        })
     }
 
     /// Prepared-token variant of [`Self::get_validated`] — reads the
@@ -1834,7 +1864,11 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
-        let (operand_evidence, deferred_carrier) = capture.parts();
+        let producer::CaptureParts {
+            evidence: operand_evidence,
+            carrier: deferred_carrier,
+            receipt,
+        } = capture.parts();
         self.get_validated_value_impl(
             prepared.family(),
             prepared.slot(),
@@ -1842,6 +1876,7 @@ impl SemanticGraphStore {
             ctx,
             operand_evidence,
             deferred_carrier,
+            receipt,
             true,
         )
     }
@@ -1869,6 +1904,9 @@ impl SemanticGraphStore {
         >,
         deferred_carrier: Option<
             &mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+        >,
+        receipt: &mut Option<
+            Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         >,
         record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
@@ -1915,6 +1953,7 @@ impl SemanticGraphStore {
                 Some(slot) => *slot = Some(entry.read_set_signature.clone()),
                 None => entry.read_set_signature.bubble(ctx),
             }
+            *receipt = Some(Arc::clone(&entry.cost_receipt));
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
                 value: entry.result,
@@ -2005,7 +2044,11 @@ impl SemanticGraphStore {
         prepared: &PreparedKeyHandle,
         capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
-        let (operand_evidence, deferred_carrier) = capture.parts();
+        let producer::CaptureParts {
+            evidence: operand_evidence,
+            carrier: deferred_carrier,
+            receipt,
+        } = capture.parts();
         let key = prepared.key();
         let family = prepared.family();
         let slot = prepared.slot();
@@ -2061,6 +2104,7 @@ impl SemanticGraphStore {
             Some(slot) => *slot = Some(entry.read_set_signature.clone()),
             None => entry.read_set_signature.bubble_via_tls(),
         }
+        *receipt = Some(Arc::clone(&entry.cost_receipt));
         let hit = CacheRead {
             value: entry.result,
             dep_signature: Arc::clone(&entry.dispatch_dep_signature),
@@ -2136,6 +2180,7 @@ impl SemanticGraphStore {
             state.completed = None;
             state.dep_signature = None;
             state.graph_carrier = None;
+            state.cost_receipt = None;
             state.walker_diagnostics = None;
             state.cache_suppress = true;
             state.result_is_partial = true;
@@ -2216,6 +2261,7 @@ impl SemanticGraphStore {
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         satisfied_projection: &MaterializedSet,
+        cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         inflight: &Arc<FlightCell>,
     ) -> WarmPublishOutcome {
         let publishable = matches!(result, QueryResult::Value(_));
@@ -2263,6 +2309,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            cost_receipt: Arc::clone(cost_receipt),
         };
         // Aggregate retention admission, BEFORE the per-family cap plan:
         // a refusal must not displace a resident candidate to make room
@@ -2382,6 +2429,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(self_root_canonicals),
             validated_at_generation,
             admission_seq,
+            cost_receipt: Arc::clone(cost_receipt),
         };
         drop(entries);
         // Published cleanly under a non-aborted in-flight entry — the
@@ -2439,6 +2487,7 @@ impl SemanticGraphStore {
         dispatch_dep_signature: DepSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         satisfied_projection: MaterializedSet,
+        cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         parent_inflight: &Arc<FlightCell>,
         admission_already_linearized: bool,
     ) -> bool {
@@ -2507,6 +2556,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            cost_receipt,
         };
         // A narrower sibling slot is a fresh candidate with its own
         // carriers, so it is charged like any other publish. Under

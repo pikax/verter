@@ -1649,6 +1649,7 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
         assert_eq!(exact_root.validated_at_generation, root_generation);
         let warmed = graph
             .get_relation_payload(&warm_host, &root_key)
+            .map(|served| served.read)
             .expect("the sibling must validate in the warm reader's generation");
         assert_eq!(warmed.outcome, RelationOutcome::NotAssignable);
         barrier.wait();
@@ -14974,7 +14975,10 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
         "the raced cold result still returns to its owning request"
     );
     assert!(
-        graph.get_relation_payload(&host, &key).is_none(),
+        graph
+            .get_relation_payload(&host, &key)
+            .map(|served| served.read)
+            .is_none(),
         "an aborted cold binding owner must not resurrect a warm relation entry"
     );
 }

@@ -39,7 +39,7 @@ impl SemanticGraphStore {
         keys.iter()
             .map(|key| {
                 if let Some(hit) = self.get_validated(key, ctx) {
-                    match hit.value {
+                    match hit.read.value {
                         QueryResult::Value(node) | QueryResult::Recursive(node) => Ok(node),
                         QueryResult::Error(_) => Err(BatchExpandError::EvictedNode),
                     }
@@ -283,6 +283,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            cost_receipt: super::scc_publish::fixture_receipt(&family),
         };
         let cap = family.candidate_cap();
         let eviction = match view {
@@ -401,6 +402,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
             validated_at_generation: entry.validated_at_generation,
             admission_seq: entry.admission_seq,
+            cost_receipt: Arc::clone(&entry.cost_receipt),
         })
     }
 
@@ -513,6 +515,7 @@ impl SemanticGraphStore {
             dispatch_dep_signature,
             self_root_canonicals,
             satisfied_projection,
+            &super::scc_publish::fixture_receipt(prepared.family()),
             inflight,
         )
     }
@@ -532,6 +535,7 @@ impl SemanticGraphStore {
         parent_inflight: &Arc<FlightCell>,
         admission_already_linearized: bool,
     ) -> bool {
+        let cost_receipt = super::scc_publish::fixture_receipt(&family_and_slot(&key).0);
         self.warm_publish_one_if_absent(
             ctx,
             crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx),
@@ -541,6 +545,7 @@ impl SemanticGraphStore {
             dispatch_dep_signature,
             self_root_canonicals,
             satisfied_projection,
+            cost_receipt,
             parent_inflight,
             admission_already_linearized,
         )

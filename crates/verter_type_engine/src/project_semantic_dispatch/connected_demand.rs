@@ -28,7 +28,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use super::cost_receipt::{
-    CostDependency, CostIdentity, CostScope, DemandCostReceipt, LogicalUsage, ReplayRefusal,
+    BudgetProfile, BudgetProfileSpec, CostDependency, CostIdentity, CostScope, DemandCostReceipt,
+    LogicalUsage, ReplayRefusal, COST_MODEL_REVISION,
 };
 
 use crate::semantic_query::PartialReasonSet;
@@ -566,21 +567,50 @@ impl<'a> ConnectedDemandLedger<'a> {
 }
 
 /// The cost-receipt operations: recording each cold computation's
-/// exclusive cost and admitting warm results by replaying their receipts.
-/// The memo and continuation carriers consume them; until those carriers
-/// are threaded, only the substrate's own tests do.
-#[cfg_attr(not(test), allow(dead_code))]
+/// exclusive cost and admitting stored results by replaying their receipts.
 impl ConnectedDemandLedger<'_> {
     /// Open the recording of a cold computation of `identity`: until it is
     /// sealed or abandoned, every charge the demand takes is its exclusive
     /// cost, except the charges of computations opened above it.
     pub fn open_cost_scope(&self, identity: CostIdentity) {
-        self.scopes.borrow_mut().push(CostScope {
+        self.resume_cost_scope(CostScope {
             identity,
             exclusive: LogicalUsage::default(),
             prerequisites: Vec::new(),
         });
-        self.scope_open.set(true);
+    }
+
+    /// Refresh the mirror of "a recording is open".
+    fn sync_top(&self, scopes: &[CostScope]) {
+        self.scope_open.set(!scopes.is_empty());
+    }
+
+    /// Take the open computation's recording off the stack without ending
+    /// it: a suspended frame keeps its recording between its steps, so a
+    /// sibling's charges never accrue to it. `None` when none is open.
+    pub(crate) fn suspend_cost_scope(&self) -> Option<CostScope> {
+        let mut scopes = self.scopes.borrow_mut();
+        let scope = scopes.pop();
+        self.sync_top(&scopes);
+        scope
+    }
+
+    /// Put a suspended recording back on top: its frame runs again.
+    pub(crate) fn resume_cost_scope(&self, scope: CostScope) {
+        let mut scopes = self.scopes.borrow_mut();
+        scopes.push(scope);
+        self.sync_top(&scopes);
+    }
+
+    /// Record one request operation spent by the computation on top: the
+    /// per-request projection fuse admitted one more operator build.
+    pub(crate) fn accrue_operation(&self) {
+        if !self.scope_open.get() {
+            return;
+        }
+        if let Some(scope) = self.scopes.borrow_mut().last_mut() {
+            scope.exclusive.operations = scope.exclusive.operations.saturating_add(1);
+        }
     }
 
     /// Record that the open computation consumed the result `receipt`
@@ -588,6 +618,9 @@ impl ConnectedDemandLedger<'_> {
     /// in place). Recorded however the result arrived — computed, served
     /// or already paid — so the receipt being built owes it in full.
     pub fn record_prerequisite(&self, receipt: &Arc<DemandCostReceipt>, nesting: u16) {
+        if !self.scope_open.get() {
+            return;
+        }
         if let Some(scope) = self.scopes.borrow_mut().last_mut() {
             scope.prerequisites.push(CostDependency {
                 receipt: Arc::clone(receipt),
@@ -597,26 +630,42 @@ impl ConnectedDemandLedger<'_> {
     }
 
     /// Seal the open computation's recording: its receipt, now paid for
-    /// this demand together with its closure, which it consumed paid.
-    /// `None` when no computation is recording.
-    pub fn seal_cost_scope(&self) -> Option<Arc<DemandCostReceipt>> {
-        let scope = {
-            let mut scopes = self.scopes.borrow_mut();
-            let scope = scopes.pop()?;
-            self.scope_open.set(!scopes.is_empty());
-            scope
-        };
-        let receipt = DemandCostReceipt::new(scope.identity, scope.exclusive, scope.prerequisites);
-        self.paid.borrow_mut().insert(receipt.identity().clone());
-        Some(receipt)
+    /// this demand (and its request operations for `request`) together
+    /// with its closure, which it consumed paid. `None` when no computation
+    /// is recording.
+    pub fn seal_cost_scope(
+        &self,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> Option<Arc<DemandCostReceipt>> {
+        let scope = self.suspend_cost_scope()?;
+        self.paid.borrow_mut().insert(scope.identity.clone());
+        if let Some(request) = request {
+            request.mark_operations_paid(std::iter::once(scope.identity.clone()));
+        }
+        Some(DemandCostReceipt::new(
+            scope.identity,
+            scope.exclusive,
+            scope.prerequisites,
+        ))
     }
 
     /// Drop the open computation's recording without a receipt: it did not
-    /// complete, so nothing it charged may be served warm as paid.
+    /// complete, so nothing about it may be served warm as paid. What it
+    /// charged stays spent, and is its consumer's own cost: the consumer
+    /// paid for a computation it then had to do without.
     pub fn abandon_cost_scope(&self) {
-        let mut scopes = self.scopes.borrow_mut();
-        scopes.pop();
-        self.scope_open.set(!scopes.is_empty());
+        if let Some(scope) = self.suspend_cost_scope() {
+            self.fold_into_consumer(scope);
+        }
+    }
+
+    /// Fold an ended recording into the recording below it, if any: the
+    /// usage it charged, and the prerequisites it consumed.
+    fn fold_into_consumer(&self, scope: CostScope) {
+        if let Some(consumer) = self.scopes.borrow_mut().last_mut() {
+            consumer.exclusive = consumer.exclusive.saturating_add(scope.exclusive);
+            consumer.prerequisites.extend(scope.prerequisites);
+        }
     }
 
     /// Whether this demand has paid `identity`'s receipt and its closure.
@@ -624,16 +673,40 @@ impl ConnectedDemandLedger<'_> {
         self.paid.borrow().contains(identity)
     }
 
+    /// The allowances this ledger answers to under `request`'s operation
+    /// allowance, as one interned profile.
+    pub(crate) fn profile(
+        &self,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> BudgetProfile {
+        BudgetProfile::intern(BudgetProfileSpec {
+            work: self.work_limit.get(),
+            bytes: self.bytes_limit.get(),
+            query_depth: self.query_depth_limit.get(),
+            instantiation_depth: self.instantiation_depth_limit,
+            tail_steps: self.tail_steps_limit,
+            request_operations: request
+                .map_or(0, |request| request.effective_projection_op_budget()),
+            relation_comparisons: crate::semantic_query::checker_policy::relation_comparisons(),
+            cost_model_revision: COST_MODEL_REVISION,
+        })
+    }
+
     /// Admit serving the result `receipt` costs without computing it:
     /// charge, in one admission, the exclusive usage of every computation
-    /// in its closure this demand has not paid, and mark them paid. The
+    /// in its closure this demand has not paid (and the request operations
+    /// of every one `request` has not paid), and mark them paid. The
     /// receipt's nesting is checked against the remaining query depth even
     /// when it is paid. A refusal charges and marks nothing, and leaves the
     /// stored result untouched: this caller receives plain resource
     /// incompleteness, never a checker diagnostic, and another demand with
     /// room may still serve it. Replayed charges belong to no open recording
     /// — the consumer records the receipt as a prerequisite instead.
-    pub fn replay_admit(&self, receipt: &Arc<DemandCostReceipt>) -> Result<(), ReplayRefusal> {
+    pub fn replay_admit(
+        &self,
+        receipt: &Arc<DemandCostReceipt>,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> Result<(), ReplayRefusal> {
         let tripped = self.tripped.get();
         if !tripped.is_empty() || self.cancellation.is_cancelled() {
             return Err(ReplayRefusal::Tripped);
@@ -643,21 +716,40 @@ impl ConnectedDemandLedger<'_> {
         {
             return Err(ReplayRefusal::Depth);
         }
-        let (unpaid, total) = {
+        let operations_paid = request.map(|request| request.operations_paid());
+        let (unpaid, unpaid_operations, total) = {
             let paid = self.paid.borrow();
             let mut unpaid: Vec<&CostIdentity> = Vec::new();
+            let mut unpaid_operations: Vec<&CostIdentity> = Vec::new();
             let mut seen: FxHashSet<&CostIdentity> = FxHashSet::default();
             let mut total = LogicalUsage::default();
             let mut stack: Vec<&Arc<DemandCostReceipt>> = vec![receipt];
             while let Some(next) = stack.pop() {
                 let identity = next.identity();
-                if paid.contains(identity) || !seen.insert(identity) {
+                let demand_paid = paid.contains(identity);
+                let request_paid = operations_paid
+                    .as_ref()
+                    .is_none_or(|operations| operations.contains(identity));
+                if (demand_paid && request_paid) || !seen.insert(identity) {
                     continue;
                 }
-                total = total
-                    .checked_add(next.exclusive())
-                    .ok_or(ReplayRefusal::Work)?;
-                unpaid.push(identity);
+                let exclusive = next.exclusive();
+                let owed = LogicalUsage {
+                    work: if demand_paid { 0 } else { exclusive.work },
+                    bytes: if demand_paid { 0 } else { exclusive.bytes },
+                    operations: if request_paid {
+                        0
+                    } else {
+                        exclusive.operations
+                    },
+                };
+                total = total.checked_add(owed).ok_or(ReplayRefusal::Work)?;
+                if !demand_paid {
+                    unpaid.push(identity);
+                }
+                if !request_paid {
+                    unpaid_operations.push(identity);
+                }
                 stack.extend(
                     next.prerequisites()
                         .iter()
@@ -665,8 +757,11 @@ impl ConnectedDemandLedger<'_> {
                         .map(|dependency| &dependency.receipt),
                 );
             }
-            let unpaid: Vec<CostIdentity> = unpaid.into_iter().cloned().collect();
-            (unpaid, total)
+            (
+                unpaid.into_iter().cloned().collect::<Vec<_>>(),
+                unpaid_operations.into_iter().cloned().collect::<Vec<_>>(),
+                total,
+            )
         };
         let work_room = self.work_limit.get().saturating_sub(self.work_used.get()) as u64;
         if total.work > work_room {
@@ -676,12 +771,92 @@ impl ConnectedDemandLedger<'_> {
         if total.bytes > byte_room {
             return Err(ReplayRefusal::Bytes);
         }
+        if let (Some(request), Some(operations_paid)) = (request, operations_paid) {
+            if !request.admit_replayed_operations(
+                total.operations,
+                operations_paid,
+                unpaid_operations,
+            ) {
+                return Err(ReplayRefusal::Operations);
+            }
+        }
         self.work_used
             .set(self.work_used.get() + total.work as usize);
         self.bytes_used
             .set(self.bytes_used.get() + total.bytes as usize);
         self.paid.borrow_mut().extend(unpaid);
         Ok(())
+    }
+}
+
+/// The recording of one cold computation, open until its build ends. A
+/// recording dropped without [`Self::finish`] — a panic, an early return —
+/// is abandoned, so its charges stay its consumer's.
+pub(crate) struct CostRecording<'l, 'a> {
+    ledger: &'l ConnectedDemandLedger<'a>,
+    open: bool,
+}
+
+impl ConnectedDemandLedger<'_> {
+    /// Open the recording of a cold computation of `identity`.
+    pub(crate) fn record_cost(&self, identity: CostIdentity) -> CostRecording<'_, '_> {
+        self.open_cost_scope(identity);
+        CostRecording {
+            ledger: self,
+            open: true,
+        }
+    }
+
+    /// Whether a connected demand is active.
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.get()
+    }
+
+    /// The work units and construction bytes the active demand charged.
+    pub(crate) fn charged(&self) -> (usize, usize) {
+        (self.work_used.get(), self.bytes_used.get())
+    }
+
+    /// Leave the active demand as a sealed refusal's evaluation left it:
+    /// its work and bytes charged and `trip` tripped.
+    pub(crate) fn apply_refusal(&self, work: usize, bytes: usize, trip: PartialReasonSet) {
+        self.work_used
+            .set(self.work_used.get().saturating_add(work));
+        self.bytes_used
+            .set(self.bytes_used.get().saturating_add(bytes));
+        self.record_trip(trip);
+    }
+
+    /// Whether no computation is recording.
+    pub(crate) fn is_unrecorded(&self) -> bool {
+        !self.scope_open.get()
+    }
+}
+
+impl CostRecording<'_, '_> {
+    /// End the recording: a complete computation seals its receipt (paid
+    /// for this demand, its operations for `request`); an incomplete one is
+    /// abandoned and leaves none.
+    pub(crate) fn finish(
+        mut self,
+        complete: bool,
+        request: Option<&crate::request_budget::RequestBudget>,
+    ) -> Option<Arc<DemandCostReceipt>> {
+        self.open = false;
+        if complete {
+            self.ledger.seal_cost_scope(request)
+        } else {
+            self.ledger.abandon_cost_scope();
+            None
+        }
+    }
+}
+
+impl Drop for CostRecording<'_, '_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.ledger.abandon_cost_scope();
+        }
     }
 }
 

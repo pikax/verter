@@ -15,6 +15,12 @@
 //!
 //! Every other query, and every query a frame's step evaluates in place,
 //! keeps the synchronous path; code a step reaches never drives.
+//!
+//! A frame's cost recording opens at its first step and stays open until
+//! it completes: the drive runs one chain, so the recordings nest exactly
+//! as the frames do, and the charges a needed demand's entry takes between
+//! two steps accrue to the frame that needed it, as they do on the native
+//! stack.
 
 use std::sync::Arc;
 
@@ -42,6 +48,8 @@ type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 pub(super) struct QueryDelivery {
     read: ValueRead,
     carrier: Option<ReadSetSignature>,
+    /// The answering result's cost receipt, for the consumer's recording.
+    receipt: Option<Arc<super::cost_receipt::DemandCostReceipt>>,
 }
 
 /// The program instantiations run on: the dispatch they evaluate through
@@ -79,6 +87,8 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     /// How deep this instantiation nests in the drive's chain: the root's
     /// is 1.
     depth: u32,
+    /// Whether this frame's cost recording is open on the ledger.
+    recording: bool,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> Drop for InstantiateFrame<'_, '_, C> {
@@ -87,6 +97,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> Drop for InstantiateFrame<'_
         // entered; its lease aborts its flight on drop.
         if let Some((identity, args)) = self.active.take() {
             self.dispatch.leave_instantiate_active(&identity, &args);
+        }
+        // A frame stopped before it completed leaves no receipt; what it
+        // charged is its consumer's.
+        if self.recording {
+            self.dispatch.connected_demand.abandon_cost_scope();
         }
     }
 }
@@ -112,22 +127,40 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             Some(attempt) => attempt,
             None => match dispatch.enter_query_frame(key) {
                 Ok(attempt) => attempt,
-                Err(delivery) => return Start::Answer(Ok(delivery)),
+                Err(delivery) => return Start::Answer(Ok(*delivery)),
             },
         };
-        let mut carrier = None;
-        let claim = {
-            let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            dispatch.graph().claim_query(
-                dispatch.ctx,
-                dispatch.snapshot.flags(),
-                &mut attempt,
-                &self.task,
-                &mut capture,
-            )
+        let (claim, carrier, receipt) = loop {
+            let mut carrier = None;
+            let (claim, receipt) = {
+                let mut capture = ReadCapture::deferring_carrier(&mut carrier);
+                let claim = dispatch.graph().claim_query(
+                    dispatch.ctx,
+                    dispatch.snapshot.flags(),
+                    &mut attempt,
+                    &self.task,
+                    &mut capture,
+                );
+                (claim, capture.take_receipt())
+            };
+            // A warm result this demand cannot pay for is computed instead.
+            if let (Claim::Read(_), Some(receipt)) = (&claim, &receipt) {
+                if !attempt.is_recomputing()
+                    && matches!(
+                        dispatch.admit_served(receipt, 0),
+                        super::ServedAdmission::Recompute(_)
+                    )
+                {
+                    attempt.recompute();
+                    continue;
+                }
+                // Admitted (or tripped): `answered` records it once more,
+                // which charges nothing further.
+            }
+            break (claim, carrier, receipt);
         };
         match claim {
-            Claim::Read(read) => Start::Answer(Ok(dispatch.answered(key, read, carrier))),
+            Claim::Read(read) => Start::Answer(Ok(dispatch.answered(key, read, carrier, receipt))),
             Claim::Recursive(recursion) => {
                 Start::Answer(Ok(dispatch.recursion_delivery(key, recursion)))
             }
@@ -137,6 +170,20 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 attempt,
             }),
             Claim::Produce(lease) => {
+                if let Some((read, carrier)) = dispatch.own_published_read(key, 0) {
+                    // Dropping the lease releases the flight unpublished.
+                    drop(lease);
+                    return Start::Answer(Ok(QueryDelivery {
+                        read: dispatch.attribute_query_read(
+                            key,
+                            false,
+                            read,
+                            &CarrierNormalizationPrelude::none(),
+                        ),
+                        carrier: Some(carrier),
+                        receipt: None,
+                    }));
+                }
                 Start::Produce(QueryFrame::Instantiate(Box::new(InstantiateFrame {
                     dispatch,
                     key: key.clone(),
@@ -146,6 +193,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                     build: None,
                     active: None,
                     depth: self.child_depth,
+                    recording: false,
                 })))
             }
         }
@@ -174,7 +222,10 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             key.clone(),
             &mut capture,
         ) {
-            Err(read) => return Ok(dispatch.answered(key, read, carrier)),
+            Err(read) => {
+                let receipt = capture.take_receipt();
+                return Ok(dispatch.answered(key, read, carrier, receipt));
+            }
             Ok(mut attempt) => graph.claim_query(
                 dispatch.ctx,
                 dispatch.snapshot.flags(),
@@ -183,8 +234,9 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 &mut capture,
             ),
         };
+        let receipt = capture.take_receipt();
         Ok(match claim {
-            Claim::Read(read) => dispatch.answered(key, read, carrier),
+            Claim::Read(read) => dispatch.answered(key, read, carrier, receipt),
             Claim::Recursive(recursion) => dispatch.recursion_delivery(key, recursion),
             Claim::Subscribed(_) | Claim::Produce(_) => {
                 dispatch.recursion_delivery(key, Recursion::SamePath)
@@ -207,17 +259,33 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             mut attempt,
         } = pending;
         let mut carrier = None;
-        let joined = {
+        let (joined, receipt) = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            subscription.wait(
+            let joined = subscription.wait(
                 dispatch.ctx,
                 dispatch.snapshot.flags(),
                 &mut attempt,
                 &mut capture,
-            )
+            );
+            (joined, capture.take_receipt())
         };
+        // A joined result this demand cannot pay for is computed instead.
+        if let (Joined::Read(_), Some(receipt)) = (&joined, &receipt) {
+            if !attempt.is_recomputing()
+                && matches!(
+                    dispatch.admit_served(receipt, 0),
+                    super::ServedAdmission::Recompute(_)
+                )
+            {
+                attempt.recompute();
+                self.retries.insert(key, attempt);
+                return External::Restart;
+            }
+        }
         match joined {
-            Joined::Read(read) => External::Complete(Ok(dispatch.answered(&key, read, carrier))),
+            Joined::Read(read) => {
+                External::Complete(Ok(dispatch.answered(&key, read, carrier, receipt)))
+            }
             Joined::Recursive(recursion) => {
                 External::Complete(Ok(dispatch.recursion_delivery(&key, recursion)))
             }
@@ -248,11 +316,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The connected demand spans the whole drive; the entry itself is
         // charged exactly as a synchronous entry is.
         let (connected_guard, _) = self.enter_connected_demand(false);
+        // An isolated root whose refusal is sealed answers from it.
+        let isolated_root = self.isolated_root_identity(&connected_guard, &key);
+        if let Some(summary) = isolated_root
+            .as_ref()
+            .and_then(|root| self.sealed_refusal_for(root))
+        {
+            return self.deliver_sealed_refusal(&summary);
+        }
         // The drive runs on this native stack: its entry is one nested
         // query level, as a synchronous entry is.
         let (attempt, _query_depth_guard) = match self.enter_query(&key, None, true) {
             Ok(entered) => entered,
-            Err(read) => return self.finish_driven_read(&key, read, None, &connected_guard),
+            Err(read) => return self.finish_driven_read(&key, read, None, &connected_guard, None),
         };
         // A claim needs the entry's task; a warm read took none.
         let execution = self.graph().enter_execution();
@@ -266,14 +342,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let outcome = SemanticExecution::new().drive(&mut program, key.clone());
         drop(program);
         match outcome {
-            Ok(QueryDelivery { read, carrier }) => {
-                self.finish_driven_read(&key, read, carrier, &connected_guard)
+            Ok(QueryDelivery {
+                read,
+                carrier,
+                receipt,
+            }) => {
+                if let Some(receipt) = &receipt {
+                    self.connected_demand.record_prerequisite(receipt, 1);
+                }
+                let traced = self.driven_root_traced.borrow_mut().take();
+                self.finish_driven_read(
+                    &key,
+                    read,
+                    carrier,
+                    &connected_guard,
+                    isolated_root.zip(traced),
+                )
             }
             Err(()) => self.finish_driven_read(
                 &key,
                 crate::semantic_query_memo::cancelled_cache_read(),
                 None,
                 &connected_guard,
+                None,
             ),
         }
     }
@@ -287,6 +378,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut read: ValueRead,
         carrier: Option<ReadSetSignature>,
         connected_guard: &super::connected_demand::ConnectedDemandGuard<'_>,
+        refusal: Option<(super::IsolatedRoot, super::TracedFacts)>,
     ) -> ValueRead {
         if let Some(carrier) = carrier {
             carrier.bubble_via_tls();
@@ -295,6 +387,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(reasons) = self.connected_demand_trip() {
                 self.append_connected_limit_diagnostics(key, reasons, &mut read);
             }
+        }
+        if let Some((identity, traced)) = refusal {
+            self.seal_root_refusal(identity, &read, traced);
         }
         self.fold_cache_read_rails(
             read.result_is_partial,
@@ -306,7 +401,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// A need's entry: the dispatch it replaces is counted, charged and
     /// looked up exactly as a synchronous entry would be. `Err` answers it.
-    fn enter_query_frame(&self, key: &SemanticQueryKey) -> Result<ClaimAttempt, QueryDelivery> {
+    fn enter_query_frame(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Result<ClaimAttempt, Box<QueryDelivery>> {
         self.record_dispatch_intent_counters(key);
         #[cfg(any(test, feature = "test-support"))]
         super::raise::DISPATCH_TRACE.with(|t| {
@@ -319,9 +417,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The runtime holds this entry on the heap: it enters no nested
         // native query level.
         let entered = self.enter_query(key, Some(&mut carrier), false);
-        entered
-            .map(|(attempt, _)| attempt)
-            .map_err(|read| QueryDelivery { read, carrier })
+        entered.map(|(attempt, _)| attempt).map_err(|read| {
+            Box::new(QueryDelivery {
+                read,
+                carrier,
+                receipt: None,
+            })
+        })
     }
 
     /// Count, charge and look up one query entry, exactly as the
@@ -350,25 +452,51 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(slot) => ReadCapture::deferring_carrier(slot),
             None => ReadCapture::default(),
         };
-        let attempt = self
-            .graph()
-            .begin_query_claim(self.ctx, self.snapshot.flags(), key.clone(), &mut capture)
-            .map_err(|read| {
-                self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none())
-            })?;
+        let attempt = match self.graph().begin_query_claim(
+            self.ctx,
+            self.snapshot.flags(),
+            key.clone(),
+            &mut capture,
+        ) {
+            Ok(attempt) => attempt,
+            Err(read) => {
+                match self.served_read(key, read, capture.take_receipt(), u16::from(charge_depth)) {
+                    Ok(read) => {
+                        return Err(self.attribute_query_read(
+                            key,
+                            false,
+                            read,
+                            &CarrierNormalizationPrelude::none(),
+                        ))
+                    }
+                    // A warm result this demand cannot pay for is computed.
+                    Err(_) => self
+                        .graph()
+                        .begin_query_recompute(self.snapshot.flags(), key.clone())?,
+                }
+            }
+        };
         Ok((attempt, query_depth_guard))
     }
 
-    /// A result another producer, or the memo, answered with.
+    /// A result another producer, or the memo, answered with: admitted by
+    /// replaying its receipt into the needing frame's demand. A result the
+    /// demand cannot pay for even after computing it is the demand's trip.
     fn answered(
         &self,
         key: &SemanticQueryKey,
         read: ValueRead,
         carrier: Option<ReadSetSignature>,
+        receipt: Option<Arc<super::cost_receipt::DemandCostReceipt>>,
     ) -> QueryDelivery {
+        let read = match self.served_read(key, read, receipt.clone(), 0) {
+            Ok(read) => read,
+            Err(refusal) => self.refused_replay_read(key, refusal),
+        };
         QueryDelivery {
             read: self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none()),
             carrier,
+            receipt,
         }
     }
 
@@ -378,6 +506,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         QueryDelivery {
             read: self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none()),
             carrier: None,
+            receipt: None,
         }
     }
 
@@ -401,9 +530,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// taint, and read the instantiated node as a synchronous
     /// instantiation's reader does.
     fn consume_delivery(&self, delivery: QueryDelivery) -> SemanticNodeId {
-        let QueryDelivery { read, carrier } = delivery;
+        let QueryDelivery {
+            read,
+            carrier,
+            receipt,
+        } = delivery;
         if let Some(carrier) = carrier {
             carrier.bubble_via_tls();
+        }
+        if let Some(receipt) = &receipt {
+            self.connected_demand.record_prerequisite(receipt, 0);
         }
         self.fold_cache_read_rails(
             read.result_is_partial,
@@ -427,6 +563,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     where
         'a: 'p,
     {
+        if !frame.recording {
+            let identity = frame
+                .lease
+                .as_ref()
+                .expect("a stepping frame owns its lease")
+                .cost_identity();
+            self.connected_demand.open_cost_scope(identity);
+            frame.recording = true;
+        }
         let tracer = frame.tracer.get_or_insert_with(|| {
             crate::fact_signature_helpers::StepwiseFactTracer::new(
                 crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(frame.dispatch.ctx),
@@ -520,6 +665,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .take()
             .expect("a stepped frame owns its tracer")
             .finish();
+        let traced_soundly = matches!(
+            finalise,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_)
+        );
         let output = self.close_cold_build(
             output.into(),
             std::mem::take(&mut frame.taint),
@@ -532,15 +681,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .lease
             .take()
             .expect("a producing frame owns its lease");
+        if frame.depth == 1 {
+            // The drive's root: its entry seals a refusal on these facts.
+            *self.driven_root_traced.borrow_mut() =
+                super::TracedFacts::of_output(&output, traced_soundly);
+        }
+        let request = crate::request_context::current_request_budget();
+        let receipt = if std::mem::take(&mut frame.recording) {
+            if output.completeness.is_partial() {
+                self.connected_demand.abandon_cost_scope();
+                None
+            } else {
+                self.connected_demand.seal_cost_scope(request.as_deref())
+            }
+        } else {
+            None
+        };
         let mut carrier = None;
         let read = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            match lease.settle(self.ctx, self.snapshot.flags(), output) {
+            match lease.settle(self.ctx, self.snapshot.flags(), output, receipt.clone()) {
                 Err(read) => read,
                 Ok(mut settled) => {
                     match settled.admit(self.ctx, self.snapshot.flags(), &mut capture) {
                         Err(read) => read,
-                        Ok(()) => settled.complete(self.ctx, &mut capture),
+                        Ok(()) => {
+                            let published = settled.published_carrier();
+                            let read = settled.complete(self.ctx, &mut capture);
+                            if let (Some(carrier), Some(receipt)) = (published, &receipt) {
+                                self.keep_published(&frame.key, &read, carrier, receipt);
+                            }
+                            read
+                        }
                     }
                 }
             }
@@ -553,6 +725,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &CarrierNormalizationPrelude::none(),
             ),
             carrier,
+            receipt,
         }
     }
 }
