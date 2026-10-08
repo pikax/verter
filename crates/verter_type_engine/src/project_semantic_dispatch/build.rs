@@ -7881,12 +7881,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if prepared.kind != verter_session_query::declarations::TypeDeclKind::Class {
             return None;
         }
-        // A class another module augments (`declare module "./c" {
-        // interface C { … } }`) declares members its own body does not: only
-        // the whole declaration, which merges the augmentations, answers.
-        if self.class_takes_module_augmentation(canonical, class) {
-            return None;
-        }
         let body_slot = prepared.body_facts.body_slot.clone();
         let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
         let members_step = verter_type_expr::locators::TypeBodyPathStep::ClassMembersNamed {
@@ -8011,6 +8005,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
                 scope,
             ));
+        }
+        // A class another module augments (`declare module "./c" {
+        // interface C { … } }`) declares members its own body does not, so a read its own body
+        // does not answer and that is about to follow `extends` decides it: only
+        // the whole declaration, which merges the augmentations, answers.
+        if self.class_takes_module_augmentation(canonical, class) {
+            return None;
         }
         // An inherited member reads off the base the class extends: its
         // `extends` arm lowers to a lazy reference, which binds no `this`, so
