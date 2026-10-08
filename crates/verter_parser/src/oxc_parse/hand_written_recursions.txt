@@ -153,7 +153,6 @@ verter_semantic/src/analysis/flow/value_descent.rs sequence_value_takes_call_rai
 verter_semantic/src/analysis/flow/value_descent.rs value_composes_unmodeled_call
 verter_semantic/src/analysis/flow/value_descent.rs value_is_unmodeled_call
 verter_semantic/src/analysis/framework_facts/svelte.rs collect_props_local_bindings
-verter_semantic/src/analysis/function_program.rs discover_namespaced_statement
 verter_semantic/src/analysis/function_program.rs record_pattern
 verter_semantic/src/analysis/function_program.rs visit_expression
 verter_semantic/src/analysis/function_program_access.rs collect_default_target

@@ -85,7 +85,7 @@ fn carrier_manifest_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absenc
     let corrupt_root = unique_server_ws_root("oracle_corrupt");
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
     std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
-    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+    std::fs::write(store.head_path(), b"{ this manifest is truncated")
         .expect("write a corrupt manifest");
 
     // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.

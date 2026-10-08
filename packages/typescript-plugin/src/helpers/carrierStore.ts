@@ -11,31 +11,45 @@ import {
 } from "@verter/language-shared";
 import type { CarrierImportCompletionSnapshot } from "./pathCompletion";
 
+import {
+  CARRIER_STORE_HEAD_FILE,
+  carrierJournalFile,
+  carrierSnapshotFile,
+  decodeCarrierJournalLine,
+  parseCarrierStoreHead,
+  type CarrierJournalOp,
+  type CarrierStoreHead,
+} from "./carrierJournal";
+
 /**
  * The NODE ADAPTER of the shared [`CarrierStoreReader`] interface: a
  * synchronous `node:fs` reader over the Rust-published on-disk
- * content-addressed carrier-snapshot store + atomic manifest. The interface
- * (and the manifest value types) live in `@verter/language-shared`; this is
- * the SOLE module in the plugin that touches the store filesystem — every
- * host hook reads carriers through it.
+ * content-addressed carrier-snapshot store and its incremental manifest. The
+ * interface (and the manifest value types) live in `@verter/language-shared`;
+ * this is the SOLE module in the plugin that touches the store filesystem —
+ * every host hook reads carriers through it.
  *
  * The Rust `verter_lsp` is the sole carrier authority — it compiles every
  * framework carrier (`.vue`/`.svelte`) and publishes the result to this store
- * (content-addressed blobs + maps under an atomically-swapped `manifest.json`
- * keyed by a monotonic `epoch`). The plugin runs inside the user's tsserver (a
- * SEPARATE process with NO shared memory), so it reads the store synchronously
- * and never compiles a carrier itself.
+ * (content-addressed blobs + maps, advertised by journal records under a
+ * monotonic `epoch`). The plugin runs inside the user's tsserver (a SEPARATE
+ * process with NO shared memory), so it reads the store synchronously and never
+ * compiles a carrier itself.
  *
  * ## Store layout (mirrors the Rust publish store)
  *
- * The per-workspace store dir holds `blobs/`, `maps/`, and `manifest.json`. The
- * plugin does NOT recompute the dir — the Rust LSP passes the RESOLVED dir in
- * the plugin config (`carrierStoreDir`) with a `VERTER_CARRIER_STORE_DIR`
- * environment fallback. When neither is set the store is UNAVAILABLE: the
- * reader serves nothing for carriers (fail closed) and the host hooks fall
- * through to real disk for everything else.
+ * The per-workspace store dir holds `blobs/`, `maps/`, and the incremental
+ * manifest described in `./carrierJournal`: `head.json` naming a generation,
+ * that generation's compacted base `snapshot-<g>.json`, and its append-only
+ * `journal-<g>.log`. The plugin does NOT recompute the dir — the Rust LSP
+ * passes the RESOLVED dir in the plugin config (`carrierStoreDir`) with a
+ * `VERTER_CARRIER_STORE_DIR` environment fallback. When neither is set the
+ * store is UNAVAILABLE: the reader serves nothing for carriers (fail closed) and
+ * the host hooks fall through to real disk for everything else.
  *
  * ## Manifest schema (the Rust serde shape)
+ *
+ * The base snapshot (and `readManifest()`'s materialized view) is:
  *
  * ```jsonc
  * {
@@ -65,15 +79,17 @@ import type { CarrierImportCompletionSnapshot } from "./pathCompletion";
  * `ManifestScriptKind` serde renames (`CarrierIde`/`CarrierApi`/`Shadow`/`Real`;
  * `TSX`/`TS`/`JSX`/`JS`).
  *
- * ## Read consistency
+ * ## Read consistency and cost
  *
- * The manifest is read once and CACHED, keyed by the manifest file's mtime + size.
- * A re-read only happens when the file changes (a sync `fs.statSync` is the cheap
- * change check on every accessor). A missing or torn manifest is tolerated — every
- * accessor returns `undefined`/empty rather than throwing into a tsserver hook.
- * The Rust two-phase publish guarantees every `ready_files` entry the cached
- * manifest names has its blob present on disk, so a blob read for a ready file
- * never observes a half-written file.
+ * The reader folds the published state ONCE and then follows it: every accessor
+ * reads the small head and, while it names the folded generation, applies only
+ * the journal records appended since the last read (the journal only grows, so
+ * no publication can hide behind an unchanged stat). A compaction changes the
+ * generation and costs one base load. A missing or torn store is tolerated —
+ * every accessor returns `undefined`/empty (or the last good fold) rather than
+ * throwing into a tsserver hook. The Rust two-phase publish guarantees every
+ * `ready_files` entry a committed record names has its blob present on disk, so
+ * a blob read for a ready file never observes a half-written file.
  */
 
 /** The plugin-config / environment keys carrying the resolved store dir. */
@@ -149,10 +165,40 @@ export function resolveResponseRemap(
   return true;
 }
 
-/** The change-detection key for the cached manifest: file mtime + size. */
-interface ManifestStat {
-  mtimeMs: number;
-  size: number;
+/** One project's folded rows plus its canonical-path indexes, all maintained per op. */
+interface FoldedProject {
+  /** Source → its owned rows, in owned order (a re-put source moves to the end). */
+  owned: Map<string, OwnedSource[]>;
+  /** Provider URI → ready entry. */
+  ready: Map<string, ReadyFile>;
+  /** Canonical provider path → ready entry. */
+  readyByCanonical: Map<string, ReadyFile>;
+  /** Canonical source OR provider path → owned rows naming it, in owned order. */
+  ownedByCanonical: Map<string, OwnedSource[]>;
+}
+
+/** A folded generation at a journal byte offset. */
+interface FoldedStore {
+  generation: number;
+  instance: string;
+  /** Bytes of the journal already applied (always a line end). */
+  offset: number;
+  epoch: number;
+  hostVersion: string;
+  projects: Map<string, FoldedProject>;
+}
+
+function emptyProject(): FoldedProject {
+  return {
+    owned: new Map(),
+    ready: new Map(),
+    readyByCanonical: new Map(),
+    ownedByCanonical: new Map(),
+  };
+}
+
+function isNotFound(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "ENOENT";
 }
 
 /**
@@ -173,7 +219,6 @@ interface ManifestStat {
  */
 export class DiskCarrierStoreReader implements CarrierStoreReader {
   private readonly storeDir: string | undefined;
-  private readonly manifestPath: string | undefined;
   /**
    * The normalized project identity this reader is scoped to (the configured
    * project's `getProjectName()` — the manifest `projects` key, forward-slash
@@ -181,16 +226,10 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    */
   private readonly projectKey: string | undefined;
   private readonly useCaseSensitiveFileNames: boolean;
-  private cachedManifest: Manifest | undefined;
-  private cachedStat: ManifestStat | undefined;
-  private readonly readyFilesByCanonicalPath = new WeakMap<
-    ProjectEntry,
-    ReadonlyMap<string, ReadyFile>
-  >();
-  private readonly ownedSourcesByCanonicalPath = new WeakMap<
-    ProjectEntry,
-    ReadonlyMap<string, readonly OwnedSource[]>
-  >();
+  /** The folded published state; `undefined` before anything was published. */
+  private folded: FoldedStore | undefined;
+  /** The materialized `readManifest()` view of `folded`, dropped on any change. */
+  private materialized: Manifest | undefined;
   /**
    * Last-good ready blobs by `provider_uri`. A previously-served ready blob is
    * retained so a transient not-ready window (mid-publish) returns the last-good
@@ -202,7 +241,6 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
 
   constructor(storeDir: string | undefined, projectKey?: string, useCaseSensitiveFileNames = true) {
     this.storeDir = storeDir;
-    this.manifestPath = storeDir === undefined ? undefined : path.join(storeDir, "manifest.json");
     this.projectKey = projectKey === undefined ? undefined : normalizePath(projectKey);
     this.useCaseSensitiveFileNames = useCaseSensitiveFileNames;
   }
@@ -212,117 +250,176 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
     return this.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
   }
 
-  private canonicalReadyFiles(project: ProjectEntry): ReadonlyMap<string, ReadyFile> {
-    const cached = this.readyFilesByCanonicalPath.get(project);
-    if (cached !== undefined) return cached;
-    const indexed = new Map<string, ReadyFile>();
-    for (const [providerUri, ready] of Object.entries(project.ready_files)) {
-      indexed.set(this.canonicalPath(providerUri), ready);
-    }
-    this.readyFilesByCanonicalPath.set(project, indexed);
-    return indexed;
-  }
-
-  private canonicalOwnedSources(
-    project: ProjectEntry,
-  ): ReadonlyMap<string, readonly OwnedSource[]> {
-    const cached = this.ownedSourcesByCanonicalPath.get(project);
-    if (cached !== undefined) return cached;
-    const indexed = new Map<string, OwnedSource[]>();
-    for (const owned of project.owned_sources) {
-      const keys = new Set([
-        this.canonicalPath(owned.source_uri),
-        this.canonicalPath(owned.provider_uri),
-      ]);
-      for (const key of keys) {
-        const entries = indexed.get(key);
-        if (entries === undefined) indexed.set(key, [owned]);
-        else entries.push(owned);
-      }
-    }
-    this.ownedSourcesByCanonicalPath.set(project, indexed);
-    return indexed;
-  }
-
   /** Whether the store dir is configured at all. */
   isAvailable(): boolean {
     return this.storeDir !== undefined;
   }
 
-  /**
-   * The manifest project entries this reader may consult. A PROJECT-SCOPED
-   * reader returns only its own project's entry (matched on the normalized
-   * project URI, with a case-insensitive fallback so a Windows drive-letter or
-   * NTFS/APFS case difference between the Rust-written tsconfig path and
-   * tsserver's `getProjectName()` still resolves — distinct projects on a
-   * case-sensitive FS are disambiguated by the exact-match first pass). An
-   * unscoped reader returns every entry.
-   */
-  private scopedProjectEntries(manifest: Manifest): ProjectEntry[] {
-    if (this.projectKey === undefined) {
-      return Object.values(manifest.projects);
+  // ── folding ──────────────────────────────────────────────────────────────
+
+  private indexOwnedRow(project: FoldedProject, row: OwnedSource): void {
+    const keys = new Set([
+      this.canonicalPath(row.source_uri),
+      this.canonicalPath(row.provider_uri),
+    ]);
+    for (const key of keys) {
+      const rows = project.ownedByCanonical.get(key);
+      if (rows === undefined) project.ownedByCanonical.set(key, [row]);
+      else rows.push(row);
     }
-    const exact = manifest.projects[this.projectKey];
-    if (exact !== undefined) {
-      return [exact];
+  }
+
+  private unindexOwnedRow(project: FoldedProject, row: OwnedSource): void {
+    const keys = new Set([
+      this.canonicalPath(row.source_uri),
+      this.canonicalPath(row.provider_uri),
+    ]);
+    for (const key of keys) {
+      const rows = project.ownedByCanonical.get(key);
+      if (rows === undefined) continue;
+      const remaining = rows.filter((candidate) => candidate !== row);
+      if (remaining.length === 0) project.ownedByCanonical.delete(key);
+      else project.ownedByCanonical.set(key, remaining);
     }
-    const wantNormalized = this.projectKey;
-    const wantFolded = wantNormalized.toLowerCase();
-    for (const [key, entry] of Object.entries(manifest.projects)) {
-      const keyNormalized = normalizePath(key);
-      if (keyNormalized === wantNormalized || keyNormalized.toLowerCase() === wantFolded) {
-        return [entry];
+  }
+
+  private putOwned(project: FoldedProject, sourceUri: string, rows: OwnedSource[]): void {
+    this.deleteOwned(project, sourceUri);
+    project.owned.set(sourceUri, rows);
+    for (const row of rows) this.indexOwnedRow(project, row);
+  }
+
+  private deleteOwned(project: FoldedProject, sourceUri: string): void {
+    const prior = project.owned.get(sourceUri);
+    if (prior === undefined) return;
+    project.owned.delete(sourceUri);
+    for (const row of prior) this.unindexOwnedRow(project, row);
+  }
+
+  private putReady(project: FoldedProject, providerUri: string, file: ReadyFile): void {
+    project.ready.set(providerUri, file);
+    project.readyByCanonical.set(this.canonicalPath(providerUri), file);
+  }
+
+  private deleteReady(project: FoldedProject, providerUri: string): void {
+    const prior = project.ready.get(providerUri);
+    if (prior === undefined) return;
+    project.ready.delete(providerUri);
+    const key = this.canonicalPath(providerUri);
+    if (project.readyByCanonical.get(key) === prior) project.readyByCanonical.delete(key);
+  }
+
+  private applyOp(store: FoldedStore, op: CarrierJournalOp): void {
+    let project = store.projects.get(op.project);
+    if (project === undefined) {
+      if (op.op === "owned_del" || op.op === "ready_del") return;
+      project = emptyProject();
+      store.projects.set(op.project, project);
+    }
+    switch (op.op) {
+      case "project_put":
+        return;
+      case "owned_clear":
+        project.owned.clear();
+        project.ownedByCanonical.clear();
+        return;
+      case "owned_put":
+        this.putOwned(project, op.source_uri, op.rows);
+        return;
+      case "owned_del":
+        this.deleteOwned(project, op.source_uri);
+        return;
+      case "ready_put":
+        this.putReady(project, op.provider_uri, op.file);
+        return;
+      case "ready_del":
+        this.deleteReady(project, op.provider_uri);
+        return;
+    }
+  }
+
+  /** Fold a base snapshot; owned rows group per source in first-appearance order. */
+  private foldBase(head: CarrierStoreHead, manifest: Manifest): FoldedStore {
+    const store: FoldedStore = {
+      generation: head.generation,
+      instance: head.instance,
+      offset: 0,
+      epoch: manifest.epoch,
+      hostVersion: manifest.host_version,
+      projects: new Map(),
+    };
+    for (const [projectUri, entry] of Object.entries(manifest.projects)) {
+      const project = emptyProject();
+      const grouped = new Map<string, OwnedSource[]>();
+      for (const row of entry.owned_sources ?? []) {
+        const rows = grouped.get(row.source_uri);
+        if (rows === undefined) grouped.set(row.source_uri, [row]);
+        else rows.push(row);
       }
+      for (const [sourceUri, rows] of grouped) this.putOwned(project, sourceUri, rows);
+      for (const [providerUri, ready] of Object.entries(entry.ready_files ?? {})) {
+        this.putReady(project, providerUri, ready);
+      }
+      store.projects.set(projectUri, project);
     }
-    return [];
+    return store;
   }
 
   /**
-   * Read the manifest, re-parsing only when the on-disk file's mtime/size has
-   * changed since the cached read. A missing/torn manifest yields `undefined`.
+   * Apply every complete, verifying record appended past `store.offset`, reading
+   * ONLY those bytes. Returns `"reload"` when the journal is gone or shrank below
+   * the consumed offset; otherwise stops (fail closed, offset unchanged) at the
+   * first line that does not verify — a torn tail still being appended, or
+   * corruption a later compaction replaces.
    */
-  readManifest(): Manifest | undefined {
-    if (this.manifestPath === undefined) {
-      return undefined;
-    }
-
-    let stat: fs.Stats;
+  private tail(dir: string, store: FoldedStore): "ok" | "reload" {
+    let fd: number;
     try {
-      stat = fs.statSync(this.manifestPath);
+      fd = fs.openSync(path.join(dir, carrierJournalFile(store.generation)), "r");
     } catch {
-      // No manifest yet (store not warmed) — drop any stale cache.
-      this.cachedManifest = undefined;
-      this.cachedStat = undefined;
-      return undefined;
+      return "reload";
     }
-
-    const mtimeMs = stat.mtimeMs;
-    const size = stat.size;
-    if (
-      this.cachedManifest !== undefined &&
-      this.cachedStat !== undefined &&
-      this.cachedStat.mtimeMs === mtimeMs &&
-      this.cachedStat.size === size
-    ) {
-      return this.cachedManifest;
-    }
-
-    let raw: string;
     try {
-      raw = fs.readFileSync(this.manifestPath, "utf8");
+      const size = fs.fstatSync(fd).size;
+      if (size < store.offset) return "reload";
+      if (size === store.offset) return "ok";
+      const bytes = Buffer.allocUnsafe(size - store.offset);
+      let read = 0;
+      while (read < bytes.length) {
+        const n = fs.readSync(fd, bytes, read, bytes.length - read, store.offset + read);
+        if (n === 0) break;
+        read += n;
+      }
+      let at = 0;
+      while (at < read) {
+        const newline = bytes.indexOf(0x0a, at);
+        if (newline < 0 || newline >= read) break;
+        const record = decodeCarrierJournalLine(bytes, at, newline);
+        if (record === undefined || record.epoch <= store.epoch) break;
+        for (const op of record.ops) this.applyOp(store, op);
+        store.epoch = record.epoch;
+        store.offset += newline + 1 - at;
+        this.materialized = undefined;
+        at = newline + 1;
+      }
+      return "ok";
     } catch {
-      return this.cachedManifest;
+      return "ok";
+    } finally {
+      fs.closeSync(fd);
     }
+  }
 
+  /** Load generation `head.generation` from scratch: its base, then its journal. */
+  private load(dir: string, head: CarrierStoreHead): FoldedStore | undefined {
     let parsed: Manifest;
     try {
-      parsed = JSON.parse(raw) as Manifest;
+      parsed = JSON.parse(
+        fs.readFileSync(path.join(dir, carrierSnapshotFile(head.generation)), "utf8"),
+      ) as Manifest;
     } catch {
-      // A torn write (the atomic swap should prevent this, but tolerate it):
-      // keep the last good manifest rather than throwing into a tsserver hook.
-      return this.cachedManifest;
+      return undefined;
     }
-
     if (
       parsed === null ||
       typeof parsed !== "object" ||
@@ -330,38 +427,128 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
       parsed.projects === null ||
       typeof parsed.projects !== "object"
     ) {
-      return this.cachedManifest;
+      return undefined;
     }
-
-    this.cachedManifest = parsed;
-    this.cachedStat = { mtimeMs, size };
-    return parsed;
+    const store = this.foldBase(head, parsed);
+    return this.tail(dir, store) === "ok" ? store : undefined;
   }
 
   /**
-   * Drop the cached manifest snapshot so the next read re-parses from disk.
-   *
-   * The `(mtimeMs, size)` change key above is an OPTIMISATION, not a
-   * publication oracle. The Rust publisher swaps `manifest.json` ATOMICALLY, so
-   * a publication that REPLACES a `ready_files` entry rather than adding one can
-   * land at the same serialized length; if that write also falls inside a single
-   * filesystem timestamp tick, the replacement is stat-IDENTICAL and the cached
-   * snapshot silently survives it. A caller that has independent evidence a
-   * publication occurred (the plugin's `carrierStoreRefreshToken` advance) must
-   * therefore invalidate explicitly — otherwise the stale snapshot reports "no
-   * relevant change", the resolution-cache clear never runs, and a cached
-   * `TS2307` for an imported carrier survives until some unrelated publication.
-   *
-   * Safe to call with no store dir and before any read.
+   * Bring the folded state up to the published state: read the small head; when
+   * it still names the folded generation, apply only the journal bytes appended
+   * since the last read; reload a base only when a compaction (or a re-created
+   * store) changed the generation. Every accessor reads through here, so each
+   * host-hook call costs one head read plus the new records — never a whole
+   * manifest. A missing head yields `undefined`; an unreadable head, base or
+   * journal keeps the last good fold (never throws into a tsserver hook).
    */
-  invalidateManifest(): void {
-    this.cachedManifest = undefined;
-    this.cachedStat = undefined;
+  private readFolded(): FoldedStore | undefined {
+    const dir = this.storeDir;
+    if (dir === undefined) return undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let raw: string;
+      try {
+        raw = fs.readFileSync(path.join(dir, CARRIER_STORE_HEAD_FILE), "utf8");
+      } catch (error) {
+        if (isNotFound(error)) {
+          // No store yet (not warmed) — drop any stale fold.
+          this.folded = undefined;
+          this.materialized = undefined;
+        }
+        return this.folded;
+      }
+      const head = parseCarrierStoreHead(raw);
+      if (head === undefined) return this.folded;
+      const current = this.folded;
+      if (
+        current !== undefined &&
+        current.generation === head.generation &&
+        current.instance === head.instance &&
+        this.tail(dir, current) === "ok"
+      ) {
+        return current;
+      }
+      const loaded = this.load(dir, head);
+      if (loaded !== undefined) {
+        this.folded = loaded;
+        this.materialized = undefined;
+        return loaded;
+      }
+      // The generation was retired between the head read and the base open (a
+      // concurrent compaction): re-read the head.
+    }
+    return this.folded;
+  }
+
+  /**
+   * The folded projects this reader may consult. A PROJECT-SCOPED reader returns
+   * only its own project (matched on the normalized project URI, with a
+   * case-insensitive fallback so a Windows drive-letter or NTFS/APFS case
+   * difference between the Rust-written tsconfig path and tsserver's
+   * `getProjectName()` still resolves — distinct projects on a case-sensitive FS
+   * are disambiguated by the exact-match first pass). An unscoped reader returns
+   * every project.
+   */
+  private scopedProjects(store: FoldedStore): FoldedProject[] {
+    if (this.projectKey === undefined) {
+      return [...store.projects.values()];
+    }
+    const exact = store.projects.get(this.projectKey);
+    if (exact !== undefined) {
+      return [exact];
+    }
+    const wantNormalized = this.projectKey;
+    const wantFolded = wantNormalized.toLowerCase();
+    for (const [key, project] of store.projects) {
+      const keyNormalized = normalizePath(key);
+      if (keyNormalized === wantNormalized || keyNormalized.toLowerCase() === wantFolded) {
+        return [project];
+      }
+    }
+    return [];
+  }
+
+  private static ownedRows(project: FoldedProject): OwnedSource[] {
+    const rows: OwnedSource[] = [];
+    for (const sourceRows of project.owned.values()) rows.push(...sourceRows);
+    return rows;
+  }
+
+  /** Whether an owned row of `project` names the provider at canonical `key`. */
+  private ownsProvider(project: FoldedProject, key: string): boolean {
+    return (
+      project.ownedByCanonical
+        .get(key)
+        ?.some((owned) => this.canonicalPath(owned.provider_uri) === key) === true
+    );
+  }
+
+  // ── the reader contract ──────────────────────────────────────────────────
+
+  /**
+   * The published state materialized as a `Manifest` (cached until the next
+   * applied record), or `undefined` when nothing is published or the store is
+   * unavailable. Host hooks read through the indexed fold instead; this view
+   * serves callers that need the whole manifest value.
+   */
+  readManifest(): Manifest | undefined {
+    const store = this.readFolded();
+    if (store === undefined) return undefined;
+    if (this.materialized !== undefined) return this.materialized;
+    const projects: Record<string, ProjectEntry> = {};
+    for (const [projectUri, project] of store.projects) {
+      projects[projectUri] = {
+        owned_sources: DiskCarrierStoreReader.ownedRows(project),
+        ready_files: Object.fromEntries(project.ready),
+      };
+    }
+    this.materialized = { epoch: store.epoch, host_version: store.hostVersion, projects };
+    return this.materialized;
   }
 
   /** The current published epoch, or `undefined` when the store is unavailable. */
   currentEpoch(): number | undefined {
-    return this.readManifest()?.epoch;
+    return this.readFolded()?.epoch;
   }
 
   /**
@@ -371,16 +558,17 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * store is unavailable or the manifest names no owned sources.
    */
   ownedSources(projectUri?: string): OwnedSource[] {
-    const manifest = this.readManifest();
-    if (!manifest) {
+    const store = this.readFolded();
+    if (!store) {
       return [];
     }
     if (projectUri !== undefined) {
-      return manifest.projects[projectUri]?.owned_sources ?? [];
+      const project = store.projects.get(projectUri);
+      return project === undefined ? [] : DiskCarrierStoreReader.ownedRows(project);
     }
     const all: OwnedSource[] = [];
-    for (const project of this.scopedProjectEntries(manifest)) {
-      all.push(...project.owned_sources);
+    for (const project of this.scopedProjects(store)) {
+      all.push(...DiskCarrierStoreReader.ownedRows(project));
     }
     return all;
   }
@@ -394,14 +582,14 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * options.
    */
   readyFile(providerPath: string): ReadyFile | undefined {
-    const manifest = this.readManifest();
-    if (!manifest) {
+    const store = this.readFolded();
+    if (!store) {
       return undefined;
     }
     const normalized = normalizePath(providerPath);
     const key = this.canonicalPath(normalized);
-    for (const project of this.scopedProjectEntries(manifest)) {
-      const entry = project.ready_files[normalized] ?? this.canonicalReadyFiles(project).get(key);
+    for (const project of this.scopedProjects(store)) {
+      const entry = project.ready.get(normalized) ?? project.readyByCanonical.get(key);
       if (entry) {
         return entry;
       }
@@ -411,17 +599,17 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
 
   /** Ready companion identities for non-editor consumers of the shared reader contract. */
   readyIdeCompanions(): string[] {
-    const manifest = this.readManifest();
-    if (!manifest) {
+    const store = this.readFolded();
+    if (!store) {
       return [];
     }
     const out = new Set<string>();
-    for (const project of this.scopedProjectEntries(manifest)) {
-      const ownedProviders = new Set(
-        project.owned_sources.map((owned) => this.canonicalPath(owned.provider_uri)),
-      );
-      for (const [providerUri, ready] of Object.entries(project.ready_files)) {
-        if (ready.role === "CarrierIde" && ownedProviders.has(this.canonicalPath(providerUri))) {
+    for (const project of this.scopedProjects(store)) {
+      for (const [providerUri, ready] of project.ready) {
+        if (
+          ready.role === "CarrierIde" &&
+          this.ownsProvider(project, this.canonicalPath(providerUri))
+        ) {
           out.add(providerUri);
         }
       }
@@ -437,18 +625,15 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * reloader's responsibility.
    */
   readyFileVersions(): Map<string, string> {
-    const manifest = this.readManifest();
+    const store = this.readFolded();
     const out = new Map<string, string>();
-    if (!manifest) {
+    if (!store) {
       return out;
     }
-    for (const project of this.scopedProjectEntries(manifest)) {
-      const ownedProviders = new Set(
-        project.owned_sources.map((owned) => this.canonicalPath(owned.provider_uri)),
-      );
-      for (const [providerUri, ready] of Object.entries(project.ready_files)) {
+    for (const project of this.scopedProjects(store)) {
+      for (const [providerUri, ready] of project.ready) {
         const provider = normalizePath(providerUri);
-        if (ownedProviders.has(this.canonicalPath(provider))) {
+        if (this.ownsProvider(project, this.canonicalPath(provider))) {
           out.set(provider, `${ready.version}:${ready.content_hash}`);
         }
       }
@@ -463,23 +648,21 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * substitute generated content without creating a second document identity.
    */
   readyIdeSources(): string[] {
-    const manifest = this.readManifest();
-    if (!manifest) {
+    const store = this.readFolded();
+    if (!store) {
       return [];
     }
     const out = new Set<string>();
-    for (const project of this.scopedProjectEntries(manifest)) {
-      const readyProviders = new Set(
-        Object.entries(project.ready_files)
-          .filter(([, ready]) => ready.role === "CarrierIde")
-          .map(([providerUri]) => this.canonicalPath(providerUri)),
-      );
-      for (const owned of project.owned_sources) {
-        if (
-          owned.role === "CarrierIde" &&
-          readyProviders.has(this.canonicalPath(owned.provider_uri))
-        ) {
-          out.add(owned.source_uri);
+    for (const project of this.scopedProjects(store)) {
+      for (const rows of project.owned.values()) {
+        for (const owned of rows) {
+          if (
+            owned.role === "CarrierIde" &&
+            project.readyByCanonical.get(this.canonicalPath(owned.provider_uri))?.role ===
+              "CarrierIde"
+          ) {
+            out.add(owned.source_uri);
+          }
         }
       }
     }
@@ -514,10 +697,10 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
   companionForSource(sourcePath: string): string | undefined {
     const source = normalizePath(sourcePath);
     const sourceKey = this.canonicalPath(source);
-    const manifest = this.readManifest();
-    if (manifest) {
-      for (const project of this.scopedProjectEntries(manifest)) {
-        const ownedIde = this.canonicalOwnedSources(project)
+    const store = this.readFolded();
+    if (store) {
+      for (const project of this.scopedProjects(store)) {
+        const ownedIde = project.ownedByCanonical
           .get(sourceKey)
           ?.find(
             (owned) =>
@@ -533,23 +716,23 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
   }
 
   /**
-   * ONE-manifest-read snapshot for a single import-path completion request:
-   * the reader's SCOPED owned-source rows plus the canonical provider-path set
-   * of ready `CarrierApi` surfaces, both taken from the SAME manifest read.
-   * Completion runs per-candidate policy + readiness checks on the keystroke
-   * path; this snapshot bounds the whole request at exactly one manifest stat
-   * regardless of how many carriers the directory holds.
+   * ONE-read snapshot for a single import-path completion request: the reader's
+   * SCOPED owned-source rows plus the canonical provider-path set of ready
+   * `CarrierApi` surfaces, both taken from the SAME folded state. Completion
+   * runs per-candidate policy + readiness checks on the keystroke path; this
+   * snapshot bounds the whole request at exactly one store read regardless of
+   * how many carriers the directory holds.
    */
   importCompletionSnapshot(): CarrierImportCompletionSnapshot {
-    const manifest = this.readManifest();
-    if (!manifest) {
+    const store = this.readFolded();
+    if (!store) {
       return { ownedSources: [], readyApiProviders: new Set() };
     }
     const ownedSources: OwnedSource[] = [];
     const readyApiProviders = new Set<string>();
-    for (const project of this.scopedProjectEntries(manifest)) {
-      ownedSources.push(...project.owned_sources);
-      for (const [providerUri, ready] of Object.entries(project.ready_files)) {
+    for (const project of this.scopedProjects(store)) {
+      ownedSources.push(...DiskCarrierStoreReader.ownedRows(project));
+      for (const [providerUri, ready] of project.ready) {
         if (ready.role === "CarrierApi") {
           readyApiProviders.add(this.canonicalPath(providerUri));
         }
@@ -566,13 +749,13 @@ export class DiskCarrierStoreReader implements CarrierStoreReader {
    * without consulting a foreign tsconfig's owned set.
    */
   ownedSourceFor(providerOrSourcePath: string): OwnedSource | undefined {
-    const manifest = this.readManifest();
-    if (!manifest) {
+    const store = this.readFolded();
+    if (!store) {
       return undefined;
     }
     const key = this.canonicalPath(providerOrSourcePath);
-    for (const project of this.scopedProjectEntries(manifest)) {
-      const owned = this.canonicalOwnedSources(project).get(key)?.[0];
+    for (const project of this.scopedProjects(store)) {
+      const owned = project.ownedByCanonical.get(key)?.[0];
       if (owned !== undefined) return owned;
     }
     return undefined;

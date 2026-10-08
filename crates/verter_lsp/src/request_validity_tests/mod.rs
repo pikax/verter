@@ -40,6 +40,7 @@ use crate::type_provider::merge;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol as wire;
 
+mod applicability;
 mod controls;
 mod liveness;
 mod movement;
@@ -208,9 +209,18 @@ impl Fixture {
     }
 
     pub(super) async fn with_host_config(host_config: verter_session::HostConfig) -> Self {
+        Self::with_files(&[(APP_PATH, "vue", APP)], host_config).await
+    }
+
+    /// A fixture whose requested carrier is `APP`, opened beside the other
+    /// `files`.
+    pub(super) async fn with_files(
+        files: &[(&str, &str, &str)],
+        host_config: verter_session::HostConfig,
+    ) -> Self {
         let (temp, service, drain, provider, workspace_id) =
             make_definition_test_server_with_config(
-                &[(APP_PATH, "vue", APP)],
+                files,
                 crate::TypeProviderKind::Tsgo,
                 host_config,
                 false,

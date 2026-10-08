@@ -23,13 +23,12 @@ use verter_session_query::function_program::{
     FunctionBindingKind, FunctionBindingRecord, FunctionBodyLocator, FunctionCallArgLiteralMode,
     FunctionCallArgRecord, FunctionCallSiteRecord, FunctionCapturedRead, FunctionControlKind,
     FunctionControlRegion, FunctionDeclarationRef, FunctionDescent, FunctionDescentStep,
-    FunctionDirectCall, FunctionEffectCallee, FunctionEffectRecord, FunctionNestedCaptures,
-    FunctionParamRecord, FunctionParameterCallableCaptures, FunctionProgramDiscovery,
-    FunctionProgramIndex, FunctionProgramKey, FunctionProgramTypeParam, FunctionReadRole,
-    FunctionReferenceBinding, FunctionReferenceRecord, FunctionReturnSite, FunctionSourceTypeQuery,
-    FunctionTypeQuery, FunctionTypeQueryPosition, FunctionWriteKind, FunctionWriteRecord,
-    FunctionWriteTarget, ProgramExpressionCallKind, ProgramExpressionRecord,
-    ProgramExpressionSource,
+    FunctionDirectCall, FunctionEffectCallee, FunctionEffectRecord, FunctionParamRecord,
+    FunctionParameterCallableCaptures, FunctionProgramDiscovery, FunctionProgramIndex,
+    FunctionProgramKey, FunctionProgramTypeParam, FunctionReadRole, FunctionReferenceBinding,
+    FunctionReferenceRecord, FunctionReturnSite, FunctionSourceTypeQuery, FunctionTypeQuery,
+    FunctionTypeQueryPosition, FunctionWriteKind, FunctionWriteRecord, FunctionWriteTarget,
+    ProgramExpressionCallKind, ProgramExpressionRecord, ProgramExpressionSource,
 };
 
 use std::sync::Arc;
@@ -53,6 +52,9 @@ use verter_session_query::facts::SymbolSpace;
 
 #[path = "function_program_access.rs"]
 pub(crate) mod access;
+
+#[path = "function_program_discovery_walk.rs"]
+mod discovery_walk;
 
 #[cfg(test)]
 #[path = "function_program_tests.rs"]
@@ -84,6 +86,10 @@ struct DiscoveryCtx<'source, 'ast> {
     /// nested function declarations and call-argument function values)
     /// across the file.
     next_nested_ordinal: u32,
+    /// The span of every served function whose body the hash fold walks
+    /// ([`hash_entries`]): discovery's walk of the syntax outside them
+    /// skips each.
+    served: rustc_hash::FxHashSet<(u32, u32)>,
     /// The classes the discovery walks meet.
     classes: crate::analysis::class_index::ClassCollector,
 }
@@ -132,6 +138,10 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                     enclosing_heritage: self.enclosing_heritage,
                     enclosing_this: self.enclosing_this,
                 });
+        }
+        if node.body().is_some() {
+            let span = node.span();
+            self.served.insert((span.start, span.end));
         }
         self.hashed_nodes.push((self.entries.len(), node));
         self.entries.push(entry);
@@ -196,9 +206,9 @@ fn build_function_program_index_impl<'ast>(
         hashed_nodes: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
+        served: rustc_hash::FxHashSet::default(),
         classes: crate::analysis::class_index::ClassCollector::default(),
     };
-    let mut overload_tracker = OverloadTracker::default();
     // Discovery walks every function of the program, each walk sized for
     // what it walks: they all run inside one containment sized for the
     // program, which a walk of any node in it cannot exceed, rather than
@@ -207,24 +217,14 @@ fn build_function_program_index_impl<'ast>(
         &mut ctx,
         |ctx| &ctx.walks,
         |ctx| {
-            for (contributor_index, stmt) in program.body.iter().enumerate() {
-                discover_statement(stmt, contributor_index, None, &mut overload_tracker, ctx);
-            }
-            let served = served_spans(ctx);
-            // Folding each served body's hashes records the classes inside it.
-            hash_entries(ctx, &served);
-            let classes = &mut ctx.classes;
-            ctx.walks.with_node_stack(program.span, || {
-                crate::analysis::class_index::collect_top_level_classes(
-                    &program.body,
-                    &served,
-                    classes,
-                );
-            });
+            // Discovery's one walk of the syntax outside every served
+            // function records the classes there; folding each served
+            // body's hashes records the classes inside it.
+            discovery_walk::DiscoveryWalk::new(ctx).program(&program.body);
+            hash_entries(ctx);
         },
     );
     resolve_captures(&mut ctx.entries);
-    resolve_nested_capture_reads(&mut ctx.entries);
     resolve_call_site_targets(&mut ctx.entries);
     resolve_direct_calls(&mut ctx.entries);
     link_callback_return_sources(&ctx.canonical_id, &mut ctx.entries, &mut ctx.expressions);
@@ -234,19 +234,6 @@ fn build_function_program_index_impl<'ast>(
         FunctionProgramIndex::from_discovery(ctx.entries, ctx.expressions, classes),
         ctx.nodes,
     )
-}
-
-/// The span of every served function whose body the hash fold walks
-/// ([`hash_entries`]).
-fn served_spans(ctx: &DiscoveryCtx<'_, '_>) -> rustc_hash::FxHashSet<(u32, u32)> {
-    ctx.hashed_nodes
-        .iter()
-        .filter(|(_, node)| node.body().is_some())
-        .map(|(_, node)| {
-            let span = node.span();
-            (span.start, span.end)
-        })
-        .collect()
 }
 
 /// Fold every entry's stable and exact hashes, the functions nested in a
@@ -259,7 +246,7 @@ fn served_spans(ctx: &DiscoveryCtx<'_, '_>) -> rustc_hash::FxHashSet<(u32, u32)>
 /// directly in it replaced by that function's exact hash and length: equal
 /// exactly when the function's text is (a function with none nested hashes
 /// its text).
-fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>, served: &rustc_hash::FxHashSet<(u32, u32)>) {
+fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
     use crate::analysis::function_program_hash::{hash_function_body, NestedHashes};
     let mut nested: NestedHashes = rustc_hash::FxHashMap::default();
     // The exact hash and span of each hashed function, and the functions
@@ -303,14 +290,9 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>, served: &rustc_hash::FxHashSet<(
             &nested,
             &mut ctx.classes,
         );
-        let classes = &mut ctx.classes;
-        ctx.walks.with_node_stack(node.span(), || {
-            crate::analysis::class_index::collect_parameter_decorator_classes(
-                node.param_items(),
-                served,
-                classes,
-            );
-        });
+        // The fold does not walk the decorators of the function's
+        // parameters.
+        discovery_walk::DiscoveryWalk::new(ctx).parameter_decorators(node.param_items());
         ctx.classes.exit_frame();
         let span = node.span();
         nested.insert((span.start, span.end), part);
@@ -430,14 +412,14 @@ fn scope_contains(scope: verter_span::Span, site: verter_span::Span) -> bool {
     scope.start <= site.start && site.end <= scope.end
 }
 
-/// Compute every nested position's content-free capture identities: the
-/// referenced names that bind in an enclosing frame, resolved LEXICALLY —
-/// innermost enclosing frame first, and within a frame the innermost
-/// same-name binding whose scope contains the capturing position. Each
-/// distinct captured BINDING is recorded once, in first-reference source
-/// order; identity is the `(defining frame, binding slot)` pair, so two
-/// same-name binders never collapse. A name binding in NO enclosing frame
-/// is not a capture (a free/global reference).
+/// Resolve every reference, write target and type query of every position
+/// LEXICALLY — innermost enclosing frame first, and within a frame the
+/// innermost same-name binding whose scope contains the position. A
+/// resolved binding's identity is the `(defining frame, binding slot)`
+/// pair, so two same-name binders never collapse; a name binding in NO
+/// enclosing frame is free (a global reference). Sealing derives each
+/// position's transitive captures from these resolutions
+/// ([`FunctionProgramIndex::from_discovery`]).
 fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
     // Snapshot the frame bindings + parents up front (no borrow conflicts).
     // The binding inventories are shared, not copied, and one key -> position
@@ -501,14 +483,8 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
                 evolving_array: frame_bindings[frame][slot as usize].evolving_array,
             })
         };
-        let mut captured_sites = Vec::new();
         for reference in Arc::make_mut(&mut entries[index].references) {
             reference.binding = resolve(&reference.name, reference.span);
-            if let FunctionReferenceBinding::Resolved(identity) = &reference.binding {
-                if identity.defining_function != frame_keys[index] {
-                    captured_sites.push((reference.span.start, identity.clone()));
-                }
-            }
         }
         for write in Arc::make_mut(&mut entries[index].writes) {
             for target in Arc::make_mut(&mut write.targets) {
@@ -518,7 +494,6 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
                 reference.binding = resolve(&reference.name, reference.span);
                 if let FunctionReferenceBinding::Resolved(identity) = &reference.binding {
                     if identity.defining_function != frame_keys[index] {
-                        captured_sites.push((reference.span.start, identity.clone()));
                         let defining = position_of[&identity.defining_function];
                         if descendant_seen[defining].insert(identity.binding_slot) {
                             descendant_writes[defining].push(identity.clone());
@@ -537,12 +512,13 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
         let mut parameter_callable_captures = Vec::new();
         for (span, references) in entries[index].parameter_callable_references.iter() {
             let mut bindings: Vec<FlowBindingIdentity> = Vec::new();
+            let mut bound = rustc_hash::FxHashSet::default();
             let mut reads: Vec<FunctionCapturedRead> = Vec::new();
             let mut exact = true;
             for reference in references.iter() {
                 match resolve(&reference.name, reference.span) {
                     FunctionReferenceBinding::Resolved(identity) => {
-                        if !bindings.contains(&identity) {
+                        if bound.insert(identity.clone()) {
                             bindings.push(identity.clone());
                         }
                         if reference.read_role.is_some() {
@@ -579,19 +555,12 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
                 }
             }
         }
-        captured_sites.sort_by_key(|(span, _)| *span);
         for query in Arc::make_mut(&mut entries[index].source_type_queries) {
             query.binding = resolve(&query.name, query.span);
         }
         for query in Arc::make_mut(&mut entries[index].type_queries) {
             query.binding = resolve(&query.name, query.span);
         }
-        let mut seen = rustc_hash::FxHashSet::default();
-        let captures: Vec<_> = captured_sites
-            .into_iter()
-            .filter_map(|(_, identity)| seen.insert(identity.clone()).then_some(identity))
-            .collect();
-        entries[index].captures = CanonicalCaptureIdentity(Arc::from(captures.into_boxed_slice()));
     }
     for ((entry, writes), assignments) in entries
         .iter_mut()
@@ -600,139 +569,6 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
     {
         entry.descendant_writes = writes.into();
         entry.descendant_assignments = assignments.into();
-    }
-}
-
-/// Carry closure-cell dependencies through intervening callable values without
-/// rewalking their ASTs or constructing any child flow skeleton.
-fn resolve_nested_capture_reads(entries: &mut [FunctionProgramDiscovery]) {
-    let positions: rustc_hash::FxHashMap<_, _> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| (entry.key.clone(), i))
-        .collect();
-    let mut children = vec![Vec::new(); entries.len()];
-    let parent_position: Vec<Option<usize>> = entries
-        .iter()
-        .map(|entry| {
-            entry
-                .lexical_parent
-                .as_deref()
-                .and_then(|parent| positions.get(parent).copied())
-        })
-        .collect();
-    for (i, parent) in parent_position.iter().enumerate() {
-        if let Some(parent) = parent {
-            children[*parent].push(i);
-        }
-    }
-    // Each frame's nesting under its outermost enclosing frame, each
-    // computed once from its parent's (walking every frame's whole chain
-    // cost the square of the nesting).
-    let mut nesting: Vec<Option<usize>> = vec![None; entries.len()];
-    let mut pending = Vec::new();
-    for i in 0..entries.len() {
-        let mut frame = i;
-        let mut known = loop {
-            if let Some(known) = nesting[frame] {
-                break known;
-            }
-            match parent_position[frame] {
-                Some(parent) if nesting[frame].is_none() => {
-                    pending.push(frame);
-                    frame = parent;
-                }
-                _ => {
-                    nesting[frame] = Some(0);
-                    break 0;
-                }
-            }
-        };
-        while let Some(frame) = pending.pop() {
-            known += 1;
-            nesting[frame] = Some(known);
-        }
-    }
-    let mut order: Vec<_> = nesting
-        .iter()
-        .enumerate()
-        .map(|(i, nesting)| (std::cmp::Reverse(nesting.unwrap_or(0)), i))
-        .collect();
-    order.sort_unstable();
-    for (_, i) in order {
-        let key = &entries[i].key;
-        let mut reads = Vec::new();
-        let mut captured_sites = Vec::new();
-        for reference in entries[i].references.iter() {
-            let FunctionReferenceBinding::Resolved(binding) = &reference.binding else {
-                continue;
-            };
-            if binding.defining_function == *key {
-                continue;
-            }
-            captured_sites.push((reference.span.start, binding.clone()));
-            if reference.read_role.is_some() {
-                reads.push(FunctionCapturedRead {
-                    binding: binding.clone(),
-                    path: Arc::clone(&reference.path),
-                    span: reference.span,
-                });
-            }
-        }
-        for target in entries[i]
-            .writes
-            .iter()
-            .flat_map(|write| write.targets.iter())
-        {
-            if let FunctionWriteTarget::Binding { reference, .. } = target {
-                if let FunctionReferenceBinding::Resolved(binding) = &reference.binding {
-                    if binding.defining_function != *key {
-                        captured_sites.push((reference.span.start, binding.clone()));
-                    }
-                }
-            }
-        }
-        let mut nested = Vec::new();
-        let mut exhaustive = entries[i].captures_exhaustive;
-        for &child in &children[i] {
-            let child = &entries[child];
-            exhaustive &= child.captures_exhaustive;
-            nested.push(FunctionNestedCaptures {
-                function: child.key.clone(),
-                span: child.span,
-                bindings: child.captures.clone(),
-                reads: Arc::clone(&child.captured_reads),
-                exhaustive: child.captures_exhaustive,
-            });
-            reads.extend(
-                child
-                    .captured_reads
-                    .iter()
-                    .filter(|read| read.binding.defining_function != *key)
-                    .cloned(),
-            );
-            captured_sites.extend(
-                child
-                    .captures
-                    .0
-                    .iter()
-                    .filter(|binding| binding.defining_function != *key)
-                    .map(|binding| (child.span.start, binding.clone())),
-            );
-        }
-        reads.sort_by_key(|read| read.span.start);
-        let mut seen_reads = rustc_hash::FxHashSet::default();
-        reads.retain(|read| seen_reads.insert((read.binding.clone(), Arc::clone(&read.path))));
-        captured_sites.sort_by_key(|(span, _)| *span);
-        let mut seen_captures = rustc_hash::FxHashSet::default();
-        let captures: Vec<_> = captured_sites
-            .into_iter()
-            .filter_map(|(_, identity)| seen_captures.insert(identity.clone()).then_some(identity))
-            .collect();
-        entries[i].captured_reads = reads.into();
-        entries[i].nested_captures = nested.into();
-        entries[i].captures = CanonicalCaptureIdentity(captures.into());
-        entries[i].captures_exhaustive = exhaustive;
     }
 }
 
@@ -1480,16 +1316,8 @@ fn discover_statement<'ast>(
                 oxc_ast::ast::Declaration::ClassDeclaration(class) => {
                     discover_class(class, contributor_index, namespace_prefix, ctx);
                 }
-                oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => {
-                    discover_namespace_block(
-                        module,
-                        contributor_index,
-                        &FunctionDescent::new(),
-                        namespace_prefix,
-                        overload_tracker,
-                        ctx,
-                    );
-                }
+                // A namespace's members are discovered as discovery's walk
+                // enters its block.
                 _ => {}
             }
         }
@@ -1564,52 +1392,7 @@ fn discover_statement<'ast>(
                 }
             }
         },
-        Statement::TSNamespaceDeclaration(module) => {
-            discover_namespace_block(
-                module,
-                contributor_index,
-                &FunctionDescent::new(),
-                namespace_prefix,
-                overload_tracker,
-                ctx,
-            );
-        }
         _ => {}
-    }
-}
-
-/// Discover the served positions of one namespace declaration — written
-/// `namespace N { … }` or `export namespace N { … }` — at the statement
-/// `descent` reaches: its members are qualified `N.name` under
-/// `namespace_prefix`, and every locator extends `descent` with one
-/// [`FunctionDescentStep::NamespaceMember`] step. `declare module
-/// "specifier" { .. }` is an ambient augmentation, not a file-scope function
-/// owner — never indexed here.
-fn discover_namespace_block<'ast>(
-    module: &'ast oxc_ast::ast::TSNamespaceDeclaration<'ast>,
-    contributor_index: usize,
-    descent: &FunctionDescent,
-    namespace_prefix: Option<&str>,
-    overload_tracker: &mut OverloadTracker,
-    ctx: &mut DiscoveryCtx<'_, 'ast>,
-) {
-    let id = &module.id;
-    let prefix = match namespace_prefix {
-        Some(prefix) => format!("{prefix}.{}", id.name),
-        None => id.name.to_string(),
-    };
-    if let oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) = &module.body {
-        for (statement_ordinal, inner) in block.body.iter().enumerate() {
-            let inner_descent = descent.then(namespace_member_step(statement_ordinal));
-            discover_namespaced_statement(
-                inner,
-                contributor_index,
-                &inner_descent,
-                &prefix,
-                overload_tracker,
-                ctx,
-            );
-        }
     }
 }
 
@@ -1661,16 +1444,6 @@ fn discover_namespaced_statement<'ast>(
                 oxc_ast::ast::Declaration::ClassDeclaration(class) => {
                     discover_class_ns(class, contributor_index, descent, namespace, ctx);
                 }
-                oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => {
-                    discover_namespace_block(
-                        module,
-                        contributor_index,
-                        descent,
-                        Some(namespace),
-                        overload_tracker,
-                        ctx,
-                    );
-                }
                 _ => {}
             }
         }
@@ -1689,16 +1462,6 @@ fn discover_namespaced_statement<'ast>(
         }
         Statement::ClassDeclaration(class) => {
             discover_class_ns(class, contributor_index, descent, namespace, ctx);
-        }
-        Statement::TSNamespaceDeclaration(module) => {
-            discover_namespace_block(
-                module,
-                contributor_index,
-                descent,
-                Some(namespace),
-                overload_tracker,
-                ctx,
-            );
         }
         _ => {}
     }
@@ -3045,8 +2808,6 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             descendant_writes: Arc::from([]),
             unserved_assignments: unserved_assignments.into(),
             descendant_assignments: Arc::from([]),
-            captured_reads: Arc::from([]),
-            nested_captures: Arc::from([]),
             parameter_callable_references: parameter_callable_references.into(),
             parameter_callable_captures: Arc::from([]),
             effects: Arc::from(effects.into_boxed_slice()),
@@ -3057,7 +2818,6 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             lexical_parent: None,
             class_member: false,
             nested_declaration_name: None,
-            captures: CanonicalCaptureIdentity::default(),
             captures_exhaustive: !creates_unserved_callable,
             flow_body_stable_hash: Hash16::default(),
             flow_body_exact_hash: None,

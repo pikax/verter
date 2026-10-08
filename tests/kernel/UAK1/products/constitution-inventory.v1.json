@@ -1,0 +1,412 @@
+{
+  "id": "constitution-inventory.v1",
+  "schema": 1,
+  "contractNode": "UAK1",
+  "finalOwner": "expansion.kernel: typed immutable universal catalog and demand-selected kernel services",
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the kernel authority inventory and deletion ledger",
+    "date": "2026-10-08"
+  },
+  "companionLedger": "firewall-route-ledger.v1.json",
+  "inherits": {
+    "node": "UAK0",
+    "files": [
+      "tests/kernel/UAK0/products/owner-consumer-inventory.v1.json",
+      "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json"
+    ],
+    "rule": "UAK0's boundaries B01-B06, outcomes O01-O13, consumers C01-C17, retained seams S01-S13 and displaced routes D01-D19 stay authoritative with their owners. UAK1 adds no second owner for any of them; rows below reference them and only add constitution outcomes U01-U12, consumers K-C01-K-C04 and firewall routes K01-K04."
+  },
+  "layers": [
+    {
+      "id": "L0",
+      "name": "identity-and-source",
+      "role": "kernel",
+      "members": [
+        "verter_identity",
+        "verter_span",
+        "verter_language (registered source authority, parse artifacts)",
+        "verter_execution",
+        "verter_debug_assert",
+        "verter_analyzer_mint",
+        "verter_no_typeexpr",
+        "verter_no_typeexpr_derive",
+        "verter_no_storedspan",
+        "verter_no_storedspan_derive",
+        "verter_audit",
+        "verter_ecma",
+        "verter_analysis_inputs"
+      ],
+      "mayImport": ["L0"],
+      "peerImports": "Acyclic imports among L0 members are retained; L0 imports nothing from L1 or above."
+    },
+    {
+      "id": "L1",
+      "name": "kernel-services",
+      "role": "kernel",
+      "members": [
+        "verter_session_query",
+        "verter_type_engine",
+        "verter_semantic_source",
+        "verter_resolution",
+        "verter_type_expr",
+        "verter_type_expr_oxc",
+        "verter_css_syntax",
+        "verter_macro_dto",
+        "verter_protocol",
+        "verter_scheduler",
+        "verter_workspace",
+        "verter_tsgo_api (TypeScript-provider client API; the provider process itself is LH)",
+        "verter_session (kernel services only; except its composition root and its vertical half: framework/, typeinfo/framework_surface/vue_exec, framework/api_projectors)",
+        "verter_parser (carrier-neutral parse substrate only; the Vue/Svelte frontend inside it is breach K03)",
+        "verter_semantic (carrier-neutral analysis only; the Vue macro/framework semantics inside it are breach K04)"
+      ],
+      "mayImport": ["L0", "L1"],
+      "peerImports": "Retained acyclic peer imports inside L1 are legal (verter_type_engine -> verter_session_query/verter_type_expr, verter_session -> verter_scheduler). The parser-free query/engine restriction stays: verter_session_query, verter_type_engine and verter_type_expr import neither verter_parser nor verter_semantic (crates/verter_session_query/tests/cases/dependency_closure_guard.rs)."
+    },
+    {
+      "id": "L2",
+      "name": "horizontal-products",
+      "role": "product",
+      "members": [
+        "verter_diagnostics",
+        "verter_actions",
+        "verter_type_runtime",
+        "TypeInfo/ComponentInfo",
+        "workspace index",
+        "native checker",
+        "lint and rules",
+        "formatter",
+        "public request/result envelope"
+      ],
+      "mayImport": ["L0", "L1"]
+    },
+    {
+      "id": "L3",
+      "name": "verticals",
+      "role": "vertical",
+      "members": [
+        "carrier frontends and their semantic (framework) profiles, one module per family",
+        "verter_compiler frontend half (role-shared crate: its runtime backend half is LC)",
+        "verter_session vertical half (role-shared crate: framework/, typeinfo/framework_surface/vue_exec, framework/api_projectors; its kernel half is L1)",
+        "verter_vue_conformance",
+        "verter_svelte_conformance"
+      ],
+      "mayImport": ["L0", "L1", "L2"]
+    },
+    {
+      "id": "L4",
+      "name": "project-profiles",
+      "role": "project-profile",
+      "members": ["framework project-profile overlays (PPR contributions)"],
+      "mayImport": ["L0", "L1", "L2", "L3"]
+    },
+    {
+      "id": "LC",
+      "name": "optional-compiler-backends",
+      "role": "compiler-backend",
+      "members": [
+        "verter_compiler runtime backend half (role-shared crate: compile, compile_transaction, assembly, standalone, svelte::runtime, style_planner, framework_common::vue_bridge)",
+        "runtime compiler backends registered per vertical (Vue VDOM/Vapor, Svelte client/SSR today)"
+      ],
+      "mayImport": ["L0", "L1", "L3"]
+    },
+    {
+      "id": "LH",
+      "name": "hosts-and-presentation",
+      "role": "editor-host, cli-presentation, binding",
+      "members": [
+        "verter_lsp",
+        "verter-editor-client",
+        "packages/vue-vscode",
+        "packages/typescript-plugin",
+        "verter_mcp",
+        "verter_mcp_server",
+        "verter_tsc",
+        "verter_napi",
+        "verter_wasm",
+        "verter_ffi",
+        "CLI command adapters and reporters",
+        "verter_bench, verter_dx_baseline, verter_supervise, verter_relay_shim, verter_compile_contracts*, verter_session_oracle_macro, verter_shipped_cfg_contract, verter_source_policy_gate, verter_test_support, verter_validation_probe, xtask, verter_napi_request_fixture (tooling/test crates, never imported by production)"
+      ],
+      "mayImport": ["L0", "L1", "L2", "L3", "L4", "LC", "LR"]
+    },
+    {
+      "id": "LR",
+      "name": "composition-root",
+      "role": "registration",
+      "members": [
+        "the one static registration site that builds the CatalogSnapshot (session assembly S07 after CPF1)"
+      ],
+      "mayImport": ["L0", "L1", "L2", "L3", "L4", "LC"]
+    }
+  ],
+  "firewallRules": [
+    {
+      "id": "F01",
+      "rule": "No kernel layer (L0, L1) imports a vertical, project-profile, editor-host, CLI-presentation or compiler-backend owner (L3, L4, LH, LC).",
+      "enforcementOwner": "UAM0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1",
+      "home": "crates/verter_source_policy_gate/tests/cases/kernel_dependency_firewall.rs"
+    },
+    {
+      "id": "F02",
+      "rule": "A horizontal product (L2) imports no vertical, project profile, host or compiler backend; it consumes vertical knowledge only as catalog-registered contributions.",
+      "enforcementOwner": "UAM0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1",
+      "home": "crates/verter_source_policy_gate/tests/cases/kernel_dependency_firewall.rs"
+    },
+    {
+      "id": "F03",
+      "rule": "A carrier frontend (L3) never imports a compiler backend (LC); a backend may import its own frontend.",
+      "enforcementOwner": "UAM0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1",
+      "home": "crates/verter_source_policy_gate/tests/cases/kernel_dependency_firewall.rs"
+    },
+    {
+      "id": "F04",
+      "rule": "Only the composition root (LR) names concrete verticals, project profiles and backends; it registers them statically and publishes one immutable CatalogSnapshot.",
+      "enforcementOwner": "UAM0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1",
+      "home": "crates/verter_source_policy_gate/tests/cases/kernel_dependency_firewall.rs"
+    },
+    {
+      "id": "F05",
+      "rule": "A firewall breach that exists at the described head is an equality-pinned exception naming its deletion route (K01-K04); the exception set only shrinks, and it shrinks in the change that lands the route's deletion owner.",
+      "enforcementOwner": "UAM0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1",
+      "home": "crates/verter_source_policy_gate/tests/cases/kernel_dependency_firewall.rs"
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "U01",
+      "subblock": 1,
+      "outcome": "Kernel never executes project or framework code: executable ecosystem config is captured outside the kernel, and an unsupported executable config stays uncaptured rather than executed",
+      "owner": "CENV1C",
+      "contractOwner": "CFG0",
+      "successorPath": ["UAK1", "VID0", "CFG0", "CENV1C"],
+      "receivingAcceptance": "CENV1C-AC2"
+    },
+    {
+      "id": "U02",
+      "subblock": 1,
+      "outcome": "Every carrier has a frontend; only compile-capable carriers register an optional compiler backend; no compiler is a normal state, never an error path of tooling",
+      "owner": "CPF1",
+      "contractOwner": "CPF0",
+      "successorPath": ["UAK1", "CPF0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "U03",
+      "subblock": 1,
+      "outcome": "Compiler capability is declared per exact vertical release and never inferred from tooling support; compiler/parser conflation is a manifest structural failure",
+      "owner": "VIM1",
+      "contractOwner": "VIM0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1"],
+      "receivingAcceptance": "VIM1-AC2"
+    },
+    {
+      "id": "U04",
+      "subblock": 2,
+      "outcome": "Carrier, semantic-profile and project-profile identities are independent: one carrier byte stream may carry mutually exclusive semantic claims, and a semantic profile activates only on its exact release",
+      "owner": "VID0T",
+      "contractOwner": "VID0",
+      "successorPath": ["UAK1", "VID0", "VID0T"],
+      "receivingAcceptance": "VID0T-AC3"
+    },
+    {
+      "id": "U05",
+      "subblock": 2,
+      "outcome": "A project profile overlays semantic profiles through generic roles, realms and generated facts; it never selects a TypeScript program, owns resolution, mutates an identity, or runs when inapplicable",
+      "owner": "PPR0T",
+      "contractOwner": "PPR0",
+      "successorPath": ["UAK1", "CAT0", "PPR0", "PPR0T"],
+      "receivingAcceptance": "PPR0T-AC1",
+      "verifier": "PPR1",
+      "verifierAcceptance": "PPR1-AC2"
+    },
+    {
+      "id": "U06",
+      "subblock": 3,
+      "outcome": "Public results carry one typed outcome vocabulary (success, partial, ambiguous, NeedInputs, unsupported, not-applicable, cancelled, stale) across Rust, NAPI, WASM, LSP, MCP and CLI; no surface reports empty success for missing inputs",
+      "owner": "PUB0T",
+      "contractOwner": "PUB0",
+      "successorPath": ["UAK1", "ENC0", "PUB0", "PUB0T"],
+      "receivingAcceptance": "PUB0T-AC1",
+      "verifier": "UAP0",
+      "verifierAcceptance": "UAP0-AC-R2"
+    },
+    {
+      "id": "U07",
+      "subblock": 3,
+      "outcome": "The per-surface capability/maturity matrix is generated from manifests and freshness-checked; no boolean capability lie and no registered no-op handler",
+      "owner": "VIM1",
+      "contractOwner": "PUB0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1"],
+      "receivingAcceptance": "VIM1-AC1"
+    },
+    {
+      "id": "U08",
+      "subblock": 4,
+      "outcome": "Every vertical and horizontal product has its own terminal; no global release join exists, and the superseded release universe (global EXT0/TVG0/PJG0/X1 coupling) has no successor",
+      "owner": "UAK2",
+      "contractOwner": "UAK1",
+      "successorPath": ["UAK1", "TC-EXPANSION-KERNEL-1", "UAK2"],
+      "receivingAcceptance": "UAK2-AC1"
+    },
+    {
+      "id": "U09",
+      "subblock": 4,
+      "outcome": "Soak joins are continuous evidence over accepted terminals: they fix nothing, gate no release, and a failure becomes a non-invalidating follow-up for the exact owner",
+      "owner": "CEJ0",
+      "contractOwner": "UAK1",
+      "successorPath": ["UAK1", "CPF0", "CPF1", "SCE0", "CEC0", "CEJ0"],
+      "receivingAcceptance": "CEJ0-AC1"
+    },
+    {
+      "id": "U10",
+      "subblock": 5,
+      "outcome": "Extension contributions are data-only or isolated guest execution behind a versioned manifest; they cannot replace core identity, type semantics, resolver, cache validity or edit-transaction authority, and conflict order is deterministic",
+      "owner": "XSDK1",
+      "contractOwner": "XSDK0",
+      "successorPath": ["UAK1", "CAT0", "XSDK0", "XSDK1"],
+      "receivingAcceptance": "XSDK1-AC2"
+    },
+    {
+      "id": "U11",
+      "subblock": 5,
+      "outcome": "Dependency-firewall tests F01-F05",
+      "owner": "UAM0",
+      "contractOwner": "UAK1",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1"
+    },
+    {
+      "id": "U12",
+      "subblock": 6,
+      "outcome": "Executable validation of this inventory and its ledger with the transferred negative controls",
+      "owner": "UAM0",
+      "contractOwner": "UAK1",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1"
+    }
+  ],
+  "inheritedOutcomes": [
+    {
+      "rule": "Static registration into one immutable CatalogSnapshot (subblock 5)",
+      "uak0Outcome": "O02",
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "rule": "Demand-selected activation; disabled or unrequested profiles do zero work (subblocks 1, 3)",
+      "uak0Outcome": "O03",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "rule": "Typed carrier/framework/project/capability identities (subblock 2)",
+      "uak0Outcome": "O01",
+      "owner": "VID0T",
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "rule": "Derived project identity replaces the LSP project registry (subblock 2)",
+      "uak0Outcome": "O10",
+      "owner": "PM1",
+      "receivingAcceptance": "PM1-AC1"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "K-C01",
+      "consumer": "Workspace layer matrix that ranks verter_compiler beneath verter_session",
+      "paths": ["crates/verter_identity/tests/cases/workspace_dependency_layers.rs"],
+      "consumes": ["F01", "F03"],
+      "owner": "FWC1",
+      "successorPath": ["UAK1", "CPF0", "CPF1", "FWC1"],
+      "receivingAcceptance": "FWC1-AC1"
+    },
+    {
+      "id": "K-C02",
+      "consumer": "ARH1 dependency contracts and the existing product-direction guards (no_cross_product_binary_imports, lsp_mcp_dependency_direction, no_verter_semantic_to_verter_session_dep)",
+      "paths": [
+        "crates/verter_source_policy_gate/tests/cases/architecture_dependencies.rs",
+        "tests/architecture-health/ARH1/products/dependency-contracts.json"
+      ],
+      "consumes": ["F01", "F02"],
+      "owner": "UAM0",
+      "successorPath": ["UAK1", "CAT0", "VIM0", "VIM1", "UAM0"],
+      "receivingAcceptance": "UAM0-AC-R1"
+    },
+    {
+      "id": "K-C03",
+      "consumer": "Framework adapter registry trait objects built at host construction (FrameworkAdapterRegistry, FrameworkSurfaceAdapter, ComponentDefaultSynth, ComponentApiProjector, ScriptFactProvider)",
+      "paths": ["crates/verter_session/src/framework/registry.rs"],
+      "consumes": ["F04"],
+      "owner": "CPF1",
+      "successorPath": ["UAK1", "CPF0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "K-C04",
+      "consumer": "JS-host packages that run inside a framework's own process and are the only place ecosystem config is read (packages/nuxt reads Nuxt aliases there)",
+      "paths": ["packages/nuxt"],
+      "consumes": ["U01"],
+      "owner": "CENV1C",
+      "successorPath": ["UAK1", "VID0", "CFG0", "CENV1C"],
+      "receivingAcceptance": "CENV1C-AC1"
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "unit": "Dynamic plugin ABI or runtime plugin loading",
+      "evidence": "No production crate depends on a dynamic-loading or plugin-host crate. The only libloading in Cargo.lock is a dependency of napi-sys, which binds Node-API symbols for the NAPI addon; it loads no Verter plugin. Framework adapters are trait objects constructed in-process at host construction.",
+      "consequence": "Subblock 5 has nothing to delete; CAT0, VIM0 and XSDK0 forbid introducing one."
+    },
+    {
+      "unit": "Embedded JavaScript runtime or project-config execution in Rust",
+      "evidence": "No production crate depends on a JavaScript engine crate; project configuration is not executed by Rust or WASM at this head.",
+      "consequence": "U01 is a preservation outcome; CENV1C proves it executably."
+    },
+    {
+      "unit": "Project-profile knowledge in kernel crates",
+      "evidence": "verter_identity, verter_language, verter_protocol and verter_session production sources contain no Nuxt or SvelteKit branch; mentions are comments and tests.",
+      "consequence": "No project-profile route is displaced; PPR1 guards the overlay."
+    },
+    {
+      "unit": "CLI presentation in kernel crates",
+      "evidence": "verter_session's three binaries (oracle_gen, oracle_upgrade, oracle_lift) are feature-gated test tooling outside the production closure.",
+      "consequence": "No CLI-presentation route is displaced from the kernel."
+    }
+  ],
+  "transferredObligations": [
+    {
+      "obligation": "Dependency-firewall tests F01-F05 with equality-pinned exceptions K01-K04",
+      "receiver": "UAM0",
+      "receivingAcceptance": "UAM0-AC-R1"
+    },
+    {
+      "obligation": "Inventory validator over tests/kernel/UAK1/products/ and the negative controls: omitted row, duplicate seam, unlinked owner/consumer boundary, missing member, unknown owner, pathless owner, conflicting assignment, missing receiving AC",
+      "receiver": "UAM0",
+      "receivingAcceptance": "UAM0-AC-R1"
+    },
+    {
+      "obligation": "Typed public outcomes and capability truth across surfaces",
+      "receiver": "PUB0T",
+      "receivingAcceptance": "PUB0T-AC1"
+    },
+    {
+      "obligation": "Cross-family check of no global release join and no undefined owner",
+      "receiver": "UAK2",
+      "receivingAcceptance": "UAK2-AC1"
+    }
+  ],
+  "layerAssignmentRule": "Every workspace crate is assigned to exactly one layer above, or is a named role-shared crate whose halves are listed separately (verter_compiler: L3 + LC). The UAM0 structural check reads cargo metadata and fails on a crate in no layer."
+}

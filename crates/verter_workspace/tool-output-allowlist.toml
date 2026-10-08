@@ -25,6 +25,10 @@ path = "crates/verter_lsp/src/external_ts/carrier_publish_store.rs"
 rationale = "materializes the Verter-owned carrier-snapshot store (content-addressed blobs + atomic manifest) into a per-host temp directory for the tsserver plugin to read synchronously (tool output mirroring the in-memory ProviderSurfaceStore, not semantic input); never the user workspace"
 
 [[entries]]
+path = "crates/verter_lsp/src/external_ts/carrier_publish_journal.rs"
+rationale = "reads the Verter-owned carrier-snapshot store head, base snapshot and journal from the per-host temp directory (the read half of carrier_publish_store.rs; tool output, not semantic input); never the user workspace"
+
+[[entries]]
 path = "crates/verter_lsp/src/config.rs"
 rationale = "test fixtures (`#[cfg(test)]` blocks set up tmp directories for `discover_lint_config` tests)"
 
