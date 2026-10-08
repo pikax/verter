@@ -201,6 +201,9 @@ pub enum Claim<'s> {
 /// were all waited out.
 pub enum Acquired<'s> {
     Read(ValueRead),
+    /// The caller's own source answered the warm miss before any claim,
+    /// already admitted for the caller.
+    Served(ValueRead),
     Recursive(Recursion),
     Produce(ProducerLease<'s>),
 }
@@ -302,6 +305,10 @@ impl SemanticGraphStore {
     /// only once the warm lookup misses, so a warm read takes no task, and
     /// the caller keeps the scope for as long as the producer it may be
     /// handed runs, so every query nested in that build joins the task.
+    ///
+    /// unclaimed is consulted once the warm lookup misses and before the
+    /// first claim: a read it answers with ([Acquired::Served]) installs
+    /// no flight, so no other task can join one that is never produced.
     pub fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
         &'s self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
@@ -310,6 +317,7 @@ impl SemanticGraphStore {
         execution: &mut Option<ExecutionScope>,
         capture: &mut ReadCapture<'_>,
         recompute: bool,
+        unclaimed: &mut dyn FnMut() -> Option<ValueRead>,
     ) -> Acquired<'s> {
         let begun = if recompute {
             self.begin_query_recompute(flags, key)
@@ -320,6 +328,9 @@ impl SemanticGraphStore {
             Ok(attempt) => attempt,
             Err(read) => return Acquired::Read(read),
         };
+        if let Some(read) = unclaimed() {
+            return Acquired::Served(read);
+        }
         let task = execution
             .get_or_insert_with(|| self.enter_execution())
             .task();
@@ -1231,8 +1242,10 @@ impl SemanticGraphStore {
         // fields exactly as the production dispatch path does.
         let flags = crate::resolver_core::fact_validation_port::FactValidation::request_flags(ctx);
         let mut execution = None;
-        match self.acquire_query(ctx, flags, key, &mut execution, capture, false) {
-            Acquired::Read(read) => read,
+        match self.acquire_query(ctx, flags, key, &mut execution, capture, false, &mut || {
+            None
+        }) {
+            Acquired::Read(read) | Acquired::Served(read) => read,
             Acquired::Recursive(recursion) => Self::recursion_read(recursion, recursion_sentinel()),
             Acquired::Produce(lease) => {
                 let receipt = lease.fixture_receipt();

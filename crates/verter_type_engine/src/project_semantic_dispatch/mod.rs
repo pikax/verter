@@ -3832,16 +3832,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut refused = None;
         let cache_read = loop {
             let recompute = refused.is_some();
-            // A result this dispatcher published answers before any claim:
-            // a claim installs a flight other tasks may join, so it is
-            // taken only to produce.
-            if let Some((read, carrier)) = plain_read
-                .then(|| self.own_published_read(&key, cost_receipt::Nesting::Entered))
-                .flatten()
-            {
-                crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&carrier);
-                break read;
-            }
+            // A memo miss this dispatcher's own build already published
+            // answers before any claim: a claim installs a flight other
+            // tasks may join, so it is taken only to produce.
+            let mut own_published = || {
+                plain_read
+                    .then(|| self.own_published_read(&key, cost_receipt::Nesting::Entered))
+                    .flatten()
+                    .map(|(read, carrier)| {
+                        crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
+                            &carrier,
+                        );
+                        read
+                    })
+            };
             break match graph.acquire_query(
                 self.ctx,
                 flags,
@@ -3849,7 +3853,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &mut execution,
                 &mut capture,
                 recompute,
+                &mut own_published,
             ) {
+                Acquired::Served(read) => read,
                 Acquired::Read(read) => {
                     match self.served_read(&key, read, cost_receipt::Nesting::Entered) {
                         Ok(read) => read,

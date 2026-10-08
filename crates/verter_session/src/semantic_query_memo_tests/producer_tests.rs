@@ -346,9 +346,10 @@ fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
                 &mut execution,
                 &mut capture,
                 false,
+                &mut || None,
             ) {
                 super::producer::Acquired::Produce(_) => "produce",
-                super::producer::Acquired::Read(_) => "read",
+                super::producer::Acquired::Read(_) | super::producer::Acquired::Served(_) => "read",
                 super::producer::Acquired::Recursive(_) => "recursive",
             }
         });
