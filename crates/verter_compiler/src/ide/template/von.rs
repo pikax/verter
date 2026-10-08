@@ -15,7 +15,8 @@
 //! anchor MAPPED to the source event token. Object braces, computed-key template
 //! literals, the `($event) => { … }` handler-wrapper scaffolding (with an explicit
 //! event-payload annotation on the spread path, where JSX contextual typing cannot
-//! flow), and the v-if narrowing guard are unmapped synthetic text. This module
+//! flow), and the condition re-narrowing guard (see [`super::flow`]) are unmapped
+//! synthetic text. This module
 //! lives apart from `props.rs` so each stays within the production line-count budget.
 
 use oxc_allocator::Allocator;
@@ -23,6 +24,7 @@ use oxc_ast::ast::Expression;
 
 use verter_span::{GeneratedByteLen, SourceByteOffset, SourceByteRange};
 
+use super::flow::{CallbackSource, FlowNarrowing, GuardInjection, HandlerBody};
 use super::props::get_prop_end;
 use crate::ast::types::{ElementNode, TagType};
 use crate::ide::template::emit::{
@@ -55,7 +57,7 @@ pub(super) fn process_v_on<'alloc>(
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     components: &TemplateComponentBindings,
-    v_if_guard: Option<&str>,
+    flow: &mut FlowNarrowing,
     use_spread: bool,
 ) {
     let has_arg = prop.arg_start.is_some();
@@ -418,27 +420,45 @@ pub(super) fn process_v_on<'alloc>(
         // decomposed through the typed `EmitOp` substrate (NOT one flat mapped
         // overwrite). The event NAME is a navigable semantic anchor (mapped to the
         // source event token), the synthetic wrapper scaffolding is UNMAPPED, the
-        // optional v-if narrowing guard is UNMAPPED synthetic text injected at the
-        // body start, and the handler value is PRESERVED IN PLACE — planned + emitted
-        // through the unified in-place sink so each identifier stays an `Original`
-        // (1:1-mapped) chunk while accessor prefixes/suffixes are applied as in-place
-        // prepends. The `expr_unchanged` fast path is subsumed: with no rewrite the
-        // plan's prefixes are empty, so the in-place sink is a pure no-op over the
+        // optional re-narrowing guard is UNMAPPED synthetic text, and the handler
+        // value is PRESERVED IN PLACE — planned + emitted through the unified
+        // in-place sink so each identifier stays an `Original` (1:1-mapped) chunk
+        // while accessor prefixes/suffixes are applied as in-place prepends. The
+        // `expr_unchanged` fast path is subsumed: with no rewrite the plan's
+        // prefixes are empty, so the in-place sink is a pure no-op over the
         // preserved bytes. The branches differ ONLY in the scaffolding text and
-        // whether a narrowing guard applies.
+        // where a re-narrowing guard goes.
         //
         // `scaffold_after_event` is the synthetic text emitted AFTER the mapped event
-        // name and BEFORE the (optional) guard + body: `={`, `={() => {`, or the
-        // `={($event) => {` wrapper. `guard_text` (when present) is the narrowing guard
-        // injected at the body start — a COMPOSED, span-erased compiler-synthesized
-        // scaffold (see `emit_in_place_handler` docs) → UNMAPPED. Guards apply only to
-        // the two wrapping branches ($event / inline expression); a function/object/
-        // simple-ident handler is already a valid handler value and takes no guard.
+        // name and BEFORE the body: `={`, `={() => {`, or the `={($event) => {`
+        // wrapper. A callback under a condition — an authored function, or the
+        // wrapper around an inline statement — is re-narrowed by a guard at its
+        // body start; an object or reference handler is not a callback body.
         let _ = expr_unchanged;
-        let (scaffold_after_event, boundary_suffix, guard_text): (String, &str, Option<String>) =
+        let parsed = oxc_prop.and_then(|p| p.exp.as_ref());
+        let handler_guard = |flow: &mut FlowNarrowing, event: bool| {
+            parsed.and_then(|exp| {
+                let body = HandlerBody::of(exp)?;
+                flow.callback_guard(
+                    source,
+                    exp,
+                    CallbackSource::Handler {
+                        body,
+                        body_start: trimmed_vs,
+                        event,
+                    },
+                    resolver,
+                )
+            })
+        };
+        let (scaffold_after_event, boundary_suffix, guard): (&str, &str, Option<GuardInjection>) =
             if is_fn_expr || is_object_expr {
                 // Explicit function/object expressions are already valid handlers.
-                ("={".to_string(), "}", None)
+                let guard = parsed.and_then(|exp| {
+                    let expression = exp.expression.as_ref()?;
+                    flow.callback_guard(source, exp, CallbackSource::Function(expression), resolver)
+                });
+                ("={", "}", guard)
             } else if has_event_param {
                 // `$event` can only exist inside a callback parameter scope. Name the
                 // handler's sole parameter `$event` so it is contextually typed by the
@@ -447,21 +467,13 @@ pub(super) fn process_v_on<'alloc>(
                 // formula and no generic `eventCallbacks` indirection (which left
                 // `$event` as `any` because contextual typing does not flow through a
                 // synthetic rest parameter into a generic helper call).
-                (
-                    "={($event) => {".to_string(),
-                    "}}",
-                    v_if_guard.map(|guard| format!("if (!({})) {{ return undefined; }} ", guard)),
-                )
+                ("={($event) => {", "}}", handler_guard(flow, true))
             } else if is_simple_ident || is_member_expr {
                 // Simple handler: @click="handler" → onClick={handler}
-                ("={".to_string(), "}", None)
+                ("={", "}", None)
             } else {
                 // Inline expression: @click="count++" → onClick={() => count++}
-                (
-                    "={() => {".to_string(),
-                    "}}",
-                    v_if_guard.map(|guard| format!("if (!({})) {{ return undefined; }} ", guard)),
-                )
+                ("={() => {", "}}", handler_guard(flow, false))
             };
 
         emit_in_place_handler(
@@ -471,12 +483,12 @@ pub(super) fn process_v_on<'alloc>(
             prop.start,
             arg_start,
             &jsx_event_name,
-            &scaffold_after_event,
+            scaffold_after_event,
             trimmed_vs,
             trimmed_ve,
             prop_end,
             boundary_suffix,
-            guard_text.as_deref(),
+            guard.as_ref(),
             oxc_prop,
         );
     } else {
@@ -498,20 +510,18 @@ pub(super) fn process_v_on<'alloc>(
 ///   v-on spread branch, which maps the event-name key via `InsertMapped@arg_start`.
 /// - `scaffold_after_event` (`={`, `={() => {`, the `={($event) => {` wrapper) is
 ///   synthetic JSX scaffolding → UNMAPPED.
-/// - The optional `guard_text` is a v-if narrowing guard injected at the body start.
-///   It is a COMPOSED, span-erased compiler-synthesized scaffold (own positive
-///   condition + sibling negations from OTHER elements + ancestor scopes, already
-///   flattened to a string and joined with synthetic `!(…) && (…)`), so it has no
-///   single source span → emitted UNMAPPED (None), exactly like the sibling
+/// - The optional `guard` re-narrows the callback's outer references from their
+///   snapshots (see [`super::flow`]). It is compiler-synthesized and has no
+///   source span → emitted UNMAPPED (None), exactly like the sibling
 ///   `process_v_bind` guarded-value path's `out.prepend_alloc(injection.offset, …)`.
 /// - The handler VALUE is PRESERVED IN PLACE through the unified in-place sink (each
 ///   surviving identifier stays an `Original`, 1:1-mapped chunk; accessor
 ///   prefixes/suffixes applied as in-place prepends).
 /// - The closing `boundary_suffix` is synthetic → UNMAPPED.
 ///
-/// The guard is emitted BEFORE the in-place value plan so that at a shared anchor (an
-/// inline handler whose first body identifier sits exactly at `trimmed_vs`) the
-/// stable-sorted same-position prepend order is `<guard><accessor-prefix><identifier>`.
+/// The guard is emitted BEFORE the in-place value plan so that at a shared anchor (a
+/// body whose first identifier sits exactly at the guard offset) the stable-sorted
+/// same-position prepend order is `<guard><accessor-prefix><identifier>`.
 #[allow(clippy::too_many_arguments)]
 fn emit_in_place_handler<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
@@ -525,7 +535,7 @@ fn emit_in_place_handler<'alloc>(
     trimmed_ve: u32,
     prop_end: u32,
     boundary_suffix: &str,
-    guard_text: Option<&str>,
+    guard: Option<&GuardInjection>,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
 ) {
     // Delete the leading `@` / `v-on:` prefix (unmapped — `overwrite(.., .., "")`).
@@ -552,21 +562,14 @@ fn emit_in_place_handler<'alloc>(
     // The arg-side span between the event token and the value start (`="`, modifiers,
     // whitespace) is deleted; the synthetic scaffolding already supplied the `={`.
     out.overwrite(arg_start, trimmed_vs, "");
-    // The v-if narrowing guard (synthetic) → UNMAPPED prepend at the body start,
+    // The re-narrowing guard (synthetic) → UNMAPPED prepend at its body offset,
     // emitted before the in-place value so the same-position order keeps the guard
-    // ahead of any body identifier / accessor prefix.
-    //
-    // Guard-injection offset is per-wrapper-shape but the mapping discipline is
-    // shared: this handler path injects at `trimmed_vs` (the guard scaffolds a
-    // statement-body `{ if (!(…)) return undefined; … }`, so it lands at the body
-    // start), while the sibling v-bind function-value path
-    // (`process_v_bind` → `compute_function_guard_injection`) computes a
-    // wrapper-shape-specific offset (arrow-expression body vs arrow-block / fn-expr
-    // body `{`). Both emit the guard as an UNMAPPED prepend (synthetic narrowing
-    // text → None) ordered ahead of the in-place body identifiers — the offsets
-    // differ, the unmapped-guard contract is identical.
-    if let Some(guard) = guard_text {
-        out.prepend_alloc(trimmed_vs, guard);
+    // ahead of any body identifier / accessor prefix. A wrapped inline statement
+    // takes it at the body start (`trimmed_vs`); an authored function at its own
+    // body (after `{`, or before an expression body) — the same sites the
+    // `process_v_bind` function-value path uses.
+    if let Some(guard) = guard {
+        out.prepend_alloc(guard.source_offset, &guard.text);
     }
     // The handler value is planned + emitted IN PLACE through the unified planner.
     let bindings = oxc_prop
@@ -581,6 +584,9 @@ fn emit_in_place_handler<'alloc>(
         ExprOptions::in_place(),
     );
     emit_expr_plan(out, &plan, Placement::InPlace, source);
+    if let Some((at, close)) = guard.and_then(|guard| guard.close) {
+        out.prepend_alloc(at, close);
+    }
     // The closing `boundary_suffix` is synthetic JSX scaffolding (the `}` /
     // `}}` / `})}` wrapper + container close) → UNMAPPED, exactly like the
     // leading-prefix delete and the `scaffold_after_event` insert. Lowered

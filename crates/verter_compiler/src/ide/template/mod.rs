@@ -11,8 +11,8 @@
 //! | `<!-- comment -->` | `{/* comment */}` |
 //! | `:prop="expr"` | `prop={expr}` |
 //! | `@event="handler"` | `onEvent={handler}` |
-//! | `v-if="cond"` | `{cond ? (...) : null}` |
-//! | `v-for="item in items"` | `{items.map((item) => (...))}` |
+//! | `v-if="cond"` | `{(()=>{if(cond){...}})()}` (see [`flow`]) |
+//! | `v-for="item in items"` | `{(() => { const ___VERTER___v0 = (items); { const item = ___VERTER___flowEach1(___VERTER___v0); return (...); } })()}` |
 //! | `v-show="expr"` | `style={{display: expr ? undefined : 'none'}}` |
 //! | `v-model="val"` | `modelValue={val} onUpdate:modelValue={...}` |
 //! | `v-bind="obj"` | `{...obj}` |
@@ -20,6 +20,7 @@
 
 pub mod directives;
 pub mod emit;
+pub(crate) mod flow;
 #[cfg(any(test, feature = "test-support"))]
 pub mod flow_check;
 pub mod props;
@@ -36,7 +37,6 @@ use crate::ast::types::{
     AstNodeKind, CommentNode, ConditionalChain, ElementNode, ElementNodeConditionKind,
     InterpolationNode, TagType, TextNode,
 };
-use crate::ide::condition::{self, ConditionScope};
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText,
 };
@@ -67,6 +67,11 @@ enum ChainMode {
     /// element emits plain JSX in expression context.
     LiftedPlain,
 }
+
+/// Closes a chain's immediately invoked block after its last `v-if` /
+/// `v-else-if` branch (a `v-else` closes it itself, see
+/// [`directives::emit_v_if_close`]).
+const CHAIN_CLOSE: &str = "})()}";
 
 /// Expression context for brace ownership.
 ///
@@ -136,6 +141,8 @@ struct IdeTemplateCtx<'a, 'alloc> {
     strict_slot_entries: Vec<StrictSlotEntry>,
     /// Collected required slots checks for `checkRequiredSlots` emission.
     required_slot_checks: Vec<RequiredSlotsCheck>,
+    /// Condition narrowing scopes enclosing the current walk position.
+    flow: flow::FlowNarrowing,
 }
 
 /// Generate TSX template (JSX) from the template AST.
@@ -200,8 +207,9 @@ pub fn generate_ide_template<'alloc>(
         ts_directives_for_component_is: Vec::new(),
         strict_slot_entries: Vec::new(),
         required_slot_checks: Vec::new(),
+        flow: flow::FlowNarrowing::new(!options.is_jsx),
     };
-    walk_children_with_iife_tracking(children, &content.v_if_chains, &mut ctx, &[]);
+    walk_children_with_iife_tracking(children, &content.v_if_chains, &mut ctx);
 
     if needs_fragment {
         ctx.out.prepend_alloc(content.end, "</>");
@@ -214,12 +222,7 @@ pub fn generate_ide_template<'alloc>(
 }
 
 /// Walk a single AST node and generate JSX output.
-fn walk_node<'a, 'alloc>(
-    id: NodeId,
-    ctx: &mut IdeTemplateCtx<'a, 'alloc>,
-    condition_scopes: &[ConditionScope],
-    chain_mode: ChainMode,
-) {
+fn walk_node<'a, 'alloc>(id: NodeId, ctx: &mut IdeTemplateCtx<'a, 'alloc>, chain_mode: ChainMode) {
     let node = &ctx.ast.nodes[id.0];
     let oxc_data = &ctx.oxc_ast.data[id.0];
 
@@ -229,7 +232,7 @@ fn walk_node<'a, 'alloc>(
                 OxcNodeData::Element(el) => Some(el.as_ref()),
                 _ => None,
             };
-            walk_element(id, el, oxc_el, ctx, condition_scopes, chain_mode);
+            walk_element(id, el, oxc_el, ctx, chain_mode);
         }
         AstNodeKind::Text(text) => {
             visit_text(text, ctx.source, ctx.out);
@@ -260,19 +263,16 @@ fn walk_element<'a, 'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     ctx: &mut IdeTemplateCtx<'a, 'alloc>,
-    parent_condition_scopes: &[ConditionScope],
     chain_mode: ChainMode,
 ) {
     // Handle structural directives first
     let has_v_if = el.v_condition.is_some();
     let has_v_for = el.v_for.is_some();
-    // <template v-if v-slot> — v-if is handled by slot codegen, skip IIFE wrapping
-    let is_slot_template = el.tag_type == TagType::Template && has_v_if && el.v_slot.is_some();
 
     // Lifted chain members skip v-if emission (the condition is emitted by the parent walk loop).
     let is_lifted = matches!(chain_mode, ChainMode::LiftedBranch | ChainMode::LiftedPlain);
 
-    let emit_iife = has_v_if && !is_slot_template && !is_lifted;
+    let emit_iife = has_v_if && !is_lifted;
 
     // Compute emit context for brace ownership
     let emit_ctx = match chain_mode {
@@ -281,50 +281,70 @@ fn walk_element<'a, 'alloc>(
         ChainMode::LiftedBranch | ChainMode::LiftedPlain => EmitContext::Expression,
     };
 
-    // v-for wrapping
-    if has_v_for {
-        directives::emit_v_for_open(
+    let el_end = el
+        .tag_close
+        .as_ref()
+        .map(|tc| tc.end)
+        .unwrap_or(el.tag_open.end);
+
+    // A lifted branch is narrowed by the `cond ?` its parent emitted. Without
+    // a frame of its own it has no statement position, so it is wrapped in an
+    // immediately invoked arrow if one of its callbacks needs snapshots.
+    let lifted = match chain_mode {
+        ChainMode::LiftedPlain => Some(ctx.flow.open(
+            ctx.out,
+            el.tag_open.start,
+            flow::ScopeKind::LiftedBranch { close: el_end },
+        )),
+        ChainMode::LiftedBranch => Some(ctx.flow.open(
+            ctx.out,
+            el.tag_open.start,
+            flow::ScopeKind::LiftedCondition,
+        )),
+        ChainMode::Normal => None,
+    };
+
+    // v-for frame: `{(() => { const ___VERTER___vN = (<source>); { const <aliases> =
+    // ___VERTER___flowEachK(___VERTER___vN);` + snapshot declarations + ` return (`.
+    let frame = if has_v_for
+        && directives::emit_v_for_open(
             el,
             oxc_el,
             ctx.source,
             ctx.out,
-            ctx.alloc,
             ctx.resolver,
             ctx.options.is_jsx,
             chain_mode == ChainMode::LiftedBranch,
-        );
-    }
-
-    // Build condition scope for this element (for type narrowing guards).
-    // This computes the current element's scope and the full accumulated scopes.
-    let own_scope = if has_v_if {
-        build_condition_scope(el, oxc_el, ctx.source, ctx.resolver, ctx.ast, id)
+            &ctx.flow.frame_source_name(),
+        ) {
+        Some(ctx.flow.open(
+            ctx.out,
+            el.tag_open.start,
+            flow::ScopeKind::Frame {
+                head: "",
+                tail: directives::V_FOR_BODY_OPEN,
+            },
+        ))
     } else {
         None
     };
-    let full_scopes: Vec<ConditionScope> = if let Some(ref scope) = own_scope {
-        let mut s = parent_condition_scopes.to_vec();
-        s.push(scope.clone());
-        s
-    } else {
-        parent_condition_scopes.to_vec()
+
+    // v-if/v-else-if/v-else: one branch of the chain's immediately invoked block.
+    let branch =
+        if emit_iife && directives::emit_v_if_open(el, oxc_el, ctx.source, ctx.out, ctx.resolver) {
+            Some(
+                ctx.flow
+                    .open(ctx.out, el.tag_open.start, flow::ScopeKind::Branch),
+            )
+        } else {
+            None
+        };
+    let structural = StructuralScopes {
+        lifted,
+        frame,
+        branch,
+        bare_frame: chain_mode == ChainMode::LiftedBranch,
     };
-
-    // Generate guard text for prop narrowing (full accumulated scopes)
-    let guard_text = condition::generate_condition_text(&full_scopes);
-
-    // v-if/v-else-if/v-else IIFE wrapping (skip for <template v-if v-slot>)
-    if emit_iife {
-        directives::emit_v_if_open(
-            el,
-            oxc_el,
-            ctx.source,
-            ctx.out,
-            ctx.alloc,
-            ctx.resolver,
-            parent_condition_scopes,
-        );
-    }
 
     // Remove cached structural directive attributes from source.
     // These are NOT in el.props (the parser extracts them via prop.take()),
@@ -602,27 +622,11 @@ fn walk_element<'a, 'alloc>(
             // only if there's fallback content.
             if has_children {
                 if let Some(content) = &el.content {
-                    walk_children_with_iife_tracking(
-                        &content.children,
-                        &content.v_if_chains,
-                        ctx,
-                        &full_scopes,
-                    );
+                    walk_children_with_iife_tracking(&content.children, &content.v_if_chains, ctx);
                 }
             }
 
-            // Close v-if/v-for if present
-            if emit_iife {
-                directives::emit_v_if_close(el, ctx.source, ctx.out);
-            }
-            if has_v_for {
-                directives::emit_v_for_close(
-                    el,
-                    ctx.source,
-                    ctx.out,
-                    chain_mode == ChainMode::LiftedBranch,
-                );
-            }
+            close_structural_scopes(el, ctx, structural);
             return; // Early return — skip normal element processing below
         }
         _ => {
@@ -630,7 +634,7 @@ fn walk_element<'a, 'alloc>(
         }
     }
 
-    // Process props/attributes → JSX (pass guard for type narrowing in arrow functions)
+    // Process props/attributes → JSX (callbacks under a condition are re-narrowed)
     let collected_directives = props::process_element_props(
         el,
         oxc_el,
@@ -639,7 +643,7 @@ fn walk_element<'a, 'alloc>(
         ctx.alloc,
         ctx.resolver,
         ctx.components,
-        guard_text.as_deref(),
+        &mut ctx.flow,
         ctx.options.is_jsx,
     );
 
@@ -770,7 +774,7 @@ fn walk_element<'a, 'alloc>(
     // Template: <template #header="{ title }">children</template>
     //   → <>{"header"}{(({ title }) => (<>children</>))(CALL)}</>
     let slot_iife_info = build_slot_iife_info(id, el, ctx.source, ctx.ast);
-    if let Some(ref slot_info) = slot_iife_info {
+    let slot_frame = if let Some(ref slot_info) = slot_iife_info {
         // Emit slot IIFE opening in three ordered parts through the mapped
         // prepend channel (insertion order is preserved within one anchor):
         //   unmapped `{(() => { const ` + MAPPED authored pattern + unmapped
@@ -793,18 +797,25 @@ fn walk_element<'a, 'alloc>(
             slot_info.params_start,
             &ctx.source[slot_info.params_start as usize..slot_info.params_end as usize],
         );
-        ctx.out
-            .prepend_ordered_unmapped(anchor, &slot_info.open_suffix);
+        Some(ctx.flow.open(
+            ctx.out,
+            anchor,
+            flow::ScopeKind::Frame {
+                head: &slot_info.open_declaration_end,
+                tail: SLOT_FRAME_BODY_OPEN,
+            },
+        ))
+    } else {
+        None
+    };
+
+    // Walk children — they inherit every enclosing condition through flow.
+    if let Some(content) = &el.content {
+        walk_children_with_iife_tracking(&content.children, &content.v_if_chains, ctx);
     }
 
-    // Walk children — children inherit the condition scopes from this element
-    if let Some(content) = &el.content {
-        walk_children_with_iife_tracking(
-            &content.children,
-            &content.v_if_chains,
-            ctx,
-            &full_scopes,
-        );
+    if let Some(frame) = slot_frame {
+        ctx.flow.close(ctx.out, frame);
     }
 
     // ── Strict slot children collection ────────────────────────────
@@ -894,19 +905,35 @@ fn walk_element<'a, 'alloc>(
         ctx.out.prepend_alloc(el_end, iife_close);
     }
 
-    // Close v-if IIFE (skip for <template v-if v-slot>)
-    if emit_iife {
-        directives::emit_v_if_close(el, ctx.source, ctx.out);
-    }
+    close_structural_scopes(el, ctx, structural);
+}
 
-    // Close v-for
-    if has_v_for {
-        directives::emit_v_for_close(
-            el,
-            ctx.source,
-            ctx.out,
-            chain_mode == ChainMode::LiftedBranch,
-        );
+/// The narrowing scopes an element's structural directives opened.
+struct StructuralScopes {
+    lifted: Option<flow::ScopeToken>,
+    frame: Option<flow::ScopeToken>,
+    branch: Option<flow::ScopeToken>,
+    /// The `v-for` frame is a lifted branch (no `{`/`}` container).
+    bare_frame: bool,
+}
+
+/// Close an element's `v-if` branch, `v-for` frame and lifted branch, innermost
+/// first, emitting each scope's snapshot declarations.
+fn close_structural_scopes(
+    el: &ElementNode,
+    ctx: &mut IdeTemplateCtx<'_, '_>,
+    scopes: StructuralScopes,
+) {
+    if let Some(branch) = scopes.branch {
+        directives::emit_v_if_close(el, ctx.out);
+        ctx.flow.close(ctx.out, branch);
+    }
+    if let Some(frame) = scopes.frame {
+        ctx.flow.close(ctx.out, frame);
+        directives::emit_v_for_close(el, ctx.out, scopes.bare_frame);
+    }
+    if let Some(lifted) = scopes.lifted {
+        ctx.flow.close(ctx.out, lifted);
     }
 }
 
@@ -1015,20 +1042,24 @@ fn isolate_vue_slot_body(
     true
 }
 
+/// Opens the body of a scoped-slot frame after its declarations.
+const SLOT_FRAME_BODY_OPEN: &str = " return (<>";
+
 /// Info for generating a v-slot scoped parameter IIFE wrapper.
 struct SlotIifeInfo {
     /// Unmapped open prefix prepended after the open tag: `{(() => { const `
     open_prefix: String,
     /// Authored byte range of the destructure pattern — emitted between
-    /// `open_prefix` and `open_suffix` as a SOURCE-MAPPED prepend so IDE
+    /// `open_prefix` and `open_declaration_end` as a SOURCE-MAPPED prepend so IDE
     /// features (hover on the destructured bindings) resolve the provider's
     /// typed quickinfo at the authored pattern positions instead of landing
     /// in an unmapped synthetic region (D4).
     params_start: u32,
     params_end: u32,
-    /// Unmapped open suffix prepended after the pattern:
-    /// ` = ___VERTER___extractArgumentsFromRenderSlot(...); return (<>`
-    open_suffix: String,
+    /// Unmapped declaration end emitted after the pattern:
+    /// ` = ___VERTER___extractArgumentsFromRenderSlot(...);`. The frame's
+    /// snapshot declarations follow it, then [`SLOT_FRAME_BODY_OPEN`].
+    open_declaration_end: String,
     /// Text to prepend before the close tag: `</>)(___VERTER___extractArgumentsFromRenderSlot(...))}`
     close_text: String,
 }
@@ -1077,14 +1108,16 @@ fn build_slot_iife_info(
     }
     let offset = component.tag_open.start;
     let open_prefix = "{(() => { const ".to_string();
-    let open_suffix = format!(" = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___slotInstance{offset}, \"{slot_name}\"); return (<>");
+    let open_declaration_end = format!(
+        " = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___slotInstance{offset}, \"{slot_name}\");"
+    );
     let close_text = "</>); })()}".to_string();
 
     Some(SlotIifeInfo {
         open_prefix,
         params_start: vs,
         params_end: ve,
-        open_suffix,
+        open_declaration_end,
         close_text,
     })
 }
@@ -1093,14 +1126,15 @@ fn build_slot_iife_info(
 ///
 /// Chains are pre-computed by the AST builder. Each chain is classified as:
 /// - **Lifted** (any member has v-for): emits `{cond ? branch : branch : null}`
-/// - **IIFE** (no member has v-for): emits `{()=>{if(cond){ ... }else{ ... }}}` (existing)
+/// - **IIFE** (no member has v-for): emits `{(()=>{if(cond){ ... }else{ ... }})()}`,
+///   one immediately invoked block per chain, so every branch body continues
+///   the flow its conditions narrowed (see [`flow`]).
 ///
 /// Non-chain children (including solo v-if without siblings) pass through normally.
 fn walk_children_with_iife_tracking<'a, 'alloc>(
     children: &[NodeId],
     chains: &[ConditionalChain],
     ctx: &mut IdeTemplateCtx<'a, 'alloc>,
-    parent_condition_scopes: &[ConditionScope],
 ) {
     // ── Build per-index plan from chain metadata ──
 
@@ -1144,6 +1178,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
 
         let last_idx = indices.len() - 1;
         for (pos, &child_idx) in indices.iter().enumerate() {
+            flow::record(|work| work.chain_members += 1);
             let el = match &ctx.ast.nodes[children[child_idx].0].kind {
                 AstNodeKind::Element(el) => el,
                 _ => continue,
@@ -1230,7 +1265,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                 ChainShape::Lifted => {
                     // Flush any pending IIFE from a previous Iife chain
                     if let Some(pos) = pending_iife_close_pos.take() {
-                        ctx.out.prepend_alloc(pos, "}}");
+                        ctx.out.prepend_alloc(pos, CHAIN_CLOSE);
                     }
 
                     let oxc_el = match &ctx.oxc_ast.data[child_id.0] {
@@ -1300,7 +1335,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     if let Some(comments) = analysis.component_is_comments.get(&idx) {
                         ctx.ts_directives_for_component_is = comments.clone();
                     }
-                    walk_node(child_id, ctx, parent_condition_scopes, mode);
+                    walk_node(child_id, ctx, mode);
                     ctx.ts_directives_for_component_is.clear();
 
                     // Inject repositioned comments
@@ -1336,23 +1371,16 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                 ChainShape::Iife => {
                     // ── IIFE chain logic (same as before but chain-driven) ──
 
-                    let is_slot_template = child_el.tag_type == TagType::Template
-                        && child_el.v_condition.is_some()
-                        && child_el.v_slot.is_some();
-
-                    if !is_slot_template {
-                        if let Some(ref cond) = child_el.v_condition {
-                            match cond.kind {
-                                ElementNodeConditionKind::If => {
-                                    // Flush pending from previous chain
-                                    if let Some(pos) = pending_iife_close_pos.take() {
-                                        ctx.out.prepend_alloc(pos, "}}");
-                                    }
+                    if let Some(ref cond) = child_el.v_condition {
+                        match cond.kind {
+                            ElementNodeConditionKind::If => {
+                                // Flush pending from previous chain
+                                if let Some(pos) = pending_iife_close_pos.take() {
+                                    ctx.out.prepend_alloc(pos, CHAIN_CLOSE);
                                 }
-                                ElementNodeConditionKind::ElseIf
-                                | ElementNodeConditionKind::Else => {
-                                    // Continue existing chain
-                                }
+                            }
+                            ElementNodeConditionKind::ElseIf | ElementNodeConditionKind::Else => {
+                                // Continue existing chain
                             }
                         }
                     }
@@ -1361,7 +1389,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     if let Some(comments) = analysis.component_is_comments.get(&idx) {
                         ctx.ts_directives_for_component_is = comments.clone();
                     }
-                    walk_node(child_id, ctx, parent_condition_scopes, ChainMode::Normal);
+                    walk_node(child_id, ctx, ChainMode::Normal);
                     ctx.ts_directives_for_component_is.clear();
 
                     // Inject repositioned comments
@@ -1397,22 +1425,19 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                     }
 
                     // Track IIFE close position
-                    if !is_slot_template {
-                        if let AstNodeKind::Element(child_el) = &ctx.ast.nodes[child_id.0].kind {
-                            if let Some(ref cond) = child_el.v_condition {
-                                let el_end = child_el
-                                    .tag_close
-                                    .as_ref()
-                                    .map(|tc| tc.end)
-                                    .unwrap_or(child_el.tag_open.end);
-                                match cond.kind {
-                                    ElementNodeConditionKind::If
-                                    | ElementNodeConditionKind::ElseIf => {
-                                        pending_iife_close_pos = Some(el_end);
-                                    }
-                                    ElementNodeConditionKind::Else => {
-                                        pending_iife_close_pos = None;
-                                    }
+                    if let AstNodeKind::Element(child_el) = &ctx.ast.nodes[child_id.0].kind {
+                        if let Some(ref cond) = child_el.v_condition {
+                            let el_end = child_el
+                                .tag_close
+                                .as_ref()
+                                .map(|tc| tc.end)
+                                .unwrap_or(child_el.tag_open.end);
+                            match cond.kind {
+                                ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
+                                    pending_iife_close_pos = Some(el_end);
+                                }
+                                ElementNodeConditionKind::Else => {
+                                    pending_iife_close_pos = None;
                                 }
                             }
                         }
@@ -1424,14 +1449,14 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
 
             // Flush any pending IIFE close
             if let Some(pos) = pending_iife_close_pos.take() {
-                ctx.out.prepend_alloc(pos, "}}");
+                ctx.out.prepend_alloc(pos, CHAIN_CLOSE);
             }
 
             // Set up component :is TS directives
             if let Some(comments) = analysis.component_is_comments.get(&idx) {
                 ctx.ts_directives_for_component_is = comments.clone();
             }
-            walk_node(child_id, ctx, parent_condition_scopes, ChainMode::Normal);
+            walk_node(child_id, ctx, ChainMode::Normal);
             ctx.ts_directives_for_component_is.clear();
 
             // Inject repositioned comments
@@ -1467,22 +1492,17 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
 
                 // Solo v-if elements NOT in any chain still use IIFE tracking
                 if let Some(ref cond) = child_el.v_condition {
-                    let is_slot_template = child_el.tag_type == TagType::Template
-                        && child_el.v_condition.is_some()
-                        && child_el.v_slot.is_some();
-                    if !is_slot_template {
-                        let el_end = child_el
-                            .tag_close
-                            .as_ref()
-                            .map(|tc| tc.end)
-                            .unwrap_or(child_el.tag_open.end);
-                        match cond.kind {
-                            ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
-                                pending_iife_close_pos = Some(el_end);
-                            }
-                            ElementNodeConditionKind::Else => {
-                                pending_iife_close_pos = None;
-                            }
+                    let el_end = child_el
+                        .tag_close
+                        .as_ref()
+                        .map(|tc| tc.end)
+                        .unwrap_or(child_el.tag_open.end);
+                    match cond.kind {
+                        ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
+                            pending_iife_close_pos = Some(el_end);
+                        }
+                        ElementNodeConditionKind::Else => {
+                            pending_iife_close_pos = None;
                         }
                     }
                 }
@@ -1492,7 +1512,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
 
     // After all children: flush any remaining pending IIFE close
     if let Some(pos) = pending_iife_close_pos.take() {
-        ctx.out.prepend_alloc(pos, "}}");
+        ctx.out.prepend_alloc(pos, CHAIN_CLOSE);
     }
 }
 
@@ -1704,105 +1724,6 @@ fn inject_ts_directive_comments_for_v_for(
             out.prepend_alloc_mapped_with_offset(el.tag_open.start, 0, len, &jsx_comment);
         }
     }
-}
-
-/// Build a [`ConditionScope`] for a v-if/v-else-if/v-else element.
-///
-/// Walks backward through siblings to collect sibling negation conditions,
-/// and resolves the element's own condition with binding prefixes.
-fn build_condition_scope<'alloc>(
-    el: &ElementNode,
-    oxc_el: Option<&OxcParsedElement<'alloc>>,
-    source: &str,
-    resolver: &BindingResolver<'alloc>,
-    ast: &crate::ast::types::TemplateAst,
-    node_id: NodeId,
-) -> Option<ConditionScope> {
-    let condition = el.v_condition.as_ref()?;
-
-    // Resolve own condition expression (positive)
-    let positive = match condition.kind {
-        ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
-            let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end)
-            else {
-                return None;
-            };
-            let raw_expr = &source[vs as usize..ve as usize];
-            Some(directives::resolve_condition_expr_pub(
-                raw_expr, vs, oxc_el, resolver,
-            ))
-        }
-        ElementNodeConditionKind::Else => None,
-    };
-
-    // Collect sibling negations by walking backward
-    let sibling_negations = match condition.kind {
-        ElementNodeConditionKind::If => vec![],
-        ElementNodeConditionKind::ElseIf | ElementNodeConditionKind::Else => {
-            collect_sibling_negations(ast, node_id, source, resolver)
-        }
-    };
-
-    Some(ConditionScope {
-        positive,
-        sibling_negations,
-    })
-}
-
-/// Walk backward through siblings of a v-else-if/v-else element to collect
-/// the resolved condition expressions of preceding v-if and v-else-if elements.
-fn collect_sibling_negations<'alloc>(
-    ast: &crate::ast::types::TemplateAst,
-    node_id: NodeId,
-    source: &str,
-    resolver: &BindingResolver<'alloc>,
-) -> Vec<String> {
-    let mut negations = Vec::new();
-    let mut current = node_id;
-
-    while let Some(prev) = ast.prev_sibling(current) {
-        let prev_node = &ast.nodes[prev.0];
-        match &prev_node.kind {
-            AstNodeKind::Element(prev_el) => {
-                if let Some(ref cond) = prev_el.v_condition {
-                    // Resolve the sibling's condition expression
-                    if let (Some(vs), Some(ve)) = (cond.prop.value_start, cond.prop.value_end) {
-                        let raw_expr = &source[vs as usize..ve as usize];
-                        let resolved = resolver.resolve_simple_expr(raw_expr);
-                        negations.push(resolved);
-                    }
-
-                    // If we hit a v-if, that's the start of the chain — stop
-                    if matches!(cond.kind, ElementNodeConditionKind::If) {
-                        break;
-                    }
-                } else {
-                    // Non-conditional element — stop (not part of the chain)
-                    break;
-                }
-            }
-            AstNodeKind::Text(text) => {
-                // Skip whitespace-only text nodes
-                let t = &source[text.start as usize..text.end as usize];
-                if t.trim().is_empty() {
-                    current = prev;
-                    continue;
-                }
-                break; // Non-whitespace text — stop
-            }
-            AstNodeKind::Comment(_) => {
-                // Skip comments
-                current = prev;
-                continue;
-            }
-            _ => break,
-        }
-        current = prev;
-    }
-
-    // Reverse so they're in chain order (v-if first, then v-else-if's)
-    negations.reverse();
-    negations
 }
 
 /// Result of rewriting Vue's polymorphic `<component :is>` tag.

@@ -42,6 +42,11 @@ impl SegmentedOverwriteAuthority {
 
 // ======================== CodeGenOutput ========================
 
+/// A position in the ordered prepend channel whose text is supplied later
+/// (see [`CodeGenOutput::reserve_ordered_unmapped`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservedPrepend(usize);
+
 /// Accumulated code generation operations.
 ///
 /// All operations are deferred — nothing is applied until [`apply_to()`](Self::apply_to).
@@ -403,6 +408,30 @@ impl<'alloc> CodeGenOutput<'alloc> {
         self.mapped_prepends.push((pos, 0, len, allocated));
     }
 
+    /// Reserve an UNMAPPED ordered prepend at `pos` whose text is decided later
+    /// with [`fill_reserved`](Self::fill_reserved).
+    ///
+    /// The reservation takes its place in the ordered (`mapped_prepends`)
+    /// channel NOW, so the eventual text lands after every ordered prepend
+    /// already recorded at `pos` and before every one recorded later — even
+    /// though it is only known once the content after it has been walked. A
+    /// reservation that is never filled emits nothing.
+    #[inline]
+    pub fn reserve_ordered_unmapped(&mut self, pos: u32) -> ReservedPrepend {
+        let index = self.mapped_prepends.len();
+        self.mapped_prepends.push((pos, 0, 0, ""));
+        ReservedPrepend(index)
+    }
+
+    /// Give a reservation its text (synthetic, unmapped).
+    #[inline]
+    pub fn fill_reserved(&mut self, reserved: ReservedPrepend, content: &str) {
+        let allocated = self.alloc.alloc_str(content);
+        let entry = &mut self.mapped_prepends[reserved.0];
+        entry.2 = allocated.len() as u32;
+        entry.3 = allocated;
+    }
+
     /// Push a source-mapped prepend-left with a content offset.
     /// Characters before `content_offset` are unmapped; the source map token is
     /// placed at `content_offset`, pointing to `source_pos`. Used when binding
@@ -720,6 +749,10 @@ impl<'alloc> CodeGenOutput<'alloc> {
                 panic!("overwrite_segmented precondition violated at [{start},{end}): {err:?}");
             }
         }
+
+        // Reservations that were never filled carry no text.
+        self.mapped_prepends
+            .retain(|&(_, _, _, content)| !content.is_empty());
 
         if self.mapped_prepends.is_empty() {
             // Fast path: no mapped prepends, use the simpler batch method.

@@ -43,6 +43,7 @@ mod deps {
 pub mod builder;
 pub mod fixtures;
 pub mod generator;
+pub mod ide_fixtures;
 pub mod oracle;
 pub mod seam;
 

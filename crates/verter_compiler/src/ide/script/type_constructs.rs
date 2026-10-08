@@ -139,6 +139,23 @@ export declare function instantiateComponent<T, P>(comp: T, props: P): T extends
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
   export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
+  export type FlowSame<A, B> = (<G>() => G extends A ? 1 : 2) extends <G>() => G extends B ? 1 : 2 ? true : false;
+  export type FlowKept<R, S> = S extends unknown ? (FlowSame<R, S> extends true ? true : never) : never;
+  export type FlowExcluded<R, S> = R extends unknown ? ([FlowKept<R, S>] extends [never] ? R : never) : never;
+  export declare function flowNarrow<S>(reference: unknown, snapshot: S): reference is S;
+  export declare function flowExcluded<S>(snapshot: S): <R>(reference: R) => reference is FlowExcluded<R, S>;
+  export declare function flowEach1<V>(source: readonly V[] | null | undefined): V;
+  export declare function flowEach1<V>(source: Iterable<V> | null | undefined): V;
+  export declare function flowEach1(source: number | null | undefined): number;
+  export declare function flowEach1<S extends object>(source: S | null | undefined): S[keyof S];
+  export declare function flowEach2<V>(source: readonly V[] | null | undefined): [V, number];
+  export declare function flowEach2<V>(source: Iterable<V> | null | undefined): [V, number];
+  export declare function flowEach2(source: number | null | undefined): [number, number];
+  export declare function flowEach2<S extends object>(source: S | null | undefined): [S[keyof S], keyof S];
+  export declare function flowEach3<V>(source: readonly V[] | null | undefined): [V, number, number];
+  export declare function flowEach3<V>(source: Iterable<V> | null | undefined): [V, number, number];
+  export declare function flowEach3(source: number | null | undefined): [number, number, number];
+  export declare function flowEach3<S extends object>(source: S | null | undefined): [S[keyof S], keyof S, number];
 }
 "#;
 
@@ -203,6 +220,23 @@ export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() 
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
 export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
+export type FlowSame<A, B> = (<G>() => G extends A ? 1 : 2) extends <G>() => G extends B ? 1 : 2 ? true : false;
+export type FlowKept<R, S> = S extends unknown ? (FlowSame<R, S> extends true ? true : never) : never;
+export type FlowExcluded<R, S> = R extends unknown ? ([FlowKept<R, S>] extends [never] ? R : never) : never;
+export declare function flowNarrow<S>(reference: unknown, snapshot: S): reference is S;
+export declare function flowExcluded<S>(snapshot: S): <R>(reference: R) => reference is FlowExcluded<R, S>;
+export declare function flowEach1<V>(source: readonly V[] | null | undefined): V;
+export declare function flowEach1<V>(source: Iterable<V> | null | undefined): V;
+export declare function flowEach1(source: number | null | undefined): number;
+export declare function flowEach1<S extends object>(source: S | null | undefined): S[keyof S];
+export declare function flowEach2<V>(source: readonly V[] | null | undefined): [V, number];
+export declare function flowEach2<V>(source: Iterable<V> | null | undefined): [V, number];
+export declare function flowEach2(source: number | null | undefined): [number, number];
+export declare function flowEach2<S extends object>(source: S | null | undefined): [S[keyof S], keyof S];
+export declare function flowEach3<V>(source: readonly V[] | null | undefined): [V, number, number];
+export declare function flowEach3<V>(source: Iterable<V> | null | undefined): [V, number, number];
+export declare function flowEach3(source: number | null | undefined): [number, number, number];
+export declare function flowEach3<S extends object>(source: S | null | undefined): [S[keyof S], keyof S, number];
 
 declare module "vue" {
   // Guarantee the augmentable GlobalComponents surface exists on EVERY Vue
@@ -444,6 +478,15 @@ pub(super) fn emit_helper_imports_with_define_component(
     );
 }
 
+/// Whether the template emits a condition block or a `v-for` frame, the only
+/// constructs that reference the flow helpers.
+fn template_uses_flow_helpers(ast: &crate::ast::types::TemplateAst) -> bool {
+    ast.nodes.iter().any(|node| {
+        matches!(&node.kind, crate::ast::types::AstNodeKind::Element(el)
+            if el.v_condition.is_some() || el.v_for.is_some())
+    })
+}
+
 /// The optional helper imports a particular script shape asks for.
 #[derive(Clone, Copy, Default)]
 struct HelperImportNeeds {
@@ -507,6 +550,19 @@ fn emit_helper_imports_inner(
         writeln!(
             imports,
             "import {{ asyncComponent as {P}asyncComponent }} from \"{}\";",
+            options.types_module_name,
+            P = PREFIX,
+        )
+        .expect("write to String is infallible");
+    }
+
+    // The template's condition re-narrowing and `v-for` frame helpers (see
+    // `ide::template::flow`), imported only by files whose template has a
+    // conditional or a `v-for`.
+    if template_ast.is_some_and(template_uses_flow_helpers) {
+        writeln!(
+            imports,
+            "import {{ flowNarrow as {P}flowNarrow, flowExcluded as {P}flowExcluded, flowEach1 as {P}flowEach1, flowEach2 as {P}flowEach2, flowEach3 as {P}flowEach3 }} from \"{}\";",
             options.types_module_name,
             P = PREFIX,
         )

@@ -1,0 +1,7 @@
+{
+  "name": "e2e-flow-narrowing",
+  "private": true,
+  "dependencies": {
+    "vue": "3.5.40"
+  }
+}

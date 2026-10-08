@@ -10,13 +10,8 @@
 //! component/element typing it already performs).
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{
-    ArrowFunctionExpression, BindingPattern, ChainElement, Expression, FormalParameters, Function,
-    FunctionBody, Statement,
-};
-use oxc_ast_visit::{walk, Visit};
+use oxc_ast::ast::{ArrowFunctionExpression, Expression, Function};
 use oxc_span::GetSpan;
-use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::FxHashMap;
 
 use super::seam::{
@@ -27,6 +22,7 @@ use crate::ast::types::{
     AstNodeKind, ConditionalChain, ElementNode, ElementNodeConditionKind, TemplateAst,
 };
 use crate::ide::get_directive_name;
+use crate::ide::template::flow::{self, CallbackSource, HandlerBody};
 use crate::template::code_gen::binding::{BindingResolver, BindingType};
 use crate::template::code_gen::expression::build_prefixed_expr_segments;
 use crate::template::code_gen::types::MappedGeneratedText;
@@ -440,7 +436,7 @@ impl<'s, 'p, 'alloc> Builder<'s, 'p, 'alloc> {
                             }
                         }
                     };
-                    let outer_refs = self.outer_refs(parsed, OuterRefSource::Function(function));
+                    let outer_refs = self.outer_refs(parsed, CallbackSource::Function(expression));
                     Item::Callback(Callback {
                         scope: scope_key,
                         contract: self.contract(key)?,
@@ -457,7 +453,14 @@ impl<'s, 'p, 'alloc> Builder<'s, 'p, 'alloc> {
                         .bindings
                         .as_ref()
                         .is_some_and(|b| b.bindings.iter().any(|b| b.name == "$event"));
-                    let outer_refs = self.outer_refs(parsed, OuterRefSource::Handler(expression));
+                    let outer_refs = self.outer_refs(
+                        parsed,
+                        CallbackSource::Handler {
+                            body: HandlerBody::Expression(expression),
+                            body_start: start,
+                            event: true,
+                        },
+                    );
                     Item::Callback(Callback {
                         scope: scope_key,
                         contract: self.contract(key)?,
@@ -544,132 +547,19 @@ impl<'s, 'p, 'alloc> Builder<'s, 'p, 'alloc> {
     }
 
     /// The reference chains a callback body reads in its own flow, each with
-    /// its prefixes, prefixes first.
+    /// its prefixes, prefixes first — the production emitter's analysis.
     fn outer_refs(
         &self,
         parsed: &OxcParsedExpression<'alloc>,
-        function: OuterRefSource<'_, 'alloc>,
+        callback: CallbackSource<'_, 'alloc>,
     ) -> Vec<OuterRef> {
-        let base = parsed.offset;
-        let region = match &function {
-            OuterRefSource::Function(CallbackShape::Arrow(arrow)) => arrow.span,
-            OuterRefSource::Function(CallbackShape::Function(function)) => function.span,
-            OuterRefSource::Handler(expression) => expression.span(),
-        };
-        let region = oxc_span::Span::new(base + region.start, base + region.end);
-        let refs_chains = verter_parser::oxc_parse::with_span_stack(self.source, region, || {
-            let mut locals = Locals::default();
-            match function {
-                OuterRefSource::Function(CallbackShape::Arrow(arrow)) => {
-                    locals.function(
-                        arrow.span,
-                        &arrow.params,
-                        arrow.get_function_body(),
-                        arrow.get_expression(),
-                    );
-                }
-                OuterRefSource::Function(CallbackShape::Function(function)) => {
-                    locals.function(
-                        function.span,
-                        &function.params,
-                        function.body.as_deref(),
-                        None,
-                    );
-                }
-                OuterRefSource::Handler(expression) => {
-                    locals.declare("$event", expression.span());
-                    locals.visit_expression(expression);
-                }
-            }
-            let mut refs = Refs {
-                locals: &locals,
-                chains: Vec::new(),
-            };
-            match function {
-                OuterRefSource::Function(CallbackShape::Arrow(arrow)) => {
-                    for param in &arrow.params.items {
-                        if let Some(initializer) = &param.initializer {
-                            refs.visit_expression(initializer);
-                        }
-                    }
-                    match (arrow.get_function_body(), arrow.get_expression()) {
-                        (_, Some(expression)) => refs.visit_expression(expression),
-                        (Some(body), None) => refs.statements(&body.statements),
-                        (None, None) => {}
-                    }
-                }
-                OuterRefSource::Function(CallbackShape::Function(function)) => {
-                    if let Some(body) = &function.body {
-                        refs.statements(&body.statements);
-                    }
-                }
-                OuterRefSource::Handler(expression) => refs.visit_expression(expression),
-            }
-
-            refs.chains
-        });
-        let mut seen: FxHashMap<String, usize> = FxHashMap::default();
-        let mut out: Vec<(usize, OuterRef)> = Vec::new();
-        for chain in refs_chains {
-            let root_text = self.root_text(parsed, base + chain.root.start, chain.name);
-            let mut text = root_text;
-            let mut occurrence = Span::new(base + chain.root.start, base + chain.root.end);
-            for depth in 0..=chain.steps.len() {
-                if depth > 0 {
-                    let step = &chain.steps[depth - 1];
-                    text.push_str(if step.optional { "?." } else { "!." });
-                    match step.key {
-                        StepKey::Name(name) => text.push_str(name),
-                        StepKey::Index(span) => {
-                            text.pop();
-                            if step.optional {
-                                text.push('.');
-                            }
-                            text.push('[');
-                            text.push_str(
-                                &self.source
-                                    [(base + span.start) as usize..(base + span.end) as usize],
-                            );
-                            text.push(']');
-                        }
-                    }
-                    occurrence.end = base + step.end;
-                }
-                if !seen.contains_key(&text) {
-                    seen.insert(text.clone(), out.len());
-                    out.push((
-                        depth,
-                        OuterRef {
-                            text: text.clone(),
-                            occurrence,
-                        },
-                    ));
-                }
-            }
-        }
-        out.sort_by_key(|(depth, _)| *depth);
-        out.into_iter().map(|(_, outer)| outer).collect()
-    }
-
-    /// Resolved text of a free root identifier: its accessor prefix when the
-    /// template parse classified it as an outer binding, the bare name for a
-    /// template-scope local.
-    fn root_text(&self, parsed: &OxcParsedExpression<'alloc>, pos: u32, name: &str) -> String {
-        let outer = parsed
-            .bindings
-            .as_ref()
-            .and_then(|b| b.bindings.iter().find(|b| b.pos == pos))
-            .is_some_and(|b| !b.ignore);
-        if outer {
-            format!(
-                "{}{}{}",
-                self.resolver.resolve_prefix(name),
-                name,
-                self.resolver.resolve_suffix(name)
-            )
-        } else {
-            name.to_string()
-        }
+        flow::outer_refs(self.source, parsed, callback, self.resolver, true)
+            .into_iter()
+            .map(|outer| OuterRef {
+                text: outer.text,
+                occurrence: Span::new(outer.occurrence.start, outer.occurrence.end),
+            })
+            .collect()
     }
 }
 
@@ -677,12 +567,6 @@ impl<'s, 'p, 'alloc> Builder<'s, 'p, 'alloc> {
 enum CallbackShape<'e, 'alloc> {
     Arrow(&'e ArrowFunctionExpression<'alloc>),
     Function(&'e Function<'alloc>),
-}
-
-#[derive(Clone, Copy)]
-enum OuterRefSource<'e, 'alloc> {
-    Function(CallbackShape<'e, 'alloc>),
-    Handler(&'e Expression<'alloc>),
 }
 
 fn function_of<'e, 'alloc>(
@@ -725,283 +609,4 @@ fn trim(source: &str, span: Span) -> Span {
         span.start + leading,
         (span.end - trailing).max(span.start + leading),
     )
-}
-
-/// Names a callback declares, each with the authored range it is visible in.
-#[derive(Default)]
-struct Locals<'alloc> {
-    declared: Vec<(&'alloc str, oxc_span::Span)>,
-    /// Innermost lexical range first; the function range at the bottom.
-    blocks: Vec<oxc_span::Span>,
-    function: Option<oxc_span::Span>,
-}
-
-impl<'alloc> Locals<'alloc> {
-    fn function(
-        &mut self,
-        span: oxc_span::Span,
-        params: &FormalParameters<'alloc>,
-        body: Option<&FunctionBody<'alloc>>,
-        expression: Option<&Expression<'alloc>>,
-    ) {
-        self.function = Some(span);
-        self.blocks.push(span);
-        for param in &params.items {
-            self.pattern(&param.pattern, span);
-        }
-        if let Some(rest) = &params.rest {
-            self.pattern(&rest.rest.argument, span);
-        }
-        if let Some(body) = body {
-            for statement in &body.statements {
-                self.visit_statement(statement);
-            }
-        }
-        if let Some(expression) = expression {
-            self.visit_expression(expression);
-        }
-    }
-
-    fn declare(&mut self, name: &'alloc str, span: oxc_span::Span) {
-        self.declared.push((name, span));
-    }
-
-    fn pattern(&mut self, pattern: &BindingPattern<'alloc>, scope: oxc_span::Span) {
-        match pattern {
-            BindingPattern::BindingIdentifier(ident) => self.declare(ident.name.as_str(), scope),
-            BindingPattern::ObjectPattern(object) => {
-                for property in &object.properties {
-                    self.pattern(&property.value, scope);
-                }
-                if let Some(rest) = &object.rest {
-                    self.pattern(&rest.argument, scope);
-                }
-            }
-            BindingPattern::ArrayPattern(array) => {
-                for element in array.elements.iter().flatten() {
-                    self.pattern(element, scope);
-                }
-                if let Some(rest) = &array.rest {
-                    self.pattern(&rest.argument, scope);
-                }
-            }
-            BindingPattern::AssignmentPattern(assign) => self.pattern(&assign.left, scope),
-        }
-    }
-
-    fn block(&self) -> oxc_span::Span {
-        *self.blocks.last().expect("a callback scope is open")
-    }
-
-    fn is_local(&self, name: &str, at: u32) -> bool {
-        self.declared
-            .iter()
-            .any(|(declared, scope)| *declared == name && scope.start <= at && at < scope.end)
-    }
-
-    fn scoped(&mut self, span: oxc_span::Span, visit: impl FnOnce(&mut Self)) {
-        self.blocks.push(span);
-        visit(self);
-        self.blocks.pop();
-    }
-}
-
-impl<'alloc> Visit<'alloc> for Locals<'alloc> {
-    fn visit_block_statement(&mut self, it: &oxc_ast::ast::BlockStatement<'alloc>) {
-        self.scoped(it.span, |this| walk::walk_block_statement(this, it));
-    }
-
-    fn visit_for_statement(&mut self, it: &oxc_ast::ast::ForStatement<'alloc>) {
-        self.scoped(it.span, |this| walk::walk_for_statement(this, it));
-    }
-
-    fn visit_for_in_statement(&mut self, it: &oxc_ast::ast::ForInStatement<'alloc>) {
-        self.scoped(it.span, |this| walk::walk_for_in_statement(this, it));
-    }
-
-    fn visit_for_of_statement(&mut self, it: &oxc_ast::ast::ForOfStatement<'alloc>) {
-        self.scoped(it.span, |this| walk::walk_for_of_statement(this, it));
-    }
-
-    fn visit_switch_statement(&mut self, it: &oxc_ast::ast::SwitchStatement<'alloc>) {
-        self.scoped(it.span, |this| walk::walk_switch_statement(this, it));
-    }
-
-    fn visit_catch_clause(&mut self, it: &oxc_ast::ast::CatchClause<'alloc>) {
-        self.scoped(it.span, |this| {
-            if let Some(param) = &it.param {
-                let scope = this.block();
-                this.pattern(&param.pattern, scope);
-            }
-            this.visit_block_statement(&it.body);
-        });
-    }
-
-    fn visit_variable_declaration(&mut self, it: &oxc_ast::ast::VariableDeclaration<'alloc>) {
-        let scope = if it.kind.is_var() {
-            self.function.expect("a callback scope is open")
-        } else {
-            self.block()
-        };
-        for declarator in &it.declarations {
-            self.pattern(&declarator.id, scope);
-            if let Some(init) = &declarator.init {
-                self.visit_expression(init);
-            }
-        }
-    }
-
-    fn visit_function(&mut self, it: &Function<'alloc>, _flags: ScopeFlags) {
-        if let Some(id) = &it.id {
-            if it.is_declaration() {
-                let scope = self.block();
-                self.declare(id.name.as_str(), scope);
-            }
-        }
-    }
-
-    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'alloc>) {
-        if let Some(id) = &it.id {
-            if it.is_declaration() {
-                let scope = self.block();
-                self.declare(id.name.as_str(), scope);
-            }
-        }
-    }
-
-    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'alloc>) {}
-}
-
-/// One reference chain: a free root identifier followed by static or
-/// literal-indexed steps. Spans are relative to the parsed expression.
-struct RefChain<'alloc> {
-    name: &'alloc str,
-    root: oxc_span::Span,
-    steps: Vec<Step<'alloc>>,
-}
-
-struct Step<'alloc> {
-    optional: bool,
-    key: StepKey<'alloc>,
-    /// End of this step in the parsed expression.
-    end: u32,
-}
-
-enum StepKey<'alloc> {
-    Name(&'alloc str),
-    /// Span of a string or numeric literal index.
-    Index(oxc_span::Span),
-}
-
-struct Refs<'l, 'alloc> {
-    locals: &'l Locals<'alloc>,
-    chains: Vec<RefChain<'alloc>>,
-}
-
-impl<'alloc> Refs<'_, 'alloc> {
-    fn statements(&mut self, statements: &[Statement<'alloc>]) {
-        for statement in statements {
-            self.visit_statement(statement);
-        }
-    }
-
-    fn free(&self, name: &str, at: u32) -> bool {
-        !matches!(name, "undefined" | "NaN" | "Infinity" | "arguments")
-            && !self.locals.is_local(name, at)
-    }
-
-    /// Record the longest reference chain ending at `expression`, visiting
-    /// whatever is not part of it. Returns whether `expression` was a chain.
-    fn chain(&mut self, expression: &Expression<'alloc>) -> bool {
-        let mut steps = Vec::new();
-        let mut current = expression;
-        loop {
-            match current {
-                Expression::StaticMemberExpression(member) => {
-                    steps.push(Step {
-                        optional: member.optional,
-                        key: StepKey::Name(member.property.name.as_str()),
-                        end: member.span.end,
-                    });
-                    current = &member.object;
-                }
-                Expression::ComputedMemberExpression(member) => match &member.expression {
-                    Expression::StringLiteral(_) | Expression::NumericLiteral(_) => {
-                        steps.push(Step {
-                            optional: member.optional,
-                            key: StepKey::Index(member.expression.span()),
-                            end: member.span.end,
-                        });
-                        current = &member.object;
-                    }
-                    other => {
-                        self.visit_expression(other);
-                        steps.clear();
-                        current = &member.object;
-                    }
-                },
-                Expression::ChainExpression(chain) => match &chain.expression {
-                    ChainElement::StaticMemberExpression(member) => {
-                        steps.push(Step {
-                            optional: member.optional,
-                            key: StepKey::Name(member.property.name.as_str()),
-                            end: member.span.end,
-                        });
-                        current = &member.object;
-                    }
-                    ChainElement::ComputedMemberExpression(member)
-                        if matches!(
-                            member.expression,
-                            Expression::StringLiteral(_) | Expression::NumericLiteral(_)
-                        ) =>
-                    {
-                        steps.push(Step {
-                            optional: member.optional,
-                            key: StepKey::Index(member.expression.span()),
-                            end: member.span.end,
-                        });
-                        current = &member.object;
-                    }
-                    _ => {
-                        walk::walk_chain_expression(self, chain);
-                        return true;
-                    }
-                },
-                Expression::TSNonNullExpression(non_null) => current = &non_null.expression,
-                Expression::ParenthesizedExpression(paren) => current = &paren.expression,
-                Expression::Identifier(ident) => {
-                    if self.free(ident.name.as_str(), ident.span.start) {
-                        steps.reverse();
-                        self.chains.push(RefChain {
-                            name: ident.name.as_str(),
-                            root: ident.span,
-                            steps,
-                        });
-                    }
-                    return true;
-                }
-                other => {
-                    if steps.is_empty() && std::ptr::eq(other, expression) {
-                        return false;
-                    }
-                    self.visit_expression(other);
-                    return true;
-                }
-            }
-        }
-    }
-}
-
-impl<'alloc> Visit<'alloc> for Refs<'_, 'alloc> {
-    fn visit_expression(&mut self, it: &Expression<'alloc>) {
-        if !self.chain(it) {
-            walk::walk_expression(self, it);
-        }
-    }
-
-    fn visit_function(&mut self, _it: &Function<'alloc>, _flags: ScopeFlags) {}
-
-    fn visit_class(&mut self, _it: &oxc_ast::ast::Class<'alloc>) {}
-
-    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'alloc>) {}
 }

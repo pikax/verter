@@ -125,8 +125,8 @@ fn v_if_and_v_for_on_same_element_both_removed() {
         result
     );
     assert!(
-        result.contains(".map("),
-        "should have .map() wrapper, got: {}",
+        result.contains("___VERTER___flowEach"),
+        "should have a v-for frame, got: {}",
         result
     );
     assert!(
@@ -159,10 +159,13 @@ fn v_for_iterable_only_loop_local_emits_verbatim_not_resolver_prefixed() {
         result
     );
     // The iterable identifier is the v-for local → OXC yields zero in-range refs.
-    // Parent behavior: emit the iterable verbatim, wrapped `{(item).map(`.
+    // Parent behavior: emit the iterable verbatim as the frame source, evaluated
+    // before the alias declaration (so it reads the outer `item`).
     assert!(
-        result.contains("{(item).map("),
-        "iterable with only the loop local must stay verbatim `{{(item).map(`, got: {}",
+        result.contains(
+            "const ___VERTER___v0 = (item); { const item = ___VERTER___flowEach1(___VERTER___v0);"
+        ),
+        "iterable with only the loop local must stay verbatim `(item)`, got: {}",
         result
     );
     // It must NOT route through the resolver-only path (which prefixes the bare
@@ -181,27 +184,32 @@ fn v_if_event_handler_gets_guard() {
     let result = gen_tsx_template(
         r#"<template><div v-if="show" @click="handler($event)">click</div></template>"#,
     );
-    // Event handler with $event should have guard: if (!(...)) { return undefined; }
+    // The handler reads `handler`: it is snapshot in the branch block and
+    // re-narrowed at the wrapped body's start.
     assert!(
-        result.contains("return undefined"),
-        "event handler in v-if should have narrowing guard, got: {}",
+        result.contains(
+            "{(()=>{if(___VERTER___instance.show){\nconst ___VERTER___o0 = ___VERTER___instance.handler;\n"
+        ),
+        "the outer reference is snapshot in the branch block, got: {}",
         result
     );
     assert!(
-        result.contains("show"),
-        "guard should reference the condition, got: {}",
+        result.contains(
+            "onClick={($event) => {if (!___VERTER___flowNarrow(___VERTER___instance.handler, ___VERTER___o0) || ___VERTER___flowExcluded(___VERTER___o0)(___VERTER___instance.handler)) throw 0; ___VERTER___instance.handler($event)}}"
+        ),
+        "event handler in v-if should open with the re-narrowing guard, got: {}",
         result
     );
-    // Positive: still has the event handler
-    assert!(
-        result.contains("onClick={"),
-        "should have onClick handler, got: {}",
-        result
-    );
-    // Negative: v-if should not appear
+    // Negative: v-if should not appear, and the condition is never replayed.
     assert!(
         !result.contains("v-if"),
         "v-if must be removed, got: {}",
+        result
+    );
+    assert_eq!(
+        result.matches("instance.show").count(),
+        1,
+        "the condition must be emitted once, got: {}",
         result
     );
 }
@@ -211,10 +219,23 @@ fn v_else_if_event_handler_gets_combined_guard() {
     let result = gen_tsx_template(
         r#"<template><div v-if="a">A</div><div v-else-if="b" @click="handler($event)">B</div></template>"#,
     );
-    // Guard should negate prior siblings: !((a)) and include own condition (b)
+    // The v-else-if branch block continues the chain's flow (prior negations
+    // included): its handler is guarded from a snapshot taken in that block.
+    let else_if = result
+        .find("}else if(___VERTER___instance.b){\nconst ___VERTER___o0 = ___VERTER___instance.handler;\n")
+        .expect("snapshot in the v-else-if branch block");
+    let guard = result
+        .find("throw 0; ___VERTER___instance.handler($event)")
+        .expect("guarded handler");
     assert!(
-        result.contains("!(("),
-        "guard should have negation of prior condition, got: {}",
+        else_if < guard,
+        "the guard follows its snapshot, got: {}",
+        result
+    );
+    // Negative: the predecessor condition is never re-emitted as a negation.
+    assert!(
+        !result.contains("!((") && result.matches("instance.a").count() == 1,
+        "predecessor conditions must not be replayed, got: {}",
         result
     );
 }
@@ -223,10 +244,10 @@ fn v_else_if_event_handler_gets_combined_guard() {
 fn v_if_non_function_prop_no_guard() {
     let result =
         gen_tsx_template(r#"<template><div v-if="show" :class="myClass">content</div></template>"#);
-    // Non-function bindings should NOT have guards
+    // Non-function bindings are not callbacks: no snapshot, no guard.
     assert!(
-        !result.contains("?undefined:"),
-        "non-function prop should not have ternary guard, got: {}",
+        !result.contains("throw 0") && !result.contains("___VERTER___o0"),
+        "non-function prop should not be guarded, got: {}",
         result
     );
 }
@@ -234,27 +255,24 @@ fn v_if_non_function_prop_no_guard() {
 #[test]
 fn v_bind_function_expr_gets_block_guard() {
     // Function expression: `:handler="function() { return msg.trim() }"` inside v-if
-    // → handler={function() {if(!(guard))return; return msg.trim() }}
     let result = gen_tsx_template(
         r#"<template><div v-if="typeof msg === 'string'" :handler="function() { return msg.trim() }">hi</div></template>"#,
     );
-    let norm: String = result.chars().filter(|c| !c.is_whitespace()).collect();
-    let handler_pos = norm.find("handler={").expect("should have handler prop");
-    let after_handler = &norm[handler_pos..];
     assert!(
-        after_handler.contains("if(!(") && after_handler.contains(")return;"),
-        "function expression prop should get block guard, got:\n{}",
+        result.contains(
+            "handler={function() {if (!___VERTER___flowNarrow(___VERTER___instance.msg, ___VERTER___o0) || ___VERTER___flowExcluded(___VERTER___o0)(___VERTER___instance.msg) || !___VERTER___flowNarrow(___VERTER___instance.msg!.trim, ___VERTER___o1) || ___VERTER___flowExcluded(___VERTER___o1)(___VERTER___instance.msg!.trim)) throw 0;  return ___VERTER___instance.msg.trim() }}"
+        ),
+        "function expression prop should get the guard right after its `{{`, got:\n{}",
         result
     );
 }
 
 #[test]
 fn v_if_guarded_function_value_tsx_is_byte_equivalent() {
-    // Characterization: the v-if narrowing-guard injection for function-typed value
-    // props produces EXACTLY the same generated TSX after the EmitOp in-place
-    // migration as the pre-migration baked-overwrite form. Only the SOURCE MAP
-    // improves; the bytes (narrowing structure + accessor prefixes) are identical.
-    // SetupConst → bare identifier; Props → `__props.` accessor prefix.
+    // The re-narrowing guard of a function-typed value prop, per callback shape.
+    // The authored function stays in place; only the guard (and, for an
+    // expression body, the block that returns it) is spliced in. SetupConst →
+    // bare identifier; Props → `__props.` accessor prefix.
 
     // Arrow-expression body, SetupConst (no prefix).
     let arrow_expr = gen_tsx_template_with_bindings(
@@ -264,13 +282,14 @@ fn v_if_guarded_function_value_tsx_is_byte_equivalent() {
             ("handle", BindingType::SetupConst),
         ],
     );
+    let guard = "if (!___VERTER___flowNarrow(handle, ___VERTER___o0) || ___VERTER___flowExcluded(___VERTER___o0)(handle)) throw 0;";
     assert!(
-        arrow_expr.contains("onX={() => !((ok))?undefined:handle()}"),
-        "arrow-expr guard must be byte-identical `onX={{() => !((ok))?undefined:handle()}}`: {arrow_expr}"
+        arrow_expr.contains(&format!("onX={{() => {{ {guard} return handle(); }}}}")),
+        "arrow-expr body must become a guarded block returning it: {arrow_expr}"
     );
 
-    // Arrow-expression body, Props (accessor prefix on the body identifier; the v-if
-    // condition is resolved independently by the directive layer).
+    // Arrow-expression body, Props (accessor prefix on the body identifier and
+    // on its snapshot; the v-if condition is resolved independently).
     let arrow_expr_props = gen_tsx_template_with_bindings(
         r#"<template><div v-if="ok" :onX="() => handle()"/></template>"#,
         &[
@@ -279,7 +298,8 @@ fn v_if_guarded_function_value_tsx_is_byte_equivalent() {
         ],
     );
     assert!(
-        arrow_expr_props.contains("?undefined:__props.handle()"),
+        arrow_expr_props.contains("const ___VERTER___o0 = __props.handle;")
+            && arrow_expr_props.contains("throw 0; return __props.handle(); }}"),
         "arrow-expr Props body must keep its `__props.` accessor prefix after the guard: {arrow_expr_props}"
     );
 
@@ -292,8 +312,8 @@ fn v_if_guarded_function_value_tsx_is_byte_equivalent() {
         ],
     );
     assert!(
-        arrow_block.contains("onX={() => {if(!((ok))) return; handle() }}"),
-        "arrow-block guard must be byte-identical `() => {{if(!((ok))) return; handle() }}`: {arrow_block}"
+        arrow_block.contains(&format!("onX={{() => {{{guard}  handle() }}}}")),
+        "arrow-block guard must open the authored block: {arrow_block}"
     );
 
     // Function-expression body, SetupConst.
@@ -305,22 +325,23 @@ fn v_if_guarded_function_value_tsx_is_byte_equivalent() {
         ],
     );
     assert!(
-        fn_expr.contains("onX={function() {if(!((ok))) return; handle() }}"),
-        "fn-expr guard must be byte-identical `function() {{if(!((ok))) return; handle() }}`: {fn_expr}"
+        fn_expr.contains(&format!("onX={{function() {{{guard}  handle() }}}}")),
+        "fn-expr guard must open the authored block: {fn_expr}"
     );
 
-    // Negative (all shapes): the guarded expression must NOT be doubled or mangled —
-    // exactly ONE guard per prop.
-    assert_eq!(
-        arrow_expr.matches("?undefined:").count(),
-        1,
-        "exactly one ternary guard per arrow-expr prop: {arrow_expr}"
-    );
-    assert_eq!(
-        arrow_block.matches("if(!((ok))) return;").count(),
-        1,
-        "exactly one block guard per arrow-block prop: {arrow_block}"
-    );
+    // Negative (all shapes): exactly ONE guard and ONE snapshot per prop.
+    for output in [&arrow_expr, &arrow_block, &fn_expr] {
+        assert_eq!(
+            output.matches("throw 0;").count(),
+            1,
+            "one guard per prop: {output}"
+        );
+        assert_eq!(
+            output.matches("const ___VERTER___o").count(),
+            1,
+            "one snapshot per outer reference: {output}"
+        );
+    }
 }
 
 #[test]
@@ -333,7 +354,7 @@ fn v_bind_non_function_no_guard() {
     let after_class = &norm[class_pos..];
     // Should NOT have any guard
     assert!(
-        !after_class.starts_with("class={()=>") && !after_class.contains("?undefined:"),
+        !after_class.starts_with("class={()=>") && !result.contains("throw 0"),
         "non-function prop should not get guard, got:\n{}",
         result
     );
@@ -713,10 +734,10 @@ fn v_for_numeric_expression_range_valid_tsx() {
     );
     eprintln!("TSX output:\n{}", result);
 
-    // Non-literal iterables should still work with .map()
+    // Non-literal iterables are the frame source as-is
     assert!(
-        result.contains(".map("),
-        "should generate .map() for non-literal iterables, got: {}",
+        result.contains("const ___VERTER___v0 = (count);"),
+        "should evaluate non-literal iterables as the frame source, got: {}",
         result
     );
 }
@@ -1707,9 +1728,9 @@ fn v_show_condition_maps_to_source() {
 
 #[test]
 fn v_if_guarded_inline_handler_maps_to_source() {
-    // <div v-if="ok" @click="count++"/> — an inline v-on handler under a v-if
-    // narrowing guard. The guard `() => {if (!((ok))) { return undefined; } ` wraps
-    // the handler body. The user body `count++` must map back to source; the `() => {`
+    // <div v-if="ok" @click="count++"/> — an inline v-on handler under a v-if.
+    // The re-narrowing guard `if (!___VERTER___flowNarrow(count, …)) throw 0; `
+    // opens the wrapped handler body. The user body `count++` must map back to source; the `() => {`
     // wrapper and the guard map to None. (The von.rs handler emission already
     // preserves the body in place via the prefix/suffix boundary split; this test
     // pins that invariant so a regression that bakes the body would be caught.)
@@ -1723,8 +1744,8 @@ fn v_if_guarded_inline_handler_maps_to_source() {
     );
 
     assert!(
-        output.contains("return undefined"),
-        "inline handler under v-if must still get the narrowing guard: {output}"
+        output.contains("() => {if (!___VERTER___flowNarrow(count, ___VERTER___o0)"),
+        "inline handler under v-if must get the re-narrowing guard: {output}"
     );
     assert!(
         output.contains("() => {"),
@@ -2084,20 +2105,13 @@ fn v_on_object_spread_handler_still_maps_after_unify() {
     );
 }
 
-/// An inline v-on handler under a v-if narrowing guard. The handler
-/// boundary was baked into a single flat `boundary_prefix` string and emitted via
-/// one mapped `out.overwrite(prop_start, trimmed_vs, boundary_prefix)`, so the
-/// generated `onClick={() => {if (!((ready))) { return undefined; } ` run — the
-/// event NAME plus all the synthetic wrapper/guard scaffolding — mapped back to the
-/// `@click` prop start (a foreign anchor). Post-fix the boundary is decomposed
-/// through the typed `EmitOp` substrate:
-///   - the synthetic JSX wrapper (`onClick={`, `() => {`) and the v-if narrowing
-///     guard (`if (!((ready))) { return undefined; }`) map to None. The guard is a
-///     COMPOSED, span-erased compiler-synthesized narrowing scaffold (own positive +
-///     sibling negations from OTHER elements + ancestor scopes, already flattened to
-///     a string and joined with synthetic `!(…) && (…)`); it has no single source
-///     span, so it is synthetic text → None (consistent with the sibling
-///     `process_v_bind` guarded-value path, whose `?undefined:` also maps to None).
+/// An inline v-on handler under a v-if. The handler boundary is decomposed
+/// through the typed `EmitOp` substrate (never one mapped overwrite from the
+/// `@click` prop start, which would map the whole generated run to a foreign
+/// anchor):
+///   - the synthetic JSX wrapper (`onClick={`, `() => {`) and the re-narrowing
+///     guard map to None. The guard is compiler-synthesized and has no source
+///     span (consistent with the sibling `process_v_bind` guarded-value path).
 ///   - the event NAME `onClick` maps to the SOURCE event token (`click` arg), NOT
 ///     the `@click` prop start.
 ///   - the handler BODY `count++` stays in place, mapped to its own source span.
@@ -2112,10 +2126,10 @@ fn v_if_guarded_inline_handler_guard_maps_to_none() {
         ],
     );
 
-    // Semantics unchanged: the narrowing guard is still emitted.
+    // The re-narrowing guard is emitted.
     assert!(
-        output.contains("return undefined"),
-        "inline handler under v-if must still get the narrowing guard: {output}"
+        output.contains("throw 0; count++"),
+        "inline handler under v-if must get the re-narrowing guard: {output}"
     );
     assert!(
         output.contains("onClick={() => {"),
@@ -2159,13 +2173,13 @@ fn v_if_guarded_inline_handler_guard_maps_to_none() {
          baked-boundary desync. Tokens: {tokens:?}, output: {output}"
     );
 
-    // Negative: the injected guard text maps to None. The `if (!((ready)))` narrowing
-    // scaffold is compiler-synthesized → unmapped.
-    let guard_gen = output.find("if (!((ready)))").unwrap();
+    // Negative: the injected guard text maps to None. The re-narrowing scaffold
+    // is compiler-synthesized → unmapped.
+    let guard_gen = output.find("if (!___VERTER___flowNarrow(count").unwrap();
     let (gl, gc) = gen_offset_to_line_col(&output, guard_gen);
     assert!(
         !has_token_at_gen(&tokens, gl, gc),
-        "the injected guard `if (!((ready)))` (gen {gl}:{gc}) must map to None. \
+        "the injected guard (gen {gl}:{gc}) must map to None. \
          Tokens: {tokens:?}, output: {output}"
     );
 
@@ -2187,8 +2201,8 @@ fn ide_v_for_iterable_tsx_setup_ref_never_emits_value_suffix() {
     let source = r#"<template><div v-for="todo in todos">{{ todo }}</div></template>"#;
     let output = gen_tsx_template_with_bindings(source, &[("todos", BindingType::SetupRef)]);
     assert!(
-        output.contains("todos).map("),
-        "TSX v-for iterable must read `todos).map(`: {output}"
+        output.contains("const ___VERTER___v0 = (todos);"),
+        "TSX v-for iterable must read `(todos)`: {output}"
     );
     assert!(
         !output.contains("todos.value"),

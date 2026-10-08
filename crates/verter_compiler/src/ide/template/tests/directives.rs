@@ -81,10 +81,10 @@ fn v_for_attribute_removed_from_output() {
         "v-for attribute must be removed from JSX output, got: {}",
         result
     );
-    // Positive: .map() wrapper should be present
+    // Positive: the v-for frame should be present
     assert!(
-        result.contains(".map("),
-        "v-for should produce .map() wrapper, got: {}",
+        result.contains("___VERTER___flowEach"),
+        "v-for should produce a frame, got: {}",
         result
     );
     // The " in " separator should not appear as raw text
@@ -107,7 +107,7 @@ fn v_for_with_props_binding_attribute_removed() {
         result
     );
     assert!(
-        result.contains("__props.list).map("),
+        result.contains("const ___VERTER___v0 = (__props.list);"),
         "iterable should get __props. prefix, got: {}",
         result
     );
@@ -162,8 +162,8 @@ fn v_for_destructured_params() {
         result
     );
     assert!(
-        result.contains(".map((item, index)"),
-        "destructured params should be in .map() callback, got: {}",
+        result.contains("const [item, index] = ___VERTER___flowEach2("),
+        "destructured params should be the v-for frame aliases, got: {}",
         result
     );
     // " in " separator must not appear as raw text
@@ -185,8 +185,8 @@ fn v_for_object_destructure() {
         result
     );
     assert!(
-        result.contains(".map((value, key, index)"),
-        "triple destructure should be in .map(), got: {}",
+        result.contains("const [value, key, index] = ___VERTER___flowEach3("),
+        "triple destructure should be the v-for frame aliases, got: {}",
         result
     );
 }
@@ -201,8 +201,8 @@ fn v_for_of_variant() {
         result
     );
     assert!(
-        result.contains(".map("),
-        "should produce .map() wrapper, got: {}",
+        result.contains("___VERTER___flowEach"),
+        "should produce a v-for frame, got: {}",
         result
     );
     // "of" separator must not leak
@@ -277,16 +277,16 @@ fn v_for_numeric_range() {
         "v-for must be removed, got: {}",
         result
     );
-    // Numeric range must be wrapped in Array.from() — calling .map() directly on
-    // a number literal (e.g., `10.map(...)`) is invalid JavaScript.
+    // A numeric range is the frame helper's source (it iterates 1..=N like
+    // Vue's `renderList`); it is never a receiver (`10.map(...)` is invalid).
     assert!(
-        result.contains("Array.from({length: 10}"),
-        "numeric range should use Array.from(), got: {}",
+        result.contains("const ___VERTER___v0 = (10);"),
+        "numeric range should be the frame source, got: {}",
         result
     );
     assert!(
-        result.contains(".map("),
-        "numeric range should be iterable in .map(), got: {}",
+        result.contains("___VERTER___flowEach"),
+        "numeric range should be a v-for frame source, got: {}",
         result
     );
 }
@@ -308,8 +308,8 @@ fn v_for_complex_iterable_expression() {
         result
     );
     assert!(
-        result.contains(".map("),
-        "should have .map() wrapper, got: {}",
+        result.contains("___VERTER___flowEach"),
+        "should have a v-for frame, got: {}",
         result
     );
 }
@@ -326,7 +326,7 @@ fn v_for_setup_ref_iterable_binding() {
         result
     );
     assert!(
-        result.contains("todos).map(") && !result.contains("todos.value"),
+        result.contains("const ___VERTER___v0 = (todos);") && !result.contains("todos.value"),
         "SetupRef iterable should be bare identifier in TSX mode (no .value), got: {}",
         result
     );
@@ -338,8 +338,8 @@ fn v_for_closing_structure() {
         r#"<template><div v-for="item in items" :key="item.id">text</div></template>"#,
     );
     assert!(
-        result.contains(") })}"),
-        "v-for closing should produce CloseParen+CloseBrace+CloseParen+CloseBrace for .map() statement-body closure, got: {}",
+        result.contains("); } })()}"),
+        "v-for closing should close the frame body, the frame arrow, its call and the JSX container, got: {}",
         result
     );
 }
@@ -352,16 +352,16 @@ fn v_if_iife_structure() {
         r#"<template><div v-if="visible">hello</div></template>"#,
         &[("visible", BindingType::SetupRef)],
     );
-    // Must have IIFE pattern: {()=>{if(cond){...}}}
+    // Must have IIFE pattern: {(()=>{if(cond){...}}}
     assert!(
-        result.contains("{()=>{if(visible){"),
+        result.contains("{(()=>{if(visible){"),
         "v-if should open with IIFE if-block, got: {}",
         result
     );
     // Must close with }}} (block close + arrow body close + JSX expression close)
     assert!(
-        result.contains("}}}"),
-        "v-if standalone should close with }}}}, got: {}",
+        result.contains("}})()}"),
+        "v-if standalone should close the branch and the invoked block, got: {}",
         result
     );
     // Must NOT have ternary pattern
@@ -385,7 +385,7 @@ fn v_if_else_chain_iife_structure() {
     );
     // Should have IIFE if/else-if/else chain
     assert!(
-        result.contains("{()=>{if(a){"),
+        result.contains("{(()=>{if(a){"),
         "should have IIFE if-block, got: {}",
         result
     );
@@ -401,7 +401,7 @@ fn v_if_else_chain_iife_structure() {
     );
     // Should close with }}} at the end (else block close + arrow body + JSX)
     assert!(
-        result.contains("}}}"),
+        result.contains("}})()}"),
         "chain should close properly, got: {}",
         result
     );
@@ -420,7 +420,7 @@ fn v_if_else_if_without_else_closes() {
         &[("a", BindingType::SetupRef), ("b", BindingType::SetupRef)],
     );
     assert!(
-        result.contains("{()=>{if(a){"),
+        result.contains("{(()=>{if(a){"),
         "should have IIFE if-block, got: {}",
         result
     );
@@ -431,8 +431,8 @@ fn v_if_else_if_without_else_closes() {
     );
     // Without v-else, parent loop adds }}
     assert!(
-        result.contains("}}}"),
-        "chain without else should close with }}}}, got: {}",
+        result.contains("}})()}"),
+        "chain without else should close the branch and the invoked block, got: {}",
         result
     );
 }
@@ -444,7 +444,7 @@ fn v_if_with_binding_prefix_iife() {
         &[("show", BindingType::Props)],
     );
     assert!(
-        result.contains("{()=>{if(__props.show){"),
+        result.contains("{(()=>{if(__props.show){"),
         "should use __props.show in if-condition, got: {}",
         result
     );
@@ -453,7 +453,7 @@ fn v_if_with_binding_prefix_iife() {
 // ── v-if nested IIFE tests ──────────────────────────────────
 
 #[test]
-fn v_if_nested_gets_block_guard() {
+fn v_if_nested_chain_inherits_parent_narrowing_through_flow() {
     let result = gen_tsx_template_with_bindings(
         r#"<template><div v-if="parent"><span v-if="child">nested</span></div></template>"#,
         &[
@@ -461,17 +461,31 @@ fn v_if_nested_gets_block_guard() {
             ("child", BindingType::SetupRef),
         ],
     );
-    // Nested v-if should have block guard: if(!(condText)) return;
-    let has_guard = result.contains("return;") && result.contains("if(!(");
+    // Both chains are immediately invoked blocks, the nested one inside the
+    // outer branch, so it continues the flow `parent` narrowed.
+    let outer = result
+        .find("{(()=>{if(parent){")
+        .expect("outer chain block");
+    let nested = result
+        .find("{(()=>{if(child){")
+        .expect("nested chain block");
+    let outer_close = result.rfind("})()}").expect("outer block close");
     assert!(
-        has_guard,
-        "nested v-if should have block guard from parent, got: {}",
+        outer < nested && nested < outer_close,
+        "the nested chain must sit inside the outer branch, got: {}",
         result
     );
-    // Should still have the nested if-condition
+    // Negative: the parent condition is emitted once, never replayed into the
+    // nested chain.
+    assert_eq!(
+        result.matches("parent").count(),
+        1,
+        "the parent condition must not be replayed, got: {}",
+        result
+    );
     assert!(
-        result.contains("if(child)"),
-        "nested v-if should have its own if-condition, got: {}",
+        !result.contains("throw 0") && !result.contains("return;"),
+        "a nested chain needs no guard, got: {}",
         result
     );
 }
@@ -485,14 +499,14 @@ fn v_if_comment_before_repositioned_inside_iife() {
         &[("show", BindingType::SetupRef)],
     );
     // Comment should appear INSIDE the IIFE, after the if(cond){ line
-    // Pattern: {()=>{if(cond){ {/* @ts-expect-error */} <div>...
+    // Pattern: {(()=>{if(cond){ {/* @ts-expect-error */} <div>...
     assert!(
         result.contains("if(show)"),
         "should have IIFE condition, got:\n{}",
         result
     );
     // Comment must be AFTER the IIFE open, not before it
-    let iife_pos = result.find("{()=>{").expect("should have IIFE open");
+    let iife_pos = result.find("{(()=>{").expect("should have IIFE open");
     let comment_pos = result
         .find("{/* @ts-expect-error */}")
         .expect("comment should be preserved");
@@ -518,7 +532,7 @@ fn v_if_without_preceding_comment_no_change() {
     );
     // No comment to reposition — should work normally
     assert!(
-        result.contains("{()=>{if(show){"),
+        result.contains("{(()=>{if(show){"),
         "should have IIFE pattern, got:\n{}",
         result
     );
@@ -541,7 +555,7 @@ fn v_if_else_with_whitespace_between_elements() {
 
     // Positive: must have complete IIFE chain with if/else
     assert!(
-        result.contains("{()=>{if(show){"),
+        result.contains("{(()=>{if(show){"),
         "should have IIFE if-block, got:\n{}",
         result
     );
@@ -552,11 +566,11 @@ fn v_if_else_with_whitespace_between_elements() {
     );
 
     // Structural: IIFE must NOT close before else — no }}} between IIFE start and else
-    let iife_start = result.find("{()=>{if(").unwrap();
+    let iife_start = result.find("{(()=>{if(").unwrap();
     let else_pos = result.find("else{").unwrap();
     let between = &result[iife_start..else_pos];
     assert!(
-        !between.contains("}}}"),
+        !between.contains("})()}"),
         "IIFE must not close before else: premature close found between IIFE start and else, got:\n{}",
         result
     );
@@ -600,7 +614,7 @@ fn v_if_else_if_else_with_whitespace() {
 
     // Positive: complete IIFE chain
     assert!(
-        result.contains("{()=>{if(a){"),
+        result.contains("{(()=>{if(a){"),
         "should have IIFE if-block, got:\n{}",
         result
     );
@@ -616,18 +630,18 @@ fn v_if_else_if_else_with_whitespace() {
     );
 
     // Structural: IIFE must NOT close before else-if or else
-    let iife_start = result.find("{()=>{if(").unwrap();
+    let iife_start = result.find("{(()=>{if(").unwrap();
     let else_if_pos = result.find("else if(").unwrap();
     let else_pos = result.find("else{").unwrap();
     let between_if_and_else_if = &result[iife_start..else_if_pos];
     assert!(
-        !between_if_and_else_if.contains("}}}"),
+        !between_if_and_else_if.contains("})()}"),
         "IIFE must not close before else-if, got:\n{}",
         result
     );
     let between_else_if_and_else = &result[else_if_pos..else_pos];
     assert!(
-        !between_else_if_and_else.contains("}}}"),
+        !between_else_if_and_else.contains("})()}"),
         "IIFE must not close before else, got:\n{}",
         result
     );
@@ -665,40 +679,56 @@ fn v_if_else_if_else_with_whitespace() {
 // ── v-bind function prop guards ──────────────────
 
 #[test]
-fn v_bind_arrow_expr_gets_ternary_guard() {
-    // Arrow expression body: `:handler="() => msg.trim()"` inside v-if
-    // → handler={() => !(guard)?undefined:msg.trim()}
+fn v_bind_arrow_expr_body_becomes_guarded_block_returning_body() {
+    // Arrow expression body under v-if: the outer references it reads are
+    // snapshot in the branch block and re-narrowed at the body start, and the
+    // body is returned as authored (a return-type error still lands on it).
     let result = gen_tsx_template(
         r#"<template><div v-if="typeof msg === 'string'" :handler="() => msg.trim()">hi</div></template>"#,
     );
-    let norm: String = result.chars().filter(|c| !c.is_whitespace()).collect();
+    let branch = result
+        .find("{(()=>{if(typeof ___VERTER___instance.msg === 'string'){\n")
+        .expect("branch block");
+    let snapshot = result
+        .find("const ___VERTER___o0 = ___VERTER___instance.msg;\nconst ___VERTER___o1 = ___VERTER___instance.msg!.trim;\n")
+        .expect("snapshots of every outer reference prefix, in the branch block");
     assert!(
-        norm.contains("?undefined:"),
-        "arrow expression prop should get ternary guard, got:\n{}",
-        result
+        branch < snapshot,
+        "snapshots follow the branch condition: {result}"
     );
     assert!(
-        !norm.contains("if(!(") || norm.contains("{()=>{if("),
-        "arrow expression should use ternary guard, not block guard in handler, got:\n{}",
+        result.contains(
+            "handler={() => { if (!___VERTER___flowNarrow(___VERTER___instance.msg, ___VERTER___o0) || ___VERTER___flowExcluded(___VERTER___o0)(___VERTER___instance.msg) || !___VERTER___flowNarrow(___VERTER___instance.msg!.trim, ___VERTER___o1) || ___VERTER___flowExcluded(___VERTER___o1)(___VERTER___instance.msg!.trim)) throw 0; return ___VERTER___instance.msg.trim(); }}"
+        ),
+        "arrow expression body should become a guarded block returning the body, got:\n{}",
+        result
+    );
+    // Negative: the condition is never replayed into the callback.
+    assert_eq!(
+        result.matches("=== 'string'").count(),
+        1,
+        "the condition must be emitted once, got:\n{}",
         result
     );
 }
 
 #[test]
 fn v_bind_arrow_block_gets_block_guard() {
-    // Arrow block body: `:handler="() => { return msg.trim() }"` inside v-if
-    // → handler={() => {if(!(guard))return; return msg.trim() }}
-    let result = gen_tsx_template(
+    // Arrow block body under v-if: the guard opens the authored block.
+    let result = gen_tsx_template_with_bindings(
         r#"<template><div v-if="typeof msg === 'string'" :handler="() => { return msg.trim() }">hi</div></template>"#,
+        &[("msg", BindingType::SetupConst)],
     );
-    let norm: String = result.chars().filter(|c| !c.is_whitespace()).collect();
-    // The handler value should contain a block guard
-    // Find the handler= part and check for block guard inside it
-    let handler_pos = norm.find("handler={").expect("should have handler prop");
-    let after_handler = &norm[handler_pos..];
     assert!(
-        after_handler.contains("if(!(") && after_handler.contains(")return;"),
-        "arrow block prop should get block guard inside handler, got:\n{}",
+        result.contains("const ___VERTER___o0 = msg;\nconst ___VERTER___o1 = msg!.trim;\n"),
+        "outer references are snapshot in the branch block, got:\n{}",
+        result
+    );
+    assert!(
+        result.contains(
+            "handler={() => {if (!___VERTER___flowNarrow(msg, ___VERTER___o0) || ___VERTER___flowExcluded(___VERTER___o0)(msg) || !___VERTER___flowNarrow(msg!.trim, ___VERTER___o1) || ___VERTER___flowExcluded(___VERTER___o1)(msg!.trim)) throw 0;  return msg.trim() }}"
+        ),
+        "arrow block prop should get the guard right after its `{{`, got:\n{}",
         result
     );
 }
@@ -1025,15 +1055,15 @@ fn self_closing_template_v_if_produces_valid_jsx() {
 
 #[test]
 fn v_for_iterable_is_source_mapped() {
-    // v-for="item in items" — the iterable `items` in the .map() wrapper
+    // v-for="item in items" — the iterable `items` in the frame helper call
     // should have a source map token pointing back to the original `items` position.
     let source = r#"<template><div v-for="item in items">{{ item }}</div></template>"#;
     let (output, tokens) = gen_tsx_template_with_map(source, &[]);
 
     // Verify output shape
     assert!(
-        output.contains(".map("),
-        "v-for should produce .map() wrapper: {output}"
+        output.contains("___VERTER___flowEach"),
+        "v-for should produce a frame: {output}"
     );
 
     // Find the byte offset of "items" in the v-for attribute value
@@ -1052,14 +1082,14 @@ fn v_for_iterable_is_source_mapped() {
 
 #[test]
 fn v_for_param_is_source_mapped() {
-    // The iteration parameter `item` in .map((item) => ...) should map back
+    // The frame alias `item` in `const item = …` should map back
     // to the parameter position in the v-for attribute value.
     let source = r#"<template><div v-for="item in items">{{ item }}</div></template>"#;
     let (output, tokens) = gen_tsx_template_with_map(source, &[]);
 
     assert!(
-        output.contains(".map((item"),
-        "v-for should produce .map((item...) => ...): {output}"
+        output.contains("const item"),
+        "v-for should declare its alias in a frame: {output}"
     );
 
     // "item" starts right after the opening quote of v-for="
@@ -1395,7 +1425,7 @@ fn v_bind_longform_prop_name_source_map_accuracy() {
 // ── v-for body member access (regression test) ──────────────────
 
 /// v-for iteration variables must NOT get the `___VERTER___instance.` prefix
-/// in TSX output. They are locally scoped via `.map((param) => ...)`.
+/// in TSX output. They are locally scoped frame declarations.
 #[test]
 fn v_for_body_member_access_no_instance_prefix() {
     let result = gen_tsx_template_with_bindings(
@@ -1404,10 +1434,10 @@ fn v_for_body_member_access_no_instance_prefix() {
     );
     eprintln!("TSX output:\n{}", result);
 
-    // Positive: .map() wrapper present
+    // Positive: the v-for frame declares the alias
     assert!(
-        result.contains(".map((action"),
-        "should have .map((action...) wrapper, got: {}",
+        result.contains("const action"),
+        "should declare `action` in a v-for frame, got: {}",
         result
     );
 
@@ -1503,10 +1533,10 @@ fn nested_v_for_body_no_instance_prefix() {
     );
     eprintln!("TSX output:\n{}", result);
 
-    // Positive: both .map() wrappers
+    // Positive: the outer v-for frame
     assert!(
-        result.contains(".map((user"),
-        "outer .map((user...) expected, got: {}",
+        result.contains("const user"),
+        "outer v-for frame declaring `user` expected, got: {}",
         result
     );
 
@@ -1552,10 +1582,10 @@ fn v_for_numeric_range_valid_tsx() {
         gen_tsx_template(r#"<template><i v-for="i in 12" :key="i" class="line" /></template>"#);
     eprintln!("TSX output:\n{}", result);
 
-    // POSITIVE: should have a .map() call
+    // POSITIVE: should have a v-for frame
     assert!(
-        result.contains(".map("),
-        "should generate a .map() call, got: {}",
+        result.contains("___VERTER___flowEach"),
+        "should generate a v-for frame, got: {}",
         result
     );
 
@@ -2428,13 +2458,13 @@ fn ts_expect_error_before_v_for() {
         r#"<template><!-- @ts-expect-error --><div v-for="x in xs">{{ x }}</div></template>"#,
         &[("xs", BindingType::SetupRef)],
     );
-    // v-for wraps in .map() — the comment must be INSIDE the map callback
+    // v-for opens a frame — the comment must be INSIDE the frame body
     assert!(
-        result.contains(".map("),
-        "should have .map() wrapper, got:\n{}",
+        result.contains("___VERTER___flowEach"),
+        "should have a v-for frame, got:\n{}",
         result
     );
-    let map_pos = result.find(".map(").unwrap();
+    let map_pos = result.find("___VERTER___flowEach").unwrap();
     // Comment must be present (as JSX comment with TS directive)
     assert!(
         result.contains("@ts-expect-error"),
@@ -2444,7 +2474,7 @@ fn ts_expect_error_before_v_for() {
     let comment_pos = result.find("@ts-expect-error").unwrap();
     assert!(
         comment_pos > map_pos,
-        "comment should be inside .map() callback, not before it, got:\n{}",
+        "comment should be inside the v-for frame, not before it, got:\n{}",
         result
     );
     // No raw HTML comment markers
@@ -2487,13 +2517,13 @@ fn ts_expect_error_v_for_v_if() {
         r#"<template><!-- @ts-expect-error --><div v-for="x in xs" v-if="ok">{{ x }}</div></template>"#,
         &[("xs", BindingType::SetupRef), ("ok", BindingType::SetupRef)],
     );
-    // v-for + v-if: v-for is outer (.map), v-if uses ternary inside
+    // v-for + v-if: the lifted condition is outside, the v-for frame inside
     assert!(
-        result.contains(".map("),
-        "should have .map() wrapper, got:\n{}",
+        result.contains("___VERTER___flowEach"),
+        "should have a v-for frame, got:\n{}",
         result
     );
-    let map_pos = result.find(".map(").unwrap();
+    let map_pos = result.find("___VERTER___flowEach").unwrap();
     assert!(
         result.contains("@ts-expect-error"),
         "TS directive comment should be present, got:\n{}",
@@ -2502,7 +2532,7 @@ fn ts_expect_error_v_for_v_if() {
     let comment_pos = result.find("@ts-expect-error").unwrap();
     assert!(
         comment_pos > map_pos,
-        "comment should be inside .map() callback, got:\n{}",
+        "comment should be inside the v-for frame, got:\n{}",
         result
     );
     assert!(
@@ -2517,18 +2547,18 @@ fn regular_comment_not_repositioned_for_v_for() {
     let result = gen_tsx_template(
         r#"<template><!-- hello --><div v-for="x in xs">{{ x }}</div></template>"#,
     );
-    // Regular (non-TS-directive) comment should NOT be repositioned inside .map()
+    // Regular (non-TS-directive) comment should NOT be repositioned inside the frame
     assert!(
         result.contains("{/* hello */}"),
         "regular comment should be converted to JSX, got:\n{}",
         result
     );
-    // Comment should stay at its original position (before .map)
+    // Comment should stay at its original position (before the frame)
     let comment_pos = result.find("{/* hello */}").unwrap();
-    let map_pos = result.find(".map(").unwrap();
+    let map_pos = result.find("___VERTER___flowEach").unwrap();
     assert!(
         comment_pos < map_pos,
-        "regular comment should stay before .map(), not be repositioned inside, got:\n{}",
+        "regular comment should stay before the v-for frame, not be repositioned inside, got:\n{}",
         result
     );
     assert!(
@@ -2550,7 +2580,7 @@ fn existing_v_if_comment_repositioning_not_regressed() {
         "should have IIFE condition, got:\n{}",
         result
     );
-    let iife_pos = result.find("{()=>{").expect("should have IIFE open");
+    let iife_pos = result.find("{(()=>{").expect("should have IIFE open");
     let comment_pos = result
         .find("{/* @ts-expect-error */}")
         .expect("comment should be preserved");
@@ -2583,11 +2613,11 @@ fn v_if_v_for_followed_by_v_else_v_for() {
         result.contains("show ?") || result.contains("show?"),
         "should have lifted condition outside: {result}"
     );
-    // Positive: both branches should have .map()
-    let map_count = result.matches(".map(").count();
+    // Positive: both branches should have a v-for frame
+    let map_count = result.matches("___VERTER___flowEach").count();
     assert!(
         map_count >= 2,
-        "should have two .map() calls (one per branch), found {map_count}: {result}"
+        "should have two v-for frames (one per branch), found {map_count}: {result}"
     );
     // Negative: should NOT have bare `else` keyword (IIFE style)
     assert!(
@@ -2610,11 +2640,11 @@ fn v_if_v_for_chain_three_branches() {
         "=== v_if_v_for_chain_three_branches ===\n{}\n=== END ===",
         result
     );
-    // Should have 3 .map() calls
-    let map_count = result.matches(".map(").count();
+    // Should have 3 v-for frames
+    let map_count = result.matches("___VERTER___flowEach").count();
     assert!(
         map_count >= 3,
-        "should have three .map() calls, found {map_count}: {result}"
+        "should have three v-for frames, found {map_count}: {result}"
     );
     // Should have ternary structure, not IIFE
     assert!(
@@ -2640,10 +2670,10 @@ fn v_if_v_for_mixed_chain_some_with_for_some_without() {
         result.contains("show ?") || result.contains("show?"),
         "should have lifted condition: {result}"
     );
-    // First branch has .map(), second doesn't
+    // First branch has a v-for frame, second doesn't
     assert!(
-        result.contains(".map("),
-        "first branch should have .map(): {result}"
+        result.contains("___VERTER___flowEach"),
+        "first branch should have a v-for frame: {result}"
     );
     assert!(
         result.contains("<span"),
@@ -2658,7 +2688,7 @@ fn v_if_v_for_mixed_chain_some_with_for_some_without() {
 
 #[test]
 fn v_if_v_for_solo_lifts_condition() {
-    // Solo v-if + v-for: condition should be lifted outside .map()
+    // Solo v-if + v-for: condition should be lifted outside the frame
     // Vue 3 precedence: v-if has higher precedence, runs before v-for
     let result = gen_tsx_template(
         r#"<template><div v-if="show" v-for="item in list">{{ item }}</div></template>"#,
@@ -2667,7 +2697,7 @@ fn v_if_v_for_solo_lifts_condition() {
         "=== v_if_v_for_solo_lifts_condition ===\n{}\n=== END ===",
         result
     );
-    // Should have lifted ternary: `show ? list.map(...) : null`
+    // Should have lifted ternary: `show ? (() => { … })() : null`
     assert!(
         result.contains("show ?") || result.contains("show?"),
         "should have lifted condition outside map: {result}"
@@ -2676,7 +2706,10 @@ fn v_if_v_for_solo_lifts_condition() {
         result.contains(": null"),
         "solo lifted should have : null fallback: {result}"
     );
-    assert!(result.contains(".map("), "should have .map(): {result}");
+    assert!(
+        result.contains("___VERTER___flowEach"),
+        "should have a v-for frame: {result}"
+    );
 }
 
 #[test]
@@ -2702,14 +2735,17 @@ fn v_if_v_for_iife_chain_regression() {
 
 #[test]
 fn v_if_v_for_statement_body() {
-    // v-for should use statement-body callbacks: `=> { return (...) }`
+    // A v-for frame is an immediately invoked statement body:
+    // `(() => { const <aliases> = …; return (...); })()`
     let result =
         gen_tsx_template(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
     eprintln!("=== v_if_v_for_statement_body ===\n{}\n=== END ===", result);
     // Should have statement body with return
     assert!(
-        result.contains("=> { return"),
-        "v-for should use statement body `=> {{ return (...)  }}`, got: {result}"
+        result.contains(
+            "{(() => { const ___VERTER___v0 = (___VERTER___instance.items); { const item"
+        ) && result.contains("); return ("),
+        "v-for should use an invoked statement body, got: {result}"
     );
     // Negative: should NOT have expression body `=> (`
     assert!(
@@ -2720,7 +2756,7 @@ fn v_if_v_for_statement_body() {
 
 #[test]
 fn v_if_v_for_numeric_in_lifted_chain() {
-    // Numeric v-for in a lifted chain should use Array.from without leading {
+    // Numeric v-for in a lifted chain is a bare frame (no leading `{`)
     let result = gen_tsx_template(
         r#"<template><div v-if="show" v-for="n in 5">{{ n }}</div><div v-else>none</div></template>"#,
     );
@@ -2729,8 +2765,8 @@ fn v_if_v_for_numeric_in_lifted_chain() {
         result
     );
     assert!(
-        result.contains("Array.from("),
-        "numeric v-for should use Array.from: {result}"
+        result.contains("const ___VERTER___v0 = (5);"),
+        "numeric v-for should be the frame source: {result}"
     );
     // Must be valid TSX
     assert_valid_jsx(
@@ -2750,10 +2786,10 @@ fn v_if_v_for_adjacent_chains_independent() {
         result
     );
     // Should have 2 separate lifted ternaries
-    let map_count = result.matches(".map(").count();
+    let map_count = result.matches("___VERTER___flowEach").count();
     assert!(
         map_count >= 2,
-        "should have at least two .map() calls: {result}"
+        "should have at least two v-for frames: {result}"
     );
     assert!(
         result.contains("<p"),
@@ -2912,15 +2948,10 @@ fn v_text_identifier_maps_to_source() {
 
 #[test]
 fn v_if_guarded_value_binding_maps_to_source() {
-    // <div v-if="ok" :onSomething="() => handle()"/> exercises the props.rs
-    // `guarded.is_some()` branch: a function-typed value prop under a v-if narrowing
-    // guard. The guard `!((ok))?undefined:` is injected into the MIDDLE of the
-    // expression (after `=>`). Pre-fix the WHOLE expression — guard plus the user
-    // body `handle()` — was baked into one mapped `out.overwrite(arg_end, prop_end,
-    // &close)`, so the body identifier `handle` mapped to the foreign overwrite
-    // start (arg_end) instead of its own source span → ctrl+click failed. Post-fix
-    // the value is preserved in place (each identifier mapped) and ONLY the guard
-    // text is unmapped.
+    // <div v-if="ok" :onSomething="() => handle()"/>: a function-typed value prop
+    // under a condition. The re-narrowing guard and the block it turns the
+    // expression body into are spliced around the authored body, which stays in
+    // place (each identifier mapped); only the guard text is unmapped.
     let source = r#"<template><div v-if="ok" :onSomething="() => handle()"/></template>"#;
     let (output, tokens) = gen_tsx_template_with_map(
         source,
@@ -2930,10 +2961,10 @@ fn v_if_guarded_value_binding_maps_to_source() {
         ],
     );
 
-    // The narrowing guard must still be present (semantics unchanged).
+    // The re-narrowing guard must be present.
     assert!(
-        output.contains("?undefined:"),
-        "function-typed prop under v-if must still get the ternary narrowing guard: {output}"
+        output.contains("onSomething={() => { if (!___VERTER___flowNarrow(handle, ___VERTER___o0)"),
+        "function-typed prop under v-if must get the re-narrowing guard: {output}"
     );
     assert!(
         !output.contains("v-if"),
@@ -2944,19 +2975,17 @@ fn v_if_guarded_value_binding_maps_to_source() {
     let handle_src = source.find("handle()").unwrap() as u32;
     assert!(
         has_token_for_src(&tokens, handle_src),
-        "the guarded value body `handle` must map to source col {handle_src} (NOT the foreign \
-         overwrite start). Pre-fix the baked overwrite mapped the whole run to arg_end. \
+        "the guarded value body `handle` must map to source col {handle_src}. \
          Tokens: {:?}, output: {output}",
         tokens.iter().map(|t| (t.1, t.2)).collect::<Vec<_>>()
     );
 
-    // Negative: the injected guard text maps to None. Locate the generated `?undefined:`
-    // (the ternary guard tail) and assert no token starts there.
-    let guard_gen = output.find("?undefined:").unwrap();
+    // Negative: the injected guard text maps to None.
+    let guard_gen = output.find("{ if (!___VERTER___flowNarrow").unwrap();
     let (gl, gc) = gen_offset_to_line_col(&output, guard_gen);
     assert!(
         !has_token_at_gen(&tokens, gl, gc),
-        "the injected guard `?undefined:` (gen {gl}:{gc}) must map to None. Tokens: {tokens:?}"
+        "the injected guard (gen {gl}:{gc}) must map to None. Tokens: {tokens:?}"
     );
 
     // Negative: no generated token may map back to the prop start (`:` of :onSomething)

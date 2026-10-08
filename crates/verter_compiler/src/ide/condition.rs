@@ -62,16 +62,6 @@ pub fn generate_condition_text(scopes: &[ConditionScope]) -> Option<String> {
     }
 }
 
-/// For block scope: `if(!(condText)) return;`
-pub fn build_block_guard(condition_text: &str) -> String {
-    format!("if(!({})) return;", condition_text)
-}
-
-/// For arrow expression: `!(condText)?undefined:`
-pub fn build_ternary_guard(condition_text: &str) -> String {
-    format!("!({})?undefined:", condition_text)
-}
-
 /// Wraps expression in parentheses for safe composition in compound conditions.
 /// Already-wrapped expressions (balanced outer parens) are returned as-is.
 ///
@@ -246,36 +236,6 @@ mod tests {
         assert_eq!(
             generate_condition_text(&scopes).unwrap(),
             "!((c || d)) && (a && b)"
-        );
-    }
-
-    // ── build_block_guard ────────────────────────────────────────
-
-    #[test]
-    fn block_guard_simple() {
-        assert_eq!(build_block_guard("show"), "if(!(show)) return;");
-    }
-
-    #[test]
-    fn block_guard_complex() {
-        assert_eq!(build_block_guard("!(A) && B"), "if(!(!(A) && B)) return;");
-    }
-
-    // ── build_ternary_guard ──────────────────────────────────────
-
-    #[test]
-    fn ternary_guard_simple() {
-        assert_eq!(
-            build_ternary_guard("typeof test === 'string'"),
-            "!(typeof test === 'string')?undefined:"
-        );
-    }
-
-    #[test]
-    fn ternary_guard_complex() {
-        assert_eq!(
-            build_ternary_guard("!((typeof test === 'object')) && (typeof test === 'string')"),
-            "!(!((typeof test === 'object')) && (typeof test === 'string'))?undefined:"
         );
     }
 }
