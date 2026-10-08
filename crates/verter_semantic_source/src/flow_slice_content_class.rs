@@ -542,6 +542,14 @@ impl<'s> Lowerer<'s> {
                                 .then_some(verter_session_query::flow::slice::SliceThis::Receiver),
                         );
                         match self.lower_nested_function(&FunctionNode::Function(&method.value)) {
+                            // A method no entry serves (a local class
+                            // declaration's) is its authored signature only
+                            // when that signature names its return: a
+                            // bodied method's return is otherwise its body's,
+                            // which nothing here infers.
+                            SliceExpr::UnmodeledBinding if method.value.return_type.is_none() => {
+                                SliceClassMemberValue::Unmodeled
+                            }
                             SliceExpr::UnmodeledBinding => {
                                 match self.lower_class_signature(&method.value, own_binders) {
                                     Some(signature) => SliceClassMemberValue::Declared(signature),

@@ -1802,6 +1802,12 @@ fn encode_body_step(enc: &mut Recipe, step: TypeBodyPathStep) {
         TypeBodyPathStep::IndexSignatureKey => (21, None),
         TypeBodyPathStep::IndexSignatureValue => (22, None),
         TypeBodyPathStep::TupleElement { ordinal } => (23, Some(ordinal)),
+        TypeBodyPathStep::ClassMembersNamed { name_hash } => {
+            enc.u8(24);
+            enc.u64(name_hash);
+            return;
+        }
+        TypeBodyPathStep::ClassHeritage => (25, None),
     };
     enc.u8(tag);
     if let Some(ordinal) = ordinal {

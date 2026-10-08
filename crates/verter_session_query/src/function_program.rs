@@ -8,6 +8,11 @@ use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::facts::{FunctionReturnSource, ProgramExpressionIdentity};
 use verter_type_expr::span_origins::DeclContributorAnchor;
 
+mod class_index;
+pub use class_index::{
+    ClassBase, ClassBaseMatch, ClassIndex, ClassIndexMatch, ClassSyntaxDiscovery, ClassSyntaxRecord,
+};
+
 /// The declaration a served function position belongs to (content-free;
 /// the owner discriminates script-block owners, the name is the registered
 /// merged-symbol name — namespaces qualify `Ns.Name` exactly like the eval
@@ -1346,10 +1351,10 @@ pub struct FunctionProgramIndex {
     nested: Arc<rustc_hash::FxHashMap<(FunctionProgramKey, verter_span::Span), usize>>,
     /// Indexed declaration/callback expressions, in source order.
     expressions: Arc<[ProgramExpressionRecord]>,
-    /// Every class the file authors, in source order: syntactic data
-    /// recorded by the same build, owned by this index and released with
-    /// it.
-    classes: Arc<[ClassSyntaxRecord]>,
+    /// Every class the file authors: syntactic data recorded by the same
+    /// build, prepared into keyed lookups, owned by this index and
+    /// released with it.
+    classes: ClassIndex,
 }
 
 impl FunctionProgramIndex {
@@ -1362,7 +1367,8 @@ impl FunctionProgramIndex {
 
 impl FunctionProgramIndex {
     /// Seal one file's discovered inventory: the entries in source order,
-    /// the indexed expressions (sorted by start) and the authored classes.
+    /// the indexed expressions (sorted by start) and the authored classes
+    /// with their resolved bases ([`ClassIndex::from_discovery`]).
     /// The keyed lookups are derived here from the entries, so every way out
     /// of the index stays consistent with what discovery recorded.
     ///
@@ -1377,7 +1383,7 @@ impl FunctionProgramIndex {
     pub fn from_discovery(
         entries: Vec<FunctionProgramDiscovery>,
         expressions: Vec<ProgramExpressionRecord>,
-        classes: Vec<ClassSyntaxRecord>,
+        classes: Vec<ClassSyntaxDiscovery>,
     ) -> Self {
         let mut by_key = rustc_hash::FxHashMap::default();
         let mut value_functions = ValueFunctionLookup::default();
@@ -1411,27 +1417,9 @@ impl FunctionProgramIndex {
             nested: Arc::new(nested),
             entries: Arc::from(entries.into_boxed_slice()),
             expressions: Arc::from(expressions.into_boxed_slice()),
-            classes: Arc::from(classes.into_boxed_slice()),
+            classes: ClassIndex::from_discovery(classes),
         }
     }
-}
-
-/// One class the file authors — a declaration at any depth or a class
-/// expression — recorded syntactically at index time. A member's
-/// declaring class is the class whose body declares it directly, so a
-/// class records the span of each member it declares: each class element,
-/// and each constructor parameter that declares a property.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClassSyntaxRecord {
-    /// The class node's span.
-    pub span: verter_span::Span,
-    /// Whether the class is an expression rather than a declaration.
-    pub expression: bool,
-    /// Whether the class has an `extends` clause.
-    pub has_heritage: bool,
-    /// The span of each member the class declares directly, in source
-    /// order.
-    pub members: Arc<[verter_span::Span]>,
 }
 
 pub type ValueFunctionLookup = rustc_hash::FxHashMap<
@@ -1546,29 +1534,14 @@ impl FunctionProgramIndex {
             by_key: Arc::clone(&self.by_key),
             value_functions: Arc::clone(&self.value_functions),
             nested: Arc::clone(&self.nested),
-            classes: Arc::clone(&self.classes),
+            classes: self.classes.clone(),
         }
     }
 
-    /// The class whose body declares a member directly at `declaration`,
-    /// the member's declaration span: a class element's span, or a
-    /// property-declaring constructor parameter's.
+    /// The file's class index.
     #[must_use]
-    pub fn class_declaring_member(
-        &self,
-        declaration: verter_span::Span,
-    ) -> Option<&ClassSyntaxRecord> {
-        self.classes
-            .iter()
-            .find(|class| class.members.contains(&declaration))
-    }
-
-    /// Whether another class of the file encloses the class at `span`.
-    #[must_use]
-    pub fn class_encloses(&self, span: verter_span::Span) -> bool {
-        self.classes.iter().any(|class| {
-            class.span != span && class.span.start <= span.start && span.end <= class.span.end
-        })
+    pub fn classes(&self) -> &ClassIndex {
+        &self.classes
     }
 
     /// Indexed expression at the exact content-free program point.

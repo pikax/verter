@@ -605,6 +605,12 @@ pub struct DeclLoweringCounters {
     /// declaration closure; a whole-file env demand (fallthrough /
     /// runtime values) lowers the file's full declaration set once.
     pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
+    /// Class elements lowered by selective class-body lowering: one per raw
+    /// `ClassBody.body` element a member demand lowered. A demand for one
+    /// class member lowers only the elements declaring it, never the
+    /// class's other members. Test and measurement builds only.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    pub class_elements_lowered: std::sync::atomic::AtomicU64,
 }
 
 /// The default decl-lowering pool size — `clamp(available_parallelism / 4,

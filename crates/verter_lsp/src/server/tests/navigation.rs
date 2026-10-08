@@ -1657,6 +1657,7 @@ async fn svelte_js_render_definition_survives_change_before_template_analysis_re
         &initial_ide.code,
         initial_ide.source_map.as_deref(),
     );
+    stamp_seeded_ide_publication(server, &canonical_id, &ide_path);
     let ctx = server
         .type_provider_context(&app_uri)
         .expect("current provider surface without a foreground compile");
@@ -1832,6 +1833,7 @@ async fn svelte_direct_render_prop_definition_does_not_require_template_analysis
             &initial_ide.code,
             initial_ide.source_map.as_deref(),
         );
+        stamp_seeded_ide_publication(server, &canonical_id, &ide_path);
         let ctx = server
             .type_provider_context(&app_uri)
             .expect("current provider surface without foreground compile");

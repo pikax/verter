@@ -529,8 +529,7 @@ fn assert_clean_warm_object(host: &Arc<VerterHost>, name: &str, expected: &[(&st
 /// is a frame binding's. Each of these reads THROUGH a frame-owned
 /// reference-chain root, so the `any` is a lie.
 ///
-/// tsgo gives `number` for every one of them (`{ z: number }` for the
-/// `new` case).
+/// tsgo gives `number` for every one of them.
 ///
 /// `gateOptionalChain`, `gateTaggedTemplate` and `gateComputedMember`
 /// are not in this set: the optional-member carrier, the tagged-template
@@ -541,9 +540,7 @@ fn assert_clean_warm_object(host: &Arc<VerterHost>, name: &str, expected: &[(&st
 #[test]
 fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     let host = make_host();
-    for name in ["gateNewExpression", "gatePrivateField"] {
-        assert_fails_closed(&host, name);
-    }
+    assert_fails_closed(&host, "gatePrivateField");
     // A MEMBER-valued optional chain over a FRAME-OWNED root resolves the
     // root through the frame — the local `{ y: number }` (non-nullable, so
     // no `| undefined`), never the owner-scope `declare const` of the
@@ -555,6 +552,60 @@ fn flow_return_unmodelled_form_read_through_a_frame_binding_fails_closed() {
     // A literal-keyed element access reads the frame's local `compBait`
     // exactly as `compBait.x` would — never the owner-scope bait.
     assert_clean_warm(&host, "gateComputedMember", number());
+}
+
+/// A `new` of a class the frame declares constructs that class — never
+/// the owner-scope constructor of the same name. TypeScript 7.0.2 types
+/// `gateNewExpression` as `NewBait`, whose instance is `{ z: number }`.
+/// The class's capture set is a typed gap of the flow proof, so the answer
+/// is never admitted warm.
+#[test]
+fn flow_return_new_of_a_local_class_constructs_that_class() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = r6_key(dispatch, "gateNewExpression");
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            panic!("gateNewExpression must produce a value");
+        };
+        assert_eq!(result.degradation(), None);
+        let Some(SemanticNodeData::ClassExpressionInstance {
+            surface: instance, ..
+        }) = dispatch
+            .graph()
+            .node_data(result.return_type())
+            .as_deref()
+            .cloned()
+        else {
+            panic!("the local class's instance");
+        };
+        let Some(SemanticNodeData::Object(surface)) =
+            dispatch.graph().node_data(instance).as_deref().cloned()
+        else {
+            panic!("the instance reads as an object surface");
+        };
+        let members: Vec<(Option<&str>, Option<TypeExpr>)> = surface
+            .positive_members()
+            .iter()
+            .map(|member| {
+                (
+                    member.key.as_string(),
+                    host.project_node_to_type_expr_for_test(member.value),
+                )
+            })
+            .collect();
+        assert_eq!(members, vec![(Some("z"), Some(number()))]);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an unproven capture set admits nothing"
+        );
+    });
 }
 
 /// The positive controls. The gate is about names the FRAME owns, so a

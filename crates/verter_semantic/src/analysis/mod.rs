@@ -28,6 +28,7 @@ pub mod decl_dependencies;
 pub mod decl_headers;
 pub mod enum_constant;
 
+mod class_index;
 #[cfg(test)]
 #[path = "decl_dependencies_tests.rs"]
 mod decl_dependencies_tests;

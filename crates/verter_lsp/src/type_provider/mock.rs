@@ -173,6 +173,15 @@ mod inner {
         )>,
         /// Bytes this engine accepted. Absent means not applied.
         applied: std::collections::HashMap<String, Arc<str>>,
+        /// The serving engine incarnation: replacing the engine advances it.
+        /// A query answer is bound to the incarnation that selected it, and a
+        /// file write to the incarnation it was issued to.
+        incarnation: Arc<std::sync::atomic::AtomicU64>,
+        /// For each interactive query, in order: its path, the bytes the
+        /// engine held there at the moment it selected the answer — the bytes
+        /// the answer was evaluated against — and the incarnation that held
+        /// them.
+        evaluations: Vec<(String, Option<Arc<str>>, u64)>,
         calls: Vec<MockCall>,
         /// When `true`, the file-op methods (`open_file`/`load_file`/
         /// `update_file`/`close_file`) RECORD their call and then return
@@ -349,6 +358,17 @@ mod inner {
         restart_pulse: Option<std::sync::Arc<tokio::sync::Notify>>,
     }
 
+    impl MockState {
+        /// Record that a query at `path` is evaluated now, against the bytes
+        /// the engine holds there at this instant.
+        fn note_evaluation(&mut self, path: &str) {
+            let bytes = self.applied.get(path).cloned();
+            let incarnation = self.incarnation.load(std::sync::atomic::Ordering::SeqCst);
+            self.evaluations
+                .push((path.to_string(), bytes, incarnation));
+        }
+    }
+
     /// A mock `TypeProvider` for testing.
     ///
     /// All methods record their calls and return configured responses.
@@ -364,6 +384,9 @@ mod inner {
         /// Interactive queries still owed a scripted delivery failure, for
         /// every query kind alike.
         failed_deliveries: Arc<std::sync::atomic::AtomicUsize>,
+        /// The serving engine incarnation, shared with `state` and readable
+        /// without its lock.
+        incarnation: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl Default for MockTypeProvider {
@@ -374,11 +397,14 @@ mod inner {
 
     impl MockTypeProvider {
         pub fn new() -> Self {
+            let state = MockState::default();
+            let incarnation = Arc::clone(&state.incarnation);
             Self {
-                state: Arc::new(Mutex::new(MockState::default())),
+                state: Arc::new(Mutex::new(state)),
                 call_recorded: Arc::new(tokio::sync::Notify::new()),
                 request_barriers: Arc::new(Mutex::new(None)),
                 failed_deliveries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                incarnation,
             }
         }
 
@@ -401,6 +427,11 @@ mod inner {
         ) -> ProviderFuture<'a, T> {
             let barriers = self.request_barriers.lock().unwrap().clone();
             let failed_deliveries = Arc::clone(&self.failed_deliveries);
+            // The answer was selected by the incarnation serving now. Like the
+            // provider hub's retired-result fence, an answer whose engine was
+            // replaced before it settled is refused.
+            let incarnation = Arc::clone(&self.incarnation);
+            let selected_by = incarnation.load(std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
                 if let Some(barriers) = &barriers {
                     barriers.reach(RequestBarrier::ProviderDispatch).await;
@@ -418,6 +449,14 @@ mod inner {
                     ))
                 } else {
                     answer.await
+                };
+                let result = if incarnation.load(std::sync::atomic::Ordering::SeqCst) == selected_by
+                {
+                    result
+                } else {
+                    Err(TypeProviderError::new(
+                        "the engine incarnation that evaluated this query was retired".to_string(),
+                    ))
                 };
                 if let Some(barriers) = &barriers {
                     barriers.reach(RequestBarrier::ProviderDecode).await;
@@ -718,12 +757,20 @@ mod inner {
             (arrived, release)
         }
 
-        fn accept_applied(&self, path: &str, content: &str) {
-            self.state
-                .lock()
-                .unwrap()
-                .applied
-                .insert(path.to_string(), Arc::from(content));
+        /// The incarnation a file write issued now is delivered to.
+        fn serving_incarnation(&self) -> u64 {
+            self.incarnation.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Accept `content` at `path` for a write issued to `issued_to`. A
+        /// write issued to a retired incarnation reaches nothing the
+        /// replacement holds.
+        fn accept_applied(&self, path: &str, content: &str, issued_to: u64) {
+            let mut state = self.state.lock().unwrap();
+            if self.serving_incarnation() != issued_to {
+                return;
+            }
+            state.applied.insert(path.to_string(), Arc::from(content));
         }
 
         fn drop_applied(&self, path: &str) {
@@ -734,6 +781,36 @@ mod inner {
         /// the previous one accepted, so no earlier delivery is still applied.
         pub fn forget_applied_content(&self) {
             self.state.lock().unwrap().applied.clear();
+        }
+
+        /// Model the serving engine retiring and a replacement incarnation
+        /// taking over: the replacement holds none of the bytes the retired
+        /// engine accepted, an answer the retired engine selected never
+        /// settles, and a write issued to the retired engine never reaches the
+        /// replacement.
+        pub fn replace_engine(&self) {
+            let mut state = self.state.lock().unwrap();
+            self.incarnation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            state.applied.clear();
+        }
+
+        /// The serving engine incarnation.
+        pub(crate) fn incarnation(&self) -> u64 {
+            self.serving_incarnation()
+        }
+
+        /// Model a delivery of `path` the engine lost: it no longer holds the
+        /// bytes it accepted there.
+        pub fn lose_delivery(&self, path: &str) {
+            self.drop_applied(path);
+        }
+
+        /// Model a delivery of `content` under `path` that reached the engine
+        /// through another writer, before any surface describing it was
+        /// recorded: the engine now holds those bytes.
+        pub fn accept_unrecorded_delivery(&self, path: &str, content: &str) {
+            self.accept_applied(path, content, self.serving_incarnation());
         }
 
         /// Get all recorded calls.
@@ -773,7 +850,36 @@ mod inner {
 
         /// Clear all recorded calls.
         pub fn clear_calls(&self) {
-            self.state.lock().unwrap().calls.clear();
+            let mut state = self.state.lock().unwrap();
+            state.calls.clear();
+            state.evaluations.clear();
+        }
+
+        /// The bytes the engine held at `path` when it evaluated the most
+        /// recent interactive query there: `None` when no query reached it,
+        /// `Some(None)` when the engine held nothing at the path.
+        pub(crate) fn last_evaluated_bytes(&self, path: &str) -> Option<Option<Arc<str>>> {
+            self.state
+                .lock()
+                .unwrap()
+                .evaluations
+                .iter()
+                .rev()
+                .find(|(evaluated, _, _)| evaluated == path)
+                .map(|(_, bytes, _)| bytes.clone())
+        }
+
+        /// The engine incarnation that evaluated the most recent interactive
+        /// query at `path`, if any reached it.
+        pub(crate) fn last_evaluating_incarnation(&self, path: &str) -> Option<u64> {
+            self.state
+                .lock()
+                .unwrap()
+                .evaluations
+                .iter()
+                .rev()
+                .find(|(evaluated, _, _)| evaluated == path)
+                .map(|(_, _, incarnation)| *incarnation)
         }
 
         /// Make every subsequent file-op (`open_file`/`load_file`/
@@ -1184,13 +1290,14 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 fail_or_ok(fail, "open_file")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1222,9 +1329,10 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 fail_or_ok(fail, "load_file")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1251,13 +1359,14 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 fail_or_ok(fail, "open_file_background")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1286,13 +1395,14 @@ mod inner {
             let this = self.clone();
             let path_owned = path.to_string();
             let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 fail_or_ok(fail, "update_file")?;
-                this.accept_applied(&path_owned, &content_owned);
+                this.accept_applied(&path_owned, &content_owned, issued_to);
                 Ok(())
             })
         }
@@ -1382,11 +1492,12 @@ mod inner {
             let this = self.clone();
             let companion = companion_path.to_string();
             let bytes = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some(gate) = block {
                     gate.notified().await;
                 }
-                this.accept_applied(&companion, &bytes);
+                this.accept_applied(&companion, &bytes, issued_to);
                 Ok(())
             })
         }
@@ -1481,6 +1592,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let items = state
                     .completion_responses
                     .iter()
@@ -1537,6 +1649,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let fail = if state.fail_next_hovers > 0 {
                     state.fail_next_hovers -= 1;
                     true
@@ -1628,6 +1741,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let fail = if state.fail_next_definitions > 0 {
                     state.fail_next_definitions -= 1;
                     true
@@ -1678,6 +1792,7 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            state.note_evaluation(path);
             let fail = if state.fail_next_type_definitions > 0 {
                 state.fail_next_type_definitions -= 1;
                 true
@@ -1707,6 +1822,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .reference_responses
                     .iter()
@@ -1740,6 +1856,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .rename_responses
                     .iter()
@@ -1775,6 +1892,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .signature_help_responses
                     .iter()
@@ -1815,6 +1933,7 @@ mod inner {
                 end_offset,
                 diagnostics: diagnostics.to_vec(),
             });
+            state.note_evaluation(path);
             let result = state
                 .code_action_responses
                 .iter()
@@ -1829,6 +1948,7 @@ mod inner {
             state.calls.push(MockCall::GetSemanticTokens {
                 path: path.to_string(),
             });
+            state.note_evaluation(path);
             let result = state
                 .semantic_token_responses
                 .iter()
@@ -1848,6 +1968,7 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            state.note_evaluation(path);
             let result = state
                 .highlight_responses
                 .iter()
@@ -1869,6 +1990,7 @@ mod inner {
                 start_offset,
                 end_offset,
             });
+            state.note_evaluation(path);
             let result = state
                 .inlay_hint_responses
                 .iter()
@@ -1888,6 +2010,7 @@ mod inner {
                 path: path.to_string(),
                 data: data.clone(),
             });
+            state.note_evaluation(path);
             let result = state
                 .resolve_completion_responses
                 .iter()
