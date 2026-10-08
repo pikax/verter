@@ -32,8 +32,29 @@ pub enum IntersectionPurpose {
 }
 
 /// Owning interned recipe identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct IntersectionInputId(Interned<IntersectionRecipe>);
+
+/// Prints the recipe's digest and its top-level shape only. A nested
+/// subgroup is named by its own digest, never expanded, so formatting a
+/// key costs one level however deep or shared its recipe graph is.
+impl std::fmt::Debug for IntersectionInputId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let digest = format_args!("{:#018x}", self.0.digest());
+        match self.recipe() {
+            IntersectionRecipe::OrderedOperands(operands) => f
+                .debug_struct("IntersectionInputId")
+                .field("digest", &digest)
+                .field("operands", operands)
+                .finish(),
+            IntersectionRecipe::OrderedSteps(steps) => f
+                .debug_struct("IntersectionInputId")
+                .field("digest", &digest)
+                .field("steps", &steps.len())
+                .finish(),
+        }
+    }
+}
 
 impl IntersectionInputId {
     /// The interned recipe.
@@ -45,23 +66,37 @@ impl IntersectionInputId {
 
 intern_domain!(IntersectionRecipe {
     fn take_children(&mut self, out: &mut Vec<Interned<Self>>) {
-        // A steps slice another clone of this value still shares keeps its
-        // children; they are released when that clone drops.
         let IntersectionRecipe::OrderedSteps(steps) = self else {
             return;
         };
-        let Some(steps) = Arc::get_mut(steps) else {
-            return;
-        };
-        for step in steps.iter_mut() {
-            if let IntersectionTerm::EvaluateSubgroup { input, .. } = step {
-                if let IntersectionInputRef::Recipe(IntersectionInputId(child)) =
-                    std::mem::replace(input, IntersectionInputRef::Empty)
-                {
-                    out.push(child);
+        if let Some(steps) = Arc::get_mut(steps) {
+            for step in steps.iter_mut() {
+                if let IntersectionTerm::EvaluateSubgroup { input, .. } = step {
+                    if let IntersectionInputRef::Recipe(IntersectionInputId(child)) =
+                        std::mem::replace(input, IntersectionInputRef::Empty)
+                    {
+                        out.push(child);
+                    }
                 }
             }
+            return;
         }
+        // The slice is shared with another clone of this value or watched
+        // by a `Weak`, so its children cannot be moved out. Hand the
+        // worklist its own handle to each child, then release the slice:
+        // if it was the last strong owner the children survive in `out`
+        // instead of being destroyed by the slice's drop glue.
+        let shared = std::mem::replace(steps, Arc::from([]));
+        for step in shared.iter() {
+            if let IntersectionTerm::EvaluateSubgroup {
+                input: IntersectionInputRef::Recipe(IntersectionInputId(child)),
+                ..
+            } = step
+            {
+                out.push(child.clone());
+            }
+        }
+        drop(shared);
     }
 });
 
@@ -359,6 +394,16 @@ mod tests {
         let mut expected = [leaf, levels].concat();
         expected.sort_unstable();
         assert_eq!(walked, expected, "the deepest shared leaf is still reached");
+        let IntersectionInputRef::Recipe(root) = &input else {
+            panic!("a steps recipe");
+        };
+        for printed in [format!("{input:?}"), format!("{:?}", root.0)] {
+            assert!(
+                printed.len() < 512,
+                "formatting names subgroups by digest instead of expanding them: {} bytes",
+                printed.len()
+            );
+        }
     }
 
     const DEEP_CHAIN_CHILD: &str = "VERTER_DEEP_RECIPE_CHAIN_CHILD";
@@ -372,24 +417,37 @@ mod tests {
             std::thread::Builder::new()
                 .stack_size(256 * 1024)
                 .spawn(|| {
-                    let depth = 20_000u64;
-                    let leaf = ids(0x7200, 3);
-                    let levels = ids(0x7201, depth);
-                    let mut input = IntersectionInputRef::from_operands(&leaf);
-                    for level in &levels {
-                        input = IntersectionInputRef::from_steps(&[
-                            IntersectionTerm::Value(*level),
-                            subgroup(input),
-                        ]);
+                    // The second chain's step slices are each watched by a
+                    // `Weak`, so no slice can be mutated in place.
+                    for (base, observed) in [(0x7200, false), (0x7202, true)] {
+                        let depth = 20_000u64;
+                        let leaf = ids(base, 3);
+                        let levels = ids(base + 1, depth);
+                        let mut observers = Vec::new();
+                        let mut input = IntersectionInputRef::from_operands(&leaf);
+                        for level in &levels {
+                            input = IntersectionInputRef::from_steps(&[
+                                IntersectionTerm::Value(*level),
+                                subgroup(input),
+                            ]);
+                            if let IntersectionInputRef::Recipe(id) = &input {
+                                if let IntersectionRecipe::OrderedSteps(steps) = id.recipe() {
+                                    if observed {
+                                        observers.push(Arc::downgrade(steps));
+                                    }
+                                }
+                            }
+                        }
+                        assert_eq!(operands(&input).len() as u64, depth + 3);
+                        let leaf_recipe = IntersectionRecipe::OrderedOperands(Arc::from(leaf));
+                        assert!(resident(&leaf_recipe), "the root holds the whole chain");
+                        drop(input);
+                        assert!(
+                            !resident(&leaf_recipe),
+                            "dropping the root reclaims the chain to its leaf (observed: {observed})"
+                        );
+                        assert!(observers.iter().all(|weak| weak.upgrade().is_none()));
                     }
-                    assert_eq!(operands(&input).len() as u64, depth + 3);
-                    let leaf_recipe = IntersectionRecipe::OrderedOperands(Arc::from(leaf));
-                    assert!(resident(&leaf_recipe), "the root holds the whole chain");
-                    drop(input);
-                    assert!(
-                        !resident(&leaf_recipe),
-                        "dropping the root reclaims the chain to its leaf"
-                    );
                 })
                 .expect("spawn the small-stack thread")
                 .join()

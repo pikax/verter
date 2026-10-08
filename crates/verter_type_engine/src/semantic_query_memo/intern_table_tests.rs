@@ -64,6 +64,17 @@ impl Hash for CollidingPeer {
     }
 }
 
+/// A kind half of whose values collide on one digest, observed only
+/// through the production occupancy accessor.
+#[derive(Debug, PartialEq, Eq)]
+struct Observed(u64);
+intern_domain!(Observed);
+impl Hash for Observed {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (if self.0.is_multiple_of(2) { 0 } else { self.0 }).hash(state);
+    }
+}
+
 /// A parent record that owns child handles of its own kind.
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum Tree {
@@ -207,4 +218,31 @@ fn concurrent_intern_and_release_converge_and_drain() {
     });
     assert!(Shared::index().is_empty());
     assert!(Shared::index().capacity() <= DRAINED_CAPACITY_BOUND);
+}
+
+#[test]
+fn occupancy_reports_held_records_and_both_backing_capacities_until_owners_drain() {
+    let index = Observed::index();
+    let held: Vec<_> = (0..1_000u64)
+        .map(|key| Interned::new(Observed(key)))
+        .collect();
+    let live = index.occupancy();
+    assert_eq!(live.records, 1_000, "every held record is indexed");
+    assert_eq!(
+        live.digests, 501,
+        "500 distinct digests plus one collision digest"
+    );
+    assert!(live.digest_capacity >= live.digests);
+    assert!(
+        live.collision_entry_capacity >= 500,
+        "the shared digest's spilled bucket is counted: {live:?}"
+    );
+    drop(held);
+    let drained = index.occupancy();
+    assert_eq!((drained.records, drained.digests), (0, 0), "{drained:?}");
+    assert_eq!(drained.collision_entry_capacity, 0, "{drained:?}");
+    assert!(
+        drained.digest_capacity <= DRAINED_CAPACITY_BOUND,
+        "the digest map returns its backing capacity: {drained:?} after {live:?}"
+    );
 }

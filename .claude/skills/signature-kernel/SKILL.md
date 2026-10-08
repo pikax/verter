@@ -175,7 +175,15 @@ tables. `semantic_query_memo/intern_table.rs` owns the substrate:
   `OrderedSteps` recipe's `EvaluateSubgroup` recipes are its only same-kind
   children; a held parent keeps them valid. A kind with same-kind children
   overrides `InternDomain::take_children`, so a released chain is reclaimed
-  iteratively — nesting depth never becomes destructor stack depth.
+  iteratively — nesting depth never becomes destructor stack depth, including
+  when a step slice is still watched by a `Weak` (the children are handed to
+  the worklist by clone before the slice is released).
+* `IntersectionInputId`'s `Debug` prints the recipe digest and top-level shape
+  only; a nested subgroup is never expanded, so formatting a key is O(1) in
+  nesting depth and sharing.
+* `WeakInternTable::occupancy` / `IdentityIndexSnapshot::capture` are the
+  always-compiled lifetime counts (records, digests, digest-map and spilled
+  collision capacity), surfaced as `HostRetentionSnapshot::identity_indexes`.
 * Walk recipe operands only through `IntersectionInputRef::for_each_operand`:
   iterative, and each distinct subgroup recipe is walked once however many
   parents share it (the family release sweep runs it under the memo lock).

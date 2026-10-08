@@ -407,6 +407,10 @@ pub struct RetentionStatistics {
     pub unresolved_reach: usize,
     pub union_views: usize,
     pub stable_key_classes: usize,
+    /// Records and backing slots (digest buckets plus spilled collision
+    /// entries) across the process-wide semantic identity indexes.
+    pub identity_index_records: usize,
+    pub identity_index_backing_slots: usize,
     /// Close-time semantic releases still queued behind in-flight
     /// computations.
     pub deferred_releases: usize,
@@ -470,6 +474,8 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             unresolved_reach: snapshot.unresolved_reach,
             union_views: snapshot.union_views,
             stable_key_classes: snapshot.stable_key_classes,
+            identity_index_records: snapshot.identity_indexes.records(),
+            identity_index_backing_slots: snapshot.identity_indexes.backing_slots(),
             deferred_releases: snapshot.deferred_releases,
             resolved_import_facts: snapshot.resolved_import_facts,
             component_meta_states: snapshot.component_meta_states,

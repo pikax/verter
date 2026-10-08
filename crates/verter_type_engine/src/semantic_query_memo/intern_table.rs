@@ -26,6 +26,11 @@
 //! its whole released subtree iteratively, so the depth of a nesting chain
 //! never becomes the depth of the destructor's stack.
 //!
+//! **Occupancy.** [`WeakInternTable::occupancy`] reads an index's records,
+//! digests and both backing capacities under its lock, and
+//! [`IdentityIndexSnapshot`] collects every engine index for the host's
+//! retention snapshot. Both are always compiled; neither keeps a counter.
+//!
 //! **Lock discipline.** A record's destructor locks its index to forget
 //! itself. Nothing that can destroy a record of the same kind — an
 //! upgraded candidate that turned out not to match, or the caller's
@@ -49,10 +54,11 @@ pub trait InternDomain: Hash + Eq + Send + Sync + Sized + 'static {
     /// The kind's index. One per kind, owning no record.
     fn index() -> &'static WeakInternTable<Self>;
 
-    /// Move every same-kind child handle this value owns into `out`,
-    /// leaving the value holding none. Called only on a value whose
-    /// record is being destroyed; a kind with no same-kind children keeps
-    /// the default.
+    /// Hand `out` a handle to every same-kind child this value owns,
+    /// leaving the value holding none — even when the value's storage is
+    /// shared or weakly observed and cannot be mutated in place. Called
+    /// only on a value whose record is being destroyed; a kind with no
+    /// same-kind children keeps the default.
     fn take_children(&mut self, out: &mut Vec<Interned<Self>>) {
         let _ = out;
     }
@@ -84,6 +90,76 @@ pub struct WeakInternTable<T: InternDomain> {
 }
 
 type Bucket<T> = SmallVec<[Weak<InternRecord<T>>; 1]>;
+
+/// What one identity index holds right now. Every figure is read from the
+/// index itself under its lock; nothing is a counter or a history.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InternIndexOccupancy {
+    /// Indexed records: live, or destroyed and not yet forgotten.
+    pub records: usize,
+    /// Distinct content digests the index maps.
+    pub digests: usize,
+    /// Backing capacity of the digest map, in buckets.
+    pub digest_capacity: usize,
+    /// Heap-backed capacity of collision buckets that outgrew their single
+    /// inline entry, in weak entries.
+    pub collision_entry_capacity: usize,
+}
+
+/// Occupancy of every identity index the engine declares, the
+/// production lifetime count of these process-wide tables.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityIndexSnapshot {
+    pub intersection_recipes: InternIndexOccupancy,
+    pub semantic_contexts: InternIndexOccupancy,
+    pub order_domains: InternIndexOccupancy,
+    pub relate_keys: InternIndexOccupancy,
+    pub resolve_call_keys: InternIndexOccupancy,
+}
+
+impl IdentityIndexSnapshot {
+    /// Read every index, each under its own lock.
+    #[must_use]
+    pub fn capture() -> Self {
+        use crate::semantic_query::{
+            semantic_context::{OrderDomainKey, SemanticContext},
+            IntersectionRecipe, RelateMemoKey, ResolveCallKey,
+        };
+        Self {
+            intersection_recipes: IntersectionRecipe::index().occupancy(),
+            semantic_contexts: SemanticContext::index().occupancy(),
+            order_domains: OrderDomainKey::index().occupancy(),
+            relate_keys: RelateMemoKey::index().occupancy(),
+            resolve_call_keys: ResolveCallKey::index().occupancy(),
+        }
+    }
+
+    fn indexes(&self) -> [&InternIndexOccupancy; 5] {
+        [
+            &self.intersection_recipes,
+            &self.semantic_contexts,
+            &self.order_domains,
+            &self.relate_keys,
+            &self.resolve_call_keys,
+        ]
+    }
+
+    /// Indexed records across every index.
+    #[must_use]
+    pub fn records(&self) -> usize {
+        self.indexes().iter().map(|index| index.records).sum()
+    }
+
+    /// Backing capacity across every index: digest-map buckets plus
+    /// spilled collision entries.
+    #[must_use]
+    pub fn backing_slots(&self) -> usize {
+        self.indexes()
+            .iter()
+            .map(|index| index.digest_capacity + index.collision_entry_capacity)
+            .sum()
+    }
+}
 
 /// One interned record: the value plus its content digest. Freed with
 /// its last owning handle; its destructor forgets the index entry.
@@ -189,11 +265,29 @@ impl<T: InternDomain> WeakInternTable<T> {
         }
     }
 
+    /// Current occupancy and backing capacity, read under one lock.
+    #[must_use]
+    pub fn occupancy(&self) -> InternIndexOccupancy {
+        let slots = self.slots.lock();
+        let mut occupancy = InternIndexOccupancy {
+            digests: slots.len(),
+            digest_capacity: slots.capacity(),
+            ..InternIndexOccupancy::default()
+        };
+        for bucket in slots.values() {
+            occupancy.records += bucket.len();
+            if bucket.spilled() {
+                occupancy.collision_entry_capacity += bucket.capacity();
+            }
+        }
+        occupancy
+    }
+
     /// Indexed records (live, or destroyed and not yet forgotten).
     #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.slots.lock().values().map(SmallVec::len).sum()
+        self.occupancy().records
     }
 
     #[cfg(test)]
@@ -254,6 +348,12 @@ impl<T: InternDomain> Interned<T> {
     #[must_use]
     pub fn value(&self) -> &T {
         &self.record.value
+    }
+
+    /// The record's content digest.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        self.record.digest
     }
 
     /// Whether both handles name the same record.
