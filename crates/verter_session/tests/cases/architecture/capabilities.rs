@@ -1880,10 +1880,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         // Skip test sources.
         if path_str.ends_with("_tests.rs")
             || path_str.ends_with("/tests.rs")
-            || path_str.contains("/verter_session/src/tests/meta/")
-            || path_str.contains("/verter_session/src/tests/host_manage/")
-            || path_str.contains("/verter_type_engine/src/project_semantic_dispatch/tests/")
-            || path_str.contains("/verter_type_engine/src/semantic_query_memo/tests/")
+            || is_src_test_module_path(&rel_path(path))
         {
             continue;
         }
@@ -2791,7 +2788,12 @@ mod typed_ir_resolver_guards {
     /// equals `tests.rs`. Those files exist inside `src/` for
     /// per-CLAUDE.md test-file organisation but are test-only modules.
     fn collect_production_rs_files() -> Vec<(PathBuf, String)> {
-        let root = super::super::workspace_root();
+        collect_production_rs_files_under(&super::super::workspace_root())
+    }
+
+    /// [`collect_production_rs_files`] over the workspace rooted at `root`.
+    /// Test-source classification reads paths relative to `root`.
+    fn collect_production_rs_files_under(root: &Path) -> Vec<(PathBuf, String)> {
         let crates_dir = root.join("crates");
         let mut out: Vec<(PathBuf, String)> = Vec::new();
         let entries = match fs::read_dir(&crates_dir) {
@@ -2810,17 +2812,19 @@ mod typed_ir_resolver_guards {
             let mut files: Vec<PathBuf> = Vec::new();
             walk_rs(&src_dir, &mut files);
             for f in files {
-                let rel = f
-                    .strip_prefix(&root)
-                    .unwrap_or(&f)
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let rel = super::super::rel_path_under(root, &f);
                 if is_test_file(&rel) {
                     continue;
                 }
                 out.push((f, rel));
             }
         }
+        assert!(
+            !out.is_empty(),
+            "no production files found under {} — an empty universe passes \
+             vacuously",
+            crates_dir.display()
+        );
         out
     }
 
@@ -2846,7 +2850,9 @@ mod typed_ir_resolver_guards {
 
     fn is_test_file(rel: &str) -> bool {
         let name = rel.rsplit('/').next().unwrap_or("");
-        name.ends_with("_tests.rs") || name == "tests.rs" || rel.contains("/tests/")
+        name.ends_with("_tests.rs")
+            || name == "tests.rs"
+            || super::super::is_src_test_module_path(rel)
     }
 
     /// Replace `//` line comments and `/* ... */` block comments with
@@ -3154,9 +3160,12 @@ mod typed_ir_resolver_guards {
     )];
 
     fn scan_node_modules_substring() -> Vec<(String, u32, String)> {
-        let files = collect_production_rs_files();
+        scan_node_modules_substring_in(&collect_production_rs_files())
+    }
+
+    fn scan_node_modules_substring_in(files: &[(PathBuf, String)]) -> Vec<(String, u32, String)> {
         let mut out: Vec<(String, u32, String)> = Vec::new();
-        for (path, rel) in &files {
+        for (path, rel) in files {
             let src = match fs::read_to_string(path) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -3181,6 +3190,26 @@ mod typed_ir_resolver_guards {
             }
         }
         out
+    }
+
+    #[test]
+    fn typed_ir_scans_cover_production_under_a_tests_directory() {
+        use super::super::PlantedWorkspace;
+        let ws = PlantedWorkspace::new();
+        ws.plant_production_and_listed_test_module(
+            "fn owned(p: &str) -> bool { !p.contains(\"/node_modules/\") }\n",
+        );
+        let flagged: Vec<String> =
+            scan_node_modules_substring_in(&collect_production_rs_files_under(ws.root()))
+                .into_iter()
+                .map(|(rel, _, _)| rel)
+                .collect();
+        assert_eq!(
+            flagged,
+            [PlantedWorkspace::PRODUCTION_UNDER_TESTS_DIR],
+            "the production file under an unlisted `tests` directory must be \
+             flagged and the listed test-module file skipped"
+        );
     }
 
     #[test]
@@ -4402,6 +4431,45 @@ fn no_production_parse_and_build_env_in_session() {
         hits.is_empty(),
         "`parse_and_build_env` called from verter_session production code — \
          thread the materialise closure's single EvalEnv instead: {hits:#?}"
+    );
+}
+
+#[test]
+fn session_production_ident_scan_covers_production_under_a_tests_directory() {
+    let ws = PlantedWorkspace::new();
+    ws.plant_production_and_listed_test_module("fn f() { parse_and_build_env(); }\n");
+    let (hits, _) = session_production_ident_hits_under(ws.root(), &["parse_and_build_env"]);
+    assert_eq!(
+        hits,
+        [(
+            format!("{}:1", PlantedWorkspace::PRODUCTION_UNDER_TESTS_DIR),
+            "parse_and_build_env".to_string(),
+        )],
+        "the production file under an unlisted `tests` directory must be \
+         flagged and the listed test-module file skipped"
+    );
+}
+
+#[test]
+fn session_production_src_files_cover_production_under_a_tests_directory() {
+    let ws = PlantedWorkspace::new();
+    ws.plant(
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
+        "",
+    );
+    ws.plant_production_and_listed_test_module(
+        "fn eager(m: &Macro) { lower_type_expr_in_scope_with_mode(m.parsed_type_argument); }\n",
+    );
+    let flagged: Vec<String> = session_production_src_files_under(ws.root())
+        .into_iter()
+        .filter(|(rel, src)| macro_arg_eager_lowering_violations(rel, src))
+        .map(|(rel, _)| rel)
+        .collect();
+    assert_eq!(
+        flagged,
+        [PlantedWorkspace::PRODUCTION_UNDER_TESTS_DIR],
+        "the production file under an unlisted `tests` directory must be \
+         scanned and flagged and the listed test-module file skipped"
     );
 }
 
