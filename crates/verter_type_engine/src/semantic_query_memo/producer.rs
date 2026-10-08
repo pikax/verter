@@ -684,8 +684,7 @@ impl<'s> ProducerLease<'s> {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            completeness,
             taint: _, // §18 taint already consumed upstream by `admit_decision`.
             observed_self_roots: _,
             graph_carrier,
@@ -694,6 +693,8 @@ impl<'s> ProducerLease<'s> {
             satisfied_projection,
             flow_completion,
         } = output;
+        let result_is_partial = completeness.is_partial();
+        let partial_reasons = completeness.reasons();
         let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
         // …) records no path-walk hops, so its satisfied projection defaults

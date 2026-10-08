@@ -441,7 +441,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         )
             .into();
         output.observed_self_roots = observed_self_roots;
-        output.result_is_partial = result_is_partial;
+        output.set_partial(result_is_partial);
         if result_is_partial || force_return_only {
             output.cache_suppress = true;
         }
