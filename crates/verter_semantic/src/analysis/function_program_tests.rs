@@ -1684,11 +1684,10 @@ fn every_class_span(source: &str) -> Vec<verter_span::Span> {
 /// outside every function, a declaration, an exported or default-exported
 /// class and a class expression a variable holds; and in any served body or
 /// body no entry serves (a local class's method, a callback), in a served
-/// function's parameter default and decorator. Indexing classes walks no
-/// syntax of its own, so a class written in a top-level position discovery
-/// never visits (a call argument, a block, a namespace body, a static block
-/// or field initializer, an array) stays unindexed, however large the
-/// statement around it grows.
+/// function's parameter default and decorator. Discovery's walk of the
+/// syntax outside served functions reaches every position — a call
+/// argument, a block, a namespace body, a static block or field
+/// initializer, an array.
 #[test]
 fn the_class_index_records_every_class_discovery_reaches_once_in_source_order() {
     let source = "declare function deco(x: unknown): any;\n\
@@ -1734,6 +1733,101 @@ fn the_class_index_records_every_class_discovery_reaches_once_in_source_order() 
         names,
         ["CallArg", "Served", "Block", "N", "F", "Field", "SB", "InArray"],
         "every class is indexed in source order"
+    );
+}
+
+/// Discovering a statement's served positions and recording the classes
+/// it holds are one walk of it: discovery enters each statement outside
+/// every served function once — a top-level statement, a namespace member,
+/// a statement nested in a block, a branch or a static block — and never a
+/// statement inside a served function, however large that body grows.
+#[test]
+fn discovery_enters_each_statement_outside_served_functions_once() {
+    fn statements_outside_served(source: &str, served: &[verter_span::Span]) -> usize {
+        struct Statements<'s> {
+            served: &'s [verter_span::Span],
+            count: usize,
+        }
+        impl Statements<'_> {
+            fn is_served(&self, span: oxc_span::Span) -> bool {
+                self.served
+                    .iter()
+                    .any(|served| served.start == span.start && served.end == span.end)
+            }
+        }
+        impl<'a> Visit<'a> for Statements<'_> {
+            fn visit_statement(&mut self, statement: &Statement<'a>) {
+                self.count += 1;
+                walk::walk_statement(self, statement);
+            }
+            fn visit_function(
+                &mut self,
+                function: &Function<'a>,
+                flags: oxc_syntax::scope::ScopeFlags,
+            ) {
+                if !self.is_served(function.span) {
+                    walk::walk_function(self, function, flags);
+                }
+            }
+            fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+                if !self.is_served(arrow.span) {
+                    walk::walk_arrow_function_expression(self, arrow);
+                }
+            }
+        }
+        let allocator = oxc_allocator::Allocator::default();
+        let ret =
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
+        let mut statements = Statements { served, count: 0 };
+        statements.visit_program(&ret.program);
+        statements.count
+    }
+    let fixture = |served_body: &str| {
+        format!(
+            "declare const flag: boolean;\n\
+             class A {{ static s = class Field {{}}; static {{ class SB {{}} }} m() {{ {served_body} return 1; }} }}\n\
+             namespace NS {{ export class N {{}} export function f() {{ {served_body} }} {{ class InBlock {{}} }} }}\n\
+             if (flag) {{ class Cond {{}} }} else {{ (() => {{ class Unserved {{}} }})(); }}\n\
+             export const v = [class InArray {{}}];\n\
+             function served() {{ {served_body} }}\n"
+        )
+    };
+    let mut entered = Vec::new();
+    for served_body in ["", &"const a = 1; if (a) { class Inner {} }\n".repeat(64)] {
+        let source = fixture(served_body);
+        let _ = discovery_walk::take_statement_entries_for_tests();
+        let index = index_of(&source);
+        let statements = discovery_walk::take_statement_entries_for_tests();
+        let served: Vec<verter_span::Span> = index
+            .entries_for_test()
+            .iter()
+            .map(|entry| entry.span())
+            .collect();
+        assert_eq!(
+            statements,
+            statements_outside_served(&source, &served),
+            "each statement outside every served function is entered once"
+        );
+        let names: Vec<&str> = index
+            .classes()
+            .records()
+            .iter()
+            .filter(|record| !source[record.span.start as usize..].starts_with("class Inner"))
+            .map(|record| {
+                let text = &source[record.span.start as usize..record.span.end as usize];
+                text.split([' ', '{']).nth(1).unwrap_or(text)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["A", "Field", "SB", "N", "InBlock", "Cond", "Unserved", "InArray"]
+        );
+        entered.push(statements);
+    }
+    assert_eq!(
+        entered[0], entered[1],
+        "a served body's statements are the hash fold's, never discovery's walk's"
     );
 }
 

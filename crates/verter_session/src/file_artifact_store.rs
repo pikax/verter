@@ -1449,6 +1449,45 @@ impl FileArtifactStore {
         artifacts + augmenters + index
     }
 
+    /// What the capture summaries of the function program indexes the
+    /// store's artifacts hold — live versions and retired versions it still
+    /// retains — each summary counted once however many versions share it.
+    /// Reads only indexes a demand has already built; never builds one.
+    /// Returns the summed occupancy and the number of distinct summaries.
+    pub fn capture_summary_occupancy(
+        &self,
+    ) -> (
+        verter_session_query::function_program::CaptureSummaryCounts,
+        usize,
+    ) {
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut occupancy = verter_session_query::function_program::CaptureSummaryCounts::default();
+        let mut count = |payload: &FileArtifacts| {
+            let Some(index) = payload
+                .indexed
+                .shallow_state
+                .decl_bodies()
+                .retained_function_program_index()
+            else {
+                return;
+            };
+            if let Some(identity) = index.capture_summary_identity() {
+                if seen.insert(identity) {
+                    occupancy.accumulate(&index.capture_summary_occupancy());
+                }
+            }
+        };
+        for entry in self.artifacts.iter() {
+            count(&entry.value().payload);
+        }
+        for entry in self.retired_artifacts.iter() {
+            for version in entry.value() {
+                count(&version.payload);
+            }
+        }
+        (occupancy, seen.len())
+    }
+
     /// Number of live captured roots currently leasing membership.
     #[must_use]
     pub fn live_root_count(&self) -> usize {

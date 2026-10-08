@@ -367,24 +367,32 @@ impl CaptureSummaries {
         }
     }
 
-    /// The records this summary holds: one per frame, nested-frame link,
-    /// distinct captured binding, capture occurrence and captured read.
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    fn counts(&self) -> CaptureSummaryCounts {
+    /// The records this summary holds right now — one per frame,
+    /// nested-frame link, distinct captured binding, capture occurrence and
+    /// captured read — and the bytes of the arenas holding them. Read from
+    /// the arenas themselves; nothing is a counter or a history.
+    pub(super) fn occupancy(&self) -> CaptureSummaryCounts {
+        use std::mem::size_of_val;
         CaptureSummaryCounts {
             frames: self.frames.len(),
             nested_links: self.children.len(),
             bindings: self.bindings.len(),
             captures: self.captures.len(),
             reads: self.reads.len(),
+            backing_bytes: size_of_val(&*self.frames)
+                + size_of_val(&*self.children)
+                + size_of_val(&*self.bindings)
+                + size_of_val(&*self.captures)
+                + size_of_val(&*self.reads),
         }
     }
 }
 
-/// The physical records one file's capture summary holds, for
-/// measurement: each count grows with what the file authors, never with
-/// how deeply its functions nest.
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+/// What one file's capture summary holds: the physical records of its
+/// arenas, each count growing with what the file authors, never with how
+/// deeply its functions nest, and the arenas' backing storage. A
+/// production occupancy count, available in every build: summed over the
+/// summaries a host retains, it is the host's resident capture storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CaptureSummaryCounts {
     /// Function positions.
@@ -397,14 +405,28 @@ pub struct CaptureSummaryCounts {
     pub captures: usize,
     /// Captured reads, each stored once where it is authored.
     pub reads: usize,
+    /// Bytes of the five arenas' record storage (each arena is an exact
+    /// fit, so this is its capacity). The names and read paths the records
+    /// share are owned with the discovery records, not counted here.
+    pub backing_bytes: usize,
 }
 
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl CaptureSummaryCounts {
     /// Every record, summed.
     #[must_use]
     pub fn total(&self) -> usize {
         self.frames + self.nested_links + self.bindings + self.captures + self.reads
+    }
+
+    /// Add `other`'s records and bytes to these: the occupancy of two
+    /// distinct summaries.
+    pub fn accumulate(&mut self, other: &Self) {
+        self.frames += other.frames;
+        self.nested_links += other.nested_links;
+        self.bindings += other.bindings;
+        self.captures += other.captures;
+        self.reads += other.reads;
+        self.backing_bytes += other.backing_bytes;
     }
 }
 
@@ -436,12 +458,13 @@ impl FrameCaptureHandle {
         self.view().own_exhaustive()
     }
 
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    pub(super) fn counts(&self) -> CaptureSummaryCounts {
-        self.summary.counts()
+    /// What the shared summary holds.
+    pub(super) fn occupancy(&self) -> CaptureSummaryCounts {
+        self.summary.occupancy()
     }
 
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    /// The shared summary's allocation address: equal for two handles on
+    /// the same summary while either is alive.
     pub(super) fn summary_ptr(&self) -> *const () {
         Arc::as_ptr(&self.summary).cast()
     }
