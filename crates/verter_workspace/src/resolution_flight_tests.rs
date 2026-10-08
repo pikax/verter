@@ -116,6 +116,91 @@ fn concurrent_identical_cold_queries_run_one_producer() {
     assert_eq!(workspace.resource_snapshot().resolution_flights, 0);
 }
 
+/// A retention account that refuses every reservation.
+struct RefusingAccount;
+
+impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+    for RefusingAccount
+{
+    fn reserve_retained(
+        &self,
+        _bytes: usize,
+    ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge> {
+        None
+    }
+}
+
+/// Under retention pressure the leader's complete answer is not retained,
+/// yet still delivered: its subscribers adopt it, restating its witness,
+/// instead of each running the producer again.
+///
+/// Mutation recipe: on a refused reservation, leave the flight without a
+/// delivery. Each subscriber then resolves for itself and the producer runs
+/// three times.
+#[test]
+fn a_refused_retention_still_serves_the_flight_subscribers() {
+    let workspace = workspace(&[("/p/dep.ts", "export const dep = 1\n")]);
+    crate::traits::WorkspaceAccess::install_resolution_retention(
+        workspace.as_ref(),
+        Arc::new(RefusingAccount),
+    );
+    let outcomes: Arc<Mutex<Vec<ResolutionOutcome>>> = Arc::default();
+    let followers = Arc::new(Mutex::new(Vec::new()));
+    let hook_workspace = Arc::clone(&workspace);
+    let hook_outcomes = Arc::clone(&outcomes);
+    let hook_followers = Arc::clone(&followers);
+    let leader = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            for _ in 0..2 {
+                let workspace = Arc::clone(&hook_workspace);
+                let outcomes = Arc::clone(&hook_outcomes);
+                hook_followers
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::spawn(move || {
+                        let outcome = workspace.resolve_import_outcome(MAIN, "./dep", CONTEXT);
+                        outcomes.lock().unwrap().push(outcome);
+                    }));
+            }
+            await_subscribers(&hook_workspace, false, 2);
+        },
+        || workspace.resolve_import_outcome(MAIN, "./dep", CONTEXT),
+    );
+    for follower in followers.lock().unwrap().drain(..) {
+        follower.join().unwrap();
+    }
+    assert_eq!(target(&leader), Some("/p/dep.ts".to_string()));
+    assert_eq!(
+        leader.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::RetentionPressure)
+    );
+    let fresh = WorkspaceRead::capture_resolution_world(workspace.as_ref()).expect("captured");
+    for outcome in outcomes.lock().unwrap().iter() {
+        assert_eq!(target(outcome), Some("/p/dep.ts".to_string()));
+        assert!(
+            outcome.trace().reused(),
+            "the subscriber adopted the delivery"
+        );
+        match &outcome.admission {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(witness) => {
+                assert!(
+                    witness.validates(fresh.as_ref()),
+                    "the restated witness is the answer's own, valid in its world"
+                );
+            }
+            other => panic!("a subscriber's adopted answer is cacheable, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        producer_runs(&workspace),
+        1,
+        "one producer run for three demands under retention pressure"
+    );
+    assert_eq!(workspace.resource_snapshot().resolution.slots, 0);
+    assert_eq!(workspace.resource_snapshot().resolution_flights, 0);
+}
+
 #[test]
 fn a_subscriber_never_adopts_an_answer_that_is_not_valid_for_its_overlay() {
     let workspace = workspace(&[]);

@@ -47,6 +47,41 @@ pub struct WorkspaceResourceSnapshot {
     /// Content-transition history occupancy: retained exact and subtree
     /// evidence, the evidence readers own, and the backing capacity.
     pub freshness_history: crate::freshness::FreshnessResidency,
+    /// Workspace-lane resolution ownership and decision-graph occupancy.
+    pub resolution: ResolutionResidency,
+}
+
+/// Current occupancy of the workspace's resident resolution state: the
+/// workspace lane's slots and the decision graphs of every live resolution
+/// root. Read from current collection sizes, never from an event history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResolutionResidency {
+    /// Workspace-lane slots (one per importer, specifier, phase, kind and
+    /// population).
+    pub slots: usize,
+    /// Candidates retained across those slots, each holding its retention
+    /// charge.
+    pub candidates: usize,
+    /// Distinct importers owning at least one slot.
+    pub owners: usize,
+    /// Entries in the lane's admission queue, including stale entries of
+    /// slots already retired (compacted once they dominate).
+    pub slot_queue_entries: usize,
+    /// Slots the lane's slot table holds storage for: allocated capacity,
+    /// distinct from [`Self::slots`] occupancy.
+    pub slot_capacity: usize,
+    /// Entries the lane's admission queue holds storage for.
+    pub slot_queue_capacity: usize,
+    /// Live derived nodes (decisions and owner sets) across the base and
+    /// session roots.
+    pub derived_nodes: usize,
+    /// Direct edges those nodes record.
+    pub decision_edges: usize,
+    /// Dependencies some live node records an edge to.
+    pub dependency_buckets: usize,
+    /// Removed derived nodes whose tombstone is still stored, awaiting
+    /// retirement into the derived floor.
+    pub retired_decisions: usize,
 }
 
 /// Read-only view of the workspace authority.
@@ -746,10 +781,12 @@ pub trait WorkspaceAccess: WorkspaceRead {
 
     fn end_strict_self_root_transition(&self) {}
 
-    /// Install the host's aggregate retention account, which the resident
-    /// request-overlay resolution state (the overlay lane and the overlay
-    /// value table) charges its entries to. Adapter workspaces with no
-    /// Engine retain no such state and ignore it.
+    /// Replace the retention account the resident resolution state charges
+    /// its entries to. Test-support only: an Engine-backed workspace charges
+    /// the process-local aggregate account from construction, so production
+    /// has nothing to install. Adapter workspaces with no Engine retain no
+    /// such state and ignore it.
+    #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,
         _account: std::sync::Arc<
