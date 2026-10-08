@@ -284,7 +284,7 @@ fn emit_mapped_v_for_iterable<'alloc>(
 ///
 /// This adapter performs NO prefix/suffix logic of its own — every accessor
 /// decision is the producer's.
-fn resolve_iterable_segments(
+pub(crate) fn resolve_iterable_segments(
     iterable: &str,
     iterable_start: u32,
     oxc_el: Option<&OxcParsedElement<'_>>,

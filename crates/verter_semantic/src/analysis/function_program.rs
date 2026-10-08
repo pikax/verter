@@ -23,13 +23,12 @@ use verter_session_query::function_program::{
     FunctionBindingKind, FunctionBindingRecord, FunctionBodyLocator, FunctionCallArgLiteralMode,
     FunctionCallArgRecord, FunctionCallSiteRecord, FunctionCapturedRead, FunctionControlKind,
     FunctionControlRegion, FunctionDeclarationRef, FunctionDescent, FunctionDescentStep,
-    FunctionDirectCall, FunctionEffectCallee, FunctionEffectRecord, FunctionNestedCaptures,
-    FunctionParamRecord, FunctionParameterCallableCaptures, FunctionProgramDiscovery,
-    FunctionProgramIndex, FunctionProgramKey, FunctionProgramTypeParam, FunctionReadRole,
-    FunctionReferenceBinding, FunctionReferenceRecord, FunctionReturnSite, FunctionSourceTypeQuery,
-    FunctionTypeQuery, FunctionTypeQueryPosition, FunctionWriteKind, FunctionWriteRecord,
-    FunctionWriteTarget, ProgramExpressionCallKind, ProgramExpressionRecord,
-    ProgramExpressionSource,
+    FunctionDirectCall, FunctionEffectCallee, FunctionEffectRecord, FunctionParamRecord,
+    FunctionParameterCallableCaptures, FunctionProgramDiscovery, FunctionProgramIndex,
+    FunctionProgramKey, FunctionProgramTypeParam, FunctionReadRole, FunctionReferenceBinding,
+    FunctionReferenceRecord, FunctionReturnSite, FunctionSourceTypeQuery, FunctionTypeQuery,
+    FunctionTypeQueryPosition, FunctionWriteKind, FunctionWriteRecord, FunctionWriteTarget,
+    ProgramExpressionCallKind, ProgramExpressionRecord, ProgramExpressionSource,
 };
 
 use std::sync::Arc;
@@ -224,7 +223,6 @@ fn build_function_program_index_impl<'ast>(
         },
     );
     resolve_captures(&mut ctx.entries);
-    resolve_nested_capture_reads(&mut ctx.entries);
     resolve_call_site_targets(&mut ctx.entries);
     resolve_direct_calls(&mut ctx.entries);
     link_callback_return_sources(&ctx.canonical_id, &mut ctx.entries, &mut ctx.expressions);
@@ -430,14 +428,14 @@ fn scope_contains(scope: verter_span::Span, site: verter_span::Span) -> bool {
     scope.start <= site.start && site.end <= scope.end
 }
 
-/// Compute every nested position's content-free capture identities: the
-/// referenced names that bind in an enclosing frame, resolved LEXICALLY —
-/// innermost enclosing frame first, and within a frame the innermost
-/// same-name binding whose scope contains the capturing position. Each
-/// distinct captured BINDING is recorded once, in first-reference source
-/// order; identity is the `(defining frame, binding slot)` pair, so two
-/// same-name binders never collapse. A name binding in NO enclosing frame
-/// is not a capture (a free/global reference).
+/// Resolve every reference, write target and type query of every position
+/// LEXICALLY — innermost enclosing frame first, and within a frame the
+/// innermost same-name binding whose scope contains the position. A
+/// resolved binding's identity is the `(defining frame, binding slot)`
+/// pair, so two same-name binders never collapse; a name binding in NO
+/// enclosing frame is free (a global reference). Sealing derives each
+/// position's transitive captures from these resolutions
+/// ([`FunctionProgramIndex::from_discovery`]).
 fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
     // Snapshot the frame bindings + parents up front (no borrow conflicts).
     // The binding inventories are shared, not copied, and one key -> position
@@ -501,14 +499,8 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
                 evolving_array: frame_bindings[frame][slot as usize].evolving_array,
             })
         };
-        let mut captured_sites = Vec::new();
         for reference in Arc::make_mut(&mut entries[index].references) {
             reference.binding = resolve(&reference.name, reference.span);
-            if let FunctionReferenceBinding::Resolved(identity) = &reference.binding {
-                if identity.defining_function != frame_keys[index] {
-                    captured_sites.push((reference.span.start, identity.clone()));
-                }
-            }
         }
         for write in Arc::make_mut(&mut entries[index].writes) {
             for target in Arc::make_mut(&mut write.targets) {
@@ -518,7 +510,6 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
                 reference.binding = resolve(&reference.name, reference.span);
                 if let FunctionReferenceBinding::Resolved(identity) = &reference.binding {
                     if identity.defining_function != frame_keys[index] {
-                        captured_sites.push((reference.span.start, identity.clone()));
                         let defining = position_of[&identity.defining_function];
                         if descendant_seen[defining].insert(identity.binding_slot) {
                             descendant_writes[defining].push(identity.clone());
@@ -537,12 +528,13 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
         let mut parameter_callable_captures = Vec::new();
         for (span, references) in entries[index].parameter_callable_references.iter() {
             let mut bindings: Vec<FlowBindingIdentity> = Vec::new();
+            let mut bound = rustc_hash::FxHashSet::default();
             let mut reads: Vec<FunctionCapturedRead> = Vec::new();
             let mut exact = true;
             for reference in references.iter() {
                 match resolve(&reference.name, reference.span) {
                     FunctionReferenceBinding::Resolved(identity) => {
-                        if !bindings.contains(&identity) {
+                        if bound.insert(identity.clone()) {
                             bindings.push(identity.clone());
                         }
                         if reference.read_role.is_some() {
@@ -579,19 +571,12 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
                 }
             }
         }
-        captured_sites.sort_by_key(|(span, _)| *span);
         for query in Arc::make_mut(&mut entries[index].source_type_queries) {
             query.binding = resolve(&query.name, query.span);
         }
         for query in Arc::make_mut(&mut entries[index].type_queries) {
             query.binding = resolve(&query.name, query.span);
         }
-        let mut seen = rustc_hash::FxHashSet::default();
-        let captures: Vec<_> = captured_sites
-            .into_iter()
-            .filter_map(|(_, identity)| seen.insert(identity.clone()).then_some(identity))
-            .collect();
-        entries[index].captures = CanonicalCaptureIdentity(Arc::from(captures.into_boxed_slice()));
     }
     for ((entry, writes), assignments) in entries
         .iter_mut()
@@ -600,139 +585,6 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
     {
         entry.descendant_writes = writes.into();
         entry.descendant_assignments = assignments.into();
-    }
-}
-
-/// Carry closure-cell dependencies through intervening callable values without
-/// rewalking their ASTs or constructing any child flow skeleton.
-fn resolve_nested_capture_reads(entries: &mut [FunctionProgramDiscovery]) {
-    let positions: rustc_hash::FxHashMap<_, _> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| (entry.key.clone(), i))
-        .collect();
-    let mut children = vec![Vec::new(); entries.len()];
-    let parent_position: Vec<Option<usize>> = entries
-        .iter()
-        .map(|entry| {
-            entry
-                .lexical_parent
-                .as_deref()
-                .and_then(|parent| positions.get(parent).copied())
-        })
-        .collect();
-    for (i, parent) in parent_position.iter().enumerate() {
-        if let Some(parent) = parent {
-            children[*parent].push(i);
-        }
-    }
-    // Each frame's nesting under its outermost enclosing frame, each
-    // computed once from its parent's (walking every frame's whole chain
-    // cost the square of the nesting).
-    let mut nesting: Vec<Option<usize>> = vec![None; entries.len()];
-    let mut pending = Vec::new();
-    for i in 0..entries.len() {
-        let mut frame = i;
-        let mut known = loop {
-            if let Some(known) = nesting[frame] {
-                break known;
-            }
-            match parent_position[frame] {
-                Some(parent) if nesting[frame].is_none() => {
-                    pending.push(frame);
-                    frame = parent;
-                }
-                _ => {
-                    nesting[frame] = Some(0);
-                    break 0;
-                }
-            }
-        };
-        while let Some(frame) = pending.pop() {
-            known += 1;
-            nesting[frame] = Some(known);
-        }
-    }
-    let mut order: Vec<_> = nesting
-        .iter()
-        .enumerate()
-        .map(|(i, nesting)| (std::cmp::Reverse(nesting.unwrap_or(0)), i))
-        .collect();
-    order.sort_unstable();
-    for (_, i) in order {
-        let key = &entries[i].key;
-        let mut reads = Vec::new();
-        let mut captured_sites = Vec::new();
-        for reference in entries[i].references.iter() {
-            let FunctionReferenceBinding::Resolved(binding) = &reference.binding else {
-                continue;
-            };
-            if binding.defining_function == *key {
-                continue;
-            }
-            captured_sites.push((reference.span.start, binding.clone()));
-            if reference.read_role.is_some() {
-                reads.push(FunctionCapturedRead {
-                    binding: binding.clone(),
-                    path: Arc::clone(&reference.path),
-                    span: reference.span,
-                });
-            }
-        }
-        for target in entries[i]
-            .writes
-            .iter()
-            .flat_map(|write| write.targets.iter())
-        {
-            if let FunctionWriteTarget::Binding { reference, .. } = target {
-                if let FunctionReferenceBinding::Resolved(binding) = &reference.binding {
-                    if binding.defining_function != *key {
-                        captured_sites.push((reference.span.start, binding.clone()));
-                    }
-                }
-            }
-        }
-        let mut nested = Vec::new();
-        let mut exhaustive = entries[i].captures_exhaustive;
-        for &child in &children[i] {
-            let child = &entries[child];
-            exhaustive &= child.captures_exhaustive;
-            nested.push(FunctionNestedCaptures {
-                function: child.key.clone(),
-                span: child.span,
-                bindings: child.captures.clone(),
-                reads: Arc::clone(&child.captured_reads),
-                exhaustive: child.captures_exhaustive,
-            });
-            reads.extend(
-                child
-                    .captured_reads
-                    .iter()
-                    .filter(|read| read.binding.defining_function != *key)
-                    .cloned(),
-            );
-            captured_sites.extend(
-                child
-                    .captures
-                    .0
-                    .iter()
-                    .filter(|binding| binding.defining_function != *key)
-                    .map(|binding| (child.span.start, binding.clone())),
-            );
-        }
-        reads.sort_by_key(|read| read.span.start);
-        let mut seen_reads = rustc_hash::FxHashSet::default();
-        reads.retain(|read| seen_reads.insert((read.binding.clone(), Arc::clone(&read.path))));
-        captured_sites.sort_by_key(|(span, _)| *span);
-        let mut seen_captures = rustc_hash::FxHashSet::default();
-        let captures: Vec<_> = captured_sites
-            .into_iter()
-            .filter_map(|(_, identity)| seen_captures.insert(identity.clone()).then_some(identity))
-            .collect();
-        entries[i].captured_reads = reads.into();
-        entries[i].nested_captures = nested.into();
-        entries[i].captures = CanonicalCaptureIdentity(captures.into());
-        entries[i].captures_exhaustive = exhaustive;
     }
 }
 
@@ -3045,8 +2897,6 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             descendant_writes: Arc::from([]),
             unserved_assignments: unserved_assignments.into(),
             descendant_assignments: Arc::from([]),
-            captured_reads: Arc::from([]),
-            nested_captures: Arc::from([]),
             parameter_callable_references: parameter_callable_references.into(),
             parameter_callable_captures: Arc::from([]),
             effects: Arc::from(effects.into_boxed_slice()),
@@ -3057,7 +2907,6 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
             lexical_parent: None,
             class_member: false,
             nested_declaration_name: None,
-            captures: CanonicalCaptureIdentity::default(),
             captures_exhaustive: !creates_unserved_callable,
             flow_body_stable_hash: Hash16::default(),
             flow_body_exact_hash: None,

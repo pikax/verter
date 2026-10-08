@@ -281,7 +281,7 @@ fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
             flow_body_exact_hash: child.flow_body_exact_hash().unwrap(),
             ..function_key("/capture.ts", "root", 0, source)
         };
-        (key, child.captures().0[0].clone())
+        (key, child.captures().next().unwrap().clone())
     }
     let (before, old_capture) = child_key("function root() { let x = 0; return () => x; }");
     let (after, new_capture) =
