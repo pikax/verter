@@ -57,7 +57,7 @@
         "verter_scheduler",
         "verter_workspace",
         "verter_tsgo_api (TypeScript-provider client API; the provider process itself is LH)",
-        "verter_session (except its composition root)",
+        "verter_session (kernel services only; except its composition root and its vertical half: framework/, typeinfo/framework_surface/vue_exec, framework/api_projectors)",
         "verter_parser (carrier-neutral parse substrate only; the Vue/Svelte frontend inside it is breach K03)",
         "verter_semantic (carrier-neutral analysis only; the Vue macro/framework semantics inside it are breach K04)"
       ],
@@ -88,6 +88,7 @@
       "members": [
         "carrier frontends and their semantic (framework) profiles, one module per family",
         "verter_compiler frontend half (role-shared crate: its runtime backend half is LC)",
+        "verter_session vertical half (role-shared crate: framework/, typeinfo/framework_surface/vue_exec, framework/api_projectors; its kernel half is L1)",
         "verter_vue_conformance",
         "verter_svelte_conformance"
       ],

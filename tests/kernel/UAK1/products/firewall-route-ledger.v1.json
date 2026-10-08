@@ -21,7 +21,7 @@
       "id": "K01",
       "category": "central-framework-switch",
       "constitutionRule": "F01",
-      "unit": "Kernel session production closure links the runtime compiler backends",
+      "unit": "Kernel session production closure links verter_compiler: the runtime backends and the carrier frontend half",
       "symbols": [
         "verter_compiler::compile",
         "verter_compiler::compile_transaction",
@@ -29,15 +29,26 @@
         "verter_compiler::standalone",
         "verter_compiler::svelte::runtime",
         "verter_compiler::style_planner",
-        "verter_compiler::framework_common::vue_bridge"
+        "verter_compiler::framework_common::vue_bridge",
+        "verter_compiler::framework_common::FrameworkParseArtifact",
+        "verter_compiler::framework_common::registered_carrier_projection",
+        "verter_compiler::framework_common::carrier_compiler",
+        "verter_compiler::parser::types::ParsedSfc",
+        "verter_compiler::tsc"
       ],
       "paths": [
         "crates/verter_session/Cargo.toml",
         "crates/verter_session/src/host_resolve",
+        "crates/verter_session/src/project_type_store.rs",
+        "crates/verter_session/src/file_artifact_store.rs",
+        "crates/verter_session/src/resolver_core/owned_lowering_port.rs",
+        "crates/verter_session/src/parse.rs",
+        "crates/verter_session/src/template_convert.rs",
+        "crates/verter_session/src/types/tsc_response.rs",
         "crates/verter_identity/tests/cases/workspace_dependency_layers.rs"
       ],
       "disposition": "replace",
-      "successor": "kernel services reach compile products only through the optional CarrierCompilerBackendRegistry populated by the composition root; the frontend imports no runtime codegen",
+      "successor": "the whole verter_session -> verter_compiler crate edge is removed, frontend half included: kernel services reach compile products only through the optional CarrierCompilerBackendRegistry populated by the composition root, and store/parse/template-convert/tsc code consumes neutral typed parse and projection ports instead of verter_compiler types",
       "deletionOwner": "FWC1",
       "productionCapable": true,
       "successorPath": ["UAK1", "CPF0", "CPF1", "FWC1"],

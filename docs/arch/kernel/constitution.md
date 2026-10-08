@@ -45,8 +45,8 @@ references them.
 
 Every workspace crate belongs to exactly one layer (or is a named role-shared crate whose halves are listed separately); `constitution-inventory.v1.json` lists every crate, including `verter_audit`, `verter_ecma`, `verter_analysis_inputs`, `verter_tsgo_api`, `verter_type_runtime`, the derive crates, `verter_diagnostics` and `verter_actions`. Retained peer imports inside a layer are legal; the parser-free restriction stays (`verter_session_query`, `verter_type_engine` and `verter_type_expr` import neither `verter_parser` nor `verter_semantic`). The layer is a role, not a crate. Today several roles share one crate:
 `verter_compiler` holds both carrier frontends (`L3`) and runtime backends
-(`LC`), and `verter_session` holds kernel services, the framework registry and
-per-family modules. The rules below bind the roles. Splitting crates is the
+(`LC`), and `verter_session` holds kernel services (`L1`) and a vertical half (`framework/`,
+`typeinfo/framework_surface/vue_exec`, `framework/api_projectors`, `L3`). The rules below bind the roles. Splitting crates is the
 receiving owner's choice, as long as the rule holds.
 
 ## Dependency firewall
@@ -179,7 +179,7 @@ landing. No identity-bound receipt is recorded.
 
 | Route | Breach | Rule | Deletion owner |
 | ----- | ------ | ---- | -------------- |
-| `K01` | `verter_session`'s production closure links the compiler's runtime/compile backends (`compile`, `compile_transaction`, `assembly`, `standalone`, `svelte::runtime`, `style_planner`, `framework_common::vue_bridge`). `workspace_dependency_layers` ranks the compiler beneath the session. | `F01` | FWC1 (`FWC1-AC1`) |
+| `K01` | `verter_session`'s production closure links `verter_compiler`: the runtime/compile backends (`compile`, `compile_transaction`, `assembly`, `standalone`, `svelte::runtime`, `style_planner`, `framework_common::vue_bridge`) and the carrier frontend half (`framework_common::FrameworkParseArtifact` held in the shared stores, `registered_carrier_projection`, `carrier_compiler`, `parser::types::ParsedSfc`, `tsc`). The whole crate edge is the exception. `workspace_dependency_layers` ranks the compiler beneath the session. | `F01` | FWC1 (`FWC1-AC1`) |
 | `K02` | The Svelte JSX shim assets are embedded in the kernel crate (`framework/svelte_jsx_assets`). `verter_lsp` and `verter_tsc` read them from there. | `F01` | FWC1 (`FWC1-AC2`) |
 | `K03` | The Vue/Svelte carrier frontend (`verter_parser`: Vue SFC parser, `svelte_reactivity`) sits in the kernel parse substrate, so every kernel consumer of `verter_parser` imports a vertical. | `F01` | FWC1 (`FWC1-AC3`) |
 | `K04` | Vue macro and framework semantics (`verter_semantic` `analysis::{macros,component_meta,classify}`, `analyzers::reactive_flow`) sit in the kernel semantic crate, so kernel consumers of `verter_semantic` import a vertical. | `F01` | FWC1 (`FWC1-AC4`) |
