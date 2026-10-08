@@ -1117,13 +1117,13 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// nested Instantiate dispatch produced a fatal `QueryError`. The
     /// memo refuses insertion when this is true.
     pub(super) cache_suppress: bool,
-    /// `true` when the walker's result is a PARTIAL — the
+    /// The completeness of the walker's result. A partial — the
     /// pathological-input cap fired or a nested Instantiate dispatch
-    /// produced a fatal `QueryError`. Distinct from [`Self::cache_suppress`]
-    /// (which is also set by benign non-cacheability upstream): this is the
-    /// signal the component-meta + shape/materialize warm gates key on. Set
-    /// in lock-step with `cache_suppress` at the walker fatal/pathological
-    /// paths.
+    /// produced a fatal `QueryError` — is distinct from
+    /// [`Self::cache_suppress`] (which is also set by benign
+    /// non-cacheability upstream): this is the signal the component-meta +
+    /// shape/materialize warm gates key on. Set in lock-step with
+    /// `cache_suppress` at the walker fatal/pathological paths.
     ///
     /// The classes behind a partial: the walker's OWN fatal/pathological
     /// stops name no class (they are genuine unclassified partials and
