@@ -7,13 +7,13 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `FunctionProgramIndex::expressions_by_point`: indexed expression program point → its record's position (first record in source order wins a shared point) | `FunctionProgramIndex::expression`, read per call argument by call resolution and per program-expression source by flow-return evaluation | REQUIRED | Built once when `FunctionProgramIndex::from_discovery` seals a parsed file version; shared by every clone of the index (including `map_stable_hashes`) and released with it | `src/function_program.rs` | always |
-| `PROGRAM_EXPRESSION_LOOKUP_VISITS` thread-local counter: records yielded by `FunctionProgramIndex::expression` (per record examined, not per call) | none; linear-lookup tests and measurement only | OPTIONAL | Per thread; accumulates until a reader resets it | `src/function_program.rs` | `cfg(any(test, feature = "test-support", feature = "semantic-observe"))` |
+| `PROGRAM_EXPRESSION_LOOKUP_VISITS` thread-local counter: expression point-key comparisons made by `FunctionProgramIndex::expression` (counted in the key's equality, so a scan grows with the file) | none; linear-lookup tests and measurement only | OPTIONAL | Per thread; accumulates until a reader resets it | `src/function_program.rs` | `cfg(any(test, feature = "test-support", feature = "semantic-observe"))` |
 
 ## verter_semantic
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
-| `CALLBACK_LINK_PROBES` thread-local counter read through `take_callback_link_probes`: callback candidates examined while linking call arguments to callback positions | none; linear-linking tests and measurement only | OPTIONAL | Per thread; accumulates until `take_callback_link_probes` drains it | `src/analysis/function_program.rs` | `cfg(any(test, feature = "test-support", feature = "semantic-observe"))` |
+| `CALLBACK_LINK_PROBES` thread-local counter read through `take_callback_link_probes`: callback position-key comparisons made while linking call arguments to callback positions (counted in the key's equality) | none; linear-linking tests and measurement only | OPTIONAL | Per thread; accumulates until `take_callback_link_probes` drains it | `src/analysis/function_program.rs` | `cfg(any(test, feature = "test-support", feature = "semantic-observe"))` |
 
 ## Transient operational state (not retained semantic stores or instrumentation)
 

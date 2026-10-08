@@ -1359,7 +1359,7 @@ pub struct FunctionProgramIndex {
     expressions: Arc<[ProgramExpressionRecord]>,
     /// Each indexed expression's program point → its position in
     /// `expressions`; where two records share a point the first wins.
-    expressions_by_point: Arc<rustc_hash::FxHashMap<ProgramExpressionIdentity, usize>>,
+    expressions_by_point: Arc<rustc_hash::FxHashMap<ExpressionPointKey, usize>>,
     /// Every class the file authors: syntactic data recorded by the same
     /// build, prepared into keyed lookups, owned by this index and
     /// released with it.
@@ -1453,7 +1453,7 @@ impl FunctionProgramIndex {
         );
         for (ordinal, record) in expressions.iter().enumerate() {
             expressions_by_point
-                .entry(record.point.clone())
+                .entry(ExpressionPointKey(record.point.clone()))
                 .or_insert(ordinal);
         }
         FunctionProgramIndex {
@@ -1481,11 +1481,27 @@ std::thread_local! { pub static FUNCTION_VALUE_LOOKUP_VISITS: std::cell::Cell<us
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 std::thread_local! {
-    /// Indexed-expression records examined by
-    /// [`FunctionProgramIndex::expression`] on this thread: one per lookup,
-    /// whatever the file's expression count.
+    /// Point-key comparisons made by [`FunctionProgramIndex::expression`] on
+    /// this thread: every candidate record whose point is compared counts
+    /// once, so an index that compares few candidates per lookup stays
+    /// linear in lookups and a population scan grows with the file.
     pub static PROGRAM_EXPRESSION_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+/// Expression-point map key. Equality is the only way a lookup decides a
+/// record is the requested one, so each comparison is the unit of lookup work.
+#[derive(Debug, Clone, Hash)]
+pub(crate) struct ExpressionPointKey(ProgramExpressionIdentity);
+
+impl PartialEq for ExpressionPointKey {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        PROGRAM_EXPRESSION_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
+        self.0 == other.0
+    }
+}
+
+impl Eq for ExpressionPointKey {}
 
 impl FunctionProgramIndex {
     /// Locate one exact child position in the retained file inventory.
@@ -1605,12 +1621,8 @@ impl FunctionProgramIndex {
         &self,
         point: &ProgramExpressionIdentity,
     ) -> Option<&ProgramExpressionRecord> {
-        self.expressions_by_point.get(point).map(|&ordinal| {
-            // One visit per record examined: the index yields only the
-            // record at this point.
-            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-            PROGRAM_EXPRESSION_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
-            &self.expressions[ordinal]
-        })
+        self.expressions_by_point
+            .get(&ExpressionPointKey(point.clone()))
+            .map(|&ordinal| &self.expressions[ordinal])
     }
 }

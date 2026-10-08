@@ -1180,13 +1180,27 @@ fn resolve_call_site_targets(entries: &mut [FunctionProgramDiscovery]) {
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 std::thread_local! { static CALLBACK_LINK_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
-/// Callback candidates examined while linking call arguments to their
-/// callback positions on this thread since the last call: one per function
-/// argument, none for an ordinary argument.
+/// Callback-position comparisons made while linking call arguments to their
+/// callback positions on this thread since the last call: every candidate
+/// whose position is compared counts once, none for an ordinary argument.
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 pub fn take_callback_link_probes() -> usize {
     CALLBACK_LINK_PROBES.with(|probes| probes.replace(0))
 }
+
+/// Callback position; equality is the unit of linking work.
+#[derive(Debug, Clone, Copy, Hash)]
+struct CallbackPoint(u32);
+
+impl PartialEq for CallbackPoint {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        CALLBACK_LINK_PROBES.with(|probes| probes.set(probes.get() + 1));
+        self.0 == other.0
+    }
+}
+
+impl Eq for CallbackPoint {}
 
 fn link_callback_return_sources(
     canonical_id: &Arc<str>,
@@ -1228,7 +1242,7 @@ fn link_callback_return_sources(
     let mut by_point =
         rustc_hash::FxHashMap::with_capacity_and_hasher(callbacks.len(), rustc_hash::FxBuildHasher);
     for (ordinal, (point, ..)) in callbacks.iter().enumerate() {
-        by_point.entry(*point).or_insert(ordinal);
+        by_point.entry(CallbackPoint(*point)).or_insert(ordinal);
     }
 
     // Only a function-valued argument can name a callback: a call with
@@ -1243,11 +1257,7 @@ fn link_callback_return_sources(
             .iter_mut()
             .filter(|argument| argument.is_function_value)
         {
-            if let Some(&ordinal) = by_point.get(&argument.point) {
-                // One probe per callback candidate examined; the index
-                // yields at most the single candidate at this point.
-                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-                CALLBACK_LINK_PROBES.with(|probes| probes.set(probes.get() + 1));
+            if let Some(&ordinal) = by_point.get(&CallbackPoint(argument.point)) {
                 argument.function_return_source = Some(callbacks[ordinal].1.clone());
                 changed = true;
             }
