@@ -154,6 +154,37 @@ is `SemanticRetentionAccount` (see `/type-cache-architecture` → Aggregate
 retention account). A retained parse snapshot is a `Pinned` charge — charged
 unconditionally, never refused.
 
+### Semantic identity records are owned by their handles
+
+Intersection recipes, semantic contexts, order domains and the large family-key
+payloads (`RelateMemoKey`, `ResolveCallKey`) are NOT ordinals into process-owned
+tables. `semantic_query_memo/intern_table.rs` owns the substrate:
+
+* `Interned<T>` is one owning `Arc` pointer. `IntersectionInputId`,
+  `SemanticContextId` and `OrderDomainId` wrap one; they are `Clone`, not
+  `Copy`, and expose the value (`recipe()`, `context()`) — there is no `as_u32`,
+  no `lookup_*`, and no raw slot number another index could also mint.
+* Each kind declares itself with `intern_domain!`, which gives it a private
+  `WeakInternTable` reached as `InternDomain::index()`. The index only
+  DEDUPLICATES (digest → `Weak`); it owns no record. A record's destructor
+  forgets its entry, and a surviving collision bucket and the index both shrink
+  their backing capacity once drained.
+* Identity is exact value equality behind the digest: equal handles share a
+  record, or match digest AND value. A digest collision never aliases.
+* **Retained children:** a record owns exactly what its value owns. An
+  `OrderedSteps` recipe's `EvaluateSubgroup` recipes are its only same-kind
+  children; a held parent keeps them valid. A kind with same-kind children
+  overrides `InternDomain::take_children`, so a released chain is reclaimed
+  iteratively — nesting depth never becomes destructor stack depth.
+* Walk recipe operands only through `IntersectionInputRef::for_each_operand`:
+  iterative, and each distinct subgroup recipe is walked once however many
+  parents share it (the family release sweep runs it under the memo lock).
+* Lock discipline: never drop something that can destroy a same-kind record
+  while holding that kind's index lock.
+* `SemanticContextId::production()` is the one permanent record.
+  `SemanticPolicySetId` is the policy set's own value (`SemanticPolicySet::id()`),
+  so it needs no table.
+
 ---
 
 ## 5. Evidence

@@ -10,9 +10,13 @@
 //! retained children are exactly the nested recipe ids of its
 //! `EvaluateSubgroup` terms: a held parent keeps every nested subgroup
 //! valid, and [`IntersectionInputRef::for_each_operand`] reaches every
-//! node operand however deep the nesting.
+//! node operand however deep the nesting, walking each distinct subgroup
+//! once however many parents share it. Neither that walk nor a released
+//! chain's reclamation recurses on the nesting depth.
 
 use std::sync::Arc;
+
+use rustc_hash::FxHashSet;
 
 use super::semantic_context::SemanticContextId;
 use super::SemanticNodeId;
@@ -39,7 +43,27 @@ impl IntersectionInputId {
     }
 }
 
-intern_domain!(IntersectionRecipe);
+intern_domain!(IntersectionRecipe {
+    fn take_children(&mut self, out: &mut Vec<Interned<Self>>) {
+        // A steps slice another clone of this value still shares keeps its
+        // children; they are released when that clone drops.
+        let IntersectionRecipe::OrderedSteps(steps) = self else {
+            return;
+        };
+        let Some(steps) = Arc::get_mut(steps) else {
+            return;
+        };
+        for step in steps.iter_mut() {
+            if let IntersectionTerm::EvaluateSubgroup { input, .. } = step {
+                if let IntersectionInputRef::Recipe(IntersectionInputId(child)) =
+                    std::mem::replace(input, IntersectionInputRef::Empty)
+                {
+                    out.push(child);
+                }
+            }
+        }
+    }
+});
 
 /// Compact input reference for `ReduceIntersection`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -155,30 +179,60 @@ impl IntersectionInputRef {
     }
 
     /// Visit every node operand this input names, descending into every
-    /// nested subgroup recipe, in authored order.
+    /// nested subgroup recipe in authored order. A subgroup recipe shared by
+    /// several parents (or twice by one) is walked at its first occurrence
+    /// only, so the work is linear in the distinct recipes and their terms
+    /// rather than in the paths through a shared recipe graph.
     pub fn for_each_operand(&self, visit: &mut impl FnMut(SemanticNodeId)) {
+        let Self::Recipe(root) = self else {
+            self.visit_inline_operands(visit);
+            return;
+        };
+        // Live records have distinct value addresses, and every record
+        // reached here is held by `self` for the whole walk.
+        fn enter<'a>(
+            id: &'a IntersectionInputId,
+            walked: &mut FxHashSet<*const IntersectionRecipe>,
+            pending: &mut Vec<std::slice::Iter<'a, IntersectionTerm>>,
+            visit: &mut dyn FnMut(SemanticNodeId),
+        ) {
+            if !walked.insert(std::ptr::from_ref(id.recipe())) {
+                return;
+            }
+            match id.recipe() {
+                IntersectionRecipe::OrderedOperands(operands) => {
+                    operands.iter().copied().for_each(visit);
+                }
+                IntersectionRecipe::OrderedSteps(steps) => pending.push(steps.iter()),
+            }
+        }
+        let mut walked = FxHashSet::default();
+        let mut pending = Vec::new();
+        enter(root, &mut walked, &mut pending, visit);
+        while let Some(top) = pending.last_mut() {
+            let Some(step) = top.next() else {
+                pending.pop();
+                continue;
+            };
+            match step {
+                IntersectionTerm::Value(id) => visit(*id),
+                IntersectionTerm::EvaluateSubgroup { input, .. } => match input {
+                    Self::Recipe(id) => enter(id, &mut walked, &mut pending, visit),
+                    inline => inline.visit_inline_operands(visit),
+                },
+            }
+        }
+    }
+
+    /// The operands of a recipe-free input.
+    fn visit_inline_operands(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
         match self {
-            Self::Empty => {}
+            Self::Empty | Self::Recipe(_) => {}
             Self::Unary(id) => visit(*id),
             Self::Binary(left, right) => {
                 visit(*left);
                 visit(*right);
             }
-            Self::Recipe(id) => match id.recipe() {
-                IntersectionRecipe::OrderedOperands(operands) => {
-                    operands.iter().copied().for_each(&mut *visit);
-                }
-                IntersectionRecipe::OrderedSteps(steps) => {
-                    for step in steps.iter() {
-                        match step {
-                            IntersectionTerm::Value(id) => visit(*id),
-                            IntersectionTerm::EvaluateSubgroup { input, .. } => {
-                                input.for_each_operand(visit);
-                            }
-                        }
-                    }
-                }
-            },
         }
     }
 }
@@ -270,6 +324,100 @@ mod tests {
         assert!(
             !probes.iter().any(resident),
             "every churned recipe is reclaimed once its owners drop"
+        );
+    }
+
+    fn subgroup(input: IntersectionInputRef) -> IntersectionTerm {
+        IntersectionTerm::EvaluateSubgroup {
+            input,
+            purpose: IntersectionPurpose::CheckerReduction,
+        }
+    }
+
+    #[test]
+    fn a_shared_subgroup_graph_is_walked_once_per_distinct_recipe() {
+        // Every level names the level below twice, so the recipe graph has
+        // 2^depth root-to-leaf paths over depth + 1 distinct records.
+        let depth = 20u64;
+        let leaf = ids(0x7100, 3);
+        let levels = ids(0x7101, depth);
+        let mut input = IntersectionInputRef::from_operands(&leaf);
+        for level in &levels {
+            input = IntersectionInputRef::from_steps(&[
+                IntersectionTerm::Value(*level),
+                subgroup(input.clone()),
+                subgroup(input),
+            ]);
+        }
+        let mut walked = operands(&input);
+        assert_eq!(
+            walked.len() as u64,
+            depth + 3,
+            "each distinct recipe's operands are visited once"
+        );
+        walked.sort_unstable();
+        let mut expected = [leaf, levels].concat();
+        expected.sort_unstable();
+        assert_eq!(walked, expected, "the deepest shared leaf is still reached");
+    }
+
+    const DEEP_CHAIN_CHILD: &str = "VERTER_DEEP_RECIPE_CHAIN_CHILD";
+
+    /// A subgroup chain far deeper than a small stack could recurse through
+    /// is walked and, once its root drops, reclaimed down to the leaf.
+    /// Runs in a child process so an overflow fails this test alone.
+    #[test]
+    fn a_deep_subgroup_chain_is_walked_and_reclaimed_on_a_small_stack() {
+        if std::env::var_os(DEEP_CHAIN_CHILD).is_some() {
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(|| {
+                    let depth = 20_000u64;
+                    let leaf = ids(0x7200, 3);
+                    let levels = ids(0x7201, depth);
+                    let mut input = IntersectionInputRef::from_operands(&leaf);
+                    for level in &levels {
+                        input = IntersectionInputRef::from_steps(&[
+                            IntersectionTerm::Value(*level),
+                            subgroup(input),
+                        ]);
+                    }
+                    assert_eq!(operands(&input).len() as u64, depth + 3);
+                    let leaf_recipe = IntersectionRecipe::OrderedOperands(Arc::from(leaf));
+                    assert!(resident(&leaf_recipe), "the root holds the whole chain");
+                    drop(input);
+                    assert!(
+                        !resident(&leaf_recipe),
+                        "dropping the root reclaims the chain to its leaf"
+                    );
+                })
+                .expect("spawn the small-stack thread")
+                .join()
+                .expect("the chain is walked and reclaimed");
+            println!("{DEEP_CHAIN_CHILD}: reclaimed");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "semantic_query::intersection_input::tests::a_deep_subgroup_chain_is_walked_and_reclaimed_on_a_small_stack",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(DEEP_CHAIN_CHILD, "1")
+            .output()
+            .expect("run the chain in a child process");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .contains(&format!("{DEEP_CHAIN_CHILD}: reclaimed")),
+            "{:?} {}",
+            output.status,
+            stderr
+                .lines()
+                .find(|line| line.contains("overflowed") || line.contains("panicked"))
+                .unwrap_or("")
         );
     }
 

@@ -53,6 +53,17 @@ impl Hash for Colliding {
     }
 }
 
+/// A second all-colliding kind, so the bucket-capacity probe is not
+/// perturbed by the aliasing test's records.
+#[derive(Debug, PartialEq, Eq)]
+struct CollidingPeer(u64);
+intern_domain!(CollidingPeer);
+impl Hash for CollidingPeer {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        0u64.hash(state);
+    }
+}
+
 /// A parent record that owns child handles of its own kind.
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum Tree {
@@ -120,6 +131,30 @@ fn digest_collisions_never_alias_distinct_values() {
         *Colliding::index().get(&Colliding(2)).expect("still live"),
         Colliding(2)
     );
+}
+
+#[test]
+fn a_live_collision_peer_does_not_pin_its_drained_bucket_capacity() {
+    let index = CollidingPeer::index();
+    let sentinel = Interned::new(CollidingPeer(0));
+    let peers: Vec<_> = (1..=2_000)
+        .map(|key| Interned::new(CollidingPeer(key)))
+        .collect();
+    let high_water = index
+        .bucket_capacity(&CollidingPeer(0))
+        .expect("one bucket");
+    assert!(high_water > 2_000);
+    drop(peers);
+    assert_eq!(index.len(), 1, "only the sentinel stays indexed");
+    let retained = index
+        .bucket_capacity(&CollidingPeer(0))
+        .expect("sentinel's bucket");
+    assert!(
+        retained <= 4,
+        "the surviving bucket returns its backing capacity: {retained} of a {high_water} high water"
+    );
+    drop(sentinel);
+    assert!(index.is_empty());
 }
 
 #[test]

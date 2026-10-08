@@ -21,6 +21,10 @@
 //! value that embeds other handles (an ordered-steps recipe whose
 //! subgroups are themselves recipes) keeps those children alive for as
 //! long as the parent record lives; the index never holds a child alive.
+//! A kind whose values nest handles of the SAME kind declares
+//! [`InternDomain::take_children`], and a destroyed record then reclaims
+//! its whole released subtree iteratively, so the depth of a nesting chain
+//! never becomes the depth of the destructor's stack.
 //!
 //! **Lock discipline.** A record's destructor locks its index to forget
 //! itself. Nothing that can destroy a record of the same kind — an
@@ -44,11 +48,23 @@ const RETAINED_SLOT_FLOOR: usize = 16;
 pub trait InternDomain: Hash + Eq + Send + Sync + Sized + 'static {
     /// The kind's index. One per kind, owning no record.
     fn index() -> &'static WeakInternTable<Self>;
+
+    /// Move every same-kind child handle this value owns into `out`,
+    /// leaving the value holding none. Called only on a value whose
+    /// record is being destroyed; a kind with no same-kind children keeps
+    /// the default.
+    fn take_children(&mut self, out: &mut Vec<Interned<Self>>) {
+        let _ = out;
+    }
 }
 
-/// Declare `$ty` an [`InternDomain`] with a private static index.
+/// Declare `$ty` an [`InternDomain`] with a private static index. Extra
+/// trait items (a `take_children` override) follow in braces.
 macro_rules! intern_domain {
     ($ty:ty) => {
+        $crate::semantic_query_memo::intern_table::intern_domain!($ty {});
+    };
+    ($ty:ty { $($items:tt)* }) => {
         impl $crate::semantic_query_memo::intern_table::InternDomain for $ty {
             fn index() -> &'static $crate::semantic_query_memo::intern_table::WeakInternTable<Self>
             {
@@ -56,6 +72,7 @@ macro_rules! intern_domain {
                     $crate::semantic_query_memo::intern_table::WeakInternTable::new();
                 &INDEX
             }
+            $($items)*
         }
     };
 }
@@ -152,14 +169,18 @@ impl<T: InternDomain> WeakInternTable<T> {
         })
     }
 
-    /// Forget the entry of a record being destroyed, releasing backing
-    /// capacity once the index has drained well below it.
-    fn forget(&self, digest: u64, record: *const InternRecord<T>) {
+    /// Forget the entries of destroyed records under `digest` — the
+    /// caller's own and any other already-dead peer — releasing a
+    /// surviving bucket's and the index's backing capacity once each has
+    /// drained well below it.
+    fn forget(&self, digest: u64) {
         let mut slots = self.slots.lock();
         if let Some(bucket) = slots.get_mut(&digest) {
-            bucket.retain(|weak| !std::ptr::eq(weak.as_ptr(), record));
+            bucket.retain(|weak| weak.strong_count() > 0);
             if bucket.is_empty() {
                 slots.remove(&digest);
+            } else if bucket.spilled() && bucket.capacity() > bucket.len().saturating_mul(4) {
+                bucket.shrink_to_fit();
             }
         }
         let floor = RETAINED_SLOT_FLOOR.max(slots.len());
@@ -168,7 +189,7 @@ impl<T: InternDomain> WeakInternTable<T> {
         }
     }
 
-    /// Indexed records (live, or being destroyed on another thread).
+    /// Indexed records (live, or destroyed and not yet forgotten).
     #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
@@ -187,6 +208,17 @@ impl<T: InternDomain> WeakInternTable<T> {
     pub fn capacity(&self) -> usize {
         self.slots.lock().capacity()
     }
+
+    /// Backing capacity of the collision bucket `value`'s digest selects,
+    /// in weak entries; `None` when no entry carries that digest.
+    #[cfg(test)]
+    #[must_use]
+    pub fn bucket_capacity(&self, value: &T) -> Option<usize> {
+        self.slots
+            .lock()
+            .get(&digest_of(value))
+            .map(SmallVec::capacity)
+    }
 }
 
 impl<T: InternDomain> Default for WeakInternTable<T> {
@@ -197,7 +229,17 @@ impl<T: InternDomain> Default for WeakInternTable<T> {
 
 impl<T: InternDomain> Drop for InternRecord<T> {
     fn drop(&mut self) {
-        T::index().forget(self.digest, self);
+        T::index().forget(self.digest);
+        // Reclaim the released subtree with an explicit worklist: a child
+        // this record held last is unwrapped and emptied here, so its own
+        // destructor finds nothing left to release and never recurses.
+        let mut released = Vec::new();
+        self.value.take_children(&mut released);
+        while let Some(child) = released.pop() {
+            if let Some(mut record) = Arc::into_inner(child.record) {
+                record.value.take_children(&mut released);
+            }
+        }
     }
 }
 
