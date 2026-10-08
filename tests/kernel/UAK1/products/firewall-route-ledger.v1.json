@@ -48,7 +48,21 @@
       "category": "central-framework-switch",
       "constitutionRule": "F01",
       "unit": "Svelte JSX shim assets embedded in the kernel session crate",
-      "symbols": ["SVELTE_JSX_RUNTIME_DTS", "SVELTE_JSX_DEV_RUNTIME_DTS"],
+      "symbols": [
+        "SVELTE_JSX_RUNTIME_DTS",
+        "SVELTE_JSX_DEV_RUNTIME_DTS",
+        "SVELTE_JSX_SVG_RUNTIME_DTS",
+        "SVELTE_JSX_SVG_DEV_RUNTIME_DTS",
+        "SVELTE_JSX_MATHML_RUNTIME_DTS",
+        "SVELTE_JSX_MATHML_DEV_RUNTIME_DTS",
+        "SVELTE_JSX_PACKAGE_NAME",
+        "SVELTE_JSX_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_DEV_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_SVG_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_SVG_DEV_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_MATHML_RUNTIME_SPECIFIER",
+        "SVELTE_JSX_MATHML_DEV_RUNTIME_SPECIFIER"
+      ],
       "paths": [
         "crates/verter_session/src/framework/svelte_jsx_assets.rs",
         "crates/verter_session/src/framework/svelte_jsx_assets"

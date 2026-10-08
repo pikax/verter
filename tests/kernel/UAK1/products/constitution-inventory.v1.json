@@ -126,7 +126,7 @@
         "verter_wasm",
         "verter_ffi",
         "CLI command adapters and reporters",
-        "verter_bench, verter_dx_baseline, verter_supervise, verter_relay_shim, verter_compile_contracts*, verter_session_oracle_macro, verter_shipped_cfg_contract, verter_source_policy_gate, verter_test_support, verter_validation_probe (tooling/test crates, never imported by production)"
+        "verter_bench, verter_dx_baseline, verter_supervise, verter_relay_shim, verter_compile_contracts*, verter_session_oracle_macro, verter_shipped_cfg_contract, verter_source_policy_gate, verter_test_support, verter_validation_probe, xtask, verter_napi_request_fixture (tooling/test crates, never imported by production)"
       ],
       "mayImport": ["L0", "L1", "L2", "L3", "L4", "LC", "LR"]
     },
