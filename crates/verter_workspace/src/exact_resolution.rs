@@ -14,7 +14,7 @@
 //! latent defect (ambient deps silently dropped on parse re-record) was
 //! caused by exactly this kind of routing.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
 use crate::path_matches_prefix;
@@ -92,6 +92,23 @@ impl DependencySnapshot {
         out.extend(self.ambient_resolved.iter().cloned());
         out.extend(self.semantic_transitive.iter().cloned());
         out
+    }
+
+    /// Whether the owner has no dependency state in any class.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lazy_resolved.is_empty() && self.is_empty_beyond_lazy_resolved()
+    }
+
+    /// Whether the owner's only dependency state, if any, is resolution
+    /// answers (`lazy_resolved`).
+    fn is_empty_beyond_lazy_resolved(&self) -> bool {
+        self.parsed_resolved.is_empty()
+            && self.parsed_unresolved_relatives.is_empty()
+            && self.exact_resolved.is_empty()
+            && self.ambient_resolved.is_empty()
+            && self.semantic_transitive.is_empty()
+            && self.bare_specifiers.is_empty()
+            && self.exact_resolutions.is_empty()
     }
 
     /// Active unresolved-stem set: `parsed_unresolved_relatives` minus
@@ -223,47 +240,94 @@ impl EdgeStore {
         })
     }
 
+    /// Whether replacing `canonical_id`'s exact resolutions with
+    /// `resolutions` would store the table it already holds. Read-only: a
+    /// publisher decides an unchanged refresh with it before opening any
+    /// publication window.
+    pub fn exact_resolutions_unchanged(
+        &self,
+        canonical_id: &str,
+        resolutions: &[ExactResolution],
+    ) -> bool {
+        self.exact_route_winners(canonical_id, resolutions)
+            .is_none()
+    }
+
+    /// The idempotency gate (the `replace_parsed_edges` R22 shape): `None`
+    /// when `resolutions` are value-identical to the stored table, so a
+    /// caller performs no write and reports `changed: false` for a
+    /// steady-state re-push; otherwise, per input route, whether it is the
+    /// route a replace stores.
+    ///
+    /// Duplicate-key safety: the input is a Vec, so the same key can appear
+    /// twice. A replace keeps only the LAST route per key — an earlier route
+    /// for that key is superseded and stores nothing, not even its resolved
+    /// target in `exact_resolved` — so the comparison is against exactly the
+    /// table a replace would store: `[A→x, A→x]` against `{A→x, B→y}` is a
+    /// change (the replace drops `B→y`), and `[A→x, A→y]` against `{A→y}`
+    /// is not. An owner with no edge state stores the empty table, so an
+    /// empty input for it is unchanged.
+    fn exact_route_winners(
+        &self,
+        canonical_id: &str,
+        resolutions: &[ExactResolution],
+    ) -> Option<Vec<bool>> {
+        #[cfg(any(test, feature = "semantic-observe"))]
+        crate::resolution_currency::record_exact_publication_work(resolutions.len());
+        let mut last_route: FxHashMap<(&str, ResolvePhase, ResolveRequestKind), usize> =
+            FxHashMap::default();
+        for (index, resolution) in resolutions.iter().enumerate() {
+            last_route.insert(
+                (&resolution.specifier, resolution.phase, resolution.kind),
+                index,
+            );
+        }
+        let stored = self
+            .files
+            .get(canonical_id)
+            .map(|state| &state.deps.exact_resolutions);
+        let unchanged = last_route.len() == stored.map_or(0, FxHashMap::len)
+            && last_route
+                .iter()
+                .all(|(&(specifier, phase, kind), &index)| {
+                    stored.and_then(|stored| stored.get(&(specifier.to_string(), phase, kind)))
+                        == Some(&resolutions[index])
+                });
+        if unchanged {
+            return None;
+        }
+        Some(
+            resolutions
+                .iter()
+                .enumerate()
+                .map(|(index, resolution)| {
+                    last_route[&(
+                        resolution.specifier.as_str(),
+                        resolution.phase,
+                        resolution.kind,
+                    )] == index
+                })
+                .collect(),
+        )
+    }
+
     /// Replace bundler-injected exact resolutions for a file. Active-stem
     /// set is recomputed AFTER the exact mutation; `reverse_deps_by_stem`
     /// is updated against the active-stem diff. Parsed-unresolved entries
     /// are NOT destroyed — when bundler later removes/Nones a resolution,
     /// the stem becomes active again automatically (active-stem model).
+    /// A refresh that would store the held table writes nothing.
     pub fn replace_exact_resolutions(
         &mut self,
         canonical_id: &str,
         resolutions: Vec<ExactResolution>,
     ) -> ExactResolutionResult {
-        // Idempotency gate (the `replace_parsed_edges` R22 shape): if the
-        // supplied snapshot is value-identical to the stored table, perform
-        // no write at all and report `changed: false` so callers can skip
-        // their invalidation cascades for steady-state re-pushes.
-        //
-        // Duplicate-key safety: the input is a Vec, so the same key can
-        // appear twice (`[A→x, A→x]`). Comparing RAW input length against
-        // the stored table would judge that input "unchanged" against
-        // `{A→x, B→y}` while a real replace drops `B→y` — count DISTINCT
-        // input keys instead.
-        if let Some(state) = self.files.get(canonical_id) {
-            let stored = &state.deps.exact_resolutions;
-            let mut distinct_keys: FxHashSet<(String, ResolvePhase, ResolveRequestKind)> =
-                FxHashSet::default();
-            let every_entry_matches = resolutions.iter().all(|resolution| {
-                let key = (
-                    resolution.specifier.clone(),
-                    resolution.phase,
-                    resolution.kind,
-                );
-                let matches = stored.get(&key) == Some(resolution);
-                distinct_keys.insert(key);
-                matches
-            });
-            if every_entry_matches && distinct_keys.len() == stored.len() {
-                return ExactResolutionResult {
-                    newly_resolved: Vec::new(),
-                    changed: false,
-                };
-            }
-        }
+        let Some(winners) = self.exact_route_winners(canonical_id, &resolutions) else {
+            return ExactResolutionResult {
+                newly_resolved: Vec::new(),
+                changed: false,
+            };
+        };
 
         let mut newly_resolved = Vec::new();
         let pre_existing_other_class = {
@@ -282,7 +346,10 @@ impl EdgeStore {
             snap.exact_resolutions.clear();
             snap.exact_resolved.clear();
 
-            for resolution in resolutions {
+            for (resolution, winner) in resolutions.into_iter().zip(winners) {
+                if !winner {
+                    continue;
+                }
                 if let Some(ref id) = resolution.resolved_canonical_id {
                     if snap.exact_resolved.insert(id.clone())
                         && !pre_existing_other_class.contains(id)
@@ -372,6 +439,42 @@ impl EdgeStore {
             inserted = snap.lazy_resolved.insert(dep_id.to_string());
         });
         inserted
+    }
+
+    /// Retract one lazy-resolved dep: the retained resolution answer that
+    /// recorded it left the workspace lane, and no remaining answer of the
+    /// owner resolves to it. Only the `lazy_resolved` class moves; the
+    /// reverse-axis bucket keeps the owner while another class still names
+    /// the dep. An owner left with no dependency state at all — an importer
+    /// known only through its resolutions — leaves the store, so owners the
+    /// workspace never learns about stay bounded by the retained answers.
+    pub fn retract_lazy_resolved_dep(&mut self, canonical_id: &str, dep_id: &str) {
+        if !self
+            .files
+            .get(canonical_id)
+            .is_some_and(|state| state.deps.lazy_resolved.contains(dep_id))
+        {
+            return;
+        }
+        self.write_pattern(canonical_id, |snap| {
+            snap.lazy_resolved.remove(dep_id);
+        });
+        if self
+            .files
+            .get(canonical_id)
+            .is_some_and(|state| state.deps.is_empty())
+        {
+            self.files.remove(canonical_id);
+        }
+    }
+
+    /// Whether the owner has dependency state beyond resolution answers —
+    /// parsed, exact, ambient or semantic edges — that its own retirement,
+    /// not its resolutions', removes.
+    pub(crate) fn holds_state_beyond_lazy_resolutions(&self, canonical_id: &str) -> bool {
+        self.files
+            .get(canonical_id)
+            .is_some_and(|state| !state.deps.is_empty_beyond_lazy_resolved())
     }
 
     /// Replace `ambient_resolved` set wholesale.
@@ -534,17 +637,19 @@ impl EdgeStore {
         // when its edges change or it is removed.
     }
 
-    /// Remove all state for files under a directory prefix.
-    pub fn remove_under(&mut self, prefix: &str) {
+    /// Remove all state for files under a directory prefix. Returns the
+    /// owners removed.
+    pub fn remove_under(&mut self, prefix: &str) -> Vec<String> {
         let to_remove: Vec<String> = self
             .files
             .keys()
             .filter(|path| path_matches_prefix(path, prefix))
             .cloned()
             .collect();
-        for canonical_id in to_remove {
-            self.remove_file(&canonical_id);
+        for canonical_id in &to_remove {
+            self.remove_file(canonical_id);
         }
+        to_remove
     }
 
     /// Get stored bare specifiers for a file (for lazy resolution).
