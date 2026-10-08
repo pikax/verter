@@ -706,7 +706,7 @@ impl SkeletonNameIndex {
         let mut next = offsets.clone();
         let mut by_name = vec![SkeletonBindingId(0); offsets[names.len()] as usize];
         for (index, binding) in bindings.iter().enumerate() {
-            if let Some(at) = next.get_mut(binding.name.index()) {
+            if let Some(at) = next[..names.len()].get_mut(binding.name.index()) {
                 by_name[*at as usize] = SkeletonBindingId::from_index(index as u32);
                 *at += 1;
             }
