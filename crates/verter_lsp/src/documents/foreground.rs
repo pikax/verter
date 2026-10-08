@@ -153,10 +153,10 @@ pub(crate) struct ForegroundRequest {
     /// Open incarnation, edit generation, client version and source bytes of
     /// the requested document; `None` when it was not open.
     document: Option<DocumentSnapshotIdentity>,
-    /// The host authority the request was answered under: the workspace
-    /// root it captured and the identity settlement compares, which an
-    /// equivalent root republication, a cache eviction or a cache-row
-    /// removal leaves unchanged and every authority replacement changes.
+    /// The host authority identity the request was answered under, which
+    /// settlement compares. Nothing is retained: an equivalent root
+    /// republication, a cache eviction or a cache-row removal leaves it
+    /// unchanged and every authority replacement changes it.
     authority: Arc<verter_session::HostAuthorityView>,
     /// Every provider surface a provider answer of this request was decoded
     /// through, in decode order. Each stays bracketed until settlement, so two
