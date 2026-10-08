@@ -161,10 +161,7 @@ impl SemanticGraphStore {
             .entries
             .get(&refusal_key)
             .cloned()?;
-        let enters_alike = match (request, &summary.prefix.request) {
-            (Some(_), Some(_)) | (None, None) => true,
-            _ => false,
-        };
+        let enters_alike = request.is_some() == summary.prefix.request.is_some();
         (enters_alike
             && self.serves_stored_value(&summary.read.value)
             && summary
