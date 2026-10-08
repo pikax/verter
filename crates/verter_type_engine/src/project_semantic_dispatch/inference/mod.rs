@@ -3,12 +3,13 @@
 //! a conditional's `infer` declarations and a reverse mapped type
 //! (`getTypeFromInference`), and for a signature's type parameters.
 
+mod collect;
 pub mod constraints;
 pub mod fixation;
+pub mod session;
 
 pub use fixation::{winning_candidates, WinningCandidates};
 
-mod binding_control;
 use super::dispatch_txn::{RelationStep, StrictFamilyConfig};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -167,13 +168,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> InferenceDemandDriver
         crate::semantic_query::stable_key::provably_equal(self.graph(), a, b)
     }
 }
-/// Selected arena/source and binding-control authority; no whole transaction,
-/// query lease, or ambient resolver can be obtained through this view.
+/// Selected arena/source authority; no whole transaction, query lease, or
+/// ambient resolver can be obtained through this view.
 pub(in crate::project_semantic_dispatch) struct InferenceTxn<'a, D: InferenceDemandDriver> {
     driver: &'a D,
     arena: super::arena_ops::ArenaOps<'a>,
     source: &'a dyn crate::resolver_core::request_ports::OwnedLowering,
-    binding: binding_control::BindingControl<'a>,
 }
 impl<'b, 'a, C: crate::resolver_core::ResolverCapabilities>
     InferenceTxn<'b, ProjectSemanticDispatch<'a, C>>
@@ -183,7 +183,6 @@ impl<'b, 'a, C: crate::resolver_core::ResolverCapabilities>
             driver,
             arena: super::arena_ops::ArenaOps::new(driver.graph()),
             source: driver.ctx,
-            binding: binding_control::BindingControl::new(&driver.dispatch_txn),
         }
     }
 }
