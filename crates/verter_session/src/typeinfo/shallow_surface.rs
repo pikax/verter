@@ -118,18 +118,19 @@ impl VerterHost {
             QueryResult::Error(_) => return None,
         };
 
-        crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
-            &host_ctx,
-            &dispatch,
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
-        )
-        // Public accessor discharge: an INCOMPLETE resolution records its
-        // typed reason before surfacing the established miss signal — a
+        // Public accessor adoption: an INCOMPLETE resolution records its
+        // fact causes before surfacing the established miss signal — a
         // failed resolution never passes as "no such surface".
-        .recorded()
+        crate::typeinfo::surface_resolution::adopt_surface(
+            crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+                &host_ctx,
+                &dispatch,
+                base,
+                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+                None,
+            ),
+        )
     }
 
     /// Project a resolved base node to its span-rich one-level
@@ -307,16 +308,15 @@ pub(crate) fn callable_first_param_object_surface<
     ) {
         return None;
     }
-    project_shallow_surface_from_base(
+    // An INCOMPLETE projection records its fact causes before the
+    // no-surface answer; a failed resolution never reads as "the param has
+    // no object surface".
+    crate::typeinfo::surface_resolution::adopt_surface(project_shallow_surface_from_base(
         ctx,
         dispatch,
         first_param,
         Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
-    )
-    // An INCOMPLETE projection records its typed reason before the
-    // no-surface answer; a failed resolution never reads as "the param has
-    // no object surface".
-    .recorded()
+    ))
 }

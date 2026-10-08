@@ -106,7 +106,7 @@ use verter_session_query::function_program::{
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 
 use super::super::dispatch_txn::{CheckerDispatchTransaction, ObligationIdentity};
-use super::super::{BuildLocalTaintGuard, ProjectSemanticDispatch};
+use super::super::ProjectSemanticDispatch;
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::semantic_query::{FlowReturnKey, FlowReturnStep, SemanticNodeData, SemanticNodeId};
 
@@ -537,28 +537,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// records the unsettled callee returns it demands instead of nesting
     /// them.
     fn evaluate_scheduled_callee(&self, key: &FlowReturnKey, probe: bool) -> ScheduledEvaluation {
-        let deferred_sticky = crate::request_context::DeferredPartialStickyScope::enter();
-        let completeness = crate::request_context::ColdComputeCompletenessScope::enter();
-        let frame = BuildLocalTaintGuard::push(&self.build_local_taint);
-        self.dispatch_txn
-            .borrow_mut()
-            .flow
-            .schedule
-            .probes
-            .push(probe.then(CalleeKeys::default));
-        let step = self.execute_flow_return(key.clone());
-        let recorded = self
-            .dispatch_txn
-            .borrow_mut()
-            .flow
-            .schedule
-            .probes
-            .pop()
-            .flatten()
-            .unwrap_or_default();
-        let _ = frame.finish();
-        completeness.discard();
-        drop(deferred_sticky);
+        let (step, recorded) = self
+            .observe_flow_read(|| {
+                self.dispatch_txn
+                    .borrow_mut()
+                    .flow
+                    .schedule
+                    .probes
+                    .push(probe.then(CalleeKeys::default));
+                let step = self.execute_flow_return(key.clone());
+                let recorded = self
+                    .dispatch_txn
+                    .borrow_mut()
+                    .flow
+                    .schedule
+                    .probes
+                    .pop()
+                    .flatten()
+                    .unwrap_or_default();
+                (step, recorded)
+            })
+            .discard();
         // An evaluation the instantiation transfer answered queued no
         // member, and needs none: every later demand is answered the same
         // way.
