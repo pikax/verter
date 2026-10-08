@@ -139,7 +139,7 @@ mod tests {
             multi_statement: false,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Static,
         }
     }

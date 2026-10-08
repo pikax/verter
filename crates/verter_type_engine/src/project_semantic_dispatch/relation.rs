@@ -77,7 +77,7 @@ use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::conditional_decision::ConditionalOutcome;
+use super::conditional_decision::{exact_reading, ConditionalReading};
 use super::dispatch_txn::{
     provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
     FlowReturnPendingOutcome, InferenceInfoSetup, InferenceOccurrence, InferenceSession,
@@ -5741,7 +5741,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } => {
                     let conditional_shadows =
                         self.extends_pattern_declares_infer(*extends, base_infer);
-                    if let ConditionalOutcome::Reduced(selected) = self.conditional_outcome(node) {
+                    if let Some(ConditionalReading::Reduced(selected)) =
+                        exact_reading(self.conditional_outcome(node))
+                    {
                         // Only the true branch is in the scope of the
                         // pattern's `infer` declarations: an answer that is
                         // not the false branch may hold it.
@@ -5915,7 +5917,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     policy: top.policy,
                     source_freshness: top.source_freshness,
                     inference_context,
-                    context: top.context,
+                    context: top.context.clone(),
                 }
             }
             None => self.relate_key_for(source, target),
@@ -6938,19 +6940,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(spec) = reverse_spec {
             return self.relate_reverse_homomorphic(key.source, &spec, bindings);
         }
-        let source_conditional = self.conditional_outcome(key.source);
-        if let ConditionalOutcome::Reduced(reduced) = source_conditional {
+        // An unfinished or aborted conditional reading on either side
+        // leaves the relation undecided; only complete readings relate.
+        let source_conditional = exact_reading(self.conditional_outcome(key.source));
+        if let Some(ConditionalReading::Reduced(reduced)) = source_conditional {
             return self.relate_member(reduced, key.target, bindings, InferPosition::Covariant);
         }
-        let target_conditional = self.conditional_outcome(key.target);
-        if let ConditionalOutcome::Reduced(reduced) = target_conditional {
+        let target_conditional = exact_reading(self.conditional_outcome(key.target));
+        if let Some(ConditionalReading::Reduced(reduced)) = target_conditional {
             return self.relate_member(key.source, reduced, bindings, InferPosition::Covariant);
         }
         let (source_deferred, target_deferred) = match (source_conditional, target_conditional) {
-            (ConditionalOutcome::Undecided, _) | (_, ConditionalOutcome::Undecided) => {
-                return RelationResult::Unknown;
-            }
-            (source, target) => (source.into_deferred(), target.into_deferred()),
+            (Some(source), Some(target)) => (source.into_deferred(), target.into_deferred()),
+            (None, _) | (_, None) => return RelationResult::Unknown,
         };
         if let Some(result) = self.relate_deferred_conditionals(
             key.source,

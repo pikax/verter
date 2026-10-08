@@ -400,9 +400,8 @@ pub struct AppliedResult {
 
 impl AppliedResult {
     /// Shape-only / context-free *evaluation* (reserved evaluation and
-    /// evidence ids). `semantic_context` must be an interned identity —
-    /// there is no reserved context sentinel, and id 0 is the first
-    /// interned context.
+    /// evidence ids). `semantic_context` is the owning interned context
+    /// handle — there is no reserved context sentinel.
     #[must_use]
     pub fn context_free(
         descriptor: SignatureDescriptorId,

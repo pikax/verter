@@ -198,9 +198,9 @@ fn canonicalise_for_digest(
             purpose,
             context,
         } => SemanticQueryKey::ReduceIntersection {
-            input: *input,
+            input: input.clone(),
             purpose: *purpose,
-            context: *context,
+            context: context.clone(),
         },
         other => other.clone(),
     }
@@ -4083,8 +4083,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         // the check/extends operands terminates bounded instead of
         // diverging.
         let dispatch = self.dispatch;
-        if let super::conditional_decision::ConditionalOutcome::Reduced(selected) =
-            dispatch.conditional_outcome(node)
+        if let Some(super::conditional_decision::ConditionalReading::Reduced(selected)) =
+            super::conditional_decision::exact_reading(dispatch.conditional_outcome(node))
         {
             return self.node_is_open(ctx, selected);
         }

@@ -482,6 +482,106 @@ async fn owner_loss_retracts_previously_published_carrier() {
     );
 }
 
+/// Every transition the coordinator runs — an owned publish, a single- and a
+/// multi-source activation, an owner-loss reconcile and an explicit removal — enters
+/// the session's ONE gate registry through a freshly built reconciler, and leaves no
+/// gate behind once it returns.
+#[tokio::test]
+async fn coordinator_transitions_retire_their_source_gates() {
+    let (coord, mock) = coordinator();
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let unadvertised = format!("{ws_root}/src/Other.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+    let (host, fs) = host_without_snapshot();
+    let gates = Arc::clone(coord.source_gates());
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+    let outcome = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion.clone()],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("publish under a configured owner succeeds");
+    assert!(matches!(outcome, ReconcileOutcome::Advertised { .. }));
+    assert_eq!(gates.live_gates(), 0, "an owned publish retired its gate");
+
+    assert!(coord
+        .activate_published_source(&source)
+        .await
+        .expect("single activation succeeds"));
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "a single activation retired its gate"
+    );
+
+    let activated = coord
+        .activate_published_sources(&[unadvertised.clone(), source.clone()])
+        .await
+        .expect("batch activation succeeds");
+    assert_eq!(activated, 1, "only the advertised source activates");
+    assert!(
+        mock.calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::ActivateCarrierMembers { .. })),
+        "the batch reached the provider while its gates were held"
+    );
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "a multi-source activation retired every gate it held"
+    );
+
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        build_workspace_snapshot_simple(Vec::new(), SnapshotGeneration(2)),
+    )));
+    let outcome = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("owner loss reconciles to a tombstone");
+    assert!(matches!(outcome, ReconcileOutcome::Tombstoned { .. }));
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "an owner-loss retract retired its gate"
+    );
+
+    let outcome = coord
+        .remove_membership(&source, AbsentReason::Deleted)
+        .await
+        .expect("an explicit removal succeeds");
+    assert!(matches!(outcome, ReconcileOutcome::Tombstoned { .. }));
+    assert_eq!(gates.live_gates(), 0, "a removal retired its gate");
+    assert!(
+        gates.backing_capacity() > 0,
+        "the transitions went through the coordinator's shared registry"
+    );
+}
+
 /// Owner A→B: a source that MOVES to a new owning project must not stay
 /// advertised in its OLD project. The per-edit publish uses
 /// `OwnedSetScope::SourceDelta` (union into the target, never prune), so without

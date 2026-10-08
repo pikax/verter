@@ -91,7 +91,7 @@ mod tests {
             multi_statement: false,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -123,7 +123,7 @@ mod tests {
             multi_statement: false,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -160,7 +160,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -196,7 +196,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -220,7 +220,7 @@ mod tests {
             multi_statement: false,
             errors: None,
             bindings: None, // No bindings extracted
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Static,
         };
 
@@ -247,7 +247,7 @@ mod tests {
             multi_statement: false,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 

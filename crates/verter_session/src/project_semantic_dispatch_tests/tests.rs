@@ -14577,7 +14577,7 @@ fn relate_parent_key_invalidates_on_semantic_context_change() {
     other_policy.compatibility_version = 2;
     let context_a = SemanticContext::production().intern();
     let context_b = SemanticContext {
-        policy_set: other_policy.intern(),
+        policy_set: other_policy.id(),
         ..SemanticContext::production()
     }
     .intern();

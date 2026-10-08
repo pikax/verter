@@ -227,7 +227,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.project_generation_signature(),
         )
             .into();
-        output.result_is_partial = true;
+        output.mark_partial();
         output.cache_suppress = true;
         output
     }
@@ -241,7 +241,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.project_generation_signature(),
         )
             .into();
-        output.result_is_partial = true;
+        output.mark_partial();
         output.cache_suppress = true;
         output
     }
