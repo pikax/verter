@@ -316,7 +316,9 @@ pub enum ServingDelivery {
     /// The engine reads the surface through the carrier membership
     /// publication, and no committed publication attests this surface.
     Unpublished,
-    /// The engine keeps no application ledger the store could consult.
+    /// The engine keeps no application ledger the store could consult: it
+    /// cannot say which bytes it holds, so nothing it answers is attributable
+    /// to a recorded surface.
     Uncertified,
 }
 
@@ -331,10 +333,11 @@ pub trait ProviderDeliveryWitness: Send + Sync {
 /// The typed delivery state of one recorded surface: whether the bytes the
 /// store records are the bytes the serving provider evaluates.
 ///
-/// Only [`Self::Delivered`] and [`Self::Unwitnessed`] may serve a provider
-/// answer. Every other state is a signal of its own — never a diagnostics
-/// outcome — and a foreground request meets it by repairing the requested
-/// file's surface before dispatch, or by answering without the provider.
+/// Only [`Self::Delivered`] may serve a provider answer: a record is never
+/// evidence of its own delivery. Every other state is a signal of its own —
+/// never a diagnostics outcome — and a foreground request meets it by
+/// repairing the requested file's surface before dispatch, or by answering
+/// without the provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceDelivery {
     /// Recorded and delivered: the serving provider holds exactly these bytes.
@@ -351,7 +354,8 @@ pub enum SurfaceDelivery {
     /// delivery.
     DeliveryLost,
     /// No serving-side ledger exists to consult (no provider is bound, or it
-    /// cannot certify application): the record is the only evidence there is.
+    /// cannot certify application): nothing proves the engine holds these
+    /// bytes, so the record alone never serves a provider answer.
     Unwitnessed,
 }
 
@@ -360,7 +364,7 @@ impl SurfaceDelivery {
     /// state.
     #[must_use]
     pub const fn is_servable(self) -> bool {
-        matches!(self, Self::Delivered | Self::Unwitnessed)
+        matches!(self, Self::Delivered)
     }
 }
 

@@ -25,18 +25,21 @@ pub(super) enum Control {
     WorkspaceReplacementRepeatedGeneration,
     /// The workspace loses the configured project that owned the document.
     ProjectOwnerLoss,
-    /// The provider engine restarts under the query: the in-flight delivery is
-    /// lost, and the replacement engine serves the bytes the old one held.
+    /// The serving engine is replaced while it holds the query: the held
+    /// answer never settles, and the replacement incarnation holds none of the
+    /// bytes the retired one accepted until they are delivered to it again.
     ProviderRestart,
     /// The IDE surface is recorded again with only its map identity changed.
     MapOnlyChange,
     /// Authored text is inserted before every block, moving every carrier
     /// offset while the script and template bodies stay the same.
     SourceOnlyOffsetShift,
-    /// The provider's answer is held while the document is edited and the edit
-    /// is reverted to the original bytes.
+    /// The document is edited and the edit reverted while every file delivery
+    /// is held: each delivery stays pending, so the engine never receives the
+    /// edited bytes and keeps the ones it held.
     DelayedProviderDelivery,
-    /// Every provider delivery fails.
+    /// The engine loses the requested surface's delivery, and every later file
+    /// delivery and provider answer fails.
     FailedProviderDelivery,
     /// The IDE surface moves to different bytes and back to the original
     /// bytes during one request.
@@ -129,9 +132,8 @@ macro_rules! control_rows {
 pub(super) use control_rows;
 
 /// For each provider dispatch of one request, in order: whether the answer it
-/// returned was produced after the control moved state, and the bytes the
-/// engine held at the IDE path when it produced it.
-type DispatchLedger = Arc<Mutex<Vec<(bool, Option<Arc<str>>)>>>;
+/// returned was produced after the control moved state.
+type DispatchLedger = Arc<Mutex<Vec<bool>>>;
 
 impl Control {
     /// The barriers this control moves state at. A provider-side event can
@@ -152,7 +154,7 @@ impl Control {
             Control::CloseReopenIdenticalBytes => handles.close_and_reopen(APP),
             Control::WorkspaceReplacementRepeatedGeneration => handles.replace_workspace(true),
             Control::ProjectOwnerLoss => handles.replace_workspace(false),
-            Control::ProviderRestart => handles.provider.fail_next_deliveries(1),
+            Control::ProviderRestart => handles.provider.replace_engine_holding_query(),
             Control::MapOnlyChange => {
                 let mut map_hash = handles.current_surface().stamp.map_hash;
                 map_hash[0] ^= 0xff;
@@ -160,10 +162,17 @@ impl Control {
             }
             Control::SourceOnlyOffsetShift => handles.edit(2, &shifted_app()),
             Control::DelayedProviderDelivery => {
+                handles.provider.hold_file_deliveries();
                 handles.edit(2, &edited_app());
                 handles.edit(3, APP);
             }
-            Control::FailedProviderDelivery => handles.provider.fail_next_deliveries(usize::MAX),
+            Control::FailedProviderDelivery => {
+                handles.provider.set_fail_file_ops(true);
+                handles
+                    .provider
+                    .lose_delivery(&handles.current_surface().stamp.provider_path);
+                handles.provider.fail_next_deliveries(usize::MAX);
+            }
             Control::ProviderSurfaceAbaDuringRequest => {
                 handles.record_drifted_surface();
                 handles.record_current_surface(None);
@@ -175,14 +184,24 @@ impl Control {
     }
 
     /// The delivery states the carrier's current IDE surface may end the
-    /// request in. A control that never touches what the engine holds leaves
-    /// the surface delivered: whatever the route answered, a lost or delayed
-    /// provider answer is not a surface the engine stopped holding.
+    /// request in — the typed delivery outcome of each control that moves what
+    /// the engine holds.
     fn final_delivery(self) -> Option<&'static [SurfaceDelivery]> {
         match self {
-            Control::DelayedProviderDelivery
-            | Control::FailedProviderDelivery
-            | Control::ProviderRestart => Some(&[SurfaceDelivery::Delivered]),
+            // Every edited delivery stayed pending, and the edit was reverted
+            // to the bytes the engine still holds.
+            Control::DelayedProviderDelivery => Some(&[SurfaceDelivery::Delivered]),
+            // No delivery can succeed again: the lost surface stays lost, or a
+            // surface recorded again for a repair waits on a delivery that
+            // keeps failing.
+            Control::FailedProviderDelivery => Some(&[
+                SurfaceDelivery::DeliveryLost,
+                SurfaceDelivery::AwaitingDelivery,
+            ]),
+            // Re-delivered to the replacement incarnation, or reported lost.
+            Control::ProviderRestart => {
+                Some(&[SurfaceDelivery::Delivered, SurfaceDelivery::DeliveryLost])
+            }
             // Repaired before dispatch, or still awaiting the delivery the
             // record ran ahead of.
             Control::RecordBeforeDelivery => Some(&[
@@ -230,10 +249,13 @@ impl Control {
             // A route with bounded recovery re-asks the replacement engine and
             // answers what the unmoved fixture answers; every other route
             // answers without the provider. Neither may claim a content change.
+            // A recovering route that answers without the provider must have
+            // met the replacement without the surface (checked against the
+            // surface's final delivery state by the caller).
             (Control::ProviderRestart, Outcome::Answered(answer)) => {
                 route.recovers_a_lost_delivery() && fresh && unmoved(answer)
             }
-            (Control::ProviderRestart, Outcome::Empty) => !route.recovers_a_lost_delivery(),
+            (Control::ProviderRestart, Outcome::Empty) => true,
             (Control::ProviderRestart, _) => false,
             // The surface ends byte- and map-identical to where it began, but it
             // was a different surface in between: only a request that captured
@@ -292,17 +314,16 @@ pub(super) async fn assert_control(route: Route, control: Control) {
         let ledger: DispatchLedger = Arc::default();
         fixture.provider.clear_calls();
         fixture.barriers.clear();
-        // The provider produces its answer when it is queried, before the
+        // The provider selects its answer when it is queried, before the
         // dispatch barrier runs, so a dispatch is fresh exactly when the move
         // preceded its barrier arrival.
         let ide_path = handles.current_surface().stamp.provider_path.to_string();
         let record_dispatch = {
             let ledger = Arc::clone(&ledger);
             let moved = Arc::clone(&moved);
-            let handles = handles.clone();
             move |fresh: Option<bool>| {
                 let fresh = fresh.unwrap_or_else(|| moved.load(Ordering::SeqCst));
-                ledger.lock().push((fresh, handles.engine_bytes(&ide_path)));
+                ledger.lock().push(fresh);
             }
         };
         let moved_at_dispatch = Arc::clone(&moved);
@@ -318,14 +339,12 @@ pub(super) async fn assert_control(route: Route, control: Control) {
             fixture.barriers.arm(
                 barrier,
                 Arc::new(move |arrival| {
-                    // Fresh is read before the move; the engine's bytes after
-                    // it, since the engine evaluates the query once this
-                    // barrier returns.
-                    let fresh = moved_at_dispatch.load(Ordering::SeqCst);
+                    // The answer this dispatch carries was selected before the
+                    // move.
+                    record_dispatch(Some(moved_at_dispatch.load(Ordering::SeqCst)));
                     if arrival == 0 {
                         act();
                     }
-                    record_dispatch(Some(fresh));
                     Box::pin(async {})
                 }),
             );
@@ -353,20 +372,19 @@ pub(super) async fn assert_control(route: Route, control: Control) {
             "{route:?}/{control:?}: the request never reached {barrier:?}, so the control did not run"
         );
         let ledger = ledger.lock().clone();
-        let fresh = ledger.last().is_some_and(|(fresh, _)| *fresh);
-        let freshness: Vec<bool> = ledger.iter().map(|(fresh, _)| *fresh).collect();
+        let fresh = ledger.last().copied().unwrap_or(false);
         assert!(
             control.admits(route, barrier, &outcome, &reference, fresh),
             "{route:?}/{control:?} at {barrier:?}: {outcome:?} is not the defined outcome \
-             (unmoved answer {reference:?}; per dispatch, answered after the move: {freshness:?})"
+             (unmoved answer {reference:?}; per dispatch, answered after the move: {ledger:?})"
         );
-        // Whatever the control, an answer is decoded only through bytes the
-        // engine held when it produced it: the surface the answer settled
-        // through is the store's current one, since nothing moves after the
-        // control's one move.
+        // Whatever the control, an answer is decoded only through the bytes the
+        // engine evaluated it against — read at the instant the engine selected
+        // the answer, not after: the surface the answer settled through is the
+        // store's current one, since nothing moves after the control's one move.
         if matches!(outcome, Outcome::Answered(_)) {
             let settled = handles.current_surface();
-            let evaluated = ledger.last().and_then(|(_, bytes)| bytes.clone());
+            let evaluated = fixture.provider.last_evaluated_bytes(&ide_path).flatten();
             assert!(
                 evaluated.as_deref() == Some(&*settled.provider_content),
                 "{route:?}/{control:?} at {barrier:?}: the answer was decoded through a surface \
@@ -382,6 +400,27 @@ pub(super) async fn assert_control(route: Route, control: Control) {
                 "{route:?}/{control:?} at {barrier:?}: the surface ended {delivery:?}, \
                  expected one of {states:?}"
             );
+            // An answer settles only through a delivered surface, and a route
+            // that recovers a lost delivery answers without the provider only
+            // when the replacement still lacks the surface.
+            if matches!(outcome, Outcome::Answered(_)) {
+                assert_eq!(
+                    delivery,
+                    SurfaceDelivery::Delivered,
+                    "{route:?}/{control:?} at {barrier:?}: answered through an undelivered surface"
+                );
+            }
+            if matches!(control, Control::ProviderRestart)
+                && matches!(outcome, Outcome::Empty)
+                && route.recovers_a_lost_delivery()
+            {
+                assert_eq!(
+                    delivery,
+                    SurfaceDelivery::DeliveryLost,
+                    "{route:?} at {barrier:?}: the replacement engine holds the surface, so the \
+                     recovering route must answer through it"
+                );
+            }
         }
     }
 }

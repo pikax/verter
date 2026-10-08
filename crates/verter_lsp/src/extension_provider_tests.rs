@@ -1499,3 +1499,104 @@ async fn inlay_hints_use_absolute_utf16_request_offsets_and_return_byte_position
     assert!(matches!(hints[0].kind, Some(InlayHintKind::Parameter)));
     assert_eq!(hints[0].label, "value:");
 }
+
+/// The extension's application receipt is what its language service
+/// acknowledged, never the contents cache that runs ahead of it: a `load_file`
+/// sends nothing, a refused delivery leaves the service's bytes unknown, and a
+/// close withdraws them.
+#[tokio::test]
+async fn applied_content_certifies_only_acknowledged_deliveries() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    transport.push_response("updateOpen", json!(true));
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/ws");
+    let file = "/ws/src/App.vue.tsx";
+
+    provider
+        .load_file(file, "export const loaded = 1;\n")
+        .await
+        .expect("a load only caches");
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::NotApplied,
+        "a load sends nothing to the extension"
+    );
+
+    provider
+        .open_file(file, "export const a = 1;\n")
+        .await
+        .expect("the extension acknowledges the open");
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const a = 1;\n"))
+    );
+
+    provider
+        .update_file(file, "export const b = 2;\n")
+        .await
+        .expect("the extension acknowledges the update");
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const b = 2;\n"))
+    );
+
+    // Nothing scripted: the extension refuses this delivery.
+    assert!(provider
+        .update_file(file, "export const c = 3;\n")
+        .await
+        .is_err());
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::NotApplied,
+        "after a refused delivery the extension's bytes are unknown"
+    );
+
+    transport.push_response("updateOpen", json!(true));
+    provider
+        .update_file(file, "export const d = 4;\n")
+        .await
+        .expect("the extension acknowledges the re-delivery");
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const d = 4;\n"))
+    );
+    transport.push_response("close", json!({}));
+    provider
+        .close_file(file)
+        .await
+        .expect("the close is acknowledged");
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::NotApplied,
+        "a closed file holds nothing"
+    );
+}
+
+/// An acknowledgement certifies its bytes only while they are still the newest
+/// issued for the file: an older delivery acknowledged after a newer write was
+/// issued says nothing about what the service holds now.
+#[tokio::test]
+async fn an_overtaken_acknowledgement_certifies_nothing() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = ScriptedTsQueryTransport::new();
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/ws");
+    let file = "/ws/src/App.vue.tsx";
+    transport.push_response("open", json!({}));
+    // A newer write is issued while the open is in flight.
+    transport.push_cache_mutation(
+        "open",
+        file,
+        "export const newer = 1;\n",
+        provider.contents_handle_for_test(),
+    );
+    provider
+        .open_file(file, "export const older = 1;\n")
+        .await
+        .expect("the extension acknowledges the open");
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::NotApplied,
+        "the open's bytes were overtaken before its acknowledgement settled"
+    );
+}

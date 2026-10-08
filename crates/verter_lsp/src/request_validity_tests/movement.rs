@@ -92,15 +92,6 @@ impl Handles {
         );
     }
 
-    /// The bytes the serving engine holds at the carrier's IDE path.
-    pub(super) fn engine_bytes(&self, ide_path: &str) -> Option<Arc<str>> {
-        match crate::TypeProvider::applied_content(self.provider.as_ref(), ide_path) {
-            verter_type_runtime::traits::AppliedContent::Applied(bytes) => Some(bytes),
-            verter_type_runtime::traits::AppliedContent::NotApplied
-            | verter_type_runtime::traits::AppliedContent::Uncertified => None,
-        }
-    }
-
     /// The typed delivery state of the carrier's current IDE surface.
     pub(super) fn surface_delivery(&self) -> crate::provider_surface_store::SurfaceDelivery {
         self.server

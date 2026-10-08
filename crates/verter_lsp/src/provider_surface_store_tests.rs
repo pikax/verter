@@ -304,8 +304,10 @@ fn two_tracked_spellings_of_one_identity_resolve_exactly_or_fail_closed() {
 fn captured_foreign_ide_surface_maps_when_imported_carrier_is_closed() {
     use tower_lsp_server::ls_types::PositionEncodingKind;
 
-    let store = ProviderSurfaceStore::new();
+    let (store, ledger) = witnessed_store();
     let provider_path = "/src/Child.svelte.tsx";
+    // The engine holds the imported carrier's IDE bytes.
+    ledger.apply(provider_path, "contractProp\n");
     let source_map = crate::documents::provider_projection::ProviderPositionMapper::source_map(
         crate::documents::position_map::PositionMapper::from_json(
             r#"{"version":3,"sources":["Child.svelte"],"names":[],"mappings":"AAAA"}"#,
@@ -2306,9 +2308,7 @@ fn map_hash_is_none_for_a_surface_without_a_source_map_fail_closed() {
 /// carrier source) and returns `Some`, so the `is_none()` assertion fails.
 #[test]
 fn committed_ide_capture_drops_a_newly_recorded_but_uncommitted_surface() {
-    use crate::provider_sync::{
-        CommittedCarrierIdeSurface, ProviderOwnerBinding, ProviderSyncState,
-    };
+    use crate::provider_sync::{CommittedCarrierSurface, ProviderOwnerBinding, ProviderSyncState};
     use dashmap::DashMap;
     use tower_lsp_server::ls_types::{TextDocumentItem, Uri};
 
@@ -2350,7 +2350,7 @@ fn committed_ide_capture_drops_a_newly_recorded_but_uncommitted_surface() {
             owner_binding: ProviderOwnerBinding::Owned("/ws/tsconfig.json".to_string()),
             ide_path: Some(ide_path.clone()),
             ide_background_loaded: true,
-            committed_ide_surface: Some(CommittedCarrierIdeSurface {
+            committed_ide_surface: Some(CommittedCarrierSurface {
                 content_hash: v1.stamp.content_hash.to_hash16(),
                 map_hash: v1.stamp.map_hash,
             }),
@@ -2468,7 +2468,10 @@ fn foreground_bracket_survives_only_identical_re_records() {
         Step::CloseAndIdenticalReopen,
         Step::OwnerChangeAndChangeBack,
     ] {
-        let store = ProviderSurfaceStore::new();
+        // The engine holds the captured bytes throughout: the bracket follows
+        // the recorded epochs alone.
+        let (store, ledger) = witnessed_store();
+        ledger.apply(VPATH, "API A\n");
         let carrier = "carrier A\n";
         let owned = |provider: &str, owner: &str| {
             let mut surface = record_surface(provider, carrier);
@@ -2678,7 +2681,8 @@ fn the_bracket_holds_only_while_the_serving_provider_holds_the_recorded_bytes() 
 /// publication, not a delivered buffer; a publication that stops attesting an
 /// acknowledged surface has lost it, while one that never attested it is
 /// still awaiting delivery. A provider that keeps no ledger, and a store with
-/// no provider bound, leave the record as the only evidence.
+/// no provider bound, leave the record as the only evidence — and a record is
+/// never evidence of its own delivery, so neither serves a provider answer.
 #[test]
 fn membership_and_unwitnessed_delivery_states_are_typed() {
     let carrier = "carrier\n";
@@ -2692,14 +2696,19 @@ fn membership_and_unwitnessed_delivery_states_are_typed() {
     assert_eq!(store.delivery_of(&a), SurfaceDelivery::DeliveryLost);
     assert!(!store.captured_surface_is_current(&a));
 
+    ledger.serve(VPATH, ServingDelivery::Published);
+    assert!(store.captured_surface_is_current(&a));
     ledger.serve(VPATH, ServingDelivery::Uncertified);
     assert_eq!(store.delivery_of(&a), SurfaceDelivery::Unwitnessed);
-    assert!(store.captured_surface_is_current(&a));
+    assert!(
+        !store.captured_surface_is_current(&a),
+        "a provider that cannot certify what it holds proves nothing about the record"
+    );
 
     let unbound = ProviderSurfaceStore::new();
     let a = unbound.record(record_surface("API A\n", carrier));
     assert_eq!(unbound.delivery_of(&a), SurfaceDelivery::Unwitnessed);
-    assert!(unbound.captured_surface_is_current(&a));
+    assert!(!unbound.captured_surface_is_current(&a));
 }
 
 /// The acknowledgement rides the shared payload: an identical re-record

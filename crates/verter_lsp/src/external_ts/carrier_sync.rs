@@ -917,7 +917,9 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                     // currency witness: the store publication — not a direct
                     // buffer this state would have to track — owns what tsserver
                     // holds, and the witness exists for the direct-open route
-                    // that opens the API companion itself.
+                    // that opens the API companion itself. WHICH API bytes the
+                    // publication carries is the receipt's API fingerprint, which
+                    // the admission gate stamps as the committed API surface.
                     if committed_state.api_path.is_some() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
                     }
@@ -1372,6 +1374,7 @@ impl CarrierTransactionCoordinator {
         state.owner_binding = ProviderOwnerBinding::Unresolved;
         state.commit_stamp = None;
         state.committed_ide_surface = None;
+        state.committed_api_surface = None;
     }
 
     /// [`Self::convert_to_unresolved`] applied to the LIVE state in `states` (created
@@ -1395,11 +1398,12 @@ impl CarrierTransactionCoordinator {
         state.owner_binding = ProviderOwnerBinding::Unresolved;
         state.commit_stamp = None;
         state.committed_ide_surface = None;
+        state.committed_api_surface = None;
         update(&mut state);
     }
 
     /// THE carrier provider-state admission gate — the sole RECEIPT-GATED owned-state
-    /// installer of the committed IDE-surface stamp ([`CommittedCarrierIdeSurface`]) and the
+    /// installer of the committed IDE-surface stamp ([`CommittedCarrierSurface`]) and the
     /// commit stamp ([`CarrierCommitStamp`]) for the PRIMARY carrier-sync paths. It is NOT
     /// the sole mutator of the whole [`ProviderSyncState`]: the declaration-overlay lifecycle
     /// mutates the `Decl` kind outside this gate (it must never touch the IDE stamp / commit
@@ -1625,6 +1629,8 @@ impl CarrierTransactionCoordinator {
                         return AdmitOutcome::Superseded;
                     }
                 }
+                state.committed_api_surface =
+                    committed_api_surface_for_commit(Some(occupied.get()), &state, receipt);
                 state.committed_ide_surface = next_ide_surface;
                 state.commit_stamp = Some(incoming);
                 occupied.insert(state);
@@ -1640,6 +1646,8 @@ impl CarrierTransactionCoordinator {
 
                 state.committed_ide_surface =
                     committed_ide_surface_for_commit(None, &state, receipt);
+                state.committed_api_surface =
+                    committed_api_surface_for_commit(None, &state, receipt);
                 state.commit_stamp = Some(incoming);
                 vacant.insert(state);
             }
@@ -1714,7 +1722,7 @@ fn committed_ide_surface_for_commit(
     prior: Option<&ProviderSyncState>,
     state: &ProviderSyncState,
     receipt: &ProviderReadyReceipt,
-) -> Option<crate::provider_sync::CommittedCarrierIdeSurface> {
+) -> Option<crate::provider_sync::CommittedCarrierSurface> {
     let ide_path = state.ide_path.as_deref()?;
     // This commit (re)published the IDE surface at the committed path ⇒ stamp its
     // receipt-attested content/map identity (the exact bytes the provider serves).
@@ -1724,12 +1732,10 @@ fn committed_ide_surface_for_commit(
         .find(|companion| {
             companion.role == SnapshotRole::CarrierIde && companion.uri.as_ref() == ide_path
         })
-        .map(
-            |companion| crate::provider_sync::CommittedCarrierIdeSurface {
-                content_hash: companion.content_hash,
-                map_hash: companion.map_hash,
-            },
-        )
+        .map(|companion| crate::provider_sync::CommittedCarrierSurface {
+            content_hash: companion.content_hash,
+            map_hash: companion.map_hash,
+        })
     {
         return Some(stamp);
     }
@@ -1739,6 +1745,39 @@ fn committed_ide_surface_for_commit(
     let prior = prior?;
     if prior.ide_path.as_deref() == Some(ide_path) && prior.owner_binding == state.owner_binding {
         prior.committed_ide_surface.clone()
+    } else {
+        None
+    }
+}
+
+/// The receipt-attested PUBLIC-API surface identity an owned commit installs — the
+/// API twin of [`committed_ide_surface_for_commit`]. A commit whose receipt attests
+/// the API companion at the committed `api_path` stamps that exact publication; one
+/// that did not re-advertise it (an IDE-only refresh) keeps the prior stamp only
+/// while the path and owner are unchanged. A receipt is the only source: path
+/// liveness alone never says which API bytes the engine reads.
+fn committed_api_surface_for_commit(
+    prior: Option<&ProviderSyncState>,
+    state: &ProviderSyncState,
+    receipt: &ProviderReadyReceipt,
+) -> Option<crate::provider_sync::CommittedCarrierSurface> {
+    let api_path = state.api_path.as_deref()?;
+    if let Some(stamp) = receipt
+        .companions()
+        .iter()
+        .find(|companion| {
+            companion.role == SnapshotRole::CarrierApi && companion.uri.as_ref() == api_path
+        })
+        .map(|companion| crate::provider_sync::CommittedCarrierSurface {
+            content_hash: companion.content_hash,
+            map_hash: companion.map_hash,
+        })
+    {
+        return Some(stamp);
+    }
+    let prior = prior?;
+    if prior.api_path.as_deref() == Some(api_path) && prior.owner_binding == state.owner_binding {
+        prior.committed_api_surface.clone()
     } else {
         None
     }
@@ -1772,6 +1811,7 @@ fn carrier_owned_sync_state(
         shadow_background_loaded: false,
         // Stamped by `commit_carrier_provider_state` from the receipt at commit time.
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -1808,6 +1848,7 @@ pub(crate) fn carrier_close_target(
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,

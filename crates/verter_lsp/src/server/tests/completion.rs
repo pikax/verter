@@ -5337,6 +5337,7 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
             decl_background_loaded: false,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,

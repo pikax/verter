@@ -173,6 +173,13 @@ mod inner {
         )>,
         /// Bytes this engine accepted. Absent means not applied.
         applied: std::collections::HashMap<String, Arc<str>>,
+        /// While `true`, file writes succeed but never reach the engine: each
+        /// delivery stays pending and `applied` keeps the earlier bytes.
+        hold_deliveries: bool,
+        /// For each interactive query, in order: its path and the bytes the
+        /// engine held there at the moment it selected the answer — the bytes
+        /// the answer was evaluated against.
+        evaluations: Vec<(String, Option<Arc<str>>)>,
         calls: Vec<MockCall>,
         /// When `true`, the file-op methods (`open_file`/`load_file`/
         /// `update_file`/`close_file`) RECORD their call and then return
@@ -347,6 +354,15 @@ mod inner {
         /// default) keeps the trait default — no engine-start pulse — so only
         /// tests that drive the pending-sync re-drive wiring opt in.
         restart_pulse: Option<std::sync::Arc<tokio::sync::Notify>>,
+    }
+
+    impl MockState {
+        /// Record that a query at `path` is evaluated now, against the bytes
+        /// the engine holds there at this instant.
+        fn note_evaluation(&mut self, path: &str) {
+            let bytes = self.applied.get(path).cloned();
+            self.evaluations.push((path.to_string(), bytes));
+        }
     }
 
     /// A mock `TypeProvider` for testing.
@@ -719,11 +735,11 @@ mod inner {
         }
 
         fn accept_applied(&self, path: &str, content: &str) {
-            self.state
-                .lock()
-                .unwrap()
-                .applied
-                .insert(path.to_string(), Arc::from(content));
+            let mut state = self.state.lock().unwrap();
+            if state.hold_deliveries {
+                return;
+            }
+            state.applied.insert(path.to_string(), Arc::from(content));
         }
 
         fn drop_applied(&self, path: &str) {
@@ -734,6 +750,28 @@ mod inner {
         /// the previous one accepted, so no earlier delivery is still applied.
         pub fn forget_applied_content(&self) {
             self.state.lock().unwrap().applied.clear();
+        }
+
+        /// Model the serving engine retiring while it holds a query, and a
+        /// replacement incarnation taking over: the replacement holds none of
+        /// the bytes the retired engine accepted, and the held query's answer
+        /// never settles.
+        pub fn replace_engine_holding_query(&self) {
+            self.forget_applied_content();
+            self.fail_next_deliveries(1);
+        }
+
+        /// Model a delivery of `path` the engine lost: it no longer holds the
+        /// bytes it accepted there.
+        pub fn lose_delivery(&self, path: &str) {
+            self.drop_applied(path);
+        }
+
+        /// Hold every later file write: each succeeds without reaching the
+        /// engine, so the engine keeps the bytes it held and the delivery stays
+        /// pending.
+        pub fn hold_file_deliveries(&self) {
+            self.state.lock().unwrap().hold_deliveries = true;
         }
 
         /// Model a delivery of `content` under `path` that reached the engine
@@ -780,7 +818,23 @@ mod inner {
 
         /// Clear all recorded calls.
         pub fn clear_calls(&self) {
-            self.state.lock().unwrap().calls.clear();
+            let mut state = self.state.lock().unwrap();
+            state.calls.clear();
+            state.evaluations.clear();
+        }
+
+        /// The bytes the engine held at `path` when it evaluated the most
+        /// recent interactive query there: `None` when no query reached it,
+        /// `Some(None)` when the engine held nothing at the path.
+        pub(crate) fn last_evaluated_bytes(&self, path: &str) -> Option<Option<Arc<str>>> {
+            self.state
+                .lock()
+                .unwrap()
+                .evaluations
+                .iter()
+                .rev()
+                .find(|(evaluated, _)| evaluated == path)
+                .map(|(_, bytes)| bytes.clone())
         }
 
         /// Make every subsequent file-op (`open_file`/`load_file`/
@@ -1488,6 +1542,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let items = state
                     .completion_responses
                     .iter()
@@ -1544,6 +1599,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let fail = if state.fail_next_hovers > 0 {
                     state.fail_next_hovers -= 1;
                     true
@@ -1635,6 +1691,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let fail = if state.fail_next_definitions > 0 {
                     state.fail_next_definitions -= 1;
                     true
@@ -1685,6 +1742,7 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            state.note_evaluation(path);
             let fail = if state.fail_next_type_definitions > 0 {
                 state.fail_next_type_definitions -= 1;
                 true
@@ -1714,6 +1772,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .reference_responses
                     .iter()
@@ -1747,6 +1806,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .rename_responses
                     .iter()
@@ -1782,6 +1842,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .signature_help_responses
                     .iter()
@@ -1822,6 +1883,7 @@ mod inner {
                 end_offset,
                 diagnostics: diagnostics.to_vec(),
             });
+            state.note_evaluation(path);
             let result = state
                 .code_action_responses
                 .iter()
@@ -1836,6 +1898,7 @@ mod inner {
             state.calls.push(MockCall::GetSemanticTokens {
                 path: path.to_string(),
             });
+            state.note_evaluation(path);
             let result = state
                 .semantic_token_responses
                 .iter()
@@ -1855,6 +1918,7 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            state.note_evaluation(path);
             let result = state
                 .highlight_responses
                 .iter()
@@ -1876,6 +1940,7 @@ mod inner {
                 start_offset,
                 end_offset,
             });
+            state.note_evaluation(path);
             let result = state
                 .inlay_hint_responses
                 .iter()
@@ -1895,6 +1960,7 @@ mod inner {
                 path: path.to_string(),
                 data: data.clone(),
             });
+            state.note_evaluation(path);
             let result = state
                 .resolve_completion_responses
                 .iter()

@@ -396,25 +396,25 @@ impl ProviderOwnerBinding {
     }
 }
 
-/// The receipt-attested identity of the carrier IDE provider surface that was
-/// actually committed (published to the store / opened as a direct buffer) for a
-/// source.
+/// The receipt-attested identity of one carrier companion surface (the IDE or the
+/// public-API companion) that was actually committed (published to the store / opened
+/// as a direct buffer) for a source.
 ///
 /// Stamped onto the committed [`ProviderSyncState`] ONLY by
 /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state),
 /// which is gated by a validated
 /// [`ProviderReadyReceipt`](crate::external_ts::ProviderReadyReceipt); the identity is
-/// the receipt's `CarrierIde` companion fingerprint (its content + source-map hashes),
+/// the receipt's companion fingerprint for that role (its content + source-map hashes),
 /// i.e. the EXACT bytes the provider serves. A later capture requires the store's
-/// CURRENT IDE surface to be this exact committed one — a surface RECORDED for a
+/// CURRENT surface to be this exact committed one — a surface RECORDED for a
 /// publish that FAILED or never committed carries a different content/map identity and
 /// is refused, so a provider offset (produced against the last successfully published
 /// content) is never mapped through newer, uncommitted content/map.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommittedCarrierIdeSurface {
-    /// Content-addressed hash (`Hash16`) of the committed IDE companion bytes.
+pub struct CommittedCarrierSurface {
+    /// Content-addressed hash (`Hash16`) of the committed companion bytes.
     pub content_hash: Hash16,
-    /// Content-addressed hash (`Hash16`) of the committed IDE companion's source-map
+    /// Content-addressed hash (`Hash16`) of the committed companion's source-map
     /// JSON (`[0; 16]` when the surface carries no map).
     pub map_hash: Hash16,
 }
@@ -480,7 +480,15 @@ pub struct ProviderSyncState {
     /// `None` for an UNRESOLVED editor-liveness carrier and for non-carrier / self-file
     /// commits (which record their surface only AFTER a successful direct sync and need
     /// no membership stamp). See [`Self::authorizes_carrier_ide_capture`].
-    pub committed_ide_surface: Option<CommittedCarrierIdeSurface>,
+    pub committed_ide_surface: Option<CommittedCarrierSurface>,
+    /// The receipt-attested identity of the committed carrier PUBLIC-API surface at
+    /// `api_path` (set only by the receipt-gated
+    /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
+    /// The membership publication's proof of WHICH API bytes the engine reads: the
+    /// path and its liveness flag say only that some API buffer is published. `None`
+    /// until a commit's receipt attests the API companion at `api_path`. See
+    /// [`Self::attests_committed_api_surface`].
+    pub committed_api_surface: Option<CommittedCarrierSurface>,
     /// The monotonic identity of the readiness receipt this state was last committed
     /// under (set only by the receipt-gated
     /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
@@ -649,6 +657,16 @@ impl ProviderSyncState {
         }
     }
 
+    /// Whether the committed publication attests a carrier public-API surface with the
+    /// given content / source-map identity: the exact API bytes the last receipt-gated
+    /// commit published at `api_path`. A surface recorded ahead of its publication, or
+    /// for a publication that failed, carries a different identity and is not attested.
+    pub fn attests_committed_api_surface(&self, content_hash: Hash16, map_hash: Hash16) -> bool {
+        self.committed_api_surface
+            .as_ref()
+            .is_some_and(|stamp| stamp.content_hash == content_hash && stamp.map_hash == map_hash)
+    }
+
     /// Create an unresolved (no committed owner) IDE-only sync state for a
     /// given IDE path.
     pub fn unresolved(ide_path: String) -> Self {
@@ -663,6 +681,7 @@ impl ProviderSyncState {
             decl_background_loaded: false,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -1071,6 +1090,7 @@ pub fn non_carrier_sync_state_for_source(
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -1218,6 +1238,7 @@ pub fn open_unresolved_carrier_state(
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -1432,6 +1453,7 @@ pub fn open_unresolved_carrier_commit(
             decl_background_loaded: false,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -1523,25 +1545,37 @@ impl ProviderSyncDeliveryWitness {
     }
 
     /// Whether the committed publication of `surface`'s carrier attests it: the
-    /// path is one of the carrier's live committed companions, and an IDE
-    /// surface is the receipt-stamped one.
+    /// path is one of the carrier's live committed companions, AND the receipt
+    /// that committed the publication fingerprinted exactly these bytes — the
+    /// receipt-stamped IDE surface for an IDE companion, the receipt-stamped API
+    /// surface for a public-API companion. A live path proves only that SOME
+    /// buffer is published there; a surface recorded ahead of its publication
+    /// (or for one that failed) shares the path but not the fingerprint.
     fn publication_attests(
         &self,
         surface: &crate::provider_surface_store::ProviderSurfaceSnapshot,
     ) -> bool {
+        use crate::provider_surface_store::ProviderSurfaceKind;
         let path = surface.stamp.provider_path.as_ref();
+        let content_hash = surface.stamp.content_hash.to_hash16();
+        let map_hash = surface.stamp.map_hash;
         self.provider_sync_states
             .get(surface.source_canonical.as_ref())
             .is_some_and(|committed| {
-                ALL_PATH_KINDS.into_iter().any(|kind| {
+                let live = ALL_PATH_KINDS.into_iter().any(|kind| {
                     committed.path_for_kind(kind) == Some(path)
                         && committed.background_loaded_for_kind(kind)
-                }) && (surface.kind
-                    != crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
-                    || committed.authorizes_carrier_ide_capture(
-                        surface.stamp.content_hash.to_hash16(),
-                        surface.stamp.map_hash,
-                    ))
+                });
+                live && match surface.kind {
+                    ProviderSurfaceKind::CarrierIde => {
+                        committed.authorizes_carrier_ide_capture(content_hash, map_hash)
+                    }
+                    ProviderSurfaceKind::CarrierApi => {
+                        committed.api_path.as_deref() == Some(path)
+                            && committed.attests_committed_api_surface(content_hash, map_hash)
+                    }
+                    ProviderSurfaceKind::Shadow | ProviderSurfaceKind::Real => false,
+                }
             })
     }
 }

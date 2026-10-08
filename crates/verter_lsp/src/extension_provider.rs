@@ -51,6 +51,11 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Files that have been sent to the extension via `open` command.
     opened_files: Arc<Mutex<HashSet<String>>>,
+    /// The bytes the extension's language service ACKNOWLEDGED per file — its
+    /// application receipt. The contents cache above runs ahead of the
+    /// extension (it is written before the request is sent, and a `load_file`
+    /// never sends anything), so it is not evidence of what the service holds.
+    applied: Arc<parking_lot::Mutex<HashMap<String, Arc<str>>>>,
     /// Workspace root path (forward slashes).
     workspace_root: String,
     /// Per-project roots for per-file `projectRootPath` matching.
@@ -76,6 +81,7 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
             transport,
             contents: Arc::new(Mutex::new(HashMap::new())),
             opened_files: Arc::new(Mutex::new(HashSet::new())),
+            applied: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             workspace_root: verter_span::path::canonicalize_path(workspace_root),
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             ownership: Arc::new(parking_lot::RwLock::new(None)),
@@ -100,6 +106,30 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
         verter_span::path::canonicalize_path(path)
     }
 
+    /// Settle the application receipt for one content delivery of `file`. An
+    /// acknowledged delivery certifies `content` only while it is still the
+    /// newest content issued for the file: an older acknowledgement landing
+    /// after a newer write was issued certifies nothing, and that newer write
+    /// settles the receipt itself. A failed delivery leaves the service's bytes
+    /// unknown, so it withdraws the receipt.
+    async fn settle_delivery(&self, file: &str, content: &Arc<str>, acknowledged: bool) {
+        if !acknowledged {
+            self.applied.lock().remove(file);
+            return;
+        }
+        let newest = self
+            .contents
+            .lock()
+            .await
+            .get(file)
+            .is_some_and(|issued| issued == content);
+        if newest {
+            self.applied
+                .lock()
+                .insert(file.to_string(), Arc::clone(content));
+        }
+    }
+
     /// Share the contents-cache handle so a scripted transport can simulate a
     /// concurrent `update_file` landing mid-request, exercising the fresh
     /// per-response snapshot the edit paths take.
@@ -112,6 +142,15 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
 impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
     fn provider_id(&self) -> &'static str {
         "extension"
+    }
+
+    /// The bytes the extension's language service acknowledged for `path`.
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        match self.applied.lock().get(&Self::normalize_path(path)) {
+            Some(bytes) => AppliedContent::Applied(Arc::clone(bytes)),
+            None => AppliedContent::NotApplied,
+        }
     }
 
     fn supports_completion_resolve(&self) -> bool {
@@ -129,25 +168,30 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             // no project, so nothing may be declared for it and no later query
             // may believe it is live in one.
             let (project_root, project_config) = declared?;
+            let issued: Arc<str> = Arc::from(content.as_str());
             contents_cache
                 .lock()
                 .await
-                .insert(file.clone(), Arc::from(content.as_str()));
+                .insert(file.clone(), Arc::clone(&issued));
             opened_files.lock().await.insert(file.clone());
-            self.query(
-                "open",
-                serde_json::json!({
-                    "file": file,
-                    "fileContent": content,
-                    "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                        else if file.ends_with(".jsx") { "JSX" }
-                        else if file.ends_with(".js") { "JS" }
-                        else { "TS" },
-                    "projectRootPath": project_root,
-                    "projectConfigPath": project_config,
-                }),
-            )
-            .await?;
+            let delivered = self
+                .query(
+                    "open",
+                    serde_json::json!({
+                        "file": file,
+                        "fileContent": content,
+                        "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                            else if file.ends_with(".jsx") { "JSX" }
+                            else if file.ends_with(".js") { "JS" }
+                            else { "TS" },
+                        "projectRootPath": project_root,
+                        "projectConfigPath": project_config,
+                    }),
+                )
+                .await;
+            self.settle_delivery(&file, &issued, delivered.is_ok())
+                .await;
+            delivered?;
             Ok(())
         })
     }
@@ -175,13 +219,14 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 cache.get(&file).map(|c| c.lines().count() as u32 + 1)
             };
 
+            let issued: Arc<str> = Arc::from(content.as_str());
             contents_cache
                 .lock()
                 .await
-                .insert(file.clone(), Arc::from(content.as_str()));
+                .insert(file.clone(), Arc::clone(&issued));
 
             let mut opened = opened_files.lock().await;
-            if opened.contains(&file) {
+            let delivered = if opened.contains(&file) {
                 drop(opened);
                 if let Some(end_line) = old_line_count {
                     self.query(
@@ -197,7 +242,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                             }]
                         }),
                     )
-                    .await?;
+                    .await
                 } else {
                     self.query(
                         "updateOpen",
@@ -215,7 +260,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                             }]
                         }),
                     )
-                    .await?;
+                    .await
                 }
             } else {
                 opened.insert(file.clone());
@@ -233,8 +278,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         "projectConfigPath": project_config,
                     }),
                 )
-                .await?;
-            }
+                .await
+            };
+            self.settle_delivery(&file, &issued, delivered.is_ok())
+                .await;
+            delivered?;
             Ok(())
         })
     }
@@ -243,9 +291,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let file = Self::normalize_path(path);
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
+        let applied = Arc::clone(&self.applied);
         Box::pin(async move {
             contents_cache.lock().await.remove(&file);
             opened_files.lock().await.remove(&file);
+            applied.lock().remove(&file);
             self.query("close", serde_json::json!({ "file": file }))
                 .await?;
             Ok(())
