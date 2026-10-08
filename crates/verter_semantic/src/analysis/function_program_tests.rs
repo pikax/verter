@@ -1617,37 +1617,200 @@ fn every_class_records_the_members_its_body_declares() {
     let source = "class A { x = 1; m(): { p: number } { return { p: 1 }; } }\n\
                   function f() { class L extends A { y = 2 } return class { constructor(protected z: number, w: number) {} }; }";
     let index = index_of(source);
+    let classes = index.classes();
     let span_of = |text: &str| {
         let start = source.find(text).expect("fixture text") as u32;
         verter_span::Span::new(start, start + text.len() as u32)
     };
-    let a = index
-        .class_declaring_member(span_of("x = 1;"))
+    let a = classes
+        .declaring_member(span_of("x = 1;"))
         .expect("a class element");
-    assert!(!a.expression && !a.has_heritage);
-    assert!(!index.class_encloses(a.span));
+    assert!(!a.record().expression && !a.record().has_heritage);
+    assert!(!a.is_enclosed());
     assert_eq!(
-        index.class_declaring_member(span_of("m(): { p: number } { return { p: 1 }; }")),
-        Some(a)
+        classes
+            .declaring_member(span_of("m(): { p: number } { return { p: 1 }; }"))
+            .map(|class| class.record()),
+        Some(a.record())
     );
-    assert_eq!(
-        index.class_declaring_member(span_of("p: number")),
-        None,
+    assert!(
+        classes.declaring_member(span_of("p: number")).is_none(),
         "a type literal's member is no class member"
     );
-    let local = index
-        .class_declaring_member(span_of("y = 2"))
+    let local = classes
+        .declaring_member(span_of("y = 2"))
         .expect("a local class element");
-    assert!(!local.expression && local.has_heritage);
-    let expression = index
-        .class_declaring_member(span_of("protected z: number"))
+    assert!(!local.record().expression && local.record().has_heritage);
+    let expression = classes
+        .declaring_member(span_of("protected z: number"))
         .expect("a property-declaring constructor parameter");
-    assert!(expression.expression && !expression.has_heritage);
-    assert_eq!(
-        index.class_declaring_member(span_of("w: number")),
-        None,
+    assert!(expression.record().expression && !expression.record().has_heritage);
+    assert!(
+        classes.declaring_member(span_of("w: number")).is_none(),
         "a plain parameter declares no property"
     );
+}
+
+/// Every class node of the program, outer before inner, as one full walk of
+/// the program meets it: the reference the index's own collection is held
+/// to.
+fn every_class_span(source: &str) -> Vec<verter_span::Span> {
+    struct Classes(Vec<verter_span::Span>);
+    impl<'a> Visit<'a> for Classes {
+        fn visit_class(&mut self, class: &Class<'a>) {
+            self.0
+                .push(verter_span::Span::new(class.span.start, class.span.end));
+            walk::walk_class(self, class);
+        }
+    }
+    let allocator = oxc_allocator::Allocator::default();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse();
+    let mut classes = Classes(Vec::new());
+    classes.visit_program(&ret.program);
+    classes.0
+}
+
+/// The index records each class of the file once, in source order, wherever
+/// it is written: outside every function (a declaration, a default export,
+/// a call argument, a block, a namespace, a class body, a static block), in
+/// a served body, in a body no entry serves (a local class's method, a
+/// callback), in a served function's parameter default and decorator, and
+/// in a field initializer. Discovery finds them without walking any syntax
+/// twice, so a region either walk skipped would drop its classes here.
+#[test]
+fn the_class_index_records_every_class_once_in_source_order() {
+    let source = "declare function use(x: unknown): void;\n\
+                  declare function deco(x: unknown): any;\n\
+                  class A { static s = class {}; static { class SB {} } m() { class M {} return M; } }\n\
+                  export default class { f = class {}; }\n\
+                  use(class CallArg { k() { return class {}; } });\n\
+                  { class Block {} }\n\
+                  namespace NS { export class N { n() { return class {}; } } }\n\
+                  const held = () => { class InArrow {} return InArrow; };\n\
+                  function served(p = class Default {}) {\n\
+                    class Local { m() { class InUnservedMethod {} return [1].map(() => class InCallback {}); } }\n\
+                    const e = class { q() { return class InServedMethod {}; } };\n\
+                    return [Local, e];\n\
+                  }\n\
+                  class D { method(@deco(class InDecorator {}) x: number) { return x; } }\n";
+    let index = index_of(source);
+    let recorded: Vec<verter_span::Span> = index
+        .classes()
+        .records()
+        .iter()
+        .map(|record| record.span)
+        .collect();
+    assert_eq!(recorded, every_class_span(source));
+    assert_eq!(recorded.len(), 20);
+}
+
+/// A class's `extends` name resolves where the checker resolves it: in the
+/// frame the class is written in, then the frames around it, then the
+/// file. It names a class this file authors only through a class
+/// declaration's name or a `const` a class expression initializes; any
+/// other binding — a parameter or a `let` shadowing it, a namespace member,
+/// a block outside every function, a method of a local class (a frame no
+/// entry serves) — and any
+/// clause that is not a bare name leaves the base unresolved.
+#[test]
+fn a_class_base_resolves_lexically() {
+    use verter_session_query::function_program::ClassBaseMatch;
+    let source = "declare function mixin(x: unknown): new () => object;\n\
+                  class A {}\n\
+                  const CE = class extends A {};\n\
+                  class B extends (CE) {}\n\
+                  function shadowed(A: new () => object) { class P extends A {} return P; }\n\
+                  function local() {\n\
+                    class A {}\n\
+                    class L extends A {}\n\
+                    const M = class extends L {};\n\
+                    let N = class {};\n\
+                    class O extends N {}\n\
+                    return () => class Inner extends M {};\n\
+                  }\n\
+                  namespace NS { export class Q extends A {} }\n\
+                  { class R extends A {} }\n\
+                  class S extends mixin(A) {}\n\
+                  class T { m() { class W extends A {} return W; } }\n\
+                  function g() { class V { m() { class U extends A {} return U; } } return V; }\n";
+    let index = index_of(source);
+    let classes = index.classes();
+    let class_at = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        let record = classes
+            .records()
+            .iter()
+            .find(|record| record.span.start == start)
+            .expect("a class starts at the fixture text");
+        classes.at(record.span).expect("indexed by its span")
+    };
+    let base_of = |text: &str| match class_at(text).base() {
+        ClassBaseMatch::None => "none".to_owned(),
+        ClassBaseMatch::Unresolved => "unresolved".to_owned(),
+        ClassBaseMatch::Class(base) => {
+            source[base.record().span.start as usize..base.record().span.end as usize].to_owned()
+        }
+    };
+    assert_eq!(base_of("class A {}\nconst"), "none");
+    assert_eq!(base_of("class extends A {};\nclass B"), "class A {}");
+    assert_eq!(base_of("class B"), "class extends A {}");
+    assert_eq!(base_of("class P"), "unresolved", "a parameter shadows `A`");
+    assert_eq!(
+        base_of("class L"),
+        "class A {}",
+        "the local `A` shadows the file's"
+    );
+    assert_eq!(base_of("class extends L"), "class L extends A {}");
+    assert_eq!(
+        base_of("class O"),
+        "unresolved",
+        "a `let` may hold another value"
+    );
+    assert_eq!(base_of("class Inner"), "class extends L {}");
+    assert_eq!(base_of("class Q"), "unresolved", "a namespace member");
+    assert_eq!(
+        base_of("class R"),
+        "unresolved",
+        "a block outside every function"
+    );
+    assert_eq!(base_of("class S"), "unresolved", "a mixin application");
+    assert_eq!(
+        base_of("class W"),
+        "class A {}",
+        "a served method reads the file"
+    );
+    assert_eq!(base_of("class U"), "unresolved", "a method no entry serves");
+    // The local `A` resolves to the local class, never the file's.
+    let local_a = source.find("class A {}\nclass L").map(|at| at as u32);
+    assert!(matches!(
+        class_at("class L").base(),
+        ClassBaseMatch::Class(base) if Some(base.record().span.start) == local_a
+    ));
+    // A class inside another class's body is enclosed by it.
+    assert!(class_at("class W").is_enclosed());
+    assert!(!class_at("class T").is_enclosed());
+}
+
+/// Collecting the classes adds no walk over the bodies discovery serves:
+/// the walk outside them visits the same statements and expressions
+/// however large a served body grows, because each served body's classes
+/// are recorded by the one walk that folds its hashes.
+#[test]
+fn the_class_walk_outside_served_bodies_never_enters_one() {
+    let visits = |statements: usize| {
+        let body = "x = x + 1; ".repeat(statements);
+        let source = format!(
+            "class A {{ m() {{ let x = 0; {body} return class {{}}; }} }}\nfunction f() {{ let x = 0; {body} return x; }}\n"
+        );
+        crate::analysis::class_index::TOP_LEVEL_CLASS_WALK_VISITS.with(|visits| visits.set(0));
+        let index = index_of(&source);
+        assert_eq!(index.classes().records().len(), 2);
+        crate::analysis::class_index::TOP_LEVEL_CLASS_WALK_VISITS.with(std::cell::Cell::get)
+    };
+    let small = visits(1);
+    assert_eq!(small, visits(200));
+    assert!(small > 0, "the walk outside served bodies ran");
 }
 
 /// Callables nested 10,000 deep index on a 1 MiB thread: discovery walks

@@ -109,20 +109,60 @@ fn a_held_class_expression_and_a_mixin_class_declare_their_own_members() {
 }
 
 /// Classes declared inside a function body, read through the tuple the
-/// function returns.
+/// function returns: each local class declares its own members, a local
+/// class extending another derives from it (its `extends` name resolves
+/// to the local class, not to anything of the file's), one extending a
+/// file-scope class derives from that class, and a class with the same
+/// shape that extends nothing derives from no other class.
 ///
-/// Measured on TypeScript 7.0.2: `Ext<L[0], L[1]>` (`LS` to `LB`),
-/// `Ext<L[3], PR>` (`LP extends PR`) and `Ext<L[4], L[1]>` (a class
-/// expression extending `LB`) are `"y"`; `Ext<L[1], L[0]>`, `Ext<L[2],
-/// L[1]>` (`LO`, redeclaring `LB`'s shape), `Ext<PR, L[3]>` and `Ext<L[1],
-/// L[4]>` are `"n"`.
-///
-/// A function-local class's instance is not evaluated here yet: every
-/// probe reads an unmodelled position and stays undecided until local
-/// classes evaluate.
+/// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
+/// `Ext<R[0], R[1]>` (`LS` to `LB`),
+/// `Ext<R[3], PR>` (`LP extends PR`) and `Ext<R[4], R[1]>` (a class
+/// expression extending `LB`) are `"y"`; `Ext<R[1], R[0]>`, `Ext<R[2],
+/// R[1]>` (`LO`, redeclaring `LB`'s shape), `Ext<PR, R[3]>` and `Ext<R[1],
+/// R[4]>` are `"n"`, with `R` the tuple `ReturnType<typeof locals>`.
 #[test]
-#[ignore = "function-local classes do not evaluate yet"]
 fn a_function_local_class_declares_its_own_members() {
+    let failures = mismatches(
+        FIXTURE,
+        &[
+            (
+                "Ext<ReturnType<typeof locals>[0], ReturnType<typeof locals>[1]>",
+                "\"y\"",
+            ),
+            (
+                "Ext<ReturnType<typeof locals>[1], ReturnType<typeof locals>[0]>",
+                "\"n\"",
+            ),
+            (
+                "Ext<ReturnType<typeof locals>[2], ReturnType<typeof locals>[1]>",
+                "\"n\"",
+            ),
+            ("Ext<ReturnType<typeof locals>[3], PR>", "\"y\""),
+            ("Ext<PR, ReturnType<typeof locals>[3]>", "\"n\""),
+            (
+                "Ext<ReturnType<typeof locals>[4], ReturnType<typeof locals>[1]>",
+                "\"y\"",
+            ),
+            (
+                "Ext<ReturnType<typeof locals>[1], ReturnType<typeof locals>[4]>",
+                "\"n\"",
+            ),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The same probes read through a type alias of the tuple (`type L =
+/// ReturnType<typeof locals>`), which publishes the function's return
+/// through the flow proof. TypeScript 7.0.2 answers them as above.
+///
+/// The flow proof reads a local class declaration's capture set as a typed
+/// gap, so the alias publishes the tuple unverified and every probe stays a
+/// partial demand until the proof enumerates that set.
+#[test]
+#[ignore = "the flow proof does not enumerate a local class declaration's capture set"]
+fn a_function_local_class_read_through_an_alias_declares_its_own_members() {
     let failures = mismatches(
         FIXTURE,
         &[
@@ -133,6 +173,24 @@ fn a_function_local_class_declares_its_own_members() {
             ("Ext<PR, L[3]>", "\"n\""),
             ("Ext<L[4], L[1]>", "\"y\""),
             ("Ext<L[1], L[4]>", "\"n\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class expression's instance relates through its surface in every
+/// position, an array or tuple element included.
+///
+/// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
+/// `Ext<[I<typeof mk>], [{}]>` and
+/// `Ext<I<typeof mk>[], {}[]>` are `"y"`.
+#[test]
+fn a_class_expression_instance_relates_as_an_element() {
+    let failures = mismatches(
+        FIXTURE,
+        &[
+            ("Ext<[I<typeof mk>], [{}]>", "\"y\""),
+            ("Ext<I<typeof mk>[], {}[]>", "\"y\""),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -152,15 +210,14 @@ class G extends Tagged(TB) { protected z = 3 }
 ";
 
 /// A class expression extending a class expression derives from it, and
-/// from its base in turn.
+/// from its base in turn: the `extends` name resolves through the class
+/// index to the class expression the `const` holds.
 ///
 /// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
 /// `Ext<InstanceType<typeof CE2>, InstanceType<typeof CE1>>` and
 /// `Ext<InstanceType<typeof CE3>, InstanceType<typeof CE1>>` are `"y"`;
-/// `Ext<InstanceType<typeof CE1>, InstanceType<typeof CE2>>` and
-/// `Ext<InstanceType<typeof CE2>, PR>` are `"n"`.
+/// `Ext<InstanceType<typeof CE1>, InstanceType<typeof CE2>>` is `"n"`.
 #[test]
-#[ignore = "the protected-member rule reads the base of a class expression with an extends clause"]
 fn a_class_expression_extending_a_class_expression_derives_from_it() {
     let failures = mismatches(
         HERITAGE,
@@ -177,9 +234,23 @@ fn a_class_expression_extending_a_class_expression_derives_from_it() {
                 "Ext<InstanceType<typeof CE1>, InstanceType<typeof CE2>>",
                 "\"n\"",
             ),
-            ("Ext<InstanceType<typeof CE2>, PR>", "\"n\""),
         ],
     );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class expression extending a class expression relates to an unrelated
+/// class with a protected member of the same name as the checker does.
+///
+/// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
+/// `Ext<InstanceType<typeof CE2>, PR>` is `"n"`. The instance a `const`
+/// holding `class extends CE1 { … }` constructs keeps its base as a
+/// reference to the value `CE1`, which names no type, so the relation
+/// stays undecided.
+#[test]
+#[ignore = "a const-held class expression's base naming a value composes no base instance"]
+fn a_class_expression_extending_a_class_expression_is_not_an_unrelated_class() {
+    let failures = mismatches(HERITAGE, &[("Ext<InstanceType<typeof CE2>, PR>", "\"n\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -206,10 +277,8 @@ fn a_class_extending_a_mixin_application_derives_from_its_base() {
 /// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`): over a
 /// function-local `class L extends Tagged(TB) { protected z = 2 }`
 /// returned as an instance, `Ext<ReturnType<typeof loc>, TB>` is `"y"` and
-/// `Ext<TB, ReturnType<typeof loc>>` `"n"`. The lane reads the local
-/// class's instance as an unmodelled position, so both stay undecided.
+/// `Ext<TB, ReturnType<typeof loc>>` `"n"`.
 #[test]
-#[ignore = "function-local classes do not evaluate yet"]
 fn a_function_local_class_extending_a_mixin_application_derives_from_its_base() {
     let failures = mismatches(
         HERITAGE,
@@ -219,4 +288,27 @@ fn a_function_local_class_extending_a_mixin_application_derives_from_its_base() 
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A local class read inside its own lowering — a static initializer
+/// constructing it, a circular `extends` — is an unmodelled position of
+/// that lowering, never a lowering that re-enters itself: each function
+/// still produces its value, the self-read degrading in place.
+#[test]
+fn a_local_class_read_inside_its_own_lowering_is_unmodelled() {
+    use super::checker_probe_lane_tests::{degradation_in, ProbeProject};
+    let source = "\
+function selfStatic() { class A { static s = new A(); } return A; }
+function selfExtends() { class L extends L {} return L; }
+function mutual() { class P extends Q {} class Q extends P {} return P; }
+";
+    for function in ["selfStatic", "selfExtends", "mutual"] {
+        assert_eq!(
+            degradation_in(ProbeProject::default(), source, function),
+            Ok(Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition
+            )),
+            "{function}"
+        );
+    }
 }

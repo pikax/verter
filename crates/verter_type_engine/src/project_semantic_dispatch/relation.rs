@@ -10810,7 +10810,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// or no class when a file-scope interface or type alias declares it.
     /// A file-scope class is named by its declaration identity, which the
     /// class-heritage ancestry authority reads; any other class (a class
-    /// expression, a class declared inside a body) by its node. A member
+    /// expression, a class declared inside a body) by its node, with the
+    /// class its `extends` clause names as the index resolved it. A member
     /// whose declaration neither reads is undecided.
     fn member_owner(&self, member: &crate::semantic_query::SurfaceMember) -> MemberOwner {
         use verter_session_query::declarations::TypeDeclKind;
@@ -10826,32 +10827,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(source_demand) = source_demand else {
             return MemberOwner::Undecided;
         };
-        let classes = source_demand.function_program_index();
-        if let Some(class) = classes.class_declaring_member(span) {
-            // A file-scope class declaration is the outermost class inside
-            // its header.
-            let file_scope = (!class.expression && !classes.class_encloses(class.span))
-                .then(|| {
-                    headers.type_headers.iter().find(|(_, header)| {
-                        header.kind == TypeDeclKind::Class
-                            && header.span.start <= class.span.start
-                            && class.span.end <= header.span.end
-                    })
-                })
-                .flatten();
-            return MemberOwner::Class(match file_scope {
-                Some((key, _)) => ClassOwner::Declared(crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::clone(file),
-                    owner: key.owner,
-                    whole_hash: serve.indexed.whole_hash,
-                    decl_name: Arc::clone(&key.name),
-                }),
-                None => ClassOwner::Syntactic {
-                    file: Arc::clone(file),
-                    span: class.span,
-                    has_heritage: class.has_heritage,
-                },
-            });
+        let index = source_demand.function_program_index();
+        let classes = index.classes();
+        if let Some(class) = classes.declaring_member(span) {
+            return MemberOwner::Class(class_owner(
+                file,
+                serve.indexed.whole_hash,
+                headers,
+                class,
+                classes.records().len(),
+            ));
         }
         let within_a_type = headers.type_headers.iter().any(|(_, header)| {
             header.kind != TypeDeclKind::Class
@@ -10901,14 +10886,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.deposit_operand_self_roots(&ancestry.observed);
                 ancestry.decided.then_some(false)
             }
-            (
-                ClassOwner::Syntactic {
-                    file,
-                    span,
-                    has_heritage,
-                },
-                target,
-            ) => {
+            (ClassOwner::Syntactic { file, span, base }, target) => {
                 if let ClassOwner::Syntactic {
                     file: target_file,
                     span: target_span,
@@ -10919,7 +10897,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return Some(true);
                     }
                 }
-                (!has_heritage).then_some(false)
+                match base {
+                    SyntacticBase::None => Some(false),
+                    SyntacticBase::Class(base) => self.class_derives_from(base, target),
+                    SyntacticBase::Unresolved => None,
+                }
             }
         }
     }
@@ -12040,9 +12022,65 @@ enum ClassOwner {
     Syntactic {
         file: Arc<str>,
         span: verter_span::Span,
-        /// Whether the class has an `extends` clause.
-        has_heritage: bool,
+        /// What its `extends` clause names.
+        base: SyntacticBase,
     },
+}
+
+/// What a [`ClassOwner::Syntactic`] class's `extends` clause names.
+enum SyntacticBase {
+    /// No `extends` clause: the class derives from itself alone.
+    None,
+    /// A class this file authors, which the class index resolved lexically.
+    Class(Box<ClassOwner>),
+    /// Anything else: derivation is undecided.
+    Unresolved,
+}
+
+/// The owner a member's declaring `class` names: a file-scope class
+/// declaration (the outermost class inside a class header) by its
+/// declaration identity, any other class by its node, following the bases
+/// the class index resolved. A chain longer than `remaining` classes (a
+/// circular `extends`) is unresolved.
+fn class_owner(
+    file: &Arc<str>,
+    whole_hash: crate::semantic_query::HashValue,
+    headers: &verter_session_query::declarations::header_index::DeclHeaderIndex,
+    class: verter_session_query::function_program::ClassIndexMatch<'_>,
+    remaining: usize,
+) -> ClassOwner {
+    use verter_session_query::declarations::TypeDeclKind;
+    use verter_session_query::function_program::ClassBaseMatch;
+    let record = class.record();
+    let file_scope = (!record.expression && !class.is_enclosed())
+        .then(|| {
+            headers.type_headers.iter().find(|(_, header)| {
+                header.kind == TypeDeclKind::Class
+                    && header.span.start <= record.span.start
+                    && record.span.end <= header.span.end
+            })
+        })
+        .flatten();
+    if let Some((key, _)) = file_scope {
+        return ClassOwner::Declared(crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::clone(file),
+            owner: key.owner,
+            whole_hash,
+            decl_name: Arc::clone(&key.name),
+        });
+    }
+    let base = match class.base() {
+        ClassBaseMatch::None => SyntacticBase::None,
+        ClassBaseMatch::Class(base) if remaining > 0 => SyntacticBase::Class(Box::new(
+            class_owner(file, whole_hash, headers, base, remaining - 1),
+        )),
+        ClassBaseMatch::Class(_) | ClassBaseMatch::Unresolved => SyntacticBase::Unresolved,
+    };
+    ClassOwner::Syntactic {
+        file: Arc::clone(file),
+        span: record.span,
+        base,
+    }
 }
 
 fn template_literal_kind_verdict(
@@ -13324,11 +13362,14 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         if matches!(&*target_data, SemanticNodeData::Conditional { .. }) {
             return true;
         }
+        // A class expression's instance relates through its surface, which
+        // the framed relation reads: the inline expansion has no arm for it.
         let is_carrier = |data: &SemanticNodeData| {
             matches!(
                 data,
                 SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
                     | SemanticNodeData::Mapped { .. }
                     | SemanticNodeData::KeyOf { .. }
                     | SemanticNodeData::IndexedAccess { .. }
