@@ -1165,6 +1165,10 @@ pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
             "materializes the Verter-owned carrier-snapshot store (content-addressed blobs + atomic manifest) into a per-host temp directory for the tsserver plugin to read synchronously (tool output mirroring the in-memory ProviderSurfaceStore, not semantic input); never the user workspace. Test fixtures use temp-dir scratch space.",
         ),
         (
+            "crates/verter_lsp/src/external_ts/carrier_publish_journal.rs",
+            "reads the Verter-owned carrier-snapshot store's head, base snapshot and append-only journal from the per-host temp directory for the tsserver plugin (tool output mirroring the in-memory ProviderSurfaceStore, not semantic input); the read half of `carrier_publish_store.rs`; never the user workspace. Test fixtures use temp-dir scratch space.",
+        ),
+        (
             "crates/verter_lsp/src/config.rs",
             "test fixtures only (`#[cfg(test)] mod tests` blocks set up tmp directories for `discover_lint_config` tests). No production-path call.",
         ),
