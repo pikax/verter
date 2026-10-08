@@ -263,8 +263,11 @@ fn an_extends_chain_past_the_follow_bound_still_answers() {
 #[test]
 fn a_circular_extends_chain_terminates_and_answers_declared_members() {
     let failures = mismatches(
-        "class A extends B { a = 1 as const; }\nclass B extends A { b = 2 as const; }\nclass C extends A { }\nfunction f(c: C) { return c.a; }\nfunction g(c: C) { return c.zz; }\n",
-        &[("ReturnType<typeof f>", "1")],
+        "class A extends B { a = 1 as const; }\nclass B extends A { b = 2 as const; }\nclass C extends A { }\nfunction f(c: C) { return c.a; }\nfunction h(c: C) { return c.b; }\n",
+        &[
+            ("ReturnType<typeof f>", "1"),
+                        ("ReturnType<typeof h>", "2"),
+        ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
