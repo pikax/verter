@@ -3134,7 +3134,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context,
             } = &key_for_build
             {
-                return self.build_signatures_of_type(*subject, *kind, *context);
+                return self.build_signatures_of_type(*subject, *kind, context.clone());
             }
             if let SemanticQueryKey::ReadSignatureResult(key) = &key_for_build {
                 return self.build_read_signature_result(key);
@@ -3216,7 +3216,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     input,
                     purpose,
                     context,
-                } => self.build_reduce_intersection(*input, *purpose, *context),
+                } => self.build_reduce_intersection(input.clone(), *purpose, context.clone()),
                 SemanticQueryKey::ProjectObjectSpread { .. } => {
                     unreachable!(
                         "ProjectObjectSpread returns its typed projection value before node-domain build"

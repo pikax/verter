@@ -6,24 +6,30 @@
 //! default policy set. Private projections derive union-order and order-
 //! domain from the context — a leaf key cannot be constructed with a
 //! policy different from its context's projection.
+//!
+//! **Ownership.** A [`SemanticContextId`] and an [`OrderDomainId`] OWN
+//! their records: each is one pointer, and the last handle dropping frees
+//! the record together with its weak deduplication entry (see
+//! [`crate::semantic_query_memo::intern_table`]). Neither record retains a
+//! child handle. The production context is the one permanent record. A
+//! [`SemanticPolicySetId`] is the policy set's exact value — a few bytes —
+//! so it needs no table at all.
 
-use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
-use parking_lot::Mutex;
-use rustc_hash::{FxHashMap, FxHasher};
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::resolution::{EnvHashes, SemanticCompilerOptions};
 
 use super::SemanticNodeId;
+use crate::semantic_query_memo::intern_table::{intern_domain, Interned};
 
-/// Interned identity of one [`SemanticContext`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SemanticContextId(u32);
+/// Owning interned identity of one [`SemanticContext`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SemanticContextId(Interned<SemanticContext>);
 
-/// Interned identity of one [`SemanticPolicySet`].
+/// Identity of one [`SemanticPolicySet`]: the set's exact value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SemanticPolicySetId(u32);
+pub struct SemanticPolicySetId(SemanticPolicySet);
 
 /// Union-order policy. Production is [`Self::VerterStableV1`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,9 +38,10 @@ pub enum SemanticOrderPolicyId {
 }
 
 /// Derived order-domain identity: facts needed to interpret stable
-/// identities under a context, not the currently loaded object set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OrderDomainId(u32);
+/// identities under a context, not the currently loaded object set. Owns
+/// its interned record.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OrderDomainId(Interned<OrderDomainKey>);
 
 /// Closed intersection-policy bundle keyed by purpose. Production carries
 /// one mapping; callers cannot supply a contradictory version.
@@ -62,17 +69,24 @@ impl SemanticPolicySet {
         }
     }
 
-    /// Intern this set, returning its id.
+    /// This set's identity.
     #[must_use]
-    pub fn intern(self) -> SemanticPolicySetId {
-        intern_policy_set(self)
+    pub const fn id(self) -> SemanticPolicySetId {
+        SemanticPolicySetId(self)
     }
 }
 
 impl Default for SemanticPolicySetId {
     fn default() -> Self {
-        static PRODUCTION: OnceLock<SemanticPolicySetId> = OnceLock::new();
-        *PRODUCTION.get_or_init(|| SemanticPolicySet::production().intern())
+        SemanticPolicySet::production().id()
+    }
+}
+
+impl SemanticPolicySetId {
+    /// The identified policy set.
+    #[must_use]
+    pub const fn policy_set(self) -> SemanticPolicySet {
+        self.0
     }
 }
 
@@ -111,30 +125,50 @@ impl SemanticContext {
     /// accelerator, not a substitute for equality.
     #[must_use]
     pub fn intern(self) -> SemanticContextId {
-        intern_context(self)
+        SemanticContextId(Interned::new(self))
     }
 }
+
+impl SemanticContextId {
+    /// The interned context.
+    #[must_use]
+    pub fn context(&self) -> &SemanticContext {
+        self.0.value()
+    }
+
+    /// The production default: the one permanent context record.
+    #[must_use]
+    pub fn production() -> Self {
+        static PRODUCTION: OnceLock<SemanticContextId> = OnceLock::new();
+        PRODUCTION
+            .get_or_init(|| SemanticContext::production().intern())
+            .clone()
+    }
+}
+
+intern_domain!(SemanticContext);
+intern_domain!(OrderDomainKey);
 
 /// Private projection: the context's union-order policy.
 #[must_use]
 pub fn project_union_order(ctx: &SemanticContext) -> SemanticOrderPolicyId {
-    lookup_policy_set(ctx.policy_set).union_order
+    ctx.policy_set.policy_set().union_order
 }
 
 /// Private projection: the order domain derived from this context.
 #[must_use]
 pub fn project_order_domain(ctx: &SemanticContext) -> OrderDomainId {
-    intern_order_domain(OrderDomainKey {
+    OrderDomainId(Interned::new(OrderDomainKey {
         env: ctx.resolver_library_project_environment,
         project_identity: ctx.project_identity,
         policy_set: ctx.policy_set,
-    })
+    }))
 }
 
 /// Leaf key for a `SemanticUnionMembers`-style view. The only constructor
 /// projects policy and domain from the context, so an independently
-/// supplied policy is unrepresentable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// supplied policy is unrepresentable. The key owns its order domain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SemanticUnionMembersKey {
     union: SemanticNodeId,
     policy: SemanticOrderPolicyId,
@@ -154,124 +188,41 @@ impl SemanticUnionMembersKey {
     }
 
     #[must_use]
-    pub fn union(self) -> SemanticNodeId {
+    pub fn union(&self) -> SemanticNodeId {
         self.union
     }
 
     #[must_use]
-    pub fn policy(self) -> SemanticOrderPolicyId {
+    pub fn policy(&self) -> SemanticOrderPolicyId {
         self.policy
     }
 
     #[must_use]
-    pub fn domain(self) -> OrderDomainId {
-        self.domain
+    pub fn domain(&self) -> &OrderDomainId {
+        &self.domain
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct OrderDomainKey {
+/// The interned content of one [`OrderDomainId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderDomainKey {
     env: EnvHashes,
     project_identity: Hash16,
     policy_set: SemanticPolicySetId,
 }
 
-struct InternTable<T> {
-    by_hash: FxHashMap<u64, Vec<u32>>,
-    items: Vec<T>,
-}
-
-impl<T> Default for InternTable<T> {
-    fn default() -> Self {
-        Self {
-            by_hash: FxHashMap::default(),
-            items: Vec::new(),
-        }
-    }
-}
-
-fn digest<T: Hash>(value: &T) -> u64 {
-    let mut hasher = FxHasher::default();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn intern_value<T: Clone + Eq + Hash>(table: &Mutex<InternTable<T>>, value: T) -> u32 {
-    let hash = digest(&value);
-    let mut guard = table.lock();
-    if let Some(ids) = guard.by_hash.get(&hash) {
-        for &id in ids {
-            if guard.items[id as usize] == value {
-                return id;
-            }
-        }
-    }
-    let id = u32::try_from(guard.items.len()).expect("intern table overflow");
-    guard.items.push(value);
-    guard.by_hash.entry(hash).or_default().push(id);
-    id
-}
-
-fn policy_table() -> &'static Mutex<InternTable<SemanticPolicySet>> {
-    static TABLE: OnceLock<Mutex<InternTable<SemanticPolicySet>>> = OnceLock::new();
-    TABLE.get_or_init(|| Mutex::new(InternTable::default()))
-}
-
-fn intern_policy_set(set: SemanticPolicySet) -> SemanticPolicySetId {
-    SemanticPolicySetId(intern_value(policy_table(), set))
-}
-
-fn lookup_policy_set(id: SemanticPolicySetId) -> SemanticPolicySet {
-    let guard = policy_table().lock();
-    guard
-        .items
-        .get(id.0 as usize)
-        .copied()
-        .unwrap_or_else(SemanticPolicySet::production)
-}
-
-fn context_table() -> &'static Mutex<InternTable<SemanticContext>> {
-    static TABLE: OnceLock<Mutex<InternTable<SemanticContext>>> = OnceLock::new();
-    TABLE.get_or_init(|| Mutex::new(InternTable::default()))
-}
-
-fn intern_context(ctx: SemanticContext) -> SemanticContextId {
-    SemanticContextId(intern_value(context_table(), ctx))
-}
-
-fn lookup_context(id: SemanticContextId) -> Option<SemanticContext> {
-    let guard = context_table().lock();
-    guard.items.get(id.0 as usize).cloned()
-}
-
-fn intern_order_domain(key: OrderDomainKey) -> OrderDomainId {
-    static TABLE: OnceLock<Mutex<InternTable<OrderDomainKey>>> = OnceLock::new();
-    let table = TABLE.get_or_init(|| Mutex::new(InternTable::default()));
-    OrderDomainId(intern_value(table, key))
-}
-
-impl SemanticContextId {
-    #[must_use]
-    pub const fn as_u32(self) -> u32 {
-        self.0
-    }
-
-    /// Lookup the interned context. `None` if the id was never interned.
-    #[must_use]
-    pub fn lookup(self) -> Option<SemanticContext> {
-        lookup_context(self)
-    }
-
-    /// Intern the production default.
-    #[must_use]
-    pub fn production() -> Self {
-        SemanticContext::production().intern()
-    }
-}
-
-impl SemanticPolicySetId {
-    #[must_use]
-    pub fn as_u32(self) -> u32 {
-        self.0
-    }
+/// Whether a context with `ctx`'s exact content is resident, and whether
+/// the order domain it projects is.
+#[cfg(test)]
+pub(crate) fn context_records_resident(ctx: &SemanticContext) -> (bool, bool) {
+    use crate::semantic_query_memo::intern_table::InternDomain;
+    let domain = OrderDomainKey {
+        env: ctx.resolver_library_project_environment,
+        project_identity: ctx.project_identity,
+        policy_set: ctx.policy_set,
+    };
+    (
+        SemanticContext::index().get(ctx).is_some(),
+        OrderDomainKey::index().get(&domain).is_some(),
+    )
 }

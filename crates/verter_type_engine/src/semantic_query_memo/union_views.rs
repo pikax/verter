@@ -67,7 +67,7 @@ impl UnionViews {
             .views
             .iter()
             .filter(|(key, (view, _))| retired(key, view))
-            .map(|(key, _)| *key)
+            .map(|(key, _)| key.clone())
             .collect();
         if keys.is_empty() {
             return Vec::new();
@@ -142,7 +142,7 @@ impl SemanticGraphStore {
             // Another reader kept the same view first; this charge drops.
             return Arc::clone(kept);
         }
-        table.views.insert(key, (Arc::clone(view), charge));
+        table.views.insert(key.clone(), (Arc::clone(view), charge));
         table.admitted.push_back(key);
         let evicted = if table.admitted.len() > UNION_VIEW_CAP {
             table
