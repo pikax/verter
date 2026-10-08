@@ -4,7 +4,8 @@
 //! every rename and code-action edit as a `TextDocumentEdit` naming the version
 //! of the open document the request was answered against, so the client
 //! rejects an edit to a document that has moved since; a client that does not
-//! advertise it keeps the unversioned shapes it can apply.
+//! advertise it receives only `changes`, and an action that needs a resource
+//! operation (extract component) is withheld whole.
 //!
 //! Hermetic: the binary runs with `--type-provider=off`, so rename and organize
 //! imports are answered by Verter's own analysis of the open buffer.
@@ -27,11 +28,13 @@ const OPEN_VERSION: i32 = 3;
 struct Replies {
     rename: Value,
     code_actions: Value,
+    extract_actions: Value,
     uri: String,
 }
 
-/// Open `APP` in a fresh workspace and send one rename and one organize-imports
-/// code action, as a client advertising `document_changes`.
+/// Open `APP` in a fresh workspace and send one rename, one organize-imports
+/// code action and one extract-component code action, as a client advertising
+/// (or not) `document_changes`.
 fn exchange(document_changes: bool) -> Replies {
     let tmp = tempfile::tempdir().expect("temp workspace root");
     let root = tmp.path().to_string_lossy().into_owned();
@@ -139,7 +142,23 @@ fn exchange(document_changes: bool) -> Replies {
         }),
     );
 
-    request(&mut stdin, &mut child, 4, "shutdown", Value::Null);
+    // The `<div>` element inside the template.
+    let extract_actions = request(
+        &mut stdin,
+        &mut child,
+        4,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 4, "character": 10 },
+                "end": { "line": 4, "character": 15 }
+            },
+            "context": { "diagnostics": [], "only": ["refactor.extract"] },
+        }),
+    );
+
+    request(&mut stdin, &mut child, 5, "shutdown", Value::Null);
     write_message(
         &mut stdin,
         &json!({ "jsonrpc": "2.0", "method": "exit", "params": null }),
@@ -149,6 +168,7 @@ fn exchange(document_changes: bool) -> Replies {
     Replies {
         rename,
         code_actions,
+        extract_actions,
         uri,
     }
 }
@@ -190,6 +210,16 @@ fn organize_imports_edit(code_actions: &Value) -> Value {
         .unwrap_or_else(|| panic!("an organize-imports action is offered: {code_actions}"))
 }
 
+/// The extract-component action's edit, when the action is offered.
+fn extract_component_edit(code_actions: &Value) -> Option<Value> {
+    code_actions
+        .as_array()?
+        .iter()
+        .find(|action| action.get("kind").and_then(Value::as_str) == Some("refactor.extract"))
+        .and_then(|action| action.get("edit"))
+        .cloned()
+}
+
 fn is_absent(value: Option<&Value>) -> bool {
     value.is_none_or(Value::is_null)
 }
@@ -216,6 +246,26 @@ fn a_document_changes_client_receives_versioned_edits() {
         vec![(replies.uri.clone(), json!(OPEN_VERSION))],
         "the code action names the version the request was answered against: {edit}"
     );
+
+    let extract = extract_component_edit(&replies.extract_actions)
+        .unwrap_or_else(|| panic!("extract component is offered: {}", replies.extract_actions));
+    let versions = document_edit_versions(&extract);
+    let app = versions
+        .iter()
+        .find(|(uri, _)| *uri == replies.uri)
+        .unwrap_or_else(|| panic!("the extract edit reaches the open document: {extract}"));
+    assert_eq!(
+        app.1,
+        json!(OPEN_VERSION),
+        "the open document's edit names the request version: {extract}"
+    );
+    assert!(
+        versions
+            .iter()
+            .filter(|(uri, _)| *uri != replies.uri)
+            .all(|(_, version)| version.is_null()),
+        "the created file has no version: {extract}"
+    );
 }
 
 #[test]
@@ -238,13 +288,37 @@ fn a_client_without_document_changes_keeps_unversioned_edits() {
         replies.rename
     );
 
-    // The organize-imports route builds `documentChanges`; an unversioned
-    // client receives that shape unchanged, with no version attached.
+    // Organize imports is built as `documentChanges`; a client that cannot
+    // apply them receives the same edit as `changes`.
     let edit = organize_imports_edit(&replies.code_actions);
-    let versions = document_edit_versions(&edit);
+    assert!(
+        is_absent(edit.get("documentChanges")),
+        "a client without documentChanges is not sent documentChanges: {edit}"
+    );
+    let changes = edit
+        .get("changes")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("organize imports is delivered as `changes`: {edit}"));
     assert_eq!(
-        versions,
-        vec![(replies.uri.clone(), Value::Null)],
-        "the route's `documentChanges` shape is kept with a null version: {edit}"
+        changes.keys().collect::<Vec<_>>(),
+        vec![&replies.uri],
+        "the edit targets the open document: {edit}"
+    );
+    assert!(
+        changes[&replies.uri]
+            .as_array()
+            .is_some_and(|edits| !edits.is_empty()),
+        "the edit carries its text edits: {edit}"
+    );
+}
+
+#[test]
+fn a_client_without_document_changes_is_not_offered_a_resource_operation_action() {
+    let replies = exchange(false);
+
+    assert!(
+        extract_component_edit(&replies.extract_actions).is_none(),
+        "extract component creates a file, so it is withdrawn whole: {}",
+        replies.extract_actions
     );
 }

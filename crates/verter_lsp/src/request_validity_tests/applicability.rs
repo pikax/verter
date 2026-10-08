@@ -15,7 +15,8 @@ use tower_lsp_server::LanguageServer;
 
 use super::super::server_tests::{authored_token_ranges, workspace_uri};
 use super::super::test_support::RequestBarrier;
-use super::{Fixture, APP, APP_PATH};
+use super::movement::{edited_app, Handles};
+use super::{Fixture, APP, APP_PATH, RESOLVED_IMPORT};
 use crate::type_provider::protocol as wire;
 
 const UTIL_PATH: &str = "src/util.ts";
@@ -389,15 +390,24 @@ fn assert_bound(scenario: &Scenario, client: Client, edit: &WorkspaceEdit, util_
         }
         Client::ChangesOnly => {
             assert!(
-                edit.document_changes
-                    .iter()
-                    .all(|changes| document_edits(&WorkspaceEdit {
-                        document_changes: Some(changes.clone()),
-                        ..Default::default()
-                    })
-                    .iter()
-                    .all(|(_, version, _)| version.is_none())),
-                "a client without documentChanges is never handed a version: {edit:?}"
+                edit.document_changes.is_none(),
+                "a client without documentChanges is handed only `changes`: {edit:?}"
+            );
+            let changes = edit
+                .changes
+                .as_ref()
+                .unwrap_or_else(|| panic!("the edit is delivered as `changes`: {edit:?}"));
+            let util = changes
+                .iter()
+                .find(|(uri, _)| scenario.is_util(uri))
+                .unwrap_or_else(|| panic!("the edit reaches the other open document: {edit:?}"));
+            assert!(
+                util.1.iter().any(|edit| edit.range == util_range),
+                "the other document's edit is decoded through its captured bytes: {util:?}"
+            );
+            assert!(
+                changes.keys().any(|uri| scenario.is_app(uri)),
+                "the edit reaches the requested document: {edit:?}"
             );
         }
     }
@@ -510,4 +520,48 @@ async fn a_target_edited_before_settlement_fails_the_request() {
             );
         }
     }
+}
+
+/// A completion-resolve `additionalTextEdits` import is placed through the
+/// carrier revision the captured provider surface was built from. It lands on
+/// the unmoved document, and a document that moved after the capture yields no
+/// edit (and marks the request's captured target incoherent, so it settles
+/// `ContentModified`) rather than placing the import through the later
+/// revision's line index.
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_resolve_places_edits_only_through_the_captured_revision() {
+    use crate::server::nav_features_completion_resolve::{
+        capture_resolve_surface, resolve_provider_auto_import_edits,
+    };
+    use crate::type_provider::auto_import::ProviderImportEdit;
+
+    let fixture = Fixture::new().await;
+    let ctx = fixture.context().await;
+    let path = ctx.tsx_path.clone();
+    let (import_at, _) = fixture.tsx_span(&ctx, "const msg");
+    let provider_edits = vec![ProviderImportEdit {
+        start: import_at,
+        end: import_at,
+        new_text: RESOLVED_IMPORT.to_string(),
+    }];
+    let server = fixture.server();
+    let (_, surface) =
+        capture_resolve_surface(server, &path).expect("the carrier serves a provider surface");
+
+    let placed = resolve_provider_auto_import_edits(server, &path, Some(&surface), &provider_edits)
+        .expect("the unmoved carrier resolves")
+        .expect("the import is placed in the carrier");
+    assert!(
+        placed
+            .iter()
+            .any(|edit| edit.new_text.contains("messageFromProvider")),
+        "the unmoved carrier receives the provider's import: {placed:?}"
+    );
+
+    Handles::of(&fixture).edit(2, &edited_app());
+    assert_eq!(
+        resolve_provider_auto_import_edits(server, &path, Some(&surface), &provider_edits),
+        Ok(None),
+        "a carrier that moved after the surface capture receives no import"
+    );
 }

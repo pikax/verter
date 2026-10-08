@@ -106,7 +106,7 @@ pub fn foreign_ide_context_from_captured(
     // edit request's captured targets: a location or edit decoded through this
     // map addresses exactly that revision, and settlement refuses the answer if
     // the client's document moves before delivery.
-    let open_target = match documents.canonical_id_to_uri(&snapshot.source_canonical) {
+    let open_target = match documents.open_uri_for_fs_path(&snapshot.source_canonical) {
         Some(uri) => {
             let identity = documents.snapshot_identity(&uri)?;
             if ContentHash::of(identity.source()) != snapshot.source_hash {
@@ -287,7 +287,7 @@ pub fn classify_captured_api_surface(
         }
         Some(CapturedPathState::Current(snapshot)) => {
             let open_target = match documents.and_then(|documents| {
-                let uri = documents.canonical_id_to_uri(&snapshot.source_canonical)?;
+                let uri = documents.open_uri_for_fs_path(&snapshot.source_canonical)?;
                 let identity = documents.snapshot_identity(&uri);
                 Some((uri, identity))
             }) {

@@ -28,7 +28,7 @@ use tower_lsp_server::ls_types::{CodeAction, CodeActionOrCommand, Uri, Workspace
 
 use super::{uri_to_canonical_id, DocumentRegistry, DocumentSnapshotIdentity};
 use crate::features::action_utils::{
-    bind_workspace_edit, EditTargetRevision, UnboundEditTarget, WorkspaceEditSupport,
+    bind_workspace_edit, EditRefusal, EditTargetRevision, WorkspaceEditSupport,
 };
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
 use verter_session::carrier_publication_store::HostSourceRevisionToken;
@@ -376,7 +376,7 @@ impl ForegroundRequest {
         &self,
         documents: &DocumentRegistry,
         response: &mut T,
-    ) -> Result<(), UnboundEditTarget> {
+    ) -> Result<(), EditRefusal> {
         let mut revision_of = |target: &Uri| self.edit_target_revision(documents, target);
         response.bind_each_edit(&mut |edit| {
             bind_workspace_edit(edit, self.edit_support, &mut revision_of)
@@ -503,15 +503,15 @@ pub(crate) trait EditBearing {
     /// may instead withdraw only the alternative whose edit cannot be bound.
     fn bind_each_edit(
         &mut self,
-        bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), UnboundEditTarget>,
-    ) -> Result<(), UnboundEditTarget>;
+        bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), EditRefusal>,
+    ) -> Result<(), EditRefusal>;
 }
 
 impl EditBearing for WorkspaceEdit {
     fn bind_each_edit(
         &mut self,
-        bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), UnboundEditTarget>,
-    ) -> Result<(), UnboundEditTarget> {
+        bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), EditRefusal>,
+    ) -> Result<(), EditRefusal> {
         bind(self)
     }
 }
@@ -523,8 +523,8 @@ impl EditBearing for WorkspaceEdit {
 impl EditBearing for Vec<CodeActionOrCommand> {
     fn bind_each_edit(
         &mut self,
-        bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), UnboundEditTarget>,
-    ) -> Result<(), UnboundEditTarget> {
+        bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), EditRefusal>,
+    ) -> Result<(), EditRefusal> {
         self.retain_mut(|action| match action {
             CodeActionOrCommand::CodeAction(CodeAction {
                 edit: Some(edit), ..
@@ -603,7 +603,7 @@ mod tests {
                 return Ok(());
             };
             if edits.iter().any(|edit| edit.text_document.uri == unbound) {
-                Err(UnboundEditTarget(unbound.clone()))
+                Err(EditRefusal::UnboundTarget(unbound.clone()))
             } else {
                 Ok(())
             }
@@ -629,7 +629,8 @@ mod tests {
             Default::default(),
             "x".to_string(),
         );
-        let refused = edit.bind_each_edit(&mut |_| Err(UnboundEditTarget(unbound.clone())));
-        assert_eq!(refused, Err(UnboundEditTarget(unbound)));
+        let refused =
+            edit.bind_each_edit(&mut |_| Err(EditRefusal::UnboundTarget(unbound.clone())));
+        assert_eq!(refused, Err(EditRefusal::UnboundTarget(unbound)));
     }
 }
