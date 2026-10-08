@@ -76,6 +76,6 @@ Remove only the candidate's withhold_aborted_projection/abort_error helper, its 
 
 ## Verification
 
-Validate the cleanup against the baseline source content and run Rust formatting, workspace Clippy, focused engine/session producer-fact and flow controls, and the configured architecture-health checks. Run applicable repository completion checks independently; report failures or unavailable checks in the controller response. No passing test count or historical commit identity is acceptance evidence.
+Verify removal of the candidate-only abort bridge and its exclusive test scaffolding against the current source, then run Rust formatting, workspace Clippy, focused engine/session producer-fact and flow controls, and the configured architecture-health checks. Run applicable repository completion checks independently; report failures or unavailable checks in the controller response. No passing test count or historical commit identity is acceptance evidence.
 
 The current repository has no roadmap ledger, charter tree, authority files or roadmap validator to amend or execute. This dated record is written at the ratification brief's explicit destination. The structured ratification-decision response supplies the complete replacement charter, addition and dependency change to the controller, which owns their application; this record introduces no repository DAG or validator.
