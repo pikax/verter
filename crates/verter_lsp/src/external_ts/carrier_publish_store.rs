@@ -14,15 +14,22 @@
 //!    `maps/blake3-<map_hash_hex>.json`. Content-addressing makes a blob write
 //!    IDEMPOTENT and STABLE: the same content always lands at the same path, and a
 //!    temp-then-rename write means a reader never sees a half-written blob.
-//! 2. **Split manifest.** `manifest.json` separates `owned_sources` (the full
-//!    project-owned carrier set, known the moment ownership resolves) from
-//!    `ready_files` (a `provider_uri` enters ONLY after its content blob write
+//! 2. **Split manifest.** The published [`Manifest`] separates `owned_sources`
+//!    (the full project-owned carrier set, known the moment ownership resolves)
+//!    from `ready_files` (a `provider_uri` enters ONLY after its content blob write
 //!    succeeds). The plugin's `getExternalFiles` returns only `ready_files`.
 //! 3. **Two-phase publish.** The write step writes every blob + map (idempotent,
-//!    skipped if already present). The commit step atomically swaps `manifest.json`
-//!    advancing the monotonic `epoch`. The manifest is the LAST thing written and
-//!    its swap is atomic, so a reader sees either the old or the new manifest —
-//!    never a torn one — and every `ready_files` entry it names has a blob on disk.
+//!    skipped if already present). The commit step appends ONE journal record
+//!    naming only the rows the publication changes, advancing the monotonic
+//!    `epoch`. The record is the LAST thing written and is applied whole or not at
+//!    all, so a reader sees either the old or the new state — never a torn one —
+//!    and every `ready_files` entry it names has a blob on disk.
+//! 4. **Incremental manifest.** The manifest is not one file rewritten per
+//!    publication: `head.json` names a generation whose compacted base
+//!    (`snapshot-<generation>.json`) plus append-only journal
+//!    (`journal-<generation>.log`) fold to it. Writer and readers process only the
+//!    records appended since they last looked, and bounded compaction keeps a cold
+//!    load proportional to the live rows — see the `journal` submodule.
 //!
 //! ## Location — NEVER the user's working tree
 //!
@@ -36,8 +43,8 @@
 //!
 //! ## Last-good + GC
 //!
-//! Publishing is purely ADDITIVE to `blobs/`/`maps/`; the manifest swap is the only
-//! mutation of the pointer set. A blob a previous manifest could reference is NEVER
+//! Publishing is purely ADDITIVE to `blobs/`/`maps/`; a committed journal record is the
+//! only mutation of the pointer set. A blob a previous manifest could reference is NEVER
 //! clobbered (content-addressing guarantees a re-publish of the same content is a
 //! no-op, and a new content lands at a new path). GC of unreferenced blobs is OUT
 //! OF SCOPE for this sub-block — see the `gc` follow-up note on [`CarrierPublishStore`].
@@ -45,7 +52,6 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -456,13 +462,148 @@ fn owned_source_of_file(file: &SnapshotFile) -> OwnedSource {
 }
 
 // ── the store ─────────────────────────────────────────────────────────────
+// ── the store ─────────────────────────────────────────────────────────────
 
-/// The on-disk content-addressed carrier-snapshot store + atomic manifest.
+#[path = "carrier_publish_journal.rs"]
+mod journal;
+
+#[cfg(any(test, feature = "semantic-observe"))]
+pub use journal::StoreWork;
+use journal::{
+    frame_record, journal_file, load_published, observe_work, parse_generation_file, read_head,
+    snapshot_file, JournalOp, JournalRecord, ObservedWork, StoreCursor, StoreHead, StoreState,
+    TailEnd, COMPACTION_FLOOR, HEAD_FILE, STORE_FORMAT, WRITER_LOCK_FILE,
+};
+
+/// A commit-boundary fault a test arms on the writer: the commit stops at the
+/// named boundary as if the process died there (the step's error is returned and
+/// the writer's in-memory fold is dropped). Test-only.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitFault {
+    /// Stop before any record byte is written.
+    BeforeAppend,
+    /// Write only the first `bytes` of the record line, then stop.
+    TornAppend { bytes: usize },
+    /// Write the whole record line (committed), then stop before returning.
+    AfterAppend,
+    /// Stop after the next generation's base is written.
+    CompactionAfterSnapshot,
+    /// Stop after the next generation's empty journal is written.
+    CompactionAfterJournal,
+    /// Stop after the head swap, before the writer adopts the new generation.
+    CompactionAfterHead,
+}
+
+/// The writer's folded state and open journal handle, guarded by
+/// [`CarrierPublishStore::writer`].
+#[derive(Debug, Default)]
+struct WriterState {
+    /// The folded authoritative generation, or `None` before the first commit and
+    /// after any failed one (the next commit reloads from disk).
+    cursor: Option<StoreCursor>,
+    /// The append handle of `cursor.generation`'s journal.
+    journal: Option<(u64, std::fs::File)>,
+    /// Highest epoch this process committed: seeds a store re-initialised after its
+    /// directory vanished, so the epoch never regresses.
+    last_epoch: u64,
+    work: ObservedWork,
+    #[cfg(test)]
+    fault: Option<CommitFault>,
+}
+
+impl WriterState {
+    fn forget(&mut self) {
+        self.cursor = None;
+        self.journal = None;
+    }
+
+    /// Consume the armed fault when it is `at`.
+    #[cfg(test)]
+    fn trip(&mut self, at: CommitFault) -> std::io::Result<()> {
+        if self.fault == Some(at) {
+            self.fault = None;
+            return Err(std::io::Error::other(format!(
+                "injected commit fault at {at:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// An advisory exclusive lock on the store's `writer.lock`, released on drop (and
+/// by the OS when the holding process dies, so a crash never wedges the store).
+struct WriterLockGuard(std::fs::File);
+
+impl WriterLockGuard {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for WriterLockGuard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// Group owned rows per source in first-appearance order — the unit a
+/// [`JournalOp::OwnedPut`] replaces.
+fn group_by_source(rows: &[OwnedSource]) -> Vec<(String, Vec<OwnedSource>)> {
+    let mut grouped: Vec<(String, Vec<OwnedSource>)> = Vec::new();
+    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for row in rows {
+        match index.get(row.source_uri.as_str()) {
+            Some(&at) => grouped[at].1.push(row.clone()),
+            None => {
+                index.insert(row.source_uri.as_str(), grouped.len());
+                grouped.push((row.source_uri.clone(), vec![row.clone()]));
+            }
+        }
+    }
+    grouped
+}
+
+/// The ops retracting `source_uri` from one project: its owned rows, and the ready
+/// entry of every provider those rows named.
+fn retract_source_ops(
+    project_uri: &str,
+    project: &journal::ProjectState,
+    source_uri: &str,
+    ops: &mut Vec<JournalOp>,
+) {
+    let Some(rows) = project.owned_rows_of(source_uri) else {
+        return;
+    };
+    ops.push(JournalOp::OwnedDel {
+        project: project_uri.to_owned(),
+        source_uri: source_uri.to_owned(),
+    });
+    let mut dropped = std::collections::HashSet::new();
+    for row in rows {
+        if project.ready.contains_key(&row.provider_uri) && dropped.insert(&row.provider_uri) {
+            ops.push(JournalOp::ReadyDel {
+                project: project_uri.to_owned(),
+                provider_uri: row.provider_uri.clone(),
+            });
+        }
+    }
+}
+
+/// The on-disk content-addressed carrier-snapshot store + incremental manifest.
 ///
 /// One store per `(host-version, workspace)`; cheap to construct (it only computes
-/// paths). `publish_batch` is the sole mutation entry point and is the two-phase
-/// publish: blobs/maps first (idempotent), then an atomic manifest swap advancing
-/// the monotonic epoch.
+/// paths). Every mutation is one commit: blobs/maps first (idempotent), then ONE
+/// appended journal record naming only the rows it changes, advancing the
+/// monotonic epoch — see the [`journal`] module for the format, the commit
+/// boundary, compaction and recovery.
 ///
 /// GC FOLLOW-UP: unreferenced blobs/maps accumulate (publishing is additive). A
 /// future sub-block adds a sweep that retains every blob/map referenced by the
@@ -474,28 +615,20 @@ pub struct CarrierPublishStore {
     /// `<temp>/verter-carrier-store/<host-version>/<workspace-hash>/`.
     workspace_dir: PathBuf,
     host_version: String,
-    /// A process-local epoch advisory used ONLY to seed a fresh manifest's epoch
-    /// monotonically when the on-disk manifest is unreadable. The authoritative
-    /// epoch is read from the on-disk manifest under the publish lock and advanced;
-    /// this guards against an epoch regression if the manifest file is transiently
-    /// unreadable.
-    last_epoch: AtomicU64,
-    /// Serializes the COMMIT STEP (the manifest read-modify-write + atomic swap)
-    /// across threads sharing this store. It guarantees two things at once:
-    /// (1) the epoch read-increment-write is atomic, so concurrent publishes can
-    /// never read the same epoch and both write `epoch + 1` (losing one); and
-    /// (2) only one thread is mid-`persist` over `manifest.json` at a time, so the
-    /// Windows `ReplaceFile`/`MoveFileEx` atomic-replace never contends on a target
-    /// another thread is concurrently replacing (which returns `PermissionDenied`).
-    /// The write step (content-addressed blob writes) stays lock-free — each content
-    /// hashes to a distinct path and the write is idempotent.
-    manifest_lock: parking_lot::Mutex<()>,
+    /// Serializes commits within this process and owns the folded state, so a
+    /// commit never re-reads the published rows: it absorbs only the records other
+    /// writers appended since its last commit, then appends its own. Commits across
+    /// processes serialize on the `writer.lock` advisory lock. The write step
+    /// (content-addressed blob writes) stays lock-free — each content hashes to a
+    /// distinct path and the write is idempotent.
+    writer: parking_lot::Mutex<WriterState>,
 }
 
 impl CarrierPublishStore {
     /// Open (compute the paths for) the store for `workspace_root` at this
     /// `host_version`. The store root is under the system temp dir — NEVER the user
-    /// workspace. Directories are created lazily on the first publish.
+    /// workspace. Directories are created lazily on the first publish, and the
+    /// published state is folded lazily on the first commit.
     #[must_use]
     pub fn open(host_version: impl Into<String>, workspace_root: &str) -> Self {
         let host_version = host_version.into();
@@ -503,8 +636,7 @@ impl CarrierPublishStore {
         Self {
             workspace_dir,
             host_version,
-            last_epoch: AtomicU64::new(0),
-            manifest_lock: parking_lot::Mutex::new(()),
+            writer: parking_lot::Mutex::new(WriterState::default()),
         }
     }
 
@@ -526,10 +658,10 @@ impl CarrierPublishStore {
         self.workspace_dir.join("maps")
     }
 
-    /// The `manifest.json` path.
+    /// The `head.json` commit-pointer path (names the authoritative generation).
     #[must_use]
-    pub fn manifest_path(&self) -> PathBuf {
-        self.workspace_dir.join("manifest.json")
+    pub fn head_path(&self) -> PathBuf {
+        self.workspace_dir.join(HEAD_FILE)
     }
 
     /// The relative blob path for a content hash + script kind
@@ -556,38 +688,300 @@ impl CarrierPublishStore {
         Some(format!("maps/{}.json", blake3_name(map_hash)))
     }
 
-    /// Read the current on-disk manifest, returning a fresh default ONLY when the
-    /// manifest does not exist (`NotFound`).
-    ///
-    /// FAIL-CLOSED, NEVER CLOBBER: any OTHER error — a transient read failure, or a
-    /// parse error on a present-but-corrupt manifest — is PROPAGATED, not swallowed
-    /// into a fresh empty manifest. Swallowing would let the commit step (which
-    /// read-modify-writes this manifest) reset to empty and then atomically swap a
-    /// manifest carrying ONLY the current project, ERASING every OTHER project's
-    /// entries. A propagated error fails the publish instead (the on-disk manifest
-    /// stays intact; the next publish retries). A fresh `NotFound` manifest seeds
-    /// its epoch from `last_epoch` so a first publish cannot regress the epoch.
-    fn read_manifest(&self) -> std::io::Result<Manifest> {
-        match std::fs::read(self.manifest_path()) {
-            Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("carrier manifest is present but unparseable: {e}"),
-                )
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(self.fresh_manifest()),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// A fresh empty manifest seeded with the process-local epoch advisory and this
-    /// store's host version — the fallback when none exists / it is unreadable.
+    /// A fresh empty manifest at epoch 0 — the diagnostics view of a store that
+    /// has never published or cannot be read.
     fn fresh_manifest(&self) -> Manifest {
         Manifest {
-            epoch: self.last_epoch.load(Ordering::Acquire),
+            epoch: 0,
             host_version: self.host_version.clone(),
             projects: BTreeMap::new(),
         }
+    }
+
+    /// Arm a commit-boundary fault for the next commit that reaches it. Test-only.
+    #[cfg(test)]
+    pub(crate) fn arm_commit_fault(&self, fault: CommitFault) {
+        self.writer.lock().fault = Some(fault);
+    }
+
+    /// The deterministic work this writer performed so far. OPTIONAL measurement
+    /// state (test and `semantic-observe` builds only).
+    #[cfg(any(test, feature = "semantic-observe"))]
+    #[must_use]
+    pub fn work(&self) -> StoreWork {
+        self.writer.lock().work
+    }
+
+    /// One commit: fold any records other writers appended, resolve `build`'s ops
+    /// against the folded state, append them as ONE record (the commit boundary),
+    /// apply them, and compact when the journal has outgrown the live rows.
+    /// Returns the record's epoch.
+    ///
+    /// FAIL-CLOSED, NEVER CLOBBER: an unreadable head, base or journal (other than
+    /// a torn tail) fails the commit before anything is appended; the on-disk store
+    /// stays intact and the next commit reloads it. A torn tail is truncated under
+    /// the writer lock before the append.
+    fn commit(&self, build: impl FnOnce(&StoreState) -> Vec<JournalOp>) -> std::io::Result<u64> {
+        std::fs::create_dir_all(&self.workspace_dir)?;
+        let mut guard = self.writer.lock();
+        let w = &mut *guard;
+        let _lock = WriterLockGuard::acquire(&self.workspace_dir.join(WRITER_LOCK_FILE))?;
+
+        if let Err(e) = self.sync(w) {
+            w.forget();
+            return Err(e);
+        }
+        let cursor = w.cursor.as_ref().expect("a synced writer holds a cursor");
+        let record = JournalRecord {
+            epoch: cursor.state.epoch + 1,
+            ops: build(&cursor.state),
+        };
+        let line = frame_record(&record)?;
+        if let Err(e) = self.append(w, &line) {
+            w.forget();
+            return Err(e);
+        }
+
+        let cursor = w.cursor.as_mut().expect("a synced writer holds a cursor");
+        cursor.state.apply_record(record);
+        cursor.journal_offset += line.len() as u64;
+        cursor.journal_records += 1;
+        let epoch = cursor.state.epoch;
+        let due = cursor.journal_records >= COMPACTION_FLOOR.max(cursor.state.live_rows());
+        w.last_epoch = epoch;
+        observe_work!(w.work, |work| work.records_appended += 1);
+
+        #[cfg(test)]
+        if let Err(e) = w.trip(CommitFault::AfterAppend) {
+            w.forget();
+            return Err(e);
+        }
+
+        // The record is committed; a failed compaction only leaves the current
+        // generation authoritative (its files are complete), so it never fails the
+        // publication.
+        if due {
+            if let Err(e) = self.compact(w) {
+                tracing::warn!(
+                    store = %self.workspace_dir.display(),
+                    error = %e,
+                    "carrier store compaction failed; the current generation stays authoritative"
+                );
+                w.forget();
+            }
+        }
+        Ok(epoch)
+    }
+
+    /// Bring the writer's fold up to the authoritative on-disk state: initialise a
+    /// store with no head, reload on a generation change (or a first commit), and
+    /// otherwise apply only the records appended since the last commit.
+    fn sync(&self, w: &mut WriterState) -> std::io::Result<()> {
+        let dir = &self.workspace_dir;
+        let Some(head) = read_head(dir)? else {
+            return self.initialize(w);
+        };
+        let current = w.cursor.as_ref().is_some_and(|c| c.follows(&head));
+        let end = if current {
+            let cursor = w.cursor.as_mut().expect("checked above");
+            match cursor.tail(dir, &mut w.work) {
+                Ok(end) => end,
+                // The journal shrank under us: refold from the base.
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => self.reload(w, &head)?,
+                Err(e) => return Err(e),
+            }
+        } else {
+            self.reload(w, &head)?
+        };
+        if end == TailEnd::Torn {
+            let cursor = w.cursor.as_ref().expect("synced");
+            let journal = std::fs::OpenOptions::new()
+                .write(true)
+                .open(cursor.journal_path(dir))?;
+            journal.set_len(cursor.journal_offset)?;
+            journal.sync_all()?;
+            w.journal = None;
+        }
+        Ok(())
+    }
+
+    fn reload(&self, w: &mut WriterState, head: &StoreHead) -> std::io::Result<TailEnd> {
+        w.forget();
+        let (cursor, end) =
+            StoreCursor::load(&self.workspace_dir, head, &mut w.work).map_err(|e| {
+                // Under the writer lock nothing retires a generation, so a missing
+                // base or journal is corruption, not a race.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "carrier store head names generation {} whose files are missing: {e}",
+                            head.generation
+                        ),
+                    )
+                } else {
+                    e
+                }
+            })?;
+        w.cursor = Some(cursor);
+        Ok(end)
+    }
+
+    /// Create a store: a fresh instance at generation 1 whose empty base sits at the
+    /// last committed epoch, an empty journal, then the head.
+    fn initialize(&self, w: &mut WriterState) -> std::io::Result<()> {
+        let dir = &self.workspace_dir;
+        let generation = 1;
+        let instance = mint_store_instance(dir);
+        let mut state = match std::fs::read(dir.join("manifest.json")) {
+            // A store written before the journal format holds its membership in
+            // `manifest.json` alone; fold it into the first base so no published
+            // source/provider row is lost. Unparseable fails the publish rather
+            // than silently erasing it.
+            Ok(bytes) => StoreState::from_manifest(
+                serde_json::from_slice::<Manifest>(&bytes).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("legacy carrier manifest is present but unparseable: {e}"),
+                    )
+                })?,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                StoreState::empty(w.last_epoch, self.host_version.clone())
+            }
+            Err(e) => return Err(e),
+        };
+        state.epoch = state.epoch.max(w.last_epoch);
+        self.write_generation(generation, &instance, &state)?;
+        w.forget();
+        w.cursor = Some(StoreCursor {
+            generation,
+            instance,
+            journal_offset: 0,
+            journal_records: 0,
+            state,
+        });
+        fsync_dir(dir);
+        Ok(())
+    }
+
+    /// Write `generation`'s base and empty journal, then swap the head to it.
+    fn write_generation(
+        &self,
+        generation: u64,
+        instance: &str,
+        state: &StoreState,
+    ) -> std::io::Result<()> {
+        let dir = &self.workspace_dir;
+        let base = serde_json::to_vec(&state.to_manifest()).map_err(std::io::Error::other)?;
+        write_atomic(dir, &dir.join(snapshot_file(generation)), &base)?;
+        self.after_snapshot_written()?;
+        write_atomic(dir, &dir.join(journal_file(generation)), b"")?;
+        self.after_journal_written()?;
+        let head = StoreHead {
+            format: STORE_FORMAT,
+            generation,
+            instance: instance.to_owned(),
+            host_version: self.host_version.clone(),
+        };
+        let head = serde_json::to_vec(&head).map_err(std::io::Error::other)?;
+        write_atomic(dir, &self.head_path(), &head)?;
+        fsync_dir(dir);
+        Ok(())
+    }
+
+    // The compaction fault seams read the armed fault without re-entering the
+    // writer guard: `compact` moves it into `compaction_fault` for the duration.
+    #[cfg(test)]
+    fn after_snapshot_written(&self) -> std::io::Result<()> {
+        compaction_fault::trip(CommitFault::CompactionAfterSnapshot)
+    }
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn after_snapshot_written(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+    #[cfg(test)]
+    fn after_journal_written(&self) -> std::io::Result<()> {
+        compaction_fault::trip(CommitFault::CompactionAfterJournal)
+    }
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn after_journal_written(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Append one framed record to the current journal and make it durable.
+    fn append(&self, w: &mut WriterState, line: &[u8]) -> std::io::Result<()> {
+        let generation = w.cursor.as_ref().expect("synced").generation;
+        if !matches!(&w.journal, Some((g, _)) if *g == generation) {
+            let path = self.workspace_dir.join(journal_file(generation));
+            let file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "carrier store journal {} cannot be opened: {e}",
+                            path.display()
+                        ),
+                    )
+                })?;
+            w.journal = Some((generation, file));
+        }
+        #[cfg(test)]
+        {
+            w.trip(CommitFault::BeforeAppend)?;
+            if let Some(CommitFault::TornAppend { bytes }) = w.fault {
+                w.fault = None;
+                let (_, file) = w.journal.as_mut().expect("opened above");
+                file.write_all(&line[..bytes.min(line.len())])?;
+                file.sync_data()?;
+                return Err(std::io::Error::other("injected commit fault at TornAppend"));
+            }
+        }
+        let (_, file) = w.journal.as_mut().expect("opened above");
+        file.write_all(line)?;
+        file.sync_data()
+    }
+
+    /// Fold the current journal into the next generation's base, swap the head to
+    /// it, and retire every generation older than the one just superseded (which a
+    /// reader that read the previous head may still be loading).
+    fn compact(&self, w: &mut WriterState) -> std::io::Result<()> {
+        let cursor = w.cursor.as_ref().expect("synced");
+        let previous = cursor.generation;
+        let next = previous + 1;
+        #[cfg(test)]
+        let _armed = compaction_fault::arm(&mut w.fault);
+        self.write_generation(next, &cursor.instance, &cursor.state)?;
+        #[cfg(test)]
+        compaction_fault::trip(CommitFault::CompactionAfterHead)?;
+
+        let cursor = w.cursor.as_mut().expect("synced");
+        observe_work!(w.work, |work| {
+            work.compactions += 1;
+            work.compaction_rows_written += cursor.state.live_rows();
+        });
+        cursor.generation = next;
+        cursor.journal_offset = 0;
+        cursor.journal_records = 0;
+        w.journal = None;
+
+        if let Ok(entries) = std::fs::read_dir(&self.workspace_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let retired = name
+                    .to_str()
+                    .and_then(parse_generation_file)
+                    .is_some_and(|generation| generation < previous);
+                if retired {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Two-phase publish for ONE project. Returns the NEW epoch.
@@ -596,14 +990,11 @@ impl CarrierPublishStore {
     /// content-addressed blob that already exists is skipped). NOTHING is advertised
     /// yet.
     ///
-    /// Commit step — atomically swap `manifest.json` (write `manifest.json.tmp` in
-    /// the SAME dir, then atomic-rename over `manifest.json`) advancing the monotonic
-    /// `epoch`, after rewriting this project's `owned_sources` and inserting a
-    /// `ready_files` entry for every file whose blob write succeeded in the write step.
-    ///
-    /// The manifest swap is the LAST write and is atomic, so a concurrent reader
-    /// sees either the old or new manifest — never a torn one — and every
-    /// `ready_files` entry the new manifest names has its blob on disk.
+    /// Commit step — append ONE journal record that reconciles this project's
+    /// `owned_sources` per [`OwnedSetScope`] and puts a `ready_files` entry for every
+    /// file whose blob write succeeded in the write step. The record is the commit
+    /// boundary: a reader applies it whole or not at all, and every `ready_files`
+    /// entry it names has its blob on disk.
     pub fn publish_batch(&self, batch: &PublishBatch) -> std::io::Result<u64> {
         let blobs_dir = self.blobs_dir();
         let maps_dir = self.maps_dir();
@@ -678,113 +1069,17 @@ impl CarrierPublishStore {
             ));
         }
 
-        // ── Commit step: rewrite the project entry + atomic manifest swap ──
-        // Serialized across threads (epoch atomicity + non-contending manifest
-        // persist on Windows). The write step above ran lock-free.
-        let _swap = self.manifest_lock.lock();
-        // FAIL-CLOSED: a present-but-corrupt / transiently-unreadable manifest
-        // propagates here rather than resetting to empty — so a commit can never
-        // clobber other projects' entries by reading a fresh empty manifest.
-        let mut manifest = self.read_manifest()?;
-        manifest.host_version = self.host_version.clone();
-        manifest.epoch += 1;
-        let new_epoch = manifest.epoch;
-        self.last_epoch.store(new_epoch, Ordering::Release);
-
-        let project = manifest
-            .projects
-            .entry(batch.project_uri.clone())
-            .or_default();
-        // Reconcile the owned set per the publish contract.
-        match batch.owned_scope {
-            // Authoritative: REWRITE the owned set (when the batch carries one — an
-            // empty owned set means "publish content only, keep the existing owned
-            // set"). The ready-files prune below drops any entry the new owned set
-            // no longer admits, so a deleted / no-longer-owned carrier stops being
-            // advertised.
-            OwnedSetScope::ProjectAuthoritative => {
-                if !batch.owned_sources.is_empty() {
-                    project.owned_sources = batch.owned_sources.clone();
-                }
-            }
-            // Per-source delta: UNION by `source_uri` — drop the prior rows for
-            // every source this batch carries, then append the batch's rows. Sibling
-            // carriers' rows stay intact (a single carrier's publish never retracts
-            // a sibling it does not know about).
-            OwnedSetScope::SourceDelta => {
-                if !batch.owned_sources.is_empty() {
-                    let touched: std::collections::HashSet<&str> = batch
-                        .owned_sources
-                        .iter()
-                        .map(|o| o.source_uri.as_str())
-                        .collect();
-                    // The provider URIs the touched sources advertised BEFORE this
-                    // delta. A companion identity change (the `.tsx` → `.jsx`
-                    // extension flip on a script-kind correction) must retract the
-                    // superseded ready entry: a stale entry stays resolvable
-                    // through `ready_files`, joins the tsserver Program, and
-                    // tsserver's output-file membership check then excludes the
-                    // current same-stem companion from the configured project.
-                    let prior_provider_uris: std::collections::HashSet<String> = project
-                        .owned_sources
-                        .iter()
-                        .filter(|o| touched.contains(o.source_uri.as_str()))
-                        .map(|o| o.provider_uri.clone())
-                        .collect();
-                    project
-                        .owned_sources
-                        .retain(|existing| !touched.contains(existing.source_uri.as_str()));
-                    project.owned_sources.extend(batch.owned_sources.clone());
-                    let current_provider_uris: std::collections::HashSet<&str> = project
-                        .owned_sources
-                        .iter()
-                        .map(|o| o.provider_uri.as_str())
-                        .collect();
-                    project.ready_files.retain(|provider_uri, _| {
-                        !prior_provider_uris.contains(provider_uri.as_str())
-                            || current_provider_uris.contains(provider_uri.as_str())
-                    });
-                }
-            }
-        }
-        // Merge the ready files (a provider_uri re-published advances to its new
-        // content/version; a provider_uri only in a prior publish is preserved).
-        for (provider_uri, entry) in ready_entries {
-            project.ready_files.insert(provider_uri, entry);
-        }
-        // PRUNE (authoritative publish only): a `ready_files` entry whose
-        // `provider_uri` is no longer in the authoritative owned set is no longer
-        // owned — remove it so `getExternalFiles` stops advertising the carrier of a
-        // deleted / no-owner / now-ambiguous source. A per-source delta does NOT
-        // prune (it does not carry the full owned set); sibling retraction is
-        // explicit via `retract_sources`.
-        if batch.owned_scope == OwnedSetScope::ProjectAuthoritative {
-            let owned_provider_uris: std::collections::HashSet<&str> = project
-                .owned_sources
-                .iter()
-                .map(|o| o.provider_uri.as_str())
-                .collect();
-            project
-                .ready_files
-                .retain(|provider_uri, _| owned_provider_uris.contains(provider_uri.as_str()));
-        }
-
-        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
-        write_atomic(&self.workspace_dir, &self.manifest_path(), &manifest_json)?;
-        // Best-effort fsync of the workspace dir so the manifest rename is durable
-        // (no-op on platforms without dir fsync).
-        fsync_dir(&self.workspace_dir);
-
-        Ok(new_epoch)
+        // ── Commit step: resolve the reconciliation into row ops, append them ──
+        self.commit(|state| reconcile_publish_ops(state, batch, ready_entries))
     }
 
     /// Retract one or more SOURCE carriers from a project — the
     /// delete / no-owner / now-ambiguous transition.
     ///
-    /// Removes every `owned_sources` row AND every `ready_files` entry whose
-    /// `source_uri` is in `source_uris`, then atomically swaps the manifest
-    /// (advancing the epoch). After this, `getExternalFiles` no longer advertises
-    /// the retracted carrier's companions. A source not present is a no-op for that
+    /// Removes every `owned_sources` row of the named sources and the `ready_files`
+    /// entry of every provider those rows named, in one committed record (advancing
+    /// the epoch). After this, `getExternalFiles` no longer advertises the
+    /// retracted carrier's companions. A source not present is a no-op for that
     /// source. Returns the new epoch (always advanced, so the plugin re-reads even
     /// for a pure retraction). Blobs are NOT deleted (content-addressed; GC is a
     /// separate sweep) — only the pointer set shrinks.
@@ -793,71 +1088,34 @@ impl CarrierPublishStore {
     /// a per-source publish adds/refreshes its own rows and never prunes siblings,
     /// so a sibling that leaves the project is retracted HERE rather than implied.
     pub fn retract_sources(&self, project_uri: &str, source_uris: &[&str]) -> std::io::Result<u64> {
-        std::fs::create_dir_all(&self.workspace_dir)?;
-        let _swap = self.manifest_lock.lock();
-        let mut manifest = self.read_manifest()?;
-        manifest.host_version = self.host_version.clone();
-        manifest.epoch += 1;
-        let new_epoch = manifest.epoch;
-        self.last_epoch.store(new_epoch, Ordering::Release);
-
-        if let Some(project) = manifest.projects.get_mut(project_uri) {
-            let retract: std::collections::HashSet<&str> = source_uris.iter().copied().collect();
-            // The provider_uris belonging to the retracted sources (drawn from the
-            // owned rows about to be removed) — these are the `ready_files` keys to
-            // drop.
-            let retract_provider_uris: std::collections::HashSet<String> = project
-                .owned_sources
-                .iter()
-                .filter(|o| retract.contains(o.source_uri.as_str()))
-                .map(|o| o.provider_uri.clone())
-                .collect();
-            project
-                .owned_sources
-                .retain(|o| !retract.contains(o.source_uri.as_str()));
-            project
-                .ready_files
-                .retain(|provider_uri, _| !retract_provider_uris.contains(provider_uri));
-        }
-
-        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
-        write_atomic(&self.workspace_dir, &self.manifest_path(), &manifest_json)?;
-        fsync_dir(&self.workspace_dir);
-        Ok(new_epoch)
+        self.commit(|state| {
+            let mut ops = Vec::new();
+            if let Some(project) = state.projects.get(project_uri) {
+                let mut seen = std::collections::HashSet::new();
+                for source_uri in source_uris {
+                    if seen.insert(*source_uri) {
+                        retract_source_ops(project_uri, project, source_uri, &mut ops);
+                    }
+                }
+            }
+            ops
+        })
     }
 
     /// Retract a SOURCE carrier from EVERY project that owns it — the
     /// delete / owner-no-longer-resolvable transition where the prior owning project
     /// is not known (a deleted carrier's owner can no longer be resolved). Removes
-    /// the source's owned rows + advertised companions from every project entry, then
-    /// atomically swaps the manifest. A no-op (still epoch-advancing) when no project
-    /// owns the source.
+    /// the source's owned rows + advertised companions from every project entry in
+    /// one committed record. A no-op (still epoch-advancing) when no project owns
+    /// the source.
     pub fn retract_source_from_all_projects(&self, source_uri: &str) -> std::io::Result<u64> {
-        std::fs::create_dir_all(&self.workspace_dir)?;
-        let _swap = self.manifest_lock.lock();
-        let mut manifest = self.read_manifest()?;
-        manifest.host_version = self.host_version.clone();
-        manifest.epoch += 1;
-        let new_epoch = manifest.epoch;
-        self.last_epoch.store(new_epoch, Ordering::Release);
-
-        for project in manifest.projects.values_mut() {
-            let retract_provider_uris: std::collections::HashSet<String> = project
-                .owned_sources
-                .iter()
-                .filter(|o| o.source_uri == source_uri)
-                .map(|o| o.provider_uri.clone())
-                .collect();
-            project.owned_sources.retain(|o| o.source_uri != source_uri);
-            project
-                .ready_files
-                .retain(|provider_uri, _| !retract_provider_uris.contains(provider_uri));
-        }
-
-        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
-        write_atomic(&self.workspace_dir, &self.manifest_path(), &manifest_json)?;
-        fsync_dir(&self.workspace_dir);
-        Ok(new_epoch)
+        self.commit(|state| {
+            let mut ops = Vec::new();
+            for (project_uri, project) in &state.projects {
+                retract_source_ops(project_uri, project, source_uri, &mut ops);
+            }
+            ops
+        })
     }
 
     /// Retract a SOURCE carrier from every project that owns it EXCEPT
@@ -866,58 +1124,335 @@ impl CarrierPublishStore {
     /// (union, never prune), so it leaves the source's stale rows in its OLD
     /// project. This removes the source's owned rows + advertised companions from
     /// every OTHER project (so the old project's `getExternalFiles` stops serving
-    /// it) while leaving the new owning project's freshly-published rows intact.
-    /// Atomically swaps the manifest (advancing the epoch). A no-op (still
-    /// epoch-advancing) when no other project owns the source.
+    /// it) while leaving the new owning project's freshly-published rows intact,
+    /// in one committed record. A no-op (still epoch-advancing) when no other
+    /// project owns the source.
     pub fn retract_source_from_all_projects_except(
         &self,
         source_uri: &str,
         keep_project_uri: &str,
     ) -> std::io::Result<u64> {
-        std::fs::create_dir_all(&self.workspace_dir)?;
-        let _swap = self.manifest_lock.lock();
-        let mut manifest = self.read_manifest()?;
-        manifest.host_version = self.host_version.clone();
-        manifest.epoch += 1;
-        let new_epoch = manifest.epoch;
-        self.last_epoch.store(new_epoch, Ordering::Release);
-
-        for (project_uri, project) in manifest.projects.iter_mut() {
-            // Leave the new owning project's just-published rows intact.
-            if project_uri == keep_project_uri {
-                continue;
+        self.commit(|state| {
+            let mut ops = Vec::new();
+            for (project_uri, project) in &state.projects {
+                // Leave the new owning project's just-published rows intact.
+                if project_uri != keep_project_uri {
+                    retract_source_ops(project_uri, project, source_uri, &mut ops);
+                }
             }
-            let retract_provider_uris: std::collections::HashSet<String> = project
-                .owned_sources
-                .iter()
-                .filter(|o| o.source_uri == source_uri)
-                .map(|o| o.provider_uri.clone())
-                .collect();
-            project.owned_sources.retain(|o| o.source_uri != source_uri);
-            project
-                .ready_files
-                .retain(|provider_uri, _| !retract_provider_uris.contains(provider_uri));
-        }
+            ops
+        })
+    }
 
-        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
-        write_atomic(&self.workspace_dir, &self.manifest_path(), &manifest_json)?;
-        fsync_dir(&self.workspace_dir);
-        Ok(new_epoch)
+    /// Read the published state from disk STRICTLY: `Ok(None)` only when the store
+    /// has never committed (no head), and an error for an unreadable or corrupt
+    /// head, base or journal. A torn journal tail (an append in flight or
+    /// interrupted) is not applied. Loads the authoritative generation from
+    /// scratch; an incremental follower is [`PublishedStoreReader`].
+    pub fn read_published(&self) -> std::io::Result<Option<Manifest>> {
+        let mut work = ObservedWork::default();
+        Ok(load_published(&self.workspace_dir, &mut work)?.map(|c| c.state.to_manifest()))
     }
 
     /// Read the current manifest from disk for DIAGNOSTICS / the plugin-equivalent
     /// reader (a fresh default when none exists OR is unreadable).
     ///
-    /// Unlike the publish path's [`Self::read_manifest`] — which must fail closed so
-    /// a corrupt manifest never clobbers other projects on the next commit — this
-    /// read-only view tolerates a corrupt manifest by reporting a fresh empty one
-    /// (it never WRITES, so there is nothing to clobber; surfacing "empty" is the
-    /// correct diagnostics behaviour for an unreadable manifest).
+    /// Unlike the commit path — which must fail closed so a corrupt store never
+    /// clobbers other projects on the next commit — this read-only view tolerates a
+    /// corrupt store by reporting a fresh empty manifest (it never WRITES, so there
+    /// is nothing to clobber; surfacing "empty" is the correct diagnostics
+    /// behaviour for an unreadable store). Use [`Self::read_published`] where an
+    /// unreadable store must not read as "nothing published".
     #[must_use]
     pub fn current_manifest(&self) -> Manifest {
-        self.read_manifest()
-            .unwrap_or_else(|_| self.fresh_manifest())
+        self.read_published()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.fresh_manifest())
     }
+}
+
+/// Resolve one publish batch into row ops against the folded state — the single
+/// owner of the owned-set reconciliation contract ([`OwnedSetScope`]).
+fn reconcile_publish_ops(
+    state: &StoreState,
+    batch: &PublishBatch,
+    ready_entries: Vec<(String, ReadyFile)>,
+) -> Vec<JournalOp> {
+    let project_uri = batch.project_uri.as_str();
+    let mut ops = Vec::new();
+    let empty = journal::ProjectState::default();
+    let project = match state.projects.get(project_uri) {
+        Some(project) => project,
+        None => {
+            ops.push(JournalOp::ProjectPut {
+                project: project_uri.to_owned(),
+            });
+            &empty
+        }
+    };
+    let groups = group_by_source(&batch.owned_sources);
+    match batch.owned_scope {
+        // Authoritative: REWRITE the owned set (when the batch carries one — an
+        // empty owned set means "publish content only, keep the existing owned
+        // set"), then PRUNE every ready entry the resulting owned set no longer
+        // admits, so a deleted / no-longer-owned carrier stops being advertised.
+        OwnedSetScope::ProjectAuthoritative => {
+            let owned_after: std::collections::HashSet<&str> = if groups.is_empty() {
+                project.owned_providers().collect()
+            } else {
+                ops.push(JournalOp::OwnedClear {
+                    project: project_uri.to_owned(),
+                });
+                batch
+                    .owned_sources
+                    .iter()
+                    .map(|o| o.provider_uri.as_str())
+                    .collect()
+            };
+            let republished: std::collections::HashSet<&str> =
+                ready_entries.iter().map(|(p, _)| p.as_str()).collect();
+            let prune: Vec<String> = project
+                .ready
+                .keys()
+                .filter(|p| !owned_after.contains(p.as_str()) && !republished.contains(p.as_str()))
+                .cloned()
+                .collect();
+            for (source_uri, rows) in groups {
+                ops.push(JournalOp::OwnedPut {
+                    project: project_uri.to_owned(),
+                    source_uri,
+                    rows,
+                });
+            }
+            for provider_uri in prune {
+                ops.push(JournalOp::ReadyDel {
+                    project: project_uri.to_owned(),
+                    provider_uri,
+                });
+            }
+            for (provider_uri, file) in ready_entries {
+                if owned_after.contains(provider_uri.as_str()) {
+                    ops.push(JournalOp::ReadyPut {
+                        project: project_uri.to_owned(),
+                        provider_uri,
+                        file,
+                    });
+                } else if project.ready.contains_key(&provider_uri) {
+                    ops.push(JournalOp::ReadyDel {
+                        project: project_uri.to_owned(),
+                        provider_uri,
+                    });
+                }
+            }
+        }
+        // Per-source delta: replace the rows of every source this batch carries;
+        // sibling carriers' rows stay intact (a single carrier's publish never
+        // retracts a sibling it does not know about). A companion identity change
+        // (the `.tsx` → `.jsx` extension flip on a script-kind correction) must
+        // retract the superseded ready entry: a stale entry stays resolvable
+        // through `ready_files`, joins the tsserver Program, and tsserver's
+        // output-file membership check then excludes the current same-stem
+        // companion from the configured project.
+        OwnedSetScope::SourceDelta => {
+            let mut superseded: Vec<String> = Vec::new();
+            if !groups.is_empty() {
+                let batch_providers: std::collections::HashSet<&str> = batch
+                    .owned_sources
+                    .iter()
+                    .map(|o| o.provider_uri.as_str())
+                    .collect();
+                // Owned-row references each prior provider loses with the touched
+                // sources' old rows.
+                let mut lost: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::new();
+                for (source_uri, _) in &groups {
+                    for row in project.owned_rows_of(source_uri).unwrap_or_default() {
+                        *lost.entry(row.provider_uri.as_str()).or_default() += 1;
+                    }
+                }
+                for (provider_uri, lost) in lost {
+                    let still_owned = batch_providers.contains(provider_uri)
+                        || project.owned_ref_count(provider_uri) > lost;
+                    if !still_owned && project.ready.contains_key(provider_uri) {
+                        superseded.push(provider_uri.to_owned());
+                    }
+                }
+                superseded.sort();
+            }
+            for (source_uri, rows) in groups {
+                ops.push(JournalOp::OwnedPut {
+                    project: project_uri.to_owned(),
+                    source_uri,
+                    rows,
+                });
+            }
+            for provider_uri in superseded {
+                ops.push(JournalOp::ReadyDel {
+                    project: project_uri.to_owned(),
+                    provider_uri,
+                });
+            }
+            for (provider_uri, file) in ready_entries {
+                ops.push(JournalOp::ReadyPut {
+                    project: project_uri.to_owned(),
+                    provider_uri,
+                    file,
+                });
+            }
+        }
+    }
+    ops
+}
+
+/// The test-only compaction fault slot: `compact` moves the writer's armed fault
+/// here for the duration of the generation write, so the write's step seams can
+/// consume it without re-entering the writer guard.
+#[cfg(test)]
+mod compaction_fault {
+    use super::CommitFault;
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<Option<CommitFault>> = const { Cell::new(None) };
+    }
+
+    /// Restores an unconsumed fault to the writer slot on drop.
+    pub(super) struct Armed<'a>(&'a mut Option<CommitFault>);
+
+    impl Drop for Armed<'_> {
+        fn drop(&mut self) {
+            *self.0 = ARMED.with(Cell::take);
+        }
+    }
+
+    pub(super) fn arm(slot: &mut Option<CommitFault>) -> Armed<'_> {
+        ARMED.with(|armed| armed.set(slot.take()));
+        Armed(slot)
+    }
+
+    pub(super) fn trip(at: CommitFault) -> std::io::Result<()> {
+        ARMED.with(|armed| {
+            if armed.get() == Some(at) {
+                armed.set(None);
+                return Err(std::io::Error::other(format!(
+                    "injected commit fault at {at:?}"
+                )));
+            }
+            Ok(())
+        })
+    }
+}
+
+/// An incremental follower of a store's published state — the Rust mirror of the
+/// Node plugin's disk reader. [`Self::refresh`] reads the small head, then only the
+/// journal bytes appended since the last refresh; it reloads a base only when a
+/// compaction changed the generation. Never writes.
+#[derive(Debug)]
+pub struct PublishedStoreReader {
+    dir: PathBuf,
+    cursor: Option<StoreCursor>,
+    work: ObservedWork,
+}
+
+impl PublishedStoreReader {
+    /// Follow the store at `dir` (a [`CarrierPublishStore::workspace_dir`]).
+    #[must_use]
+    pub fn open(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            cursor: None,
+            work: ObservedWork::default(),
+        }
+    }
+
+    /// Apply everything committed since the last refresh. On an error the
+    /// previously folded state is kept (fail closed: last good, never torn).
+    pub fn refresh(&mut self) -> std::io::Result<()> {
+        let Some(head) = read_head(&self.dir)? else {
+            self.cursor = None;
+            return Ok(());
+        };
+        if let Some(cursor) = self.cursor.as_mut() {
+            if cursor.follows(&head) {
+                // Records already applied before a failure are committed records;
+                // the cursor stays at the last one that verified.
+                match cursor.tail(&self.dir, &mut self.work) {
+                    Ok(_) => return Ok(()),
+                    Err(e)
+                        if !matches!(
+                            e.kind(),
+                            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::NotFound
+                        ) =>
+                    {
+                        return Err(e)
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        if let Some(cursor) = load_published(&self.dir, &mut self.work)? {
+            self.cursor = Some(cursor);
+        }
+        Ok(())
+    }
+
+    /// The folded published state, or `None` before anything was published.
+    #[must_use]
+    pub fn manifest(&self) -> Option<Manifest> {
+        self.cursor.as_ref().map(|c| c.state.to_manifest())
+    }
+
+    /// The folded epoch, or `None` before anything was published.
+    #[must_use]
+    pub fn epoch(&self) -> Option<u64> {
+        self.cursor.as_ref().map(|c| c.state.epoch)
+    }
+
+    /// The deterministic work this reader performed so far. OPTIONAL measurement
+    /// state (test and `semantic-observe` builds only).
+    #[cfg(any(test, feature = "semantic-observe"))]
+    #[must_use]
+    pub fn work(&self) -> StoreWork {
+        self.work
+    }
+}
+
+/// A store-instance identity: unique per creation (process, clock and a
+/// process-local counter), hashed with the store dir.
+fn mint_store_instance(dir: &Path) -> String {
+    static CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seed = format!(
+        "{}|{}|{nanos}|{}",
+        dir.display(),
+        std::process::id(),
+        CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let digest = blake3::hash(seed.as_bytes());
+    let mut h16 = [0u8; 16];
+    h16.copy_from_slice(&digest.as_bytes()[..16]);
+    hex16(&h16)
+}
+
+/// Seed `dir` as a published store whose generation 1 base is `manifest` (with an
+/// empty journal) — for tests that drive a real reader against a fixture store.
+#[cfg(test)]
+pub(crate) fn seed_published_store(dir: &Path, manifest: &Manifest) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let base = serde_json::to_vec(manifest).map_err(std::io::Error::other)?;
+    write_atomic(dir, &dir.join(snapshot_file(1)), &base)?;
+    write_atomic(dir, &dir.join(journal_file(1)), b"")?;
+    let head = StoreHead {
+        format: STORE_FORMAT,
+        generation: 1,
+        instance: "seeded".to_owned(),
+        host_version: manifest.host_version.clone(),
+    };
+    let head = serde_json::to_vec(&head).map_err(std::io::Error::other)?;
+    write_atomic(dir, &dir.join(HEAD_FILE), &head)
 }
 
 /// Render a 16-byte hash as lowercase hex (no prefix) — the manifest
@@ -950,9 +1485,9 @@ fn write_atomic(dir: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Result<
 
     // Atomic replace-over-existing. On Windows `ReplaceFile`/`MoveFileEx` can
     // transiently fail with `PermissionDenied` (or a sharing violation) if another
-    // process is momentarily holding the target — the in-process publish path
-    // serializes this under `manifest_lock`, but a second store instance / process
-    // could still contend. A short bounded retry (NEVER a busy-spin, NEVER
+    // process is momentarily holding the target — the in-process commit path
+    // serializes under the writer guard and `writer.lock`, but a reader process
+    // holding the target open can still contend. A short bounded retry (NEVER a busy-spin, NEVER
     // unbounded) absorbs that transient; an `AlreadyExists`/genuine error after the
     // retries surfaces. The temp file is preserved across retries (persist returns
     // it on failure).
@@ -990,3 +1525,7 @@ fn fsync_dir(dir: &Path) {
 #[cfg(test)]
 #[path = "carrier_publish_store_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "carrier_publish_journal_tests.rs"]
+mod journal_tests;

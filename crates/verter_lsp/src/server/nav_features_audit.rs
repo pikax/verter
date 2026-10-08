@@ -244,7 +244,7 @@ pub(super) async fn handle_rename_with_audit(
             Some(position),
             async move {
                 server
-                    .answer_repaired_foreground(
+                    .answer_repaired_edit_foreground(
                         crate::documents::ForegroundRoute::Rename,
                         &uri,
                         handle_rename(server, params),
@@ -252,25 +252,37 @@ pub(super) async fn handle_rename_with_audit(
                     .await
             },
             |payload, value| {
-                let edit_count = value
-                    .as_ref()
-                    .and_then(|w| w.changes.as_ref())
-                    .map(|m| m.values().map(Vec::len).sum::<usize>())
-                    .unwrap_or(0);
+                let edit_count = value.as_ref().map_or(0, workspace_edit_count);
                 payload.response_size_bytes =
                     u32::try_from(edit_count.saturating_mul(96)).unwrap_or(u32::MAX);
             },
         ),
         |value| {
-            let edit_count = value
-                .as_ref()
-                .and_then(|w| w.changes.as_ref())
-                .map(|m| m.values().map(Vec::len).sum::<usize>())
-                .unwrap_or(0);
+            let edit_count = value.as_ref().map_or(0, workspace_edit_count);
             u32::try_from(edit_count.saturating_mul(96)).unwrap_or(u32::MAX)
         },
     )
     .await
+}
+
+/// Text edits a rename answer carries, in either delivery shape.
+fn workspace_edit_count(edit: &WorkspaceEdit) -> usize {
+    let changes = edit
+        .changes
+        .as_ref()
+        .map_or(0, |changes| changes.values().map(Vec::len).sum::<usize>());
+    let document_changes = match &edit.document_changes {
+        Some(DocumentChanges::Edits(edits)) => edits.iter().map(|edit| edit.edits.len()).sum(),
+        Some(DocumentChanges::Operations(operations)) => operations
+            .iter()
+            .map(|operation| match operation {
+                DocumentChangeOperation::Edit(edit) => edit.edits.len(),
+                DocumentChangeOperation::Op(_) => 0,
+            })
+            .sum(),
+        None => 0,
+    };
+    changes + document_changes
 }
 
 fn hover_response_size(hover: Option<&Hover>) -> u32 {

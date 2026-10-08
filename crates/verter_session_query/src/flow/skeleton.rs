@@ -736,9 +736,55 @@ impl SkeletonNameIndex {
         }
     }
 
+    /// What the index holds right now, read from its tables: the names it
+    /// maps, the binding entries it lists, and the backing storage of its
+    /// map (by capacity) and its two arrays. The interned names themselves
+    /// are the skeleton's name table's, not counted here.
+    #[must_use]
+    pub fn occupancy(&self) -> SkeletonNameIndexOccupancy {
+        SkeletonNameIndexOccupancy {
+            names: self.ids.len(),
+            bindings: self.bindings.len(),
+            backing_bytes: self.ids.capacity() * std::mem::size_of::<(Arc<str>, FlowNameId)>()
+                + std::mem::size_of_val(&*self.offsets)
+                + std::mem::size_of_val(&*self.bindings),
+        }
+    }
+
+    /// An identity of the index's storage, equal for two clones sharing it
+    /// while either is alive, so a reader summing the indexes it retains
+    /// counts each once.
+    #[must_use]
+    pub fn storage_identity(&self) -> usize {
+        Arc::as_ptr(&self.ids).cast::<()>() as usize
+    }
+
     /// Record a name interned after the index was built.
     fn insert(&mut self, text: Arc<str>, id: FlowNameId) {
         Arc::make_mut(&mut self.ids).insert(text, id);
+    }
+}
+
+/// What one [`SkeletonNameIndex`] holds: a production occupancy count,
+/// available in every build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SkeletonNameIndexOccupancy {
+    /// Names the index maps to their ids.
+    pub names: usize,
+    /// Binding entries listed under their names.
+    pub bindings: usize,
+    /// Backing storage of the name map (by capacity) and the offset and
+    /// binding arrays, in bytes.
+    pub backing_bytes: usize,
+}
+
+impl SkeletonNameIndexOccupancy {
+    /// Add `other`'s counts to these: the occupancy of two distinct
+    /// indexes.
+    pub fn accumulate(&mut self, other: &Self) {
+        self.names += other.names;
+        self.bindings += other.bindings;
+        self.backing_bytes += other.backing_bytes;
     }
 }
 
