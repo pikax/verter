@@ -6,6 +6,10 @@
 verter_compiler/src/ide/script/comp_emit.rs collect_binding_pattern_names
 verter_compiler/src/ide/script/detectors.rs detect_gci_in_expr
 verter_compiler/src/ide/script/detectors.rs detect_gci_in_stmt
+verter_compiler/src/ide/template/flow_check/builder.rs chain
+verter_compiler/src/ide/template/flow_check/builder.rs is_reference_path
+verter_compiler/src/ide/template/flow_check/builder.rs pattern
+verter_compiler/src/ide/template/flow_check/builder.rs visit_expression
 verter_compiler/src/ide/vue_projection/binder_capture.rs leftmost_expression_identifier
 verter_compiler/src/ide/vue_projection/binder_capture.rs leftmost_type_name
 verter_compiler/src/ide/vue_projection/binding_views.rs pattern_names
@@ -148,7 +152,6 @@ verter_semantic/src/analysis/flow/value_descent.rs sequence_value_takes_call_rai
 verter_semantic/src/analysis/flow/value_descent.rs value_composes_unmodeled_call
 verter_semantic/src/analysis/flow/value_descent.rs value_is_unmodeled_call
 verter_semantic/src/analysis/framework_facts/svelte.rs collect_props_local_bindings
-verter_semantic/src/analysis/function_program.rs discover_namespaced_statement
 verter_semantic/src/analysis/function_program.rs record_pattern
 verter_semantic/src/analysis/function_program.rs visit_expression
 verter_semantic/src/analysis/function_program_access.rs collect_default_target

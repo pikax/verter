@@ -667,6 +667,125 @@ pub struct FunctionBodySkeleton {
     /// tables; a consumer asking which sites, writes or bindings a span
     /// contains, or which reads follow it, asks this index.
     pub span_index: SkeletonSpanIndex,
+    /// The name lookup over [`Self::names`] and [`Self::bindings`]:
+    /// [`SkeletonNameIndex::build`] derives it from the two tables when
+    /// the skeleton is assembled.
+    pub name_index: SkeletonNameIndex,
+}
+
+/// Each interned name's id and the bindings that declare it, so a name
+/// resolves by lookup rather than by a scan of the name or binding table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, NoTypeExpr)]
+pub struct SkeletonNameIndex {
+    ids: Arc<rustc_hash::FxHashMap<Arc<str>, FlowNameId>>,
+    /// The bindings of each name, in declaration order: those of name `n`
+    /// are `bindings[offsets[n]..offsets[n + 1]]`. A name interned after
+    /// the index was built declares none.
+    offsets: Arc<[u32]>,
+    bindings: Arc<[SkeletonBindingId]>,
+}
+
+impl SkeletonNameIndex {
+    /// Index `names` and the bindings declaring each.
+    #[must_use]
+    pub fn build(names: &[Arc<str>], bindings: &[SkeletonBinding]) -> Self {
+        let ids = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (Arc::clone(name), FlowNameId(index as u32)))
+            .collect();
+        let mut offsets = vec![0u32; names.len() + 1];
+        for binding in bindings {
+            if let Some(count) = offsets.get_mut(binding.name.index() + 1) {
+                *count += 1;
+            }
+        }
+        for index in 1..offsets.len() {
+            offsets[index] += offsets[index - 1];
+        }
+        let mut next = offsets.clone();
+        let mut by_name = vec![SkeletonBindingId(0); offsets[names.len()] as usize];
+        for (index, binding) in bindings.iter().enumerate() {
+            if let Some(at) = next[..names.len()].get_mut(binding.name.index()) {
+                by_name[*at as usize] = SkeletonBindingId::from_index(index as u32);
+                *at += 1;
+            }
+        }
+        Self {
+            ids: Arc::new(ids),
+            offsets: offsets.into(),
+            bindings: by_name.into(),
+        }
+    }
+
+    /// The id of `text`, when interned.
+    #[must_use]
+    pub fn id(&self, text: &str) -> Option<FlowNameId> {
+        self.ids.get(text).copied()
+    }
+
+    /// The bindings declaring `name`, in declaration order.
+    #[must_use]
+    pub fn bindings_of(&self, name: FlowNameId) -> &[SkeletonBindingId] {
+        match (
+            self.offsets.get(name.index()),
+            self.offsets.get(name.index() + 1),
+        ) {
+            (Some(start), Some(end)) => &self.bindings[*start as usize..*end as usize],
+            _ => &[],
+        }
+    }
+
+    /// What the index holds right now, read from its tables: the names it
+    /// maps, the binding entries it lists, and the backing storage of its
+    /// map (by capacity) and its two arrays. The interned names themselves
+    /// are the skeleton's name table's, not counted here.
+    #[must_use]
+    pub fn occupancy(&self) -> SkeletonNameIndexOccupancy {
+        SkeletonNameIndexOccupancy {
+            names: self.ids.len(),
+            bindings: self.bindings.len(),
+            backing_bytes: self.ids.capacity() * std::mem::size_of::<(Arc<str>, FlowNameId)>()
+                + std::mem::size_of_val(&*self.offsets)
+                + std::mem::size_of_val(&*self.bindings),
+        }
+    }
+
+    /// An identity of the index's storage, equal for two clones sharing it
+    /// while either is alive, so a reader summing the indexes it retains
+    /// counts each once.
+    #[must_use]
+    pub fn storage_identity(&self) -> usize {
+        Arc::as_ptr(&self.ids).cast::<()>() as usize
+    }
+
+    /// Record a name interned after the index was built.
+    fn insert(&mut self, text: Arc<str>, id: FlowNameId) {
+        Arc::make_mut(&mut self.ids).insert(text, id);
+    }
+}
+
+/// What one [`SkeletonNameIndex`] holds: a production occupancy count,
+/// available in every build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SkeletonNameIndexOccupancy {
+    /// Names the index maps to their ids.
+    pub names: usize,
+    /// Binding entries listed under their names.
+    pub bindings: usize,
+    /// Backing storage of the name map (by capacity) and the offset and
+    /// binding arrays, in bytes.
+    pub backing_bytes: usize,
+}
+
+impl SkeletonNameIndexOccupancy {
+    /// Add `other`'s counts to these: the occupancy of two distinct
+    /// indexes.
+    pub fn accumulate(&mut self, other: &Self) {
+        self.names += other.names;
+        self.bindings += other.bindings;
+        self.backing_bytes += other.backing_bytes;
+    }
 }
 
 /// The authored kind of one function body — the `async` and `generator`
@@ -690,20 +809,12 @@ impl FunctionBodySkeleton {
     /// The id of an interned name, when present.
     #[must_use]
     pub fn name_id(&self, text: &str) -> Option<FlowNameId> {
-        self.names
-            .iter()
-            .position(|candidate| candidate.as_ref() == text)
-            .and_then(|index| u32::try_from(index).ok())
-            .map(FlowNameId)
+        self.name_index.id(text)
     }
 
     /// Every binding of `name` in this frame, in declaration order.
     pub fn bindings_named(&self, name: FlowNameId) -> impl Iterator<Item = SkeletonBindingId> + '_ {
-        self.bindings
-            .iter()
-            .enumerate()
-            .filter(move |(_, binding)| binding.name == name)
-            .filter_map(|(index, _)| u32::try_from(index).ok().map(SkeletonBindingId))
+        self.name_index.bindings_of(name).iter().copied()
     }
 
     /// The region record for `id`.
@@ -781,15 +892,14 @@ impl FunctionBodySkeleton {
         name: FlowNameId,
         region: SkeletonRegionId,
     ) -> Vec<SkeletonBindingId> {
+        let named = self.name_index.bindings_of(name);
         let mut current = Some(region);
         while let Some(enclosing) = current {
             let mut hits: Vec<SkeletonBindingId> = Vec::new();
-            for (index, binding) in self.bindings.iter().enumerate() {
-                if binding.name == name
-                    && binding.region == enclosing
-                    && binding.kind.declares_value()
-                {
-                    hits.push(SkeletonBindingId::from_index(index as u32));
+            for &id in named {
+                let binding = self.binding(id);
+                if binding.region == enclosing && binding.kind.declares_value() {
+                    hits.push(id);
                 }
             }
             if !hits.is_empty() {
@@ -847,12 +957,12 @@ impl FunctionBodySkeleton {
         region: SkeletonRegionId,
         meaning: NameMeaning,
     ) -> bool {
+        let named = self.name_index.bindings_of(name);
         let mut current = Some(region);
         while let Some(enclosing) = current {
-            if self.bindings.iter().any(|binding| {
-                binding.name == name
-                    && binding.region == enclosing
-                    && binding.kind.declares(meaning)
+            if named.iter().any(|id| {
+                let binding = self.binding(*id);
+                binding.region == enclosing && binding.kind.declares(meaning)
             }) {
                 return true;
             }
@@ -875,20 +985,20 @@ impl FunctionBodySkeleton {
     /// function-scope read of that name resolves to whatever encloses the
     /// frame — never to the block's function.
     fn hoisting_bindings_of_name(&self, name: FlowNameId) -> Vec<SkeletonBindingId> {
-        self.bindings
+        self.name_index
+            .bindings_of(name)
             .iter()
-            .enumerate()
-            .filter(|(_, binding)| {
-                binding.name == name
-                    && match binding.kind {
-                        SkeletonBindingKind::Var => true,
-                        SkeletonBindingKind::NestedFunction => {
-                            self.regions[binding.region.index()].parent.is_none()
-                        }
-                        _ => false,
+            .copied()
+            .filter(|id| {
+                let binding = self.binding(*id);
+                match binding.kind {
+                    SkeletonBindingKind::Var => true,
+                    SkeletonBindingKind::NestedFunction => {
+                        self.regions[binding.region.index()].parent.is_none()
                     }
+                    _ => false,
+                }
             })
-            .map(|(index, _)| SkeletonBindingId::from_index(index as u32))
             .collect()
     }
 }
@@ -1009,7 +1119,7 @@ fn attach_declaration_closures(
     };
     let mut attachments: Vec<(usize, SkeletonBindingId)> = Vec::new();
     for (index, site) in skeleton.expr_sites.iter().enumerate() {
-        let mut seen: Vec<SkeletonBindingId> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<SkeletonBindingId> = rustc_hash::FxHashSet::default();
         let referenced = site
             .reads
             .iter()
@@ -1017,43 +1127,117 @@ fn attach_declaration_closures(
             .chain(site.calls.iter().filter_map(|call| call.binding.as_ref()));
         for binding in referenced {
             if let Some(local) = declaration_of(binding) {
-                if !seen.contains(&local) {
-                    seen.push(local);
+                if seen.insert(local) {
                     attachments.push((index, local));
                 }
             }
         }
     }
-    for (index, local) in attachments {
-        // The declaration's own capture record: the nested callable whose
-        // span holds the declared name.
-        let name = skeleton.bindings[local.index()].span.to_absolute(anchor);
-        let Some(captures) = entry
-            .nested_captures()
-            .iter()
-            .find(|child| child.span.start <= name.start && child.span.end >= name.end)
-        else {
-            continue;
-        };
+    if attachments.is_empty() {
+        return Ok(());
+    }
+    // The nested callables, by start: siblings never overlap, so the one
+    // holding a declared name is the last starting at or before it.
+    let mut nested: Vec<_> = entry.nested_captures().collect();
+    nested.sort_by_key(|child| child.span().start);
+    let mut names = SkeletonNameTable::of(skeleton);
+    // Each declaration's closure, built once however many sites read it.
+    let mut closures: rustc_hash::FxHashMap<SkeletonBindingId, Option<DeclarationClosure>> =
+        rustc_hash::FxHashMap::default();
+    let mut sites = skeleton.expr_sites.to_vec();
+    let mut attachments = attachments.into_iter().peekable();
+    while let Some(&(index, _)) = attachments.peek() {
+        let site = &mut sites[index];
+        let mut capture_bindings = site.capture_bindings.to_vec();
+        let mut bound: rustc_hash::FxHashSet<FlowBindingRef> =
+            capture_bindings.iter().cloned().collect();
+        let mut captures = site.captures.to_vec();
+        let mut captured: rustc_hash::FxHashSet<FlowNameId> = captures.iter().copied().collect();
+        let mut site_closures = site.closures.to_vec();
+        let mut reads = site.reads.to_vec();
+        while let Some((_, local)) = attachments.next_if(|(at, _)| *at == index) {
+            let closure = match closures.entry(local) {
+                std::collections::hash_map::Entry::Occupied(built) => built.into_mut(),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    // The declaration's own capture record: the nested
+                    // callable whose span holds the declared name.
+                    let name = skeleton.bindings[local.index()].span.to_absolute(anchor);
+                    let holder = nested
+                        .partition_point(|child| child.span().start <= name.start)
+                        .checked_sub(1)
+                        .map(|at| nested[at])
+                        .filter(|child| child.span().end >= name.end);
+                    slot.insert(match holder {
+                        Some(captures) => Some(DeclarationClosure::build(
+                            captures, bindings, &mut names, anchor,
+                        )?),
+                        None => None,
+                    })
+                }
+            };
+            let Some(closure) = closure else {
+                continue;
+            };
+            for binding in closure.closure.captures.iter() {
+                if bound.insert(binding.clone()) {
+                    capture_bindings.push(binding.clone());
+                }
+            }
+            for name in &closure.names {
+                if captured.insert(*name) {
+                    captures.push(*name);
+                }
+            }
+            site_closures.push(closure.closure.clone());
+            reads.extend(closure.reads.iter().cloned());
+        }
+        site.capture_bindings = capture_bindings.into();
+        site.captures = captures.into();
+        site.closures = site_closures.into();
+        site.reads = reads.into();
+    }
+    skeleton.expr_sites = sites.into();
+    names.store(skeleton);
+    Ok(())
+}
+
+/// What one hoisted local function declaration attaches to each site that
+/// reads it.
+struct DeclarationClosure {
+    closure: SkeletonClosure,
+    /// The interned names of its captures.
+    names: Vec<FlowNameId>,
+    reads: Vec<SkeletonRead>,
+}
+
+impl DeclarationClosure {
+    fn build(
+        captures: crate::function_program::FunctionCaptures<'_>,
+        bindings: &FlowBindingMap,
+        names: &mut SkeletonNameTable,
+        anchor: u32,
+    ) -> Result<Self, FlowBindingMapError> {
         let mut own: Vec<FlowBindingRef> = Vec::new();
-        for identity in captures.bindings.0.iter() {
+        let mut own_seen = rustc_hash::FxHashSet::default();
+        for identity in captures.bindings() {
             let binding = bindings.resolve_identity(identity)?;
-            if !own.contains(&binding) {
+            if own_seen.insert(binding.clone()) {
                 own.push(binding);
             }
         }
         let mut own_reads: Vec<FlowBindingRef> = Vec::new();
+        let mut own_read_seen = rustc_hash::FxHashSet::default();
         let mut reads: Vec<SkeletonRead> = Vec::new();
-        for read in captures.reads.iter() {
+        for read in captures.reads() {
             let binding = bindings.resolve_identity(&read.binding)?;
-            if !own_reads.contains(&binding) {
+            if own_read_seen.insert(binding.clone()) {
                 own_reads.push(binding.clone());
             }
-            let name = intern_skeleton_name(skeleton, &read.binding.name);
+            let name = names.intern(&read.binding.name);
             let path: Arc<[SkeletonPathSegment]> = read
                 .path
                 .iter()
-                .map(|segment| SkeletonPathSegment::Static(intern_skeleton_name(skeleton, segment)))
+                .map(|segment| SkeletonPathSegment::Static(names.intern(segment)))
                 .collect::<Vec<_>>()
                 .into();
             reads.push(SkeletonRead {
@@ -1064,28 +1248,14 @@ fn attach_declaration_closures(
                 kind: FlowReadKind::Input,
             });
         }
-        let names: Vec<FlowNameId> = captures
-            .bindings
-            .0
-            .iter()
-            .map(|identity| intern_skeleton_name(skeleton, &identity.name))
+        let capture_names = captures
+            .bindings()
+            .map(|identity| names.intern(&identity.name))
             .collect();
-        let site = &mut Arc::make_mut(&mut skeleton.expr_sites)[index];
-        for binding in &own {
-            if !site.capture_bindings.contains(binding) {
-                arc_push(&mut site.capture_bindings, binding.clone());
-            }
-        }
-        for name in names {
-            if !site.captures.contains(&name) {
-                arc_push(&mut site.captures, name);
-            }
-        }
-        arc_push(
-            &mut site.closures,
-            SkeletonClosure {
-                span: FrameSpan::rebase(anchor, captures.span),
-                correlation: if captures.exhaustive {
+        Ok(Self {
+            closure: SkeletonClosure {
+                span: FrameSpan::rebase(anchor, captures.span()),
+                correlation: if captures.exhaustive() {
                     SkeletonClosureCorrelation::Exact
                 } else {
                     SkeletonClosureCorrelation::Partial
@@ -1093,27 +1263,43 @@ fn attach_declaration_closures(
                 captures: Arc::from(own.into_boxed_slice()),
                 read_captures: Arc::from(own_reads.into_boxed_slice()),
             },
-        );
-        for read in reads {
-            arc_push(&mut site.reads, read);
+            names: capture_names,
+            reads,
+        })
+    }
+}
+
+/// A skeleton's name table open for interning: the names grow in place and
+/// are stored back once.
+struct SkeletonNameTable {
+    names: Vec<Arc<str>>,
+    index: SkeletonNameIndex,
+}
+
+impl SkeletonNameTable {
+    fn of(skeleton: &FunctionBodySkeleton) -> Self {
+        Self {
+            names: skeleton.names.to_vec(),
+            index: skeleton.name_index.clone(),
         }
     }
-    Ok(())
-}
 
-/// The id of `text` in the skeleton's name table, interning it when new.
-pub fn intern_skeleton_name(skeleton: &mut FunctionBodySkeleton, text: &str) -> FlowNameId {
-    if let Some(id) = skeleton.name_id(text) {
-        return id;
+    /// The id of `text`, interning it when new.
+    fn intern(&mut self, text: &str) -> FlowNameId {
+        if let Some(id) = self.index.id(text) {
+            return id;
+        }
+        let id = FlowNameId(u32::try_from(self.names.len()).unwrap_or(u32::MAX));
+        let text: Arc<str> = Arc::from(text);
+        self.names.push(Arc::clone(&text));
+        self.index.insert(text, id);
+        id
     }
-    let id = FlowNameId(u32::try_from(skeleton.names.len()).unwrap_or(u32::MAX));
-    arc_push(&mut skeleton.names, Arc::from(text));
-    id
-}
 
-/// `slot` with `value` appended.
-pub fn arc_push<T: Clone>(slot: &mut Arc<[T]>, value: T) {
-    let mut values = slot.to_vec();
-    values.push(value);
-    *slot = Arc::from(values.into_boxed_slice());
+    fn store(self, skeleton: &mut FunctionBodySkeleton) {
+        if self.names.len() != skeleton.names.len() {
+            skeleton.names = self.names.into();
+            skeleton.name_index = self.index;
+        }
+    }
 }

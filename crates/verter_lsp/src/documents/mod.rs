@@ -8,7 +8,7 @@ pub(crate) use analysis::SemanticReady;
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
 pub(crate) use diagnostics::BackgroundPublication;
 pub(crate) use diagnostics::DiagnosticsRefresh;
-pub(crate) use foreground::{ForegroundRequest, ForegroundRoute, Settled};
+pub(crate) use foreground::{EditBearing, ForegroundRequest, ForegroundRoute, Settled};
 pub use guarded_host::{HostRef, SharedHost};
 pub mod carrier_structure;
 pub mod line_index;
@@ -534,6 +534,18 @@ pub(crate) struct DocumentSnapshotIdentity {
     pub(crate) version: i32,
     revision: DocumentRevisionId,
     source: Arc<str>,
+}
+
+impl DocumentSnapshotIdentity {
+    /// The open revision's bytes.
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether both identities name the same open revision.
+    pub(crate) fn same_revision(&self, other: &Self) -> bool {
+        self.version == other.version && self.revision == other.revision
+    }
 }
 
 impl DocumentRegistry {
@@ -1568,6 +1580,20 @@ impl DocumentRegistry {
             }
         }
         None
+    }
+
+    /// The open document's URI for `path` under filesystem identity
+    /// ([`verter_span::path::fs_paths_equal`]): a spelling of the file that
+    /// differs in case from the client's `didOpen` URI still names the open
+    /// document on a case-insensitive host. An exact canonical-id match wins.
+    pub(crate) fn open_uri_for_fs_path(&self, path: &str) -> Option<Uri> {
+        self.canonical_id_to_uri(path).or_else(|| {
+            self.documents.iter().find_map(|entry| {
+                verter_span::path::fs_paths_equal(&entry.value().canonical_id, path)
+                    .then(|| entry.key().parse().ok())
+                    .flatten()
+            })
+        })
     }
 
     /// Get the IDE output (TSX or JSX) for a document.

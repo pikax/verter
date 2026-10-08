@@ -165,7 +165,6 @@ fn nested_signature_typeof_uses_lexical_siblings_without_runtime_captures() {
             .expect("indexed child")
             .entry()
             .captures()
-            .0
             .is_empty(),
         "type syntax is absent from runtime captures"
     );
@@ -197,12 +196,13 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
         })
         .expect("nested descriptor");
     let index = memo.function_program_index().value;
-    let capture = &index
+    let capture = index
         .get(function)
         .expect("indexed child")
         .entry()
         .captures()
-        .0[0];
+        .next()
+        .unwrap();
     let locator = context
         .mutable_authorities(capture)
         .into_iter()
@@ -255,18 +255,17 @@ fn selected_capture_locators_skip_known_unannotated_local_declarations() {
         })
         .expect("selected closure");
     let index = memo.function_program_index().value;
-    let captures = &index
+    let captures = index
         .get(function)
         .expect("indexed child")
         .entry()
-        .captures()
-        .0;
+        .captures();
     let plain = captures
-        .iter()
+        .clone()
         .find(|identity| identity.name.as_ref() == "plain")
         .expect("plain capture");
     let typed = captures
-        .iter()
+        .clone()
         .find(|identity| identity.name.as_ref() == "typed")
         .expect("typed capture");
     assert!(
@@ -558,8 +557,6 @@ fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans(
         ));
         child
             .captures()
-            .0
-            .iter()
             .flat_map(|capture| context.mutable_authorities(capture))
             .collect::<Vec<_>>()
     };

@@ -261,7 +261,11 @@ impl VerterLanguageServer {
                     .host()
                     .get_analysis(child_canonical_id)
                     .or_else(|| self.ensure_component_ready(child_canonical_id))?;
-                let source = self.documents.host().get_source(child_canonical_id)?;
+                let source = crate::documents::ForegroundRequest::host_target_source(
+                    &self.documents,
+                    child_canonical_id,
+                    self.documents.host().get_source(child_canonical_id)?,
+                )?;
                 Some((analysis, source))
             })?;
         let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
@@ -475,7 +479,11 @@ impl VerterLanguageServer {
                 let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
                 Some((target_canonical_id.to_string(), s, e))
             })?;
-        let target_source = host.get_source(&resolved_id)?;
+        let target_source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            &resolved_id,
+            host.get_source(&resolved_id)?,
+        )?;
         let target_li = LineIndex::new(&target_source, self.position_encoding.read().clone());
         let start_pos = target_li.offset_to_position(start)?;
         let end_pos = target_li.offset_to_position(end)?;
@@ -843,7 +851,11 @@ impl VerterLanguageServer {
             };
 
             if let Some((resolved_id, start, end)) = terminal {
-                let target_source = host.get_source(&resolved_id)?;
+                let target_source = crate::documents::ForegroundRequest::host_target_source(
+                    &self.documents,
+                    &resolved_id,
+                    host.get_source(&resolved_id)?,
+                )?;
                 let target_li = LineIndex::new(&target_source, encoding);
                 let start_pos = target_li.offset_to_position(start)?;
                 let end_pos = target_li.offset_to_position(end)?;
@@ -903,7 +915,11 @@ impl VerterLanguageServer {
             host.get_export_span_follow_reexports(&canonical, &sig.name)?
         };
 
-        let source = host.get_source(&terminal_id)?;
+        let source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            &terminal_id,
+            host.get_source(&terminal_id)?,
+        )?;
         let line_index = LineIndex::new(&source, self.position_encoding.read().clone());
         let start_pos = line_index.offset_to_position(terminal_start)?;
         let end_pos = line_index.offset_to_position(terminal_end)?;
@@ -935,7 +951,13 @@ impl VerterLanguageServer {
             // Check if this file has re-export signatures at the target position
             if let Some(analysis) = host.get_analysis(&canonical) {
                 // Find which export signature the target position falls within
-                if let Some(source) = host.get_source(&canonical) {
+                if let Some(source) = host.get_source(&canonical).and_then(|source| {
+                    crate::documents::ForegroundRequest::host_target_source(
+                        &self.documents,
+                        &canonical,
+                        source,
+                    )
+                }) {
                     let target_li = LineIndex::new(&source, encoding.clone());
                     if let Some(offset) = target_li.position_to_offset(&loc.range.start) {
                         for sig in analysis.export_signatures.iter() {
@@ -1170,7 +1192,11 @@ impl VerterLanguageServer {
                     .registered_file_structure_snapshot(&child_canonical_id)?;
                 Some((analysis, structure))
             })?;
-        let child_source = std::sync::Arc::clone(child_structure.source().source_arc());
+        let child_source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            &child_canonical_id,
+            std::sync::Arc::clone(child_structure.source().source_arc()),
+        )?;
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
         let blocks = project_carrier_blocks(&child_structure);
         let line_index = LineIndex::new(&child_source, self.documents.encoding());

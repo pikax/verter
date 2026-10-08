@@ -1,14 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import {
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-  utimesSync,
-  writeFileSync,
-  rmSync,
-} from "node:fs";
+import { appendCarrierStoreRecord, writeCarrierStoreFixture } from "./helpers/carrierStoreFixture";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import ts from "typescript";
@@ -46,7 +38,7 @@ function writeStore(manifest: Manifest, blobs: Record<string, string>): string {
     mkdirSync(join(abs, ".."), { recursive: true });
     writeFileSync(abs, content, "utf8");
   }
-  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest), "utf8");
+  writeCarrierStoreFixture(dir, manifest);
   return dir;
 }
 
@@ -420,7 +412,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     ready.epoch = 2;
     writeFileSync(join(dir, "blobs/A.vue.tsx"), generated, "utf8");
     writeFileSync(join(dir, "blobs/W.svelte.tsx"), "export {};\n", "utf8");
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(ready), "utf8");
+    writeCarrierStoreFixture(dir, ready);
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
       carrierStoreRefreshToken: 1,
@@ -473,7 +465,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
       blob_rel: "blobs/A-v2.vue.tsx",
     };
     writeFileSync(join(dir, "blobs/A-v2.vue.tsx"), nextGenerated, "utf8");
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(nextManifest), "utf8");
+    writeCarrierStoreFixture(dir, nextManifest);
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
       carrierStoreRefreshToken: 2,
@@ -1275,7 +1267,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
       version: 2,
     };
     writeFileSync(join(dir, "blobs/W.svelte.tsx"), "export const warmed = 2;", "utf8");
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(next), "utf8");
+    writeCarrierStoreFixture(dir, next);
     plugin.onConfigurationChanged!({
       ...info.config,
       carrierStoreRefreshToken: 2,
@@ -1417,7 +1409,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     const retracted = vueAndSvelteManifest();
     retracted.epoch = 2;
     retracted.projects["/ws/tsconfig.json"].ready_files = {};
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(retracted), "utf8");
+    writeCarrierStoreFixture(dir, retracted);
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
       carrierStoreRefreshToken: 1,
@@ -1455,7 +1447,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
     published.epoch = 2;
     writeFileSync(join(dir, "blobs/A.vue.tsx"), "export const A = 1;", "utf8");
     writeFileSync(join(dir, "blobs/W.svelte.tsx"), "export const W = 1;", "utf8");
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(published), "utf8");
+    writeCarrierStoreFixture(dir, published);
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
       carrierStoreRefreshToken: 1,
@@ -1524,7 +1516,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
       blob_rel: "blobs/A-v2.vue.tsx",
     };
     writeFileSync(join(dir, "blobs/A-v2.vue.tsx"), "export const value = 'fresh';", "utf8");
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(published), "utf8");
+    writeCarrierStoreFixture(dir, published);
 
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
@@ -1709,7 +1701,7 @@ describe("getExternalFiles carrier working-set ownership", () => {
       'declare const Native: import("svelte").Component<{ contractProp: string }, {}, "">; export default Native;\n',
       "utf8",
     );
-    writeFileSync(join(dir, "manifest.json"), JSON.stringify(published), "utf8");
+    writeCarrierStoreFixture(dir, published);
 
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
@@ -1956,7 +1948,7 @@ describe("plain .ts importing a carrier (real Program, project sets NO jsx)", ()
         );
       },
       async publish(manifest: Manifest, token: number) {
-        writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest), "utf8");
+        writeCarrierStoreFixture(dir, manifest);
         plugin.onConfigurationChanged!({
           carrierStoreDir: dir,
           [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
@@ -2125,15 +2117,13 @@ describe("plain .ts importing a carrier (real Program, project sets NO jsx)", ()
     expect(resolved?.extension).toBe(ts.Extension.Ts);
   });
 
-  it("heals a publication whose manifest replacement has an IDENTICAL stat tuple", async () => {
-    // The reader's change key is `(mtimeMs, size)`. The Rust publisher swaps the
-    // manifest ATOMICALLY, so a publication that replaces a ready-file entry
-    // rather than adding one can land at the same byte length within a single
-    // filesystem timestamp tick — a stat-identical replacement. If the token
-    // advance reads ready versions from the stale snapshot, nothing looks
-    // changed, `clearSemanticCache` never fires, and the cached TS2307 for this
-    // exact import survives until some unrelated publication. That is the
-    // sticky-negative mode this whole change exists to prevent.
+  it("heals a publication that lands as one appended journal record", async () => {
+    // A publication appends ONE record to the store journal; the plugin is told
+    // through the refresh-token advance. The reader must observe the record on
+    // that advance (with no invalidation step), or nothing looks changed,
+    // `clearSemanticCache` never fires, and the cached TS2307 for this exact
+    // import survives until some unrelated publication — the sticky-negative mode
+    // this path exists to prevent.
     const source = "/ws/src/A.vue";
     const apiProvider = `${source}.verter.ts`;
 
@@ -2145,30 +2135,6 @@ describe("plain .ts importing a carrier (real Program, project sets NO jsx)", ()
       role: "CarrierApi",
       script_kind: "TS",
     });
-    // AFTER: the same manifest with the API companion READY.
-    const after = ideOnlyManifest(source, `${source}.tsx`, "blobs/A.vue.tsx");
-    after.projects[projectKey].owned_sources.push({
-      source_uri: source,
-      provider_uri: apiProvider,
-      role: "CarrierApi",
-      script_kind: "TS",
-    });
-    after.projects[projectKey].ready_files[apiProvider] = {
-      content_hash: "api-1",
-      version: 1,
-      script_kind: "TS",
-      role: "CarrierApi",
-      map_hash: "0",
-      blob_rel: "blobs/A.vue.verter.ts",
-    };
-    // Both serializations padded to ONE width, and both writes pinned to ONE
-    // whole-second timestamp, so the replacement is byte-for-byte stat-identical.
-    const width = Math.max(JSON.stringify(before).length, JSON.stringify(after).length);
-    const pad = (m: Manifest) => {
-      const json = JSON.stringify(m);
-      return json + " ".repeat(width - json.length);
-    };
-    const pinnedSeconds = Math.floor(Date.now() / 1000) - 60;
 
     const dir = track(
       writeStore(before, {
@@ -2176,9 +2142,6 @@ describe("plain .ts importing a carrier (real Program, project sets NO jsx)", ()
         "blobs/A.vue.verter.ts": "export default class A {}",
       }),
     );
-    const manifestPath = join(dir, "manifest.json");
-    writeFileSync(manifestPath, pad(before), "utf8");
-    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
 
     const info = createInfo(dir, { diskFiles: {} }, projectKey);
     info.config = {
@@ -2203,18 +2166,28 @@ describe("plain .ts importing a carrier (real Program, project sets NO jsx)", ()
       )[0]?.resolvedModule;
 
     // Owned-but-unready: the bounded cold read times out and the plugin
-    // abstains. This ALSO seeds the reader's manifest snapshot.
+    // abstains. This ALSO seeds the reader's folded state.
     expect(resolveA()).toBeUndefined();
-    const statBefore = statSync(manifestPath);
 
-    writeFileSync(manifestPath, pad(after), "utf8");
-    utimesSync(manifestPath, pinnedSeconds, pinnedSeconds);
-
-    // The replacement really is stat-identical — otherwise this test would be
-    // exercising the ordinary mtime-changed path and prove nothing.
-    const statAfter = statSync(manifestPath);
-    expect(statAfter.size).toBe(statBefore.size);
-    expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
+    // The publication: one record making the API companion ready.
+    appendCarrierStoreRecord(dir, {
+      epoch: before.epoch + 1,
+      ops: [
+        {
+          op: "ready_put",
+          project: projectKey,
+          provider_uri: apiProvider,
+          file: {
+            content_hash: "api-1",
+            version: 1,
+            script_kind: "TS",
+            role: "CarrierApi",
+            map_hash: "0",
+            blob_rel: "blobs/A.vue.verter.ts",
+          },
+        },
+      ],
+    });
 
     plugin.onConfigurationChanged!({
       carrierStoreDir: dir,
@@ -2223,7 +2196,7 @@ describe("plain .ts importing a carrier (real Program, project sets NO jsx)", ()
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // The token advance observed the publication despite the identical stat…
+    // The token advance observed the publication…
     expect(cacheClears).toBeGreaterThan(0);
     // …and the import now resolves to the public-API surface.
     const resolved = resolveA();
