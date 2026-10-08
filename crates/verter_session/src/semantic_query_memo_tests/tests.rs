@@ -3228,8 +3228,7 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                     dep_signature: empty_signature(),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -4628,8 +4627,7 @@ fn prefix_backfill_carries_traced_facts() {
             dep_signature: Arc::clone(&parent_dep_signature),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
-            result_is_partial: false,
-            partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+            completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
             taint: verter_type_engine::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: Some(Box::new(parent_carrier.clone())),
@@ -4944,8 +4942,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5160,8 +5157,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     // non-self-root admission reason, NOT a partial. Benign
                     // inner-memo non-cacheability is `cache_suppress` only;
                     // `result_is_partial` stays false.
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5411,8 +5407,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5627,8 +5622,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5825,8 +5819,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -6104,8 +6097,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6397,8 +6389,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6743,7 +6734,7 @@ fn memo_admission_debug_asserts_against_partial_without_suppress() {
             // The laundering shape: a COMPLETE Value that surfaced a
             // partial WITHOUT setting cache_suppress (the pre-FIX-1
             // producer bug). The FIX-2 admission invariant must catch this.
-            out.result_is_partial = true;
+            out.mark_partial();
             out.cache_suppress = false;
             out
         },
@@ -6785,7 +6776,7 @@ fn partial_value_leaves_no_memo_entry_and_fresh_request_cold_rebuilds() {
             let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
             let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
             // A genuine, invariant-holding partial.
-            out.result_is_partial = true;
+            out.mark_partial();
             out.cache_suppress = true;
             out
         },
@@ -6882,7 +6873,7 @@ fn memo_admission_or_gate_refuses_partial_without_suppress_in_release() {
             // The laundering shape — a partial WITHOUT cache_suppress. In
             // debug this trips the debug_assert (covered by the should_panic
             // peer); in release the runtime OR-gate must still refuse it.
-            out.result_is_partial = true;
+            out.mark_partial();
             out.cache_suppress = false;
             out
         },
@@ -6952,7 +6943,7 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
             let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
             // Benign non-cacheable COMPLETE result — invariant holds.
             out.cache_suppress = true;
-            out.result_is_partial = false;
+            out.set_partial(false);
             out
         },
     );

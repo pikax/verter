@@ -389,16 +389,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => return false,
         };
         let canonical = Arc::clone(&identity.anchor.canonical_id);
-        let sticky_defer = crate::request_context::DeferredPartialStickyScope::enter();
-        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        let observation = super::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let node = self.execute_function_return_source(
-            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-            &canonical,
-        );
-        let _ = observation.finish();
-        completeness_scope.discard();
-        drop(sticky_defer);
+        let node = self
+            .observe_flow_read(|| {
+                self.execute_function_return_source(
+                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                    &canonical,
+                )
+            })
+            .discard();
         matches!(
             node,
             super::flow_return::FunctionReturnNode::Flow(result) if result.degradation().is_some()

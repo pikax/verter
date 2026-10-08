@@ -613,9 +613,8 @@ fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
                         dep_signature: dep_signature("/w/prefix.ts", 4),
                         walker_diagnostics: Vec::new(),
                         cache_suppress: false,
-                        result_is_partial: false,
-                        partial_reasons:
-                            verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                        completeness:
+                            verter_type_engine::semantic_query::ResultCompleteness::Complete,
                         taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                         observed_self_roots: Vec::new(),
                         graph_carrier: None,

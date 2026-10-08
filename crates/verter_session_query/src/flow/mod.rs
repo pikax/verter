@@ -13,3 +13,4 @@ pub mod peeker;
 pub mod policy;
 pub mod skeleton;
 pub mod slice;
+pub mod span_index;

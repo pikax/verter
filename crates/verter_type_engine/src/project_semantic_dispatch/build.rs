@@ -1155,7 +1155,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // belt-and-braces. (Per the architecture ruling: when the
                     // route fact cannot guarantee invalidation, the degraded
                     // MissingDependency result is `ReturnOnly`.)
-                    output.result_is_partial = true;
+                    output.mark_partial();
                     output.cache_suppress = true;
                     crate::request_context::mark_request_result_partial();
                 }
@@ -1345,7 +1345,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some(own) = source {
                     let mut output =
                         self.project_typeof_path(own, path, context, observed_hash, value_root);
-                    output.result_is_partial |= base_partial;
+                    output.fold_partial(base_partial);
                     // The member lowered from the DECLARING file roots on
                     // its content version as the composed surface would.
                     if effective_canonical.as_ref() == value_root.scope.canonical_id.as_ref() {
@@ -1645,12 +1645,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Two-signal fold: a partial composed class-surface read surfaces as
             // a partial `TypeOf` result (it would otherwise pass through with
             // `result_is_partial = false`).
-            output.result_is_partial |= composed_partial;
+            output.fold_partial(composed_partial);
             output
         } else {
             let mut output =
                 self.project_typeof_path(node_id, path, context, observed_hash, value_root);
-            output.result_is_partial |= composed_partial;
+            output.fold_partial(composed_partial);
             output
         };
         self.with_augmentation_roots(output, augmentation_roots, augmentation_unobservable)
@@ -2414,8 +2414,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
         ))
         .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)]);
-        output.result_is_partial |= read.result_is_partial;
-        output.partial_reasons = output.partial_reasons.union(read.partial_reason_classes());
+        output.fold_partial(read.result_is_partial);
+        output.add_partial_reasons(read.partial_reason_classes());
         output
     }
 
@@ -2954,7 +2954,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.project_generation_signature(),
                 )
                     .into();
-                output.result_is_partial = composed_partial;
+                output.set_partial(composed_partial);
                 if observed.is_none() || effective_root_missing {
                     output.cache_suppress = true;
                 }
@@ -2971,7 +2971,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = composed.value;
         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (result, self.project_generation_signature()).into();
-        output.result_is_partial = composed_is_partial;
+        output.set_partial(composed_is_partial);
         if observed.is_none() {
             // Could not self-root on the decl's live content version —
             // refuse warm admission; the value still flows to the caller.
@@ -4759,7 +4759,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // materialize warm gates refuse it. Benign non-cacheability of
             // the nested read does NOT taint this (it is `cache_suppress`
             // on the inner memo only).
-            output.result_is_partial = utility_is_partial;
+            output.set_partial(utility_is_partial);
             return InstantiateStart::Done(Box::new(
                 output.with_observed_self_roots(observed_self_roots),
             ));
@@ -4959,7 +4959,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 empty_signature(),
             )
                 .into();
-            output.result_is_partial = unresolved_owner_debt;
+            output.set_partial(unresolved_owner_debt);
             output.cache_suppress = unresolved_owner_debt;
             return InstantiateStart::Done(Box::new(output));
         }
@@ -5419,7 +5419,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
         }
         if unresolved_owner_debt {
-            output.result_is_partial = true;
+            output.mark_partial();
             output.cache_suppress = true;
         }
         output
@@ -10852,7 +10852,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.project_generation_signature(),
                 ))
                 .with_observed_self_roots(observed_self_roots);
-                out.result_is_partial = any_partial || norm.result_is_partial;
+                out.set_partial(any_partial || norm.result_is_partial);
                 Some(out)
             }
             _ => None,
@@ -11194,15 +11194,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let walker_diagnostics: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic> =
             std::mem::take(&mut walker.walker_diagnostics);
         let cache_suppress = walker.cache_suppress;
-        let result_is_partial = walker.result_is_partial;
         // The walker's OWN fatal / pathological stops name no class; the
         // classes it accumulated came from nested reads. A partial with an
         // empty set rides the anonymous bridge so the build never reports
         // "partial with no class".
-        let partial_reasons = if result_is_partial && walker.partial_reasons.is_empty() {
-            crate::semantic_query::PartialReasonSet::PROPAGATED
-        } else {
-            walker.partial_reasons
+        let completeness = match walker.completeness {
+            crate::semantic_query::ResultCompleteness::Partial(reasons) if reasons.is_empty() => {
+                crate::semantic_query::ResultCompleteness::Partial(
+                    crate::semantic_query::PartialReasonSet::PROPAGATED,
+                )
+            }
+            other => other,
         };
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
@@ -11222,8 +11224,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 dep_signature: fence,
                 walker_diagnostics,
                 cache_suppress,
-                result_is_partial,
-                partial_reasons,
+                completeness,
                 taint: crate::semantic_query::ResultTaint::Clean,
                 observed_self_roots: Vec::new(),
                 graph_carrier: None,
@@ -11291,8 +11292,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             dep_signature: fence,
             walker_diagnostics,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            completeness,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots,
             graph_carrier: None,
@@ -11529,7 +11529,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             fence,
         ))
         .with_observed_self_roots(observed_self_roots);
-        keyof_output.result_is_partial = keyof_is_partial;
+        keyof_output.set_partial(keyof_is_partial);
         keyof_output
     }
 
@@ -12118,7 +12118,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 fence.clone(),
             ))
             .with_observed_self_roots(self.observed_self_roots_from_nodes([source, resolved]));
-            out.result_is_partial = partial;
+            out.set_partial(partial);
             out
         };
         match data.as_ref() {
@@ -12830,8 +12830,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         fence,
                     ))
                     .with_observed_self_roots(observed_self_roots.clone());
-                deferred_output.result_is_partial = !mapped_partial_reasons.is_empty();
-                deferred_output.partial_reasons = mapped_partial_reasons;
+                deferred_output.add_partial_reasons(mapped_partial_reasons);
                 return deferred_output;
             };
 
@@ -13145,8 +13144,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     fence,
                 ))
                 .with_observed_self_roots(observed_self_roots);
-            deferred_output.result_is_partial = !mapped_partial_reasons.is_empty();
-            deferred_output.partial_reasons = mapped_partial_reasons;
+            deferred_output.add_partial_reasons(mapped_partial_reasons);
             return deferred_output;
         }
 
@@ -13182,8 +13180,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             fence,
         ))
         .with_observed_self_roots(observed_self_roots);
-        mapped_output.result_is_partial = !mapped_partial_reasons.is_empty();
-        mapped_output.partial_reasons = mapped_partial_reasons;
+        mapped_output.add_partial_reasons(mapped_partial_reasons);
         mapped_output
     }
 
@@ -13944,8 +13941,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.project_generation_signature(),
         ));
         output.cache_suppress = true;
-        output.result_is_partial = true;
-        output.partial_reasons = crate::semantic_query::PartialReasonSet::CANCELLED;
+        output.mark_partial();
+        output.add_partial_reasons(crate::semantic_query::PartialReasonSet::CANCELLED);
         output
     }
 
@@ -14500,7 +14497,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // non-cacheable budget-tainted partial, never warm-admitted, and
             // the taint folds into the enclosing request.
             output.cache_suppress = true;
-            output.result_is_partial = true;
+            output.mark_partial();
         }
         output
     }
@@ -16702,7 +16699,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // while a benign non-cacheable nested read still refuses inner-memo
         // admission without falsely marking this result partial.
         output.cache_suppress |= nested_cache_suppress;
-        output.result_is_partial |= nested_result_is_partial;
+        output.fold_partial(nested_result_is_partial);
         // Stale real-file owner: the key names a file unknown to the
         // live view (`ensure_indexed_ready_serve == None`). The value flows to
         // the caller, but the entry is non-cacheable — never publish a

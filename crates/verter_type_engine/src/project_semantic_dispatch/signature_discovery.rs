@@ -2489,10 +2489,10 @@ fn incomplete_output(
         fence,
     ));
     output.cache_suppress = true;
-    output.result_is_partial = matches!(
+    output.set_partial(matches!(
         reason,
         IncompleteReason::Budget | IncompleteReason::Cancelled
-    );
+    ));
     output
 }
 

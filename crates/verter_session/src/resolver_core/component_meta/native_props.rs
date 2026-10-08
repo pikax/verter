@@ -123,18 +123,19 @@ pub(crate) fn named_native_props_outcome(
     // An INCOMPLETE projection records its typed reason before degrading to
     // the miss outcome — a failed resolution never reads as a props-less
     // declaration.
-    let Some(surface) = crate::typeinfo::shallow_surface::project_shallow_surface_graph_only(
-        ctx,
-        dispatch,
-        base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        ProjectionReductionContext::macro_object_surface(
-            ProjectionMode::Shallow,
-            SurfaceProvenanceContext::MacroTypeArgOwnBody,
+    let Some(surface) = crate::typeinfo::surface_resolution::adopt_surface(
+        crate::typeinfo::shallow_surface::project_shallow_surface_graph_only(
+            ctx,
+            dispatch,
+            base,
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Shallow,
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+            ),
+            None,
         ),
-        None,
-    )
-    .recorded() else {
+    ) else {
         return if recursive {
             ResolvedNativePropsOutcome::Recursive
         } else {
