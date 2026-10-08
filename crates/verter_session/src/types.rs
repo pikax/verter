@@ -3930,6 +3930,16 @@ pub struct HostRetentionSnapshot {
     pub shape_cache_entries: usize,
     /// Flow-slice graph bundles.
     pub flow_graphs: usize,
+    /// Occupancy of the name indexes of the retained flow-slice graph
+    /// bundles' skeletons, each index counted once.
+    pub skeleton_name_indexes: verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy,
+    /// Occupancy of the shared closure-capture summaries of the function
+    /// program indexes the artifact store's live and retained versions have
+    /// built: one summary per parsed file version, shared by every function
+    /// entry of that file and counted once.
+    pub capture_summaries: verter_session_query::function_program::CaptureSummaryCounts,
+    /// Distinct capture summaries [`Self::capture_summaries`] sums.
+    pub capture_summary_files: usize,
     /// Flow-slice hash-node entries.
     pub flow_hash_entries: usize,
     /// Flow-slice lowered-body entries.

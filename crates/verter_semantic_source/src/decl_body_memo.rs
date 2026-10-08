@@ -1276,6 +1276,15 @@ impl DeclBodyMemo {
         self.function_index.function_program_index()
     }
 
+    /// The function program index this memo has already built, without
+    /// building it: `None` until a demand has. Retention observability
+    /// reads what the memo holds through it.
+    pub fn retained_function_program_index(
+        &self,
+    ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
+        self.function_index.function_program_index.get().cloned()
+    }
+
     /// The flow-slice function key of a fixture memo's `entry`: the key a
     /// bound flow graph over this memo's retained structure is minted under.
     #[cfg(any(test, feature = "test-support"))]

@@ -10,9 +10,9 @@ use verter_type_expr::span_origins::DeclContributorAnchor;
 
 mod capture_summary;
 mod class_index;
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-pub use capture_summary::CaptureSummaryCounts;
-pub use capture_summary::{CaptureBindings, CapturedReads, FunctionCaptures, NestedCaptures};
+pub use capture_summary::{
+    CaptureBindings, CaptureSummaryCounts, CapturedReads, FunctionCaptures, NestedCaptures,
+};
 use capture_summary::{CaptureSummaries, FrameCaptureHandle};
 pub use class_index::{
     ClassBase, ClassBaseMatch, ClassIndex, ClassIndexMatch, ClassSyntaxDiscovery, ClassSyntaxRecord,
@@ -1246,7 +1246,7 @@ impl FunctionProgramEntry {
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     #[must_use]
     pub fn capture_summary_counts(&self) -> CaptureSummaryCounts {
-        self.captures.counts()
+        self.captures.occupancy()
     }
 
     /// Whether `other` reads the same capture summary allocation.
@@ -1364,6 +1364,27 @@ pub struct FunctionProgramIndex {
 }
 
 impl FunctionProgramIndex {
+    /// What this file's capture summary holds: the one summary every entry
+    /// shares, counted once. An index serving no function holds none.
+    #[must_use]
+    pub fn capture_summary_occupancy(&self) -> CaptureSummaryCounts {
+        self.entries
+            .first()
+            .map(|entry| entry.captures.occupancy())
+            .unwrap_or_default()
+    }
+
+    /// An identity of this file's capture summary, equal for two indexes
+    /// sharing it while either is alive, so a reader summing the summaries
+    /// it retains counts each once. `None` when the index serves no
+    /// function.
+    #[must_use]
+    pub fn capture_summary_identity(&self) -> Option<usize> {
+        self.entries
+            .first()
+            .map(|entry| entry.captures.summary_ptr() as usize)
+    }
+
     /// Test-support read of `entries`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn entries_for_test(&self) -> &Arc<[FunctionProgramEntry]> {
