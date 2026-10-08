@@ -1,0 +1,90 @@
+{
+  "id": "firewall-route-ledger.v1",
+  "schema": 1,
+  "contractNode": "UAK1",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the kernel authority inventory and deletion ledger",
+    "date": "2026-10-08"
+  },
+  "categories": [
+    "central-framework-switch",
+    "untagged-coordinate-or-public-identity",
+    "duplicate-component-information-authority"
+  ],
+  "rules": {
+    "oneOwnerPerRoute": "Every displaced route names exactly one later production-capable deletion/rejection owner, its successor path from UAK1 and its receiving acceptance ID.",
+    "inheritedRoutes": "UAK0 routes D01-D19 keep their UAK0 owners. They are listed here by id only, each with the constitution rule (F.. or U..) it breaches; UAK1 assigns them no new owner.",
+    "productionCapable": "The family locks (UAI0, UAO0, UAP0, UAM0), the joins (UAK2, UKS0, CEJ0) and the verifiers delete nothing and are never deletion owners here."
+  },
+  "displacedRoutes": [
+    {
+      "id": "K01",
+      "category": "central-framework-switch",
+      "constitutionRule": "F01",
+      "unit": "Kernel session production closure links the runtime compiler backends",
+      "symbols": [
+        "verter_compiler::compile",
+        "verter_compiler::compile_transaction",
+        "verter_compiler::assembly",
+        "verter_compiler::standalone",
+        "verter_compiler::svelte::runtime",
+        "verter_compiler::style_planner",
+        "verter_compiler::framework_common::vue_bridge"
+      ],
+      "paths": [
+        "crates/verter_session/Cargo.toml",
+        "crates/verter_session/src/host_resolve",
+        "crates/verter_identity/tests/cases/workspace_dependency_layers.rs"
+      ],
+      "disposition": "replace",
+      "successor": "kernel services reach compile products only through the optional CarrierCompilerBackendRegistry populated by the composition root; the frontend imports no runtime codegen",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK1", "CPF0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "openQuestion": "uak1-kernel-compiler-edge-owner"
+    },
+    {
+      "id": "K02",
+      "category": "central-framework-switch",
+      "constitutionRule": "F01",
+      "unit": "Svelte JSX shim assets embedded in the kernel session crate",
+      "symbols": [
+        "SVELTE_JSX_RUNTIME_DTS",
+        "SVELTE_JSX_DEV_RUNTIME_DTS"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/svelte_jsx_assets.rs",
+        "crates/verter_session/src/framework/svelte_jsx_assets"
+      ],
+      "disposition": "retag",
+      "successor": "the Svelte vertical registers its IDE-projection assets on the catalog; consumers (verter_lsp svelte_assets, verter_tsc checker) read them from the registration, not from a kernel module",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK1", "CPF0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "openQuestion": "uak1-kernel-compiler-edge-owner"
+    }
+  ],
+  "inheritedRoutes": [
+    { "id": "D01", "constitutionRule": "F01", "owner": "CPF1" },
+    { "id": "D02", "constitutionRule": "F04", "owner": "CPF1" },
+    { "id": "D03", "constitutionRule": "F01", "owner": "CPF1" },
+    { "id": "D04", "constitutionRule": "F01", "owner": "CPF1" },
+    { "id": "D05", "constitutionRule": "F01", "owner": "CPF1" },
+    { "id": "D06", "constitutionRule": "F04", "owner": "CPF1" },
+    { "id": "D07", "constitutionRule": "F04", "owner": "CPF1" },
+    { "id": "D08", "constitutionRule": "F01", "owner": "CPF1" },
+    { "id": "D09", "constitutionRule": "U06", "owner": "COX0" },
+    { "id": "D10", "constitutionRule": "F04", "owner": "COX0" },
+    { "id": "D11", "constitutionRule": "F04", "owner": "COX0" },
+    { "id": "D12", "constitutionRule": "F02", "owner": "TIF1" },
+    { "id": "D13", "constitutionRule": "F02", "owner": "TIF1" },
+    { "id": "D14", "constitutionRule": "F02", "owner": "TIF1" },
+    { "id": "D15", "constitutionRule": "F02", "owner": "TIF1" },
+    { "id": "D16", "constitutionRule": "U06", "owner": "ENCF0" },
+    { "id": "D17", "constitutionRule": "U06", "owner": "ENCL0" },
+    { "id": "D18", "constitutionRule": "F02", "owner": "IDX0" },
+    { "id": "D19", "constitutionRule": "U05", "owner": "PM1" }
+  ]
+}
