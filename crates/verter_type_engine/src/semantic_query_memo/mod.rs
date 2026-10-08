@@ -55,7 +55,6 @@ mod family_retention;
 mod flow_return_memo;
 mod hash_cons_memos;
 pub mod inflight;
-mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
 pub(crate) mod nodes;
@@ -290,24 +289,6 @@ pub struct SemanticGraphStore {
     /// family rails (per-family cap, invalid-first / LRU eviction, the
     /// family `memo_budget` global bound, reverse-index drains).
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
-    /// The payload-side relation-proof table backing (design Decision 4):
-    /// proofs a [`SemanticQueryValue::Relation`] payload references by
-    /// opaque [`crate::semantic_query::RelationProofId`], interned
-    /// append-only and deduplicated by value. The proof is a descriptive
-    /// witness, NEVER a validity oracle — it rides OFF the type-values
-    /// surface.
-    ///
-    /// The id space is append-only (an id is an ordinal that is never
-    /// reused); a proof [`Self::release_canonical`] dropped because it named
-    /// a released node leaves no entry behind. The dedup map holds exactly
-    /// the live proofs.
-    relation_proof_table: Mutex<intern_table::RelationProofTable>,
-    /// The co-discharged full `Relate` keys a `CoinductiveCycle` proof
-    /// references by opaque [`crate::semantic_query::RelateKeyId`],
-    /// interned append-only (content-free — never a session-bearing
-    /// identity). Same discipline as `relation_proof_table`: a released
-    /// key leaves no entry and its id is never reused.
-    relate_key_table: Mutex<intern_table::RelateKeyTable>,
     /// In-flight admission keyed by the prepared query token
     /// ([`PreparedKeyHandle`]) whose equality IS full
     /// [`SemanticQueryKey`] equality (bijection pinned by the

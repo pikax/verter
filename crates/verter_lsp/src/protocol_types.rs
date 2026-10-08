@@ -405,8 +405,6 @@ pub struct RetentionStatistics {
     pub semantic_node_slots: usize,
     pub semantic_memo_entries: usize,
     pub unresolved_reach: usize,
-    pub relation_proofs: usize,
-    pub relate_keys: usize,
     pub union_views: usize,
     pub stable_key_classes: usize,
     /// Close-time semantic releases still queued behind in-flight
@@ -470,8 +468,6 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             semantic_node_slots: snapshot.semantic_node_slots,
             semantic_memo_entries: snapshot.semantic_memo_entries,
             unresolved_reach: snapshot.unresolved_reach,
-            relation_proofs: snapshot.relation_proofs,
-            relate_keys: snapshot.relate_keys,
             union_views: snapshot.union_views,
             stable_key_classes: snapshot.stable_key_classes,
             deferred_releases: snapshot.deferred_releases,

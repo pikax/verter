@@ -4,7 +4,7 @@
 //! the memo entries whose carriers reference the canonical and drops the
 //! arena's dedup entries for it, but leaves every node payload, every
 //! per-node sidecar (`unresolved_reach`, the member-ordinal index, origin
-//! edges) and every relation proof in place: the edited document is still
+//! edges) in place: the edited document is still
 //! open, its next lowering re-interns fresh ids, and the retained payloads
 //! are what a warm re-read of an unchanged neighbour still reaches.
 //!
@@ -31,8 +31,8 @@
 //!    and publishes afterwards is registered under the canonical, fails
 //!    validation once the reload lands a new hash, and is drained by the
 //!    next close; the admission fence below keeps it off released ids;
-//! 4. the per-node sidecars and the relation proof / relate-key tables drop
-//!    every entry naming a released node;
+//! 4. the per-node sidecars and the union member views drop every entry
+//!    naming a released node;
 //! 5. the hash-cons memos are cleared once more, after the tombstone.
 //!
 //! What is NOT released, and why: `Global`-scope nodes that embed no
@@ -68,10 +68,6 @@ pub struct SemanticReleaseReport {
     pub member_indexes_dropped: usize,
     /// Origin-edge buckets dropped from the derivation store.
     pub derivation_buckets_dropped: usize,
-    /// Relation proofs whose witness named a released node.
-    pub relation_proofs_released: usize,
-    /// Co-discharged relate keys whose operands named a released node.
-    pub relate_keys_released: usize,
     /// Union member views (V8's per-store `union_views`) whose union or a
     /// member was released.
     pub union_views_released: usize,
@@ -196,9 +192,6 @@ impl SemanticGraphStore {
             .derivation
             .lock()
             .release_nodes(&|id| dead.contains(&id));
-        let (relate_keys_released, relation_proofs_released) = self.release_relation_tables(&dead);
-        report.relate_keys_released = relate_keys_released;
-        report.relation_proofs_released = relation_proofs_released;
         report.union_views_released = self.release_union_views(&dead);
         // The stable-key classes of released nodes can never be read again.
         self.key_classes
@@ -239,40 +232,6 @@ impl SemanticGraphStore {
         // The views and their retention charges drop here, outside the
         // table's lock.
         taken.len()
-    }
-
-    /// Drop every relate key whose operands name a released node, then
-    /// every proof whose witness names a released node or a key released
-    /// here. Slots stay allocated (ids are never reused); the dedup maps
-    /// shrink to the live set. Returns `(keys released, proofs released)`.
-    fn release_relation_tables(&self, dead: &FxHashSet<SemanticNodeId>) -> (usize, usize) {
-        use crate::semantic_query::{RelateKeyId, RelationProof};
-
-        let released_keys: FxHashSet<RelateKeyId> = self
-            .relate_key_table
-            .lock()
-            .release_where(|key| dead.contains(&key.source) || dead.contains(&key.target))
-            .into_iter()
-            .map(RelateKeyId)
-            .collect();
-        let released_proofs = self
-            .relation_proof_table
-            .lock()
-            .release_where(|proof| match proof {
-                RelationProof::Assignable { witness } => witness
-                    .sub_derivations
-                    .iter()
-                    .any(|sub| dead.contains(&sub.source) || dead.contains(&sub.target)),
-                RelationProof::NotAssignable { failing_sub, .. } => {
-                    dead.contains(&failing_sub.source) || dead.contains(&failing_sub.target)
-                }
-                RelationProof::BudgetExceeded { .. } => false,
-                RelationProof::CoinductiveCycle { keys } => {
-                    keys.iter().any(|key| released_keys.contains(key))
-                }
-            })
-            .len();
-        (released_keys.len(), released_proofs)
     }
 }
 
