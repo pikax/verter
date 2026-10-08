@@ -18,10 +18,10 @@ The reviewed contract data lives in `tests/kernel/UAK0/products/`:
 | `owner-consumer-inventory.v1.json` | Named boundaries `B01`–`B06`, outcomes `O01`–`O13`, consumers `C01`–`C17`, retained seams `S01`–`S13`, the superseded-proposal map, the zero-work baseline cells `Z01`–`Z06` and the transferred obligations |
 | `deletion-retag-ledger.v1.json` | Displaced routes `D01`–`D19` with category, symbols, paths, disposition, one deletion owner, successor path and receiving acceptance ID, plus the three empty populations |
 
-Every implementation and deletion owner in both files is an existing plan node; retained seams are owned by their current crate. `consumes` names boundaries (`B..`); `consumesOutcomes` names outcomes (`O..`). Each deletion owner updates the repository skill documenting the route it removes in the same change. Every `successorPath`
+The following are UAK0 inventory assertions; the plan nodes and receiving-charter predecessor edges live in the controller-owned DAG, which this repository does not carry, and are not evidenced by these files. Every implementation and deletion owner in both files is named as an existing plan node; retained seams are owned by their current crate. `consumes` names boundaries (`B..`); `consumesOutcomes` names outcomes (`O..`). Each deletion owner is expected to update the repository skill documenting the route it removes in the same change. Every `successorPath`
 starts at UAK0, and each step follows a predecessor edge recorded in the
-receiving charter. UAM0 (`UAM0-AC-R1`) owns the validator that checks this
-data and runs its negative controls. This node ships no validator.
+receiving charter. `UAM0-AC-R1` records UAM0 as the owner of the validator that will check this
+data; that validator does not exist in this node, which ships none.
 
 ## Method
 
