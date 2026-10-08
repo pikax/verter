@@ -984,6 +984,11 @@ pub struct FileArtifactStore {
     /// Installed by the host for each workspace it serves; `None` leaves
     /// versions unleased.
     freshness_readers: parking_lot::RwLock<Option<verter_workspace::FreshnessReaders>>,
+    /// Test-only hook run once at the start of the next
+    /// [`Self::install_freshness_readers`], so a test can hold an
+    /// installation open while another workspace swap runs.
+    #[cfg(test)]
+    freshness_install_hook: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Test-only host-level audit hook.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
@@ -1057,6 +1062,8 @@ impl FileArtifactStore {
             global_contributors: crate::global_contributors::GlobalContributorIndex::new(),
             freshness_readers: parking_lot::RwLock::new(None),
             #[cfg(test)]
+            freshness_install_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
     }
@@ -1069,7 +1076,19 @@ impl FileArtifactStore {
         &self,
         readers: Option<verter_workspace::FreshnessReaders>,
     ) {
+        #[cfg(test)]
+        {
+            let hook = self.freshness_install_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         *self.freshness_readers.write() = readers;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_freshness_install(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.freshness_install_hook.lock() = Some(hook);
     }
 
     fn lease_freshness(

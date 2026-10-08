@@ -932,10 +932,10 @@ impl Engine {
         self.content_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// The per-canonical rail only moves FORWARD: every recorded transition
-    /// mints a key strictly newer than the last one read for this canonical
-    /// — a real mutation included, since a byte-less transition may already
-    /// sit at or above its generation.
+    /// Record `canonical_id`'s transition at `generation`, the content
+    /// generation the calling mutation just published. Every caller records
+    /// inside the resolution-world write that bumped it, so the rail only
+    /// moves FORWARD and never past the live generation.
     fn record_content_transition_at(&self, canonical_id: &str, generation: u64) {
         self.freshness
             .record_exact(canonical_id, generation, self.current_content_generation());
@@ -982,28 +982,34 @@ impl Engine {
         })
     }
 
-    /// Record a content transition for `canonical_id` at the CURRENT
-    /// generation without bumping — for multi-canonical mutations that
-    /// bump once after recording every affected id.
+    /// Record a content transition for `canonical_id` WITHOUT a byte change.
     ///
     /// Strictly newer than whatever this canonical's rail last read, every
-    /// time: the caller was just refused at that very value, so recording
-    /// "current generation + 1" twice would hand its retry the same key back.
+    /// time: the caller was just refused at that very value. The transition
+    /// is a content generation of its own — bumped and recorded inside one
+    /// resolution-world write like every other transition — so it never
+    /// records ahead of the live generation, where no retirement could ever
+    /// reclaim it.
     pub(crate) fn record_content_transition(&self, canonical_id: &str) {
-        let generation = self.current_content_generation();
-        self.record_content_transition_at(canonical_id, generation + 1);
+        self.mutate_resolution_world(|_world| {
+            let generation = self.bump_content_generation_in_world();
+            self.record_content_transition_at(canonical_id, generation);
+            ((), true)
+        })
     }
 
     /// Record a SUBTREE content transition for every canonical under
-    /// `prefix` (inclusive) at the current generation, without bumping —
-    /// for directory-scoped mutations whose member set the engine cannot
-    /// enumerate (`delete_dir_all`, watcher `DirectoryTreeDirty`
-    /// recovery). Callers bump once after recording, exactly like
+    /// `prefix` (inclusive) WITHOUT a byte change, for directory-scoped
+    /// transitions whose member set the engine cannot enumerate. A content
+    /// generation of its own, exactly like
     /// [`Self::record_content_transition`].
     #[allow(dead_code)]
     pub(crate) fn record_subtree_content_transition(&self, prefix: &str) {
-        let generation = self.current_content_generation();
-        self.record_subtree_content_transition_at(prefix, generation + 1);
+        self.mutate_resolution_world(|_world| {
+            let generation = self.bump_content_generation_in_world();
+            self.record_subtree_content_transition_at(prefix, generation);
+            ((), true)
+        })
     }
 
     /// The generation recorded at `canonical_id`'s most recent content

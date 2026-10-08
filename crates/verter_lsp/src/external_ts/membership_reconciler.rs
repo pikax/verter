@@ -280,6 +280,10 @@ pub struct PendingProviderReady {
     intent_epoch: u64,
     engine: Arc<str>,
     companions: Vec<CarrierCompanion>,
+    /// Ownership of the source's content-transition evidence while the
+    /// captured `source_revision` is compared against the live rail: unrelated
+    /// workspace history retirement never moves a held canonical's answer.
+    _source_evidence: Option<verter_workspace::CanonicalFreshnessLease>,
 }
 
 impl PendingProviderReady {
@@ -302,7 +306,18 @@ impl PendingProviderReady {
             intent_epoch,
             engine: engine.into(),
             companions: companions.to_vec(),
+            _source_evidence: None,
         }
+    }
+
+    /// Hold `evidence` — the source's freshness lease, taken BEFORE
+    /// `source_revision` was read — for as long as this pending lives.
+    pub(crate) fn holding_source_evidence(
+        mut self,
+        evidence: Option<verter_workspace::CanonicalFreshnessLease>,
+    ) -> Self {
+        self._source_evidence = evidence;
+        self
     }
 
     pub(crate) fn source_revision(&self) -> u64 {

@@ -96,6 +96,8 @@ mod component_meta_cache_discipline_tests;
 mod fallthrough_admission_tests;
 pub mod host_audit_runtime;
 #[cfg(test)]
+mod host_freshness_evidence_tests;
+#[cfg(test)]
 mod host_lifecycle_cascade_tests;
 #[cfg(test)]
 mod lazy_decl_body_tests;
@@ -115,8 +117,6 @@ mod prepared_decl_import_route_witness_tests;
 mod raw_snapshot_template_source_move_tests;
 #[cfg(test)]
 mod request_store_view_derived_hash_tests;
-#[cfg(test)]
-mod request_store_view_freshness_tests;
 #[cfg(test)]
 mod template_slot_generation_rail_tests;
 #[cfg(test)]

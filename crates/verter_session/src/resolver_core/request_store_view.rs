@@ -926,9 +926,10 @@ pub(crate) struct RequestStoreView<'a> {
     /// The receipts this view has validated (see [`ValidatedReceipts`]).
     validated_receipts: ValidatedReceipts,
     /// The request's ownership of the base's captured content generation in
-    /// the workspace freshness history: while the request runs, retiring
-    /// history cannot raise the transition floor past the generation the
-    /// base clamps its artifact-only answers to.
+    /// the workspace freshness history: from the moment the view is built,
+    /// retiring history cannot raise the transition floor past the
+    /// generation the base clamps its artifact-only answers to (see
+    /// [`HostStoreView::lease_freshness`]).
     _freshness: Option<verter_workspace::ViewFreshnessLease>,
     #[cfg(test)]
     validation_step_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,

@@ -3196,7 +3196,6 @@ fn stored_artifacts_own_their_canonical_freshness_evidence_until_reclaimed() {
         .map(|index| (format!("/churn/{index}.ts"), Arc::from("export {};")))
         .collect();
     workspace.notify_upsert_many(&churn);
-    workspace.notify_upsert("/churn/last.ts", Arc::from("export {};"));
 
     assert!(
         workspace.last_content_transition_generation("/pkg/unleased.d.ts") > built_at,
@@ -3206,12 +3205,19 @@ fn stored_artifacts_own_their_canonical_freshness_evidence_until_reclaimed() {
         workspace.last_content_transition_generation(leased) <= built_at,
         "retiring unrelated history must not make a stored artifact stale"
     );
+    // The batch's own records retire once the queue reaches the trigger,
+    // with no later mutation: only the leased entry and the records made
+    // after that pass remain, and they answer the batch's generation, not a
+    // future one an artifact built now would be refused under.
     let residency = workspace.resource_snapshot().freshness_history;
-    // Retirement runs once the queue reaches the trigger, so at most the
-    // evidence recorded after the last pass remains.
     assert!(
-        residency.exact_entries <= 1 + 64 + 1,
+        residency.exact_entries <= 1 + 64,
         "unleased churn must have retired: {residency:?}"
+    );
+    let completed = workspace.content_generation();
+    assert!(
+        workspace.last_content_transition_generation("/churn/4159.ts") <= completed,
+        "a record after the batch's retirement pass must not answer a future generation"
     );
 
     store.clear_all();

@@ -31,14 +31,19 @@
 //!   never from the floor, so unrelated retirement cannot move it. A subtree
 //!   entry that retires folds its generation into every leased canonical
 //!   under it first, so a leased canonical a directory event made stale
-//!   stays stale.
+//!   stays stale. A consumer that holds a revision and later compares it for
+//!   equality owns its canonical the same way, so unrelated retirement never
+//!   reads as a transition of its canonical.
 //! - a [`ViewFreshnessLease`] (held by a request store view that clamps
 //!   every answer to its captured generation) caps the floor at that
-//!   generation while it lives.
+//!   generation from the moment it is taken; a floor that already passed it
+//!   stays where it is.
 //!
 //! Unleased evidence is retired once enough of it is queued
 //! ([`DEFAULT_RETIRE_TRIGGER`]), so the floor moves rarely and the resident
 //! history is bounded by the trigger plus the evidence live readers own.
+//! Every record is made at the live content generation, so the floor (which
+//! never passes the live generation) eventually covers every unleased record.
 //! An unleased consumer comparing two reads for equality sees a floor rise
 //! as a transition: conservative, never unsound.
 //!
@@ -47,16 +52,18 @@
 //! Subtree containment is indexed by ancestor: a lookup probes the
 //! canonical itself and each of its `/`-delimited ancestors in the subtree
 //! map, so its work is bounded by the canonical's depth, not by how many
-//! directory events were ever recorded.
+//! directory events were ever recorded. Leased canonicals are kept in an
+//! ordered index, so folding a retired subtree visits only the leased
+//! canonicals under it.
 //!
 //! The history lock is a leaf: nothing else is acquired while it is held.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
-use verter_debug_assert::verter_debug_assert;
 
 #[cfg(test)]
 #[path = "freshness_tests.rs"]
@@ -92,6 +99,9 @@ struct HistoryState {
     /// `/` is the empty key — the containment rule of
     /// [`crate::path_matches_prefix`].
     subtrees: FxHashMap<Arc<str>, u64>,
+    /// Every exact key with at least one canonical lease, ordered so the
+    /// leased canonicals under a subtree are one range.
+    leased: BTreeSet<Arc<str>>,
     /// Retirement candidates in generation order: every UNLEASED exact
     /// entry and every subtree entry.
     queue: BTreeSet<(u64, EntryKind, Arc<str>)>,
@@ -117,7 +127,9 @@ struct ObserveCounters {
 #[cfg(feature = "semantic-observe")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FreshnessObserveSnapshot {
-    /// Subtree-map probes performed by lookups and records.
+    /// Index probes performed by lookups, records and retirement folds:
+    /// one per subtree-map probe, per retired-subtree range seek, and per
+    /// leased canonical a retired subtree folds into.
     pub ancestor_probes: u64,
     /// Retirement passes run.
     pub retirement_passes: u64,
@@ -177,24 +189,21 @@ impl FreshnessHistory {
         self.last_transition_in(&state, &key)
     }
 
-    /// Record an exact transition for `canonical_id` at `generation`.
+    /// Record an exact transition for `canonical_id` at `generation`, the
+    /// live content generation `current` the recording mutation published.
     ///
-    /// The recorded answer is strictly newer than the previous answer for
-    /// this canonical, every time: a byte-less transition may already have
-    /// moved it to or past `generation`, and a consumer refused at that
-    /// value must not be handed it back. `current` is the live content
-    /// generation.
+    /// The answer becomes at least `generation` and never falls. It is never
+    /// pushed past `generation`: several canonicals recorded under one
+    /// generation (a bulk upsert) may see a retirement pass raise the floor
+    /// to that generation between their records, and a later record must
+    /// still answer that generation, not a future one an artifact built at
+    /// the live generation would be refused under.
     pub(crate) fn record_exact(&self, canonical_id: &str, generation: u64, current: u64) {
         let key: Arc<str> =
             verter_session_query::resolution::normalize_canonical_id(canonical_id).into();
         let mut state = self.state.write();
         state.observed_current = state.observed_current.max(current);
-        let previous = self.last_transition_in(&state, &key);
-        let next = if generation > previous {
-            generation
-        } else {
-            previous + 1
-        };
+        let next = generation.max(self.last_transition_in(&state, &key));
         let state = &mut *state;
         match state.exact.get_mut(&key) {
             Some(entry) => {
@@ -250,11 +259,7 @@ impl FreshnessHistory {
         let state = self.state.read();
         FreshnessResidency {
             exact_entries: state.exact.len(),
-            leased_entries: state
-                .exact
-                .values()
-                .filter(|entry| entry.readers > 0)
-                .count(),
+            leased_entries: state.leased.len(),
             subtree_entries: state.subtrees.len(),
             queued_entries: state.queue.len(),
             exact_capacity: state.exact.capacity(),
@@ -316,10 +321,12 @@ impl FreshnessHistory {
                     // Leaving the floor out of the answer must not lower
                     // it: the entry absorbs the floor it was answering at.
                     entry.generation = entry.generation.max(floor);
+                    state.leased.insert(Arc::clone(key));
                 }
                 entry.readers += 1;
             }
             None => {
+                state.leased.insert(Arc::clone(key));
                 state.exact.insert(
                     Arc::clone(key),
                     ExactEntry {
@@ -334,22 +341,20 @@ impl FreshnessHistory {
     fn release_canonical(&self, key: &Arc<str>) {
         let mut state = self.state.write();
         let state = &mut *state;
-        let entry = state.exact.get_mut(key);
-        verter_debug_assert!(
-            entry.is_some(),
-            "canonical freshness lease released without an entry"
-        );
-        let Some(entry) = entry else {
-            return;
-        };
-        verter_debug_assert!(
-            entry.readers > 0,
-            "canonical freshness lease double-released"
-        );
-        entry.readers = entry.readers.saturating_sub(1);
+        // A lease's entry lives until its last lease drops, so a missing
+        // entry or a zero count is broken lease accounting, not a release.
+        let entry = state
+            .exact
+            .get_mut(key)
+            .expect("canonical freshness lease released without an entry");
+        entry.readers = entry
+            .readers
+            .checked_sub(1)
+            .expect("canonical freshness lease double-released");
         if entry.readers > 0 {
             return;
         }
+        state.leased.remove(key);
         if entry.generation <= state.floor {
             // Answers exactly what the floor answers: nothing to keep.
             state.exact.remove(key);
@@ -371,19 +376,13 @@ impl FreshnessHistory {
     fn release_view(&self, generation: u64) {
         let mut state = self.state.write();
         let state = &mut *state;
-        let count = state.views.get(&generation).copied();
-        verter_debug_assert!(
-            count.is_some(),
-            "view freshness lease released without a record"
-        );
-        match count {
-            Some(count) if count > 1 => {
-                state.views.insert(generation, count - 1);
-            }
-            Some(_) => {
-                state.views.remove(&generation);
-            }
-            None => {}
+        let count = state
+            .views
+            .get_mut(&generation)
+            .expect("view freshness lease released without a record");
+        *count -= 1;
+        if *count == 0 {
+            state.views.remove(&generation);
         }
         self.maybe_retire(state);
     }
@@ -419,7 +418,7 @@ impl FreshnessHistory {
             match kind {
                 EntryKind::Exact => {
                     let removed = state.exact.remove(&key);
-                    verter_debug_assert!(
+                    assert!(
                         removed.is_some_and(|entry| entry.readers == 0),
                         "queued exact freshness entry must be unleased"
                     );
@@ -431,24 +430,26 @@ impl FreshnessHistory {
             }
         }
 
-        if !retired_subtrees.is_empty() {
-            // Unleased canonicals under a retired subtree answer from the
-            // floor, which now covers it. Leased ones never consult the
-            // floor, so the subtree's generation folds into their entries.
-            for (key, entry) in state.exact.iter_mut() {
-                if entry.readers == 0 {
-                    continue;
-                }
-                for candidate in containing_prefixes(key) {
-                    #[cfg(feature = "semantic-observe")]
-                    self.observe
-                        .ancestor_probes
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Some(generation) = retired_subtrees.get(candidate) {
-                        entry.generation = entry.generation.max(*generation);
-                    }
-                }
-            }
+        // Unleased canonicals under a retired subtree answer from the floor,
+        // which now covers it. Leased ones never consult the floor, so the
+        // subtree's generation folds into their entries: only the leased
+        // canonicals under each retired subtree are visited.
+        let HistoryState { exact, leased, .. } = &mut *state;
+        for (prefix, generation) in &retired_subtrees {
+            #[cfg(feature = "semantic-observe")]
+            self.observe
+                .ancestor_probes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            leased_under(leased, prefix, |key| {
+                #[cfg(feature = "semantic-observe")]
+                self.observe
+                    .ancestor_probes
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let entry = exact
+                    .get_mut(key)
+                    .expect("a leased freshness key has an exact entry");
+                entry.generation = entry.generation.max(*generation);
+            });
         }
 
         Self::shrink(&mut state.exact);
@@ -469,6 +470,24 @@ fn subtree_key(prefix: &str) -> Arc<str> {
         key.pop();
     }
     key.into()
+}
+
+/// The leased keys a subtree keyed `prefix` contains under
+/// [`crate::path_matches_prefix`]: `prefix` itself and every key that
+/// continues it with `/`. The second set is exactly the range
+/// `[prefix + "/", prefix + "0")`, `'0'` being the byte after `'/'`.
+fn leased_under(leased: &BTreeSet<Arc<str>>, prefix: &str, mut visit: impl FnMut(&str)) {
+    if let Some(key) = leased.get(prefix) {
+        visit(key);
+    }
+    let lower = format!("{prefix}/");
+    let upper = format!("{prefix}0");
+    for key in leased.range::<str, _>((
+        Bound::Included(lower.as_str()),
+        Bound::Excluded(upper.as_str()),
+    )) {
+        visit(key);
+    }
 }
 
 /// Every subtree key whose prefix contains `key` under
