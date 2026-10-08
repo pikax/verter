@@ -230,8 +230,11 @@ pub fn locate_prop_decl_range_in_carrier_api(
 /// 1. **Captured [`CapturedPathState::Current`] (a `CarrierApi` surface at capture),
 ///    context builds** → `Vouched(ctx)`: map the API-surface offsets onto the `.vue`
 ///    through THAT captured generation's own source map.
-/// 2. **Captured [`CapturedPathState::Current`] but no context (no source map)** →
-///    `VirtualDrop` (fail closed).
+/// 2. **Captured [`CapturedPathState::Current`] but no context (no source map), or
+///    a surface the serving provider does not hold at decode
+///    ([`ProviderQuerySnapshot::delivery_of`] is not delivered)** → `VirtualDrop`
+///    (fail closed). The delivery read is the serving provider's own ledger, bound
+///    at capture — not a read of mutable store state.
 /// 3. **Captured [`CapturedPathState::KnownNonMappable`]** (was `Closing`, or a
 ///    non-`CarrierApi`/snapshot-less `Current` at capture) → `VirtualDrop`. The store
 ///    knew the path as virtual; its offsets index VIRTUAL content, so it must NEVER
@@ -254,6 +257,15 @@ pub fn classify_captured_api_surface(
         // A vouching surface joins the enclosing foreground request's settlement
         // bracket: a change to it before settlement — including one that changes
         // back — supersedes the answer mapped through it.
+        // A captured surface the serving provider does not hold at this
+        // decode — recorded ahead of its publication, diverged or lost — is
+        // known virtual but unmappable: the provider's offsets index bytes it
+        // does not describe.
+        Some(CapturedPathState::Current(snapshot))
+            if !captured.delivery_of(snapshot).is_servable() =>
+        {
+            ApiSurfaceResolution::VirtualDrop
+        }
         Some(CapturedPathState::Current(snapshot)) => {
             match external_ide_context_from_snapshot(snapshot, negotiated_encoding) {
                 Some(ctx) => {

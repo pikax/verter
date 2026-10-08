@@ -143,27 +143,22 @@ impl HostResolverState {
 }
 
 /// The workspace-scoped services every workspace attached to a host
-/// receives: the host's resolve-extension policy and the one resolution
-/// retention adapter over the process-local account.
+/// receives: the host's resolve-extension policy.
 ///
 /// Built once by the composition root. [`Self::attach`] is the single
 /// route through which a workspace receives them — at construction and on
 /// every [`VerterHost::set_workspace`] swap — so a swapped-in workspace
-/// can never miss a service the original received, and every attached
-/// workspace charges the same adapter.
+/// can never miss a service the original received. Resident resolution
+/// state needs no service: every workspace charges the process-local
+/// retention account from its own construction.
 pub(crate) struct WorkspaceServices {
     resolve_extensions: Vec<String>,
-    resolution_retention:
-        Arc<dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount>,
 }
 
 impl WorkspaceServices {
     fn new(config: &HostConfig) -> Self {
         Self {
             resolve_extensions: config.resolve_extensions.clone(),
-            resolution_retention: Arc::new(
-                verter_session_query::retention::ResolutionRetention::process_local(),
-            ),
         }
     }
 
@@ -171,10 +166,6 @@ impl WorkspaceServices {
     pub(crate) fn attach(&self, workspace: &dyn verter_workspace::WorkspaceAccess) {
         // Reverse-dep stem stripping honours the host policy from the start.
         workspace.set_default_resolve_extensions(self.resolve_extensions.clone());
-        // The workspace's resident request-overlay resolution state charges
-        // the process-local account — the same aggregate account every host
-        // store charges.
-        workspace.install_resolution_retention(Arc::clone(&self.resolution_retention));
     }
 }
 

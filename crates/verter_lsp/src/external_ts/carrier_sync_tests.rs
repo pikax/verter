@@ -55,6 +55,7 @@ fn owned_carrier_state() -> ProviderSyncState {
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -763,6 +764,169 @@ async fn direct_open_receipt_attests_the_exact_provider_specialized_ide_surface(
     assert!(
         !committed.authorizes_carrier_ide_capture(compiler_hash, [0; 16]),
         "the pre-adaptation compiler surface is not misreported as provider authority"
+    );
+}
+
+/// On the membership-only topology the engine reads the public-API companion
+/// from the committed publication, so the publication — not the path or its
+/// liveness flag — is the delivery evidence for API bytes. The gateway records
+/// a new API surface before its publication commits; until a receipt attesting
+/// exactly those bytes is admitted, the engine still serves the previous API
+/// surface at the same live path, and mapping its offsets through the newly
+/// recorded one would be wrong.
+#[test]
+fn an_api_surface_recorded_ahead_of_its_publication_is_not_delivered() {
+    use crate::provider_surface_store::SurfaceDelivery;
+    let canonical = "/workspace/src/App.vue";
+    let api_path = "/workspace/src/App.vue.verter.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from("<script setup lang=\"ts\">\ndefineProps<{ a: string }>();\n</script>\n"),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+    let states: Arc<DashMap<String, ProviderSyncState>> = Arc::new(DashMap::new());
+    store.bind_delivery_witness(Arc::new(
+        crate::provider_sync::ProviderSyncDeliveryWitness::new(
+            crate::type_provider::project_sync::ProjectSync::new_with_kind(
+                Arc::new(MockTypeProvider::new()),
+                crate::ProjectSyncMode::FullProject,
+                crate::TypeProviderKind::Tsserver,
+            ),
+            Arc::clone(&states),
+        ),
+    ));
+    let coordinator = CarrierTransactionCoordinator::new();
+    let record_api = |bytes: &str| {
+        let mut companions = vec![CarrierCompanion::verbatim(
+            Arc::from(api_path),
+            Arc::from(bytes),
+            None,
+            verter_session::external_ts::SnapshotRole::CarrierApi,
+            verter_session::external_ts::ScriptKind::Ts,
+        )];
+        crate::provider_surface_store::record_and_version_carrier_companions(
+            &store,
+            None,
+            &host,
+            canonical,
+            &mut companions,
+            None,
+        );
+        let snapshot = store
+            .current_snapshot(api_path)
+            .expect("the publish path records the API surface");
+        (companions, snapshot)
+    };
+    let commit = |companions: &[CarrierCompanion], revision: u64| {
+        let receipt = PendingProviderReady::authorize(
+            &test_binding("/workspace/tsconfig.json"),
+            revision,
+            0,
+            "tsserver",
+            companions,
+        )
+        .confirm_opened(&[ProviderPathKind::Api]);
+        assert_eq!(
+            coordinator.admit_owned(&host, &states, canonical, owned_carrier_state(), &receipt),
+            AdmitOutcome::Admitted
+        );
+    };
+
+    let (published_a, a) = record_api("export declare const api: { a: string };\n");
+    assert_eq!(
+        store.delivery_of(&a),
+        SurfaceDelivery::AwaitingDelivery,
+        "recorded, never published"
+    );
+    commit(&published_a, 1);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    assert!(store.captured_surface_is_current(&a));
+
+    // The record of B runs ahead of its publication: the path is still live and
+    // still loaded, but the committed publication carries A's bytes.
+    let (published_b, b) = record_api("export declare const api: { b: number };\n");
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::AwaitingDelivery);
+    assert!(
+        !store.captured_surface_is_current(&b),
+        "the engine still serves A at this path; B's offsets would mis-map its answers"
+    );
+
+    // Once the publication of exactly B commits, B is the delivered surface.
+    commit(&published_b, 2);
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::Delivered);
+    assert!(store.captured_surface_is_current(&b));
+}
+
+/// On the membership-only topology an UNRESOLVED carrier is never published to
+/// the engine: it has no receipt, so nothing fingerprints the IDE bytes the
+/// engine reads at its path. A live, background-loaded committed path with a
+/// recorded IDE surface is path liveness only, and never delivery evidence.
+#[test]
+fn an_unresolved_carriers_live_ide_path_is_not_membership_delivery() {
+    use crate::provider_surface_store::SurfaceDelivery;
+    let canonical = "/workspace/src/App.vue";
+    let ide_path = "/workspace/src/App.vue.tsx";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from("<script setup lang=\"ts\">\nconst a = 1;\n</script>\n"),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+    let states: Arc<DashMap<String, ProviderSyncState>> = Arc::new(DashMap::new());
+    store.bind_delivery_witness(Arc::new(
+        crate::provider_sync::ProviderSyncDeliveryWitness::new(
+            crate::type_provider::project_sync::ProjectSync::new_with_kind(
+                Arc::new(MockTypeProvider::new()),
+                crate::ProjectSyncMode::FullProject,
+                crate::TypeProviderKind::Tsserver,
+            ),
+            Arc::clone(&states),
+        ),
+    ));
+    let mut companions = vec![CarrierCompanion::carrier_ide(
+        Arc::from(ide_path),
+        crate::carrier_provider_projection::expect_admitted(
+            crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                None,
+                canonical,
+                "const a = 1;\n",
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "no workspace resolution is needed",
+        ),
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+    )];
+    crate::provider_surface_store::record_and_version_carrier_companions(
+        &store,
+        None,
+        &host,
+        canonical,
+        &mut companions,
+        None,
+    );
+    let surface = store
+        .current_snapshot(ide_path)
+        .expect("the publish path records the IDE surface");
+    let mut unresolved = ProviderSyncState::unresolved(ide_path.to_string());
+    unresolved.ide_background_loaded = true;
+    assert!(unresolved.is_unresolved());
+    states.insert(canonical.to_string(), unresolved);
+
+    assert_eq!(
+        store.delivery_of(&surface),
+        SurfaceDelivery::AwaitingDelivery
+    );
+    assert!(
+        !store.captured_surface_is_current(&surface),
+        "no receipt attests the IDE bytes the engine reads at this live path"
     );
 }
 
@@ -3547,7 +3711,7 @@ fn api_only_admission_merges_the_live_ide_and_declaration_legs() {
     live.ide_path = Some("/workspace/src/App.vue.jsx".into());
     live.decl_path = Some("/workspace/src/App.vue.d.ts".into());
     live.decl_background_loaded = true;
-    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierIdeSurface {
+    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierSurface {
         content_hash: [1; 16],
         map_hash: [2; 16],
     });
@@ -3587,7 +3751,7 @@ fn api_only_owner_change_cannot_reauthorize_the_old_ide_surface() {
     let states = DashMap::new();
     let coordinator = CarrierTransactionCoordinator::new();
     let mut live = owned_carrier_state();
-    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierIdeSurface {
+    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierSurface {
         content_hash: [1; 16],
         map_hash: [2; 16],
     });
