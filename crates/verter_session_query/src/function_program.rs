@@ -1479,10 +1479,13 @@ std::thread_local! { pub static FUNCTION_KEY_LOOKUP_VISITS: std::cell::Cell<usiz
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! { pub static FUNCTION_VALUE_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
-/// Indexed-expression records examined by [`FunctionProgramIndex::expression`]
-/// on this thread: one per lookup, whatever the file's expression count.
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-std::thread_local! { pub static PROGRAM_EXPRESSION_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+std::thread_local! {
+    /// Indexed-expression records examined by
+    /// [`FunctionProgramIndex::expression`] on this thread: one per lookup,
+    /// whatever the file's expression count.
+    pub static PROGRAM_EXPRESSION_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 impl FunctionProgramIndex {
     /// Locate one exact child position in the retained file inventory.
