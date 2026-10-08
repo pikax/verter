@@ -3,9 +3,9 @@
 //!
 //! Discovery already walks every served function body once, to fold its
 //! hashes: [`ClassCollector`] records the classes that walk meets. The
-//! classes outside every served body are recorded by a walk of the top-level
-//! statements ([`collect_top_level_classes`]) that skips each served
-//! function, so no syntax is walked twice.
+//! classes outside every served body are recorded by discovery's one walk
+//! (`DiscoveryWalk` in `function_program_discovery_walk.rs`), which skips
+//! each served function, so no syntax is walked twice.
 //!
 //! A class records its members, the name it is bound to (a declaration's
 //! name, or the `const` a class expression initializes) and the bare name
@@ -121,9 +121,12 @@ impl ClassCollector {
         }
     }
 
-    /// Record `class`, once.
+    /// Record `class`, once. A second walk that met a class again would
+    /// only be absorbed here, so tests count the absorbed repeats.
     pub(super) fn record(&mut self, class: &Class<'_>) {
         if !self.seen.insert(class.span.start) {
+            #[cfg(test)]
+            REPEATED_RECORDS.with(|repeats| repeats.set(repeats.get() + 1));
             return;
         }
         let mut members = Vec::with_capacity(class.body.body.len());
@@ -306,4 +309,16 @@ impl ClassCollector {
             })
             .collect()
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static REPEATED_RECORDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Classes recorded again on this thread since the last call: each is a
+/// class some second traversal met after the first had recorded it.
+#[cfg(test)]
+pub(super) fn take_repeated_records_for_tests() -> usize {
+    REPEATED_RECORDS.with(|repeats| repeats.replace(0))
 }

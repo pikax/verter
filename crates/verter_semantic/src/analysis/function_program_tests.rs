@@ -1797,8 +1797,14 @@ fn discovery_enters_each_statement_outside_served_functions_once() {
     for served_body in ["", &"const a = 1; if (a) { class Inner {} }\n".repeat(64)] {
         let source = fixture(served_body);
         let _ = discovery_walk::take_statement_entries_for_tests();
+        let _ = crate::analysis::class_index::take_repeated_records_for_tests();
         let index = index_of(&source);
         let statements = discovery_walk::take_statement_entries_for_tests();
+        assert_eq!(
+            crate::analysis::class_index::take_repeated_records_for_tests(),
+            0,
+            "no second traversal meets a class discovery already recorded"
+        );
         let served: Vec<verter_span::Span> = index
             .entries_for_test()
             .iter()

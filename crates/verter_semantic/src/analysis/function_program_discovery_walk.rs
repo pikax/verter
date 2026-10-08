@@ -57,7 +57,6 @@ impl<'w, 's, 'ast> DiscoveryWalk<'w, 's, 'ast> {
     /// record every class outside the functions they serve.
     pub(super) fn program(mut self, statements: &'ast [Statement<'ast>]) {
         for (contributor_index, statement) in statements.iter().enumerate() {
-            enter_statement();
             discover_statement(
                 statement,
                 contributor_index,
@@ -67,9 +66,10 @@ impl<'w, 's, 'ast> DiscoveryWalk<'w, 's, 'ast> {
             );
             match namespace_of(statement) {
                 Some(module) => {
+                    enter_statement();
                     self.namespace(module, contributor_index, &FunctionDescent::new(), None);
                 }
-                None => walk::walk_statement(&mut self, statement),
+                None => self.visit_statement(statement),
             }
         }
     }
@@ -95,7 +95,6 @@ impl<'w, 's, 'ast> DiscoveryWalk<'w, 's, 'ast> {
         };
         self.ctx.classes.enter_scope();
         for (statement_ordinal, statement) in block.body.iter().enumerate() {
-            enter_statement();
             let descent = descent.then(namespace_member_step(statement_ordinal));
             discover_namespaced_statement(
                 statement,
@@ -106,8 +105,11 @@ impl<'w, 's, 'ast> DiscoveryWalk<'w, 's, 'ast> {
                 self.ctx,
             );
             match namespace_of(statement) {
-                Some(inner) => self.namespace(inner, contributor_index, &descent, Some(&qualified)),
-                None => walk::walk_statement(self, statement),
+                Some(inner) => {
+                    enter_statement();
+                    self.namespace(inner, contributor_index, &descent, Some(&qualified));
+                }
+                None => self.visit_statement(statement),
             }
         }
         self.ctx.classes.exit_scope();
