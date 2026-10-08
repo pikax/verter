@@ -1357,6 +1357,9 @@ pub struct FunctionProgramIndex {
     nested: Arc<rustc_hash::FxHashMap<(FunctionProgramKey, verter_span::Span), usize>>,
     /// Indexed declaration/callback expressions, in source order.
     expressions: Arc<[ProgramExpressionRecord]>,
+    /// Each indexed expression's program point → its position in
+    /// `expressions`; where two records share a point the first wins.
+    expressions_by_point: Arc<rustc_hash::FxHashMap<ProgramExpressionIdentity, usize>>,
     /// Every class the file authors: syntactic data recorded by the same
     /// build, prepared into keyed lookups, owned by this index and
     /// released with it.
@@ -1444,12 +1447,22 @@ impl FunctionProgramIndex {
                     .or_insert(ordinal);
             }
         }
+        let mut expressions_by_point = rustc_hash::FxHashMap::with_capacity_and_hasher(
+            expressions.len(),
+            rustc_hash::FxBuildHasher,
+        );
+        for (ordinal, record) in expressions.iter().enumerate() {
+            expressions_by_point
+                .entry(record.point.clone())
+                .or_insert(ordinal);
+        }
         FunctionProgramIndex {
             by_key: Arc::new(by_key),
             value_functions: Arc::new(value_functions),
             nested: Arc::new(nested),
             entries: Arc::from(entries.into_boxed_slice()),
             expressions: Arc::from(expressions.into_boxed_slice()),
+            expressions_by_point: Arc::new(expressions_by_point),
             classes: ClassIndex::from_discovery(classes),
         }
     }
@@ -1465,6 +1478,11 @@ std::thread_local! { pub static FUNCTION_KEY_LOOKUP_VISITS: std::cell::Cell<usiz
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! { pub static FUNCTION_VALUE_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// Indexed-expression records examined by [`FunctionProgramIndex::expression`]
+/// on this thread: one per lookup, whatever the file's expression count.
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+std::thread_local! { pub static PROGRAM_EXPRESSION_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 impl FunctionProgramIndex {
     /// Locate one exact child position in the retained file inventory.
@@ -1564,6 +1582,7 @@ impl FunctionProgramIndex {
                     .into_boxed_slice(),
             ),
             expressions: Arc::clone(&self.expressions),
+            expressions_by_point: Arc::clone(&self.expressions_by_point),
             by_key: Arc::clone(&self.by_key),
             value_functions: Arc::clone(&self.value_functions),
             nested: Arc::clone(&self.nested),
@@ -1583,8 +1602,10 @@ impl FunctionProgramIndex {
         &self,
         point: &ProgramExpressionIdentity,
     ) -> Option<&ProgramExpressionRecord> {
-        self.expressions
-            .iter()
-            .find(|record| &record.point == point)
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        PROGRAM_EXPRESSION_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
+        self.expressions_by_point
+            .get(point)
+            .map(|&ordinal| &self.expressions[ordinal])
     }
 }

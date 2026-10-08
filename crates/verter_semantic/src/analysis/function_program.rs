@@ -1177,6 +1177,17 @@ fn resolve_call_site_targets(entries: &mut [FunctionProgramDiscovery]) {
     }
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+std::thread_local! { static CALLBACK_LINK_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// Callback candidates examined while linking call arguments to their
+/// callback positions on this thread since the last call: one per function
+/// argument, none for an ordinary argument.
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+pub fn take_callback_link_probes() -> usize {
+    CALLBACK_LINK_PROBES.with(|probes| probes.replace(0))
+}
+
 fn link_callback_return_sources(
     canonical_id: &Arc<str>,
     entries: &mut [FunctionProgramDiscovery],
@@ -1212,26 +1223,55 @@ fn link_callback_return_sources(
             (entry.span.start, source, entry.locator.clone(), entry.span)
         })
         .collect();
+    // A callback's source position is its identity; where two callbacks
+    // share a start, the first in source order answers.
+    let mut by_point =
+        rustc_hash::FxHashMap::with_capacity_and_hasher(callbacks.len(), rustc_hash::FxBuildHasher);
+    for (ordinal, (point, ..)) in callbacks.iter().enumerate() {
+        by_point.entry(*point).or_insert(ordinal);
+    }
 
-    let link_args = |args: &mut Arc<[FunctionCallArgRecord]>| {
+    // Only a function-valued argument can name a callback: a call with
+    // none keeps its argument records untouched.
+    let link_args = |args: &mut Arc<[FunctionCallArgRecord]>| -> bool {
+        if by_point.is_empty() || !args.iter().any(|argument| argument.is_function_value) {
+            return false;
+        }
         let mut linked = args.to_vec();
-        for argument in &mut linked {
-            if let Some((_, source, _, _)) = callbacks
-                .iter()
-                .find(|(point, _, _, _)| *point == argument.point && argument.is_function_value)
-            {
-                argument.function_return_source = Some(source.clone());
+        let mut changed = false;
+        for argument in linked
+            .iter_mut()
+            .filter(|argument| argument.is_function_value)
+        {
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            CALLBACK_LINK_PROBES.with(|probes| probes.set(probes.get() + 1));
+            if let Some(&ordinal) = by_point.get(&argument.point) {
+                argument.function_return_source = Some(callbacks[ordinal].1.clone());
+                changed = true;
             }
         }
-        *args = Arc::from(linked.into_boxed_slice());
+        if changed {
+            *args = Arc::from(linked.into_boxed_slice());
+        }
+        changed
     };
 
     for entry in entries.iter_mut() {
-        let mut sites = entry.call_sites.to_vec();
-        for site in &mut sites {
-            link_args(&mut site.args);
+        if !entry
+            .call_sites
+            .iter()
+            .any(|site| site.args.iter().any(|argument| argument.is_function_value))
+        {
+            continue;
         }
-        entry.call_sites = Arc::from(sites.into_boxed_slice());
+        let mut sites = entry.call_sites.to_vec();
+        let mut changed = false;
+        for site in &mut sites {
+            changed |= link_args(&mut site.args);
+        }
+        if changed {
+            entry.call_sites = Arc::from(sites.into_boxed_slice());
+        }
     }
     for expression in expressions.iter_mut() {
         if let ProgramExpressionSource::SemanticCall { site, .. } = &mut expression.source {
