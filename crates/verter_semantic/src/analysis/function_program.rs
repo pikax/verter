@@ -213,11 +213,14 @@ fn build_function_program_index_impl<'ast>(
             let served = served_spans(ctx);
             // Folding each served body's hashes records the classes inside it.
             hash_entries(ctx, &served);
-            crate::analysis::class_index::collect_top_level_classes(
-                &program.body,
-                &served,
-                &mut ctx.classes,
-            );
+            let classes = &mut ctx.classes;
+            ctx.walks.with_node_stack(program.span, || {
+                crate::analysis::class_index::collect_top_level_classes(
+                    &program.body,
+                    &served,
+                    classes,
+                );
+            });
         },
     );
     resolve_captures(&mut ctx.entries);
