@@ -7,6 +7,12 @@ surface to the serving provider's delivery evidence. No counter is added; the
 one trace-only item sits behind the crate's default-off `semantic-observe`
 feature, which forwards to the session's coordinated opt-in.
 
+Delivery verdicts attest bytes at each local observation. The payload's
+acknowledgement retains no engine incarnation or delivery sequence; the store's
+incarnation identifies a path lifecycle. Endpoint byte equality cannot identify
+an intervening unrecorded A→B→A delivery or a same-byte replay after restart,
+and therefore does not bind an answer to the delivery its query evaluated.
+
 ## verter_lsp
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |

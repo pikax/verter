@@ -272,6 +272,8 @@ pub struct ProviderSurfacePayload {
 /// servable: currency against the serving incarnation is re-read on every
 /// verdict. It only tells a surface that was never delivered (a record that ran
 /// ahead of its delivery) from one whose delivery was lost or overtaken.
+/// It stores neither an engine incarnation nor a delivery sequence: equal
+/// bytes after replay or an unrecorded A→B→A delivery reuse this acknowledgement.
 ///
 /// One byte inline in the payload: an acknowledgement adds no allocation to a
 /// record.
@@ -330,8 +332,9 @@ pub trait ProviderDeliveryWitness: Send + Sync {
     fn serving_delivery(&self, surface: &ProviderSurfaceSnapshot) -> ServingDelivery;
 }
 
-/// The typed delivery state of one recorded surface: whether the bytes the
-/// store records are the bytes the serving provider evaluates.
+/// The typed delivery state of one recorded surface at the ledger observation:
+/// whether the provider's evidence attests the recorded bytes at that moment.
+/// This is not an identity of the delivery a particular query evaluated.
 ///
 /// Only [`Self::Delivered`] may serve a provider answer: a record is never
 /// evidence of its own delivery. Every other state is a signal of its own —
@@ -360,8 +363,8 @@ pub enum SurfaceDelivery {
 }
 
 impl SurfaceDelivery {
-    /// Whether a provider answer may be decoded through a surface in this
-    /// state.
+    /// Whether this state satisfies the delivery prerequisite for decoding.
+    /// The verdict alone does not bind a query to a particular delivery.
     #[must_use]
     pub const fn is_servable(self) -> bool {
         matches!(self, Self::Delivered)
@@ -1226,6 +1229,9 @@ impl ProviderSurfaceStore {
     /// ahead of its delivery, a delivery can run ahead of its record, and an
     /// engine can restart — and an answer decoded through bytes the engine did
     /// not evaluate maps newer host offsets into older provider text.
+    /// These observations do not detect an unrecorded A→B→A delivery between
+    /// them or identify a same-byte replay after an engine restart. The path's
+    /// incarnation above is distinct from the serving engine's incarnation.
     #[must_use]
     pub fn captured_surface_is_current(&self, captured: &ProviderSurfaceSnapshot) -> bool {
         self.current_snapshot(&captured.stamp.provider_path)
