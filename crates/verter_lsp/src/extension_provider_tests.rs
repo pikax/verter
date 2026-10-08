@@ -854,9 +854,12 @@ async fn update_open_stamps_the_owning_package_root_too() {
         .map(str::to_string);
     assert_eq!(open_root.as_deref(), Some("/ws/packages/app"));
     let update = transport.first_args("updateOpen");
-    assert!(
-        update.get("changedFiles").is_some(),
-        "the follow-up sync is an updateOpen change: {update}"
+    assert_eq!(
+        update
+            .pointer("/openFiles/0/projectRootPath")
+            .and_then(|v| v.as_str()),
+        Some("/ws/packages/app"),
+        "the follow-up sync re-declares the owning package root: {update}"
     );
 }
 
@@ -1038,27 +1041,19 @@ async fn open_declares_a_jsconfig_owned_project_by_its_own_config_name() {
 
 #[tokio::test]
 async fn update_open_reopen_declares_the_config_too() {
-    // The re-open arm of `update_file` builds its own envelope. A config declared
-    // only on the first `open` would leave the re-opened file bound to a service
-    // built from guessed options.
+    // An update of an open file builds its own `openFiles` envelope. A config
+    // declared only on the first `open` would leave the updated file bound to a
+    // service built from guessed options.
     let transport = ScriptedTsQueryTransport::new();
     transport.push_response("open", json!({}));
     transport.push_response("updateOpen", json!(true));
     let provider = monorepo_provider(transport.clone()).await;
 
-    // Opened, then its cached content evicted: with the file still open but no
-    // prior text to diff against, `update_file` takes the closedFiles+openFiles
-    // RE-OPEN arm rather than the changedFiles arm.
     let file = "/ws/packages/app/src/App.vue.tsx";
     provider
         .open_file(file, "export const a = 1;\n")
         .await
         .expect("open_file routes through the mock transport");
-    provider
-        .contents_handle_for_test()
-        .lock()
-        .await
-        .remove(file);
     provider
         .update_file(file, "export const a = 2;\n")
         .await
@@ -1069,7 +1064,7 @@ async fn update_open_reopen_declares_the_config_too() {
         .get("openFiles")
         .and_then(|v| v.as_array())
         .and_then(|entries| entries.first())
-        .expect("the re-open arm carries an openFiles entry");
+        .expect("an update of an open file carries an openFiles entry");
     assert_eq!(
         entry.get("projectRootPath").and_then(|v| v.as_str()),
         Some("/ws/packages/app"),
@@ -1122,9 +1117,8 @@ async fn without_an_ownership_authority_no_config_is_invented() {
 // `background_init` calls `resync_open_files` immediately after installing the
 // authority for exactly this reason. The provider must therefore RE-DECLARE
 // every live file with its authoritative binding; an inherited no-op leaves
-// every bootstrap-opened file bound to the folder for the life of the window,
-// and no later edit can fix it (an ordinary `update_file` sends `changedFiles`,
-// which carries no root or config and so cannot change a binding).
+// every bootstrap-opened file bound to the folder until it happens to be edited
+// again (only an `update_file` re-declares its file's binding).
 //
 // Discrimination: the fixture opens BEFORE the authority exists and asserts on
 // the envelopes emitted AFTER it lands. A provider that inherits the trait's
@@ -1836,4 +1830,259 @@ async fn a_refused_newest_delivery_is_not_masked_by_an_older_acknowledgement() {
     a.acknowledge();
     first.await.unwrap().unwrap();
     assert_eq!(provider.applied_content(file), AppliedContent::NotApplied);
+}
+
+/// A stale failure is inert: a refused older delivery settling after a newer
+/// one was acknowledged leaves the newer receipt standing — every delivery
+/// replaces the whole buffer, so the service holds the newer bytes whatever
+/// the older one did.
+#[tokio::test]
+async fn a_stale_failure_never_withdraws_a_newer_receipt() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let file = "/ws/src/App.vue.tsx";
+    open_acknowledged(&provider, &transport, file, "export const z = 0;\n").await;
+    let (first, a) = update_in_flight(&provider, &transport, file, "export const a = 1;\n").await;
+    let (second, b) = update_in_flight(&provider, &transport, file, "export const b = 2;\n").await;
+    b.acknowledge();
+    second.await.unwrap().unwrap();
+    a.refuse();
+    assert!(first.await.unwrap().is_err());
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const b = 2;\n")),
+        "the overtaken refusal of A must not withdraw the receipt for B"
+    );
+}
+
+/// A delivery issued before a close settles nothing after it: its late
+/// failure leaves the re-opened file's receipt standing.
+#[tokio::test]
+async fn a_failure_issued_before_a_close_never_withdraws_the_reopened_receipt() {
+    use verter_type_runtime::traits::AppliedContent;
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let file = "/ws/src/App.vue.tsx";
+    open_acknowledged(&provider, &transport, file, "export const z = 0;\n").await;
+    let (updating, a) =
+        update_in_flight(&provider, &transport, file, "export const a = 1;\n").await;
+
+    let closing = {
+        let provider = Arc::clone(&provider);
+        let file = file.to_string();
+        tokio::spawn(async move { provider.close_file(&file).await })
+    };
+    let close = transport.next_arrival().await;
+    assert_eq!(close.command, "close");
+    close.acknowledge();
+    closing.await.unwrap().unwrap();
+    open_acknowledged(&provider, &transport, file, "export const c = 3;\n").await;
+
+    a.refuse();
+    assert!(updating.await.unwrap().is_err());
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from("export const c = 3;\n")),
+        "a failure issued before the close must not withdraw the re-opened receipt"
+    );
+}
+
+/// The extension language service's buffer state, mutated by each envelope
+/// exactly as `ExtensionTsService.handleQuery` applies it: `open` and
+/// `updateOpen`'s `openFiles` set the whole buffer, `changedFiles` splices
+/// its ranged text changes into the buffer the service holds (positions
+/// resolved by the service's own line walk), and a refused request applies
+/// nothing.
+#[derive(Clone, Default)]
+struct ServiceModelTransport {
+    state: Arc<Mutex<ServiceModel>>,
+}
+
+#[derive(Default)]
+struct ServiceModel {
+    buffers: std::collections::HashMap<String, String>,
+    /// Requests left to refuse, unapplied, before the service accepts again.
+    refusals: usize,
+}
+
+impl ServiceModelTransport {
+    fn refuse_next(&self) {
+        self.state.lock().unwrap().refusals += 1;
+    }
+
+    fn held(&self, file: &str) -> Option<String> {
+        self.state.lock().unwrap().buffers.get(file).cloned()
+    }
+
+    /// The service's 1-based line/offset → offset walk (ASCII fixtures, so
+    /// UTF-16 units and bytes agree).
+    fn position_to_offset(text: &str, line: u64, offset: u64) -> usize {
+        let mut current = 1;
+        let mut i = 0;
+        let bytes = text.as_bytes();
+        while current < line && i < bytes.len() {
+            if bytes[i] == b'\n' {
+                current += 1;
+            }
+            i += 1;
+        }
+        (i + offset as usize - 1).min(text.len())
+    }
+}
+
+impl TsQueryTransport for ServiceModelTransport {
+    fn ts_query(
+        &self,
+        params: TsQueryParams,
+    ) -> impl Future<Output = Result<Value, TypeProviderError>> + Send + '_ {
+        let mut state = self.state.lock().unwrap();
+        let result = if state.refusals > 0 {
+            state.refusals -= 1;
+            Err(TypeProviderError::new("refused".to_string()))
+        } else {
+            let args = &params.arguments;
+            match params.command.as_str() {
+                "open" => {
+                    let file = args["file"].as_str().unwrap().to_string();
+                    let content = args["fileContent"].as_str().unwrap().to_string();
+                    state.buffers.insert(file, content);
+                    Ok(json!({}))
+                }
+                "updateOpen" => {
+                    for entry in args["openFiles"].as_array().into_iter().flatten() {
+                        if let Some(content) = entry["fileContent"].as_str() {
+                            let file = entry["file"].as_str().unwrap().to_string();
+                            state.buffers.insert(file, content.to_string());
+                        }
+                    }
+                    for entry in args["changedFiles"].as_array().into_iter().flatten() {
+                        let file = entry["fileName"].as_str().unwrap();
+                        let Some(text) = state.buffers.get_mut(file) else {
+                            continue;
+                        };
+                        let mut changes: Vec<&Value> = entry["textChanges"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                        let key = |c: &Value| {
+                            (
+                                c["start"]["line"].as_u64().unwrap(),
+                                c["start"]["offset"].as_u64().unwrap(),
+                            )
+                        };
+                        changes.sort_by_key(|c| std::cmp::Reverse(key(c)));
+                        for change in changes {
+                            let at = |pos: &Value| {
+                                Self::position_to_offset(
+                                    text,
+                                    pos["line"].as_u64().unwrap(),
+                                    pos["offset"].as_u64().unwrap(),
+                                )
+                            };
+                            let (start, end) = (at(&change["start"]), at(&change["end"]));
+                            let new_text = change["newText"].as_str().unwrap();
+                            *text = format!("{}{new_text}{}", &text[..start], &text[end..]);
+                        }
+                    }
+                    Ok(json!(true))
+                }
+                "close" => Ok(json!({})),
+                other => Err(TypeProviderError::new(format!("unmodelled `{other}`"))),
+            }
+        };
+        std::future::ready(result)
+    }
+}
+
+/// Certified bytes are the bytes the service holds, after the service has
+/// physically applied every envelope the provider emitted.
+fn assert_certifies_held(
+    provider: &ExtensionTypeProvider<ServiceModelTransport>,
+    service: &ServiceModelTransport,
+    file: &str,
+    context: &str,
+) {
+    use verter_type_runtime::traits::AppliedContent;
+    let held = service.held(file).expect("the service holds the file");
+    assert_eq!(
+        provider.applied_content(file),
+        AppliedContent::Applied(Arc::from(held.as_str())),
+        "{context}: the receipt must certify exactly the bytes the service holds"
+    );
+}
+
+/// An update certifies the whole buffer the service ends up holding, even when
+/// the contents cache was moved by a `load_file` that delivered nothing.
+#[tokio::test]
+async fn an_update_after_a_cache_only_load_replaces_the_whole_service_buffer() {
+    let service = ServiceModelTransport::default();
+    let provider = ExtensionTypeProvider::with_transport(service.clone(), "/ws");
+    let file = "/ws/src/App.vue.tsx";
+    provider
+        .open_file(file, "const a=1;\nconst b=2;\nconst c=3;\n")
+        .await
+        .unwrap();
+    provider.load_file(file, "const a=1;\n").await.unwrap();
+    provider
+        .update_file(file, "const replacement=4;\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        service.held(file).as_deref(),
+        Some("const replacement=4;\n")
+    );
+    assert_certifies_held(&provider, &service, file, "after a cache-only load");
+}
+
+/// A refused shorter update leaves the contents cache ahead of the service;
+/// the successful retry must still replace the whole service buffer.
+#[tokio::test]
+async fn a_retry_after_a_refused_update_replaces_the_whole_service_buffer() {
+    let service = ServiceModelTransport::default();
+    let provider = ExtensionTypeProvider::with_transport(service.clone(), "/ws");
+    let file = "/ws/src/App.vue.tsx";
+    provider
+        .open_file(file, "const a=1;\nconst b=2;\nconst c=3;\n")
+        .await
+        .unwrap();
+    service.refuse_next();
+    assert!(provider.update_file(file, "const a=1;\n").await.is_err());
+    provider
+        .update_file(file, "const replacement=4;\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        service.held(file).as_deref(),
+        Some("const replacement=4;\n")
+    );
+    assert_certifies_held(&provider, &service, file, "after a refused update");
+}
+
+/// The resync re-open delivers the contents cache, which a `load_file` may
+/// have moved past the receipt: the receipt must follow the re-opened bytes,
+/// never keep certifying the bytes the re-open replaced.
+#[tokio::test]
+async fn a_resync_reopen_settles_the_bytes_it_delivers() {
+    let service = ServiceModelTransport::default();
+    let provider = ExtensionTypeProvider::with_transport(service.clone(), "/ws");
+    let file = "/ws/src/App.vue.tsx";
+    provider
+        .open_file(file, "export const a = 1;\n")
+        .await
+        .unwrap();
+    provider
+        .load_file(file, "export const b = 2;\n")
+        .await
+        .unwrap();
+    provider.resync_open_files().await.unwrap();
+    assert_eq!(service.held(file).as_deref(), Some("export const b = 2;\n"));
+    assert_certifies_held(&provider, &service, file, "after a resync re-open");
 }
