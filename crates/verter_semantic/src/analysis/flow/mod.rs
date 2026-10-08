@@ -52,8 +52,7 @@ pub mod class_evaluation;
 pub mod value_descent;
 
 pub use class_evaluation::{
-    expression_runs_effects, inline_class_evaluation, inline_class_evaluation_may_throw,
-    InlineClassEvaluation,
+    expression_runs_effects, inline_class_evaluation, InlineClassEvaluation,
 };
 
 pub use value_descent::{

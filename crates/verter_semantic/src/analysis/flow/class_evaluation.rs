@@ -113,23 +113,6 @@ pub fn inline_class_evaluation<'c, 'a>(
     })
 }
 
-/// Whether some static block of `evaluation` holds a `throw`, so the class
-/// statement may complete abruptly.
-pub fn inline_class_evaluation_may_throw(evaluation: &InlineClassEvaluation<'_, '_>) -> bool {
-    #[derive(Default)]
-    struct Throws(bool);
-    impl<'a> Visit<'a> for Throws {
-        fn visit_throw_statement(&mut self, _it: &oxc_ast::ast::ThrowStatement<'a>) {
-            self.0 = true;
-        }
-    }
-    evaluation.static_blocks.iter().any(|block| {
-        let mut throws = Throws::default();
-        throws.visit_statements(&block.body);
-        throws.0
-    })
-}
-
 /// Whether evaluating `expression` runs a call, construction or write (a
 /// nested class counts: it runs its own class-evaluation positions).
 pub fn expression_runs_effects(expression: &Expression<'_>) -> bool {

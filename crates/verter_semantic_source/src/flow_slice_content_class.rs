@@ -150,7 +150,10 @@ impl<'s> Lowerer<'s> {
         // re-scans them.
         let evaluated_at_statement = class.r#type == oxc_ast::ast::ClassType::ClassDeclaration
             && self.lowering_local_classes.last() == Some(&class.span.start)
-            && inline_class_evaluation(class).is_some();
+            && self
+                .walks
+                .with_node_stack(class.span(), || inline_class_evaluation(class))
+                .is_some();
         let heritage = class
             .heritage
             .as_ref()
@@ -483,7 +486,10 @@ impl<'s> Lowerer<'s> {
                 _ => break,
             }
         }
-        if expression_runs_effects(value) {
+        if self
+            .walks
+            .with_node_stack(value.span(), || expression_runs_effects(value))
+        {
             return SliceExpr::Gap(
                 verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
             );
