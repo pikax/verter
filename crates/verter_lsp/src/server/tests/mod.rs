@@ -1489,6 +1489,31 @@ fn publish_seed_surface(server: &VerterLanguageServer, tsx_path: &str, content: 
         .expect("seeded provider open");
 }
 
+/// Stamp the IDE surface a test recorded at `tsx_path` as the one the
+/// committed sync state of `canonical_id` published. A successful IDE sync on
+/// the membership-only topology is the receipt-gated commit, which stamps the
+/// exact surface it published: the engine never reads an IDE companion whose
+/// bytes no receipt fingerprints, however live its path is.
+pub(super) fn stamp_seeded_ide_publication(
+    server: &VerterLanguageServer,
+    canonical_id: &str,
+    tsx_path: &str,
+) {
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(tsx_path)
+        .expect("the seeded IDE surface was recorded");
+    let mut state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the seeded sync state was committed");
+    state.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierSurface {
+        content_hash: recorded.stamp.content_hash.to_hash16(),
+        map_hash: recorded.stamp.map_hash,
+    });
+    server.commit_provider_sync_state(canonical_id, state);
+}
+
 /// The surface half of [`synced_type_provider_context`], WITHOUT the
 /// DependencyReady settle — for seeding helpers whose handlers are not
 /// receipt-gated (hover / completion).
@@ -1535,6 +1560,7 @@ fn synced_type_provider_context_surface_only(
         &ide.code,
         None,
     );
+    stamp_seeded_ide_publication(server, &canonical_id, &tsx_path);
     server
         .type_provider_context(uri)
         .expect("a seeded provider surface must yield a query context")
@@ -3410,6 +3436,7 @@ async fn make_virtual_file_fixture(
             decl_background_loaded: false,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,

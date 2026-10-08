@@ -117,6 +117,70 @@ impl VerterLanguageServer {
             });
     }
 
+    /// Commit the open carrier's CURRENT IDE surface through the carrier
+    /// admission gate, as a committed publication of that surface does —
+    /// without delivering anything to the engine. The receipt attests the
+    /// surface at the next source revision under the live owner and intent
+    /// epoch, so the gate admits it exactly as it admits a production commit.
+    pub(crate) fn test_commit_current_ide_surface(&self, uri: &tower_lsp_server::ls_types::Uri) {
+        let current = self.test_current_ide_surface(uri);
+        let canonical = crate::documents::uri_to_canonical_id(uri);
+        let committed = self
+            .provider_sync_states
+            .get(&canonical)
+            .map(|state| state.clone())
+            .expect("the open carrier has committed provider state");
+        let owner = committed
+            .owner_binding
+            .owner_key()
+            .expect("the open carrier is owned")
+            .to_string();
+        let stamp = committed
+            .commit_stamp
+            .expect("the owned carrier was committed through the admission gate");
+        let host = self.documents.host();
+        let env = host.host_view_env_hashes_for(&canonical);
+        let binding = verter_session::external_ts::ProjectBinding::new_for_test(
+            "/",
+            owner,
+            "test",
+            verter_session::external_ts::EnvDims {
+                parse_env_hash: env.parse_env_hash,
+                resolve_env_hash: env.resolve_env_hash,
+                lib_env_hash: env.lib_env_hash,
+                project_identity: host.host_view_project_identity_for(&canonical),
+            },
+            Vec::new(),
+            verter_session_query::resolution::ProjectId(0),
+            stamp.ownership_generation,
+        );
+        let receipt = crate::external_ts::ProviderReadyReceipt::for_test_attesting(
+            &binding,
+            stamp.source_revision + 1,
+            self.carrier_transaction_coordinator
+                .current_intent_epoch(&canonical),
+            crate::external_ts::CompanionFingerprint {
+                uri: Arc::clone(&current.stamp.provider_path),
+                role: verter_session::external_ts::SnapshotRole::CarrierIde,
+                content_hash: current.stamp.content_hash.to_hash16(),
+                map_hash: current.stamp.map_hash,
+                version: stamp.source_revision + 1,
+            },
+        );
+        let outcome = self.carrier_transaction_coordinator.admit_owned(
+            &host,
+            &self.provider_sync_states,
+            &canonical,
+            committed,
+            &receipt,
+        );
+        assert_eq!(
+            outcome,
+            crate::external_ts::AdmitOutcome::Admitted,
+            "the admission gate admits the current surface's commit"
+        );
+    }
+
     /// Publish the installed workspace's current snapshot again with freshly
     /// built LSP views: a root publication that changes no input a request
     /// answers from.
