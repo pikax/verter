@@ -195,7 +195,8 @@ impl SkeletonSpanIndex {
             .read_groups
             .get(binding)
             .map_or((0, 0), |&(start, end)| (start as usize, end as usize));
-        let group = &self.reads[start..end];
+        let reads = &self.reads;
+        let group = &reads[start..end];
         // Reads starting past the span's end are all after it and never
         // inside it; the interior reads are not walked.
         let tail = group.partition_point(|read| !read.site_span.starts_after_end_of(span));
@@ -203,11 +204,11 @@ impl SkeletonSpanIndex {
         // contained: the end-ordered suffix finds those.
         let by_end = &self.reads_by_end[start..end];
         let wide =
-            by_end.partition_point(|&read| !group[read as usize].site_span.ends_after_end_of(span));
+            by_end.partition_point(|&read| !reads[read as usize].site_span.ends_after_end_of(span));
         group[tail..]
             .iter()
             .chain(by_end[wide..].iter().filter_map(move |&read| {
-                let read = &group[read as usize];
+                let read = &reads[read as usize];
                 (!read.site_span.starts_after_end_of(span) && read.site_span > span).then_some(read)
             }))
             .inspect(|_| record_visits(1))
