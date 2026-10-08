@@ -62,26 +62,15 @@ fn unique_server_ws_root(tag: &str) -> String {
 fn carrier_manifest_strict(ws_root: &str) -> Option<crate::external_ts::Manifest> {
     use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    let path = store.manifest_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => Some(
-            serde_json::from_slice::<crate::external_ts::Manifest>(&bytes).unwrap_or_else(|e| {
-                panic!(
-                    "the carrier-store oracle must surface a store failure rather than \
-                     report nothing published: manifest at {} is present but unparseable: {e}",
-                    path.display()
-                )
-            }),
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => panic!(
+    store.read_published().unwrap_or_else(|e| {
+        panic!(
             "the carrier-store oracle must surface a store failure rather than report \
-             nothing published: manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
-            path.display(),
+             nothing published: store at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            store.workspace_dir().display(),
             e.kind(),
             e.raw_os_error()
-        ),
-    }
+        )
+    })
 }
 
 #[derive(Default)]

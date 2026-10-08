@@ -591,15 +591,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       if (publicationAdvanced || storeChanged) {
         vueJsxContentCache.clear();
-        // The token advance is INDEPENDENT evidence that the LSP published, and
-        // it must beat the reader's `(mtimeMs, size)` change key: an atomic
-        // manifest swap that replaces a `ready_files` entry can land at the same
-        // byte length inside one filesystem timestamp tick, which that key
-        // cannot see. Reading ready versions from the stale snapshot below would
-        // report "nothing relevant changed", skip the resolution-cache clear,
-        // and leave this project's cached `TS2307` for a now-published carrier
-        // in place until some unrelated publication.
-        store.invalidateManifest();
+        // The store reader needs no invalidation here: every publication
+        // appends a journal record (the journal only grows) and a compaction
+        // swaps the head, so the ready versions read below already reflect
+        // the publication this token advance announces.
       }
       const nextReadyVersions = servedReadyVersions();
       const relevantReadyVersionsChanged =

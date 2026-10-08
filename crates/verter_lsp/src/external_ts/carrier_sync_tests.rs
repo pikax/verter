@@ -1350,24 +1350,14 @@ fn unique_ws_root() -> String {
 /// that laundering is exactly what must not reach an assertion.
 fn read_store_manifest_strict(ws_root: &str) -> Result<Option<Manifest>, String> {
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    let path = store.manifest_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
-            .map(Some)
-            .map_err(|e| {
-                format!(
-                    "carrier manifest at {} is present but unparseable: {e}",
-                    path.display()
-                )
-            }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!(
-            "carrier manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
-            path.display(),
+    store.read_published().map_err(|e| {
+        format!(
+            "carrier store at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            store.workspace_dir().display(),
             e.kind(),
             e.raw_os_error()
-        )),
-    }
+        )
+    })
 }
 
 /// The synthetic workspace root this suite derives must be unique across concurrent
@@ -1443,7 +1433,7 @@ fn store_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
     let corrupt_root = unique_ws_root();
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
     std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
-    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+    std::fs::write(store.head_path(), b"{ this manifest is truncated")
         .expect("write a corrupt manifest");
 
     // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
@@ -1936,7 +1926,7 @@ async fn narrowing_the_include_retracts_a_previously_admitted_carrier() {
 /// and Linux.
 fn break_carrier_store_writes(ws_root: &str) {
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    std::fs::write(store.manifest_path(), b"{ this manifest is not valid json")
+    std::fs::write(store.head_path(), b"{ this manifest is not valid json")
         .expect("the store dir exists after the initial publish");
 }
 
