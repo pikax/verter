@@ -1432,6 +1432,84 @@ mod owner_local_publication {
         }
     }
 
+    /// Owners populated through real resolutions, so the root's recorded
+    /// probes and realpaths grow with the owner count. An unchanged exact
+    /// refresh opens no publication window and leaves the published root in
+    /// place; a changed one builds its replacement without copying any of
+    /// those unrelated observations.
+    #[test]
+    fn exact_refresh_copies_no_unrelated_root_observation() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let owners = 256;
+        let refreshed = 9;
+        let workspace = MemoryWorkspace::new(MemoryOptions::default());
+        for index in 0..owners {
+            workspace.inject_file(owner_id(index), Arc::from("export {}\n"));
+            workspace.inject_file(format!("/p/src/dep{index:04}.ts"), Arc::from("export {}\n"));
+            assert!(
+                workspace
+                    .resolve_import(
+                        &owner_id(index),
+                        &format!("./dep{index:04}"),
+                        context(ResolvePhase::CodegenBlocker),
+                    )
+                    .is_some(),
+                "owner {index} resolves its sibling"
+            );
+            workspace.set_exact_resolutions(&owner_id(index), owner_routes(index, 0));
+        }
+        let engine = &workspace.engine;
+        let before = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        assert!(
+            before.base.path_probes.len() >= owners,
+            "the fixture's resolutions record probes for every owner"
+        );
+
+        let windows = Rc::new(Cell::new(0));
+        let unchanged = resolution_test_hooks::with_repeating_hook(
+            ResolutionPhase::WorldWriteHeld,
+            {
+                let windows = Rc::clone(&windows);
+                move || windows.set(windows.get() + 1)
+            },
+            || workspace.set_exact_resolutions(&owner_id(refreshed), owner_routes(refreshed, 0)),
+        );
+        assert!(!unchanged.changed, "an identical refresh must not publish");
+        assert_eq!(
+            windows.get(),
+            0,
+            "an unchanged refresh must not open a publication window"
+        );
+        let after_unchanged = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        assert!(
+            Arc::ptr_eq(&before.base, &after_unchanged.base),
+            "an unchanged refresh leaves the published root in place"
+        );
+
+        let changed =
+            workspace.set_exact_resolutions(&owner_id(refreshed), owner_routes(refreshed, 1));
+        assert!(changed.changed, "a changed refresh must publish");
+        let after_changed = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        assert!(
+            !Arc::ptr_eq(&before.base, &after_changed.base),
+            "a changed refresh publishes a replacement root"
+        );
+        assert!(
+            after_changed
+                .base
+                .shares_observation_maps_with(&before.base),
+            "the replacement root shares every unrelated recorded observation"
+        );
+    }
+
     #[test]
     fn a_refresh_whose_last_route_per_key_matches_the_published_bucket_is_unchanged() {
         let workspace = populated(4);

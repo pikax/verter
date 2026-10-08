@@ -240,57 +240,63 @@ impl EdgeStore {
         })
     }
 
-    /// Replace bundler-injected exact resolutions for a file. Active-stem
-    /// set is recomputed AFTER the exact mutation; `reverse_deps_by_stem`
-    /// is updated against the active-stem diff. Parsed-unresolved entries
-    /// are NOT destroyed — when bundler later removes/Nones a resolution,
-    /// the stem becomes active again automatically (active-stem model).
-    pub fn replace_exact_resolutions(
-        &mut self,
+    /// Whether replacing `canonical_id`'s exact resolutions with
+    /// `resolutions` would store the table it already holds. Read-only: a
+    /// publisher decides an unchanged refresh with it before opening any
+    /// publication window.
+    pub fn exact_resolutions_unchanged(
+        &self,
         canonical_id: &str,
-        resolutions: Vec<ExactResolution>,
-    ) -> ExactResolutionResult {
-        // Idempotency gate (the `replace_parsed_edges` R22 shape): if the
-        // supplied snapshot is value-identical to the stored table, perform
-        // no write at all and report `changed: false` so callers can skip
-        // their invalidation cascades for steady-state re-pushes.
-        //
-        // Duplicate-key safety: the input is a Vec, so the same key can
-        // appear twice. A replace keeps only the LAST route per key — an
-        // earlier route for that key is superseded and stores nothing, not
-        // even its resolved target in `exact_resolved` — so the comparison
-        // is against exactly the table a replace would store: `[A→x, A→x]`
-        // against `{A→x, B→y}` is a change (the replace drops `B→y`), and
-        // `[A→x, A→y]` against `{A→y}` is not. An owner with no edge state
-        // stores the empty table, so an empty input for it is unchanged.
+        resolutions: &[ExactResolution],
+    ) -> bool {
+        self.exact_route_winners(canonical_id, resolutions)
+            .is_none()
+    }
+
+    /// The idempotency gate (the `replace_parsed_edges` R22 shape): `None`
+    /// when `resolutions` are value-identical to the stored table, so a
+    /// caller performs no write and reports `changed: false` for a
+    /// steady-state re-push; otherwise, per input route, whether it is the
+    /// route a replace stores.
+    ///
+    /// Duplicate-key safety: the input is a Vec, so the same key can appear
+    /// twice. A replace keeps only the LAST route per key — an earlier route
+    /// for that key is superseded and stores nothing, not even its resolved
+    /// target in `exact_resolved` — so the comparison is against exactly the
+    /// table a replace would store: `[A→x, A→x]` against `{A→x, B→y}` is a
+    /// change (the replace drops `B→y`), and `[A→x, A→y]` against `{A→y}`
+    /// is not. An owner with no edge state stores the empty table, so an
+    /// empty input for it is unchanged.
+    fn exact_route_winners(
+        &self,
+        canonical_id: &str,
+        resolutions: &[ExactResolution],
+    ) -> Option<Vec<bool>> {
         #[cfg(any(test, feature = "semantic-observe"))]
         crate::resolution_currency::record_exact_publication_work(resolutions.len());
-        let winners = {
-            let mut last_route: FxHashMap<(&str, ResolvePhase, ResolveRequestKind), usize> =
-                FxHashMap::default();
-            for (index, resolution) in resolutions.iter().enumerate() {
-                last_route.insert(
-                    (&resolution.specifier, resolution.phase, resolution.kind),
-                    index,
-                );
-            }
-            let stored = self
-                .files
-                .get(canonical_id)
-                .map(|state| &state.deps.exact_resolutions);
-            let unchanged = last_route.len() == stored.map_or(0, FxHashMap::len)
-                && last_route
-                    .iter()
-                    .all(|(&(specifier, phase, kind), &index)| {
-                        stored.and_then(|stored| stored.get(&(specifier.to_string(), phase, kind)))
-                            == Some(&resolutions[index])
-                    });
-            if unchanged {
-                return ExactResolutionResult {
-                    newly_resolved: Vec::new(),
-                    changed: false,
-                };
-            }
+        let mut last_route: FxHashMap<(&str, ResolvePhase, ResolveRequestKind), usize> =
+            FxHashMap::default();
+        for (index, resolution) in resolutions.iter().enumerate() {
+            last_route.insert(
+                (&resolution.specifier, resolution.phase, resolution.kind),
+                index,
+            );
+        }
+        let stored = self
+            .files
+            .get(canonical_id)
+            .map(|state| &state.deps.exact_resolutions);
+        let unchanged = last_route.len() == stored.map_or(0, FxHashMap::len)
+            && last_route
+                .iter()
+                .all(|(&(specifier, phase, kind), &index)| {
+                    stored.and_then(|stored| stored.get(&(specifier.to_string(), phase, kind)))
+                        == Some(&resolutions[index])
+                });
+        if unchanged {
+            return None;
+        }
+        Some(
             resolutions
                 .iter()
                 .enumerate()
@@ -301,7 +307,26 @@ impl EdgeStore {
                         resolution.kind,
                     )] == index
                 })
-                .collect::<Vec<bool>>()
+                .collect(),
+        )
+    }
+
+    /// Replace bundler-injected exact resolutions for a file. Active-stem
+    /// set is recomputed AFTER the exact mutation; `reverse_deps_by_stem`
+    /// is updated against the active-stem diff. Parsed-unresolved entries
+    /// are NOT destroyed — when bundler later removes/Nones a resolution,
+    /// the stem becomes active again automatically (active-stem model).
+    /// A refresh that would store the held table writes nothing.
+    pub fn replace_exact_resolutions(
+        &mut self,
+        canonical_id: &str,
+        resolutions: Vec<ExactResolution>,
+    ) -> ExactResolutionResult {
+        let Some(winners) = self.exact_route_winners(canonical_id, &resolutions) else {
+            return ExactResolutionResult {
+                newly_resolved: Vec::new(),
+                changed: false,
+            };
         };
 
         let mut newly_resolved = Vec::new();

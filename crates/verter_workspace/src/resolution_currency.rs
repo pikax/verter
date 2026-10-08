@@ -1298,6 +1298,20 @@ impl ResolutionWorldRoot {
         ))
     }
 
+    /// Whether `other` holds the same allocation of every recorded-observation
+    /// map — path probes, realpaths, manifest fingerprints and context
+    /// versions — so building one root from the other copied none of their
+    /// entries.
+    #[cfg(test)]
+    pub(crate) fn shares_observation_maps_with(&self, other: &Self) -> bool {
+        self.path_probes.ptr_eq(&other.path_probes)
+            && self.realpaths.ptr_eq(&other.realpaths)
+            && self
+                .manifest_fingerprints
+                .ptr_eq(&other.manifest_fingerprints)
+            && self.context_versions.ptr_eq(&other.context_versions)
+    }
+
     /// The importer's published exact bucket.
     #[cfg(test)]
     pub(crate) fn exact_bucket(&self, importer_id: &str) -> Option<Arc<ExactOwnerBucket>> {

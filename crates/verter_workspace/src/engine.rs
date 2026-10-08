@@ -3292,13 +3292,29 @@ impl Engine {
     }
 
     /// Set exact resolutions for a file.
+    ///
+    /// An unchanged refresh writes nothing anywhere, so it is decided under
+    /// the publication gate before a publication window opens: it builds no
+    /// replacement root and never turns the epoch odd, so no concurrent
+    /// capture is refused for it.
     pub(crate) fn set_exact_resolutions(
         &self,
         canonical_id: &str,
         resolutions: Vec<ExactResolution>,
     ) -> ExactResolutionResult {
+        let _write = self.resolution_world_write.lock();
+        if self
+            .edges
+            .read()
+            .exact_resolutions_unchanged(canonical_id, &resolutions)
+        {
+            return ExactResolutionResult {
+                newly_resolved: Vec::new(),
+                changed: false,
+            };
+        }
         let retained = resolutions.clone();
-        self.mutate_resolution_world(|world| {
+        self.mutate_resolution_world_locked(|world| {
             let result = self
                 .edges
                 .write()
