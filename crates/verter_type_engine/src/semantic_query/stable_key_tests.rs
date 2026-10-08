@@ -2091,3 +2091,98 @@ fn closing_a_document_releases_its_key_classes() {
     assert!(graph.stable_key_class_count() <= 1);
     assert_eq!(stable_key_for_node(&graph, kept), kept_key);
 }
+
+/// The positions a per-entry search of the sorted list recovers: each
+/// entry ranks at its node's first occurrence in union order.
+fn searched_union_rank_order(graph: &SemanticGraphStore, members: &[SemanticNodeId]) -> Vec<usize> {
+    let mut sorted = members.to_vec();
+    crate::semantic_query::stable_key::sort_union_members_by_stable_key(graph, &mut sorted);
+    let mut order: Vec<usize> = (0..members.len()).collect();
+    order.sort_by_key(|&index| {
+        sorted
+            .iter()
+            .position(|node| *node == members[index])
+            .expect("every member is in its own sorted list")
+    });
+    order
+}
+
+/// Shuffled arms over `distinct` number literals, every third literal
+/// listed twice at separate positions.
+fn shuffled_arms_with_duplicates(
+    graph: &SemanticGraphStore,
+    distinct: usize,
+) -> Vec<SemanticNodeId> {
+    let literals: Vec<SemanticNodeId> = (0..distinct)
+        .map(|value| {
+            graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+                value as f64,
+            )))
+        })
+        .collect();
+    let mut arms = literals.clone();
+    arms.extend(literals.iter().step_by(3).copied());
+    // A fixed multiplicative walk shuffles the arms without a seed source.
+    let len = arms.len();
+    let stride = (0..len)
+        .map(|offset| len / 2 + 1 + offset)
+        .find(|stride| gcd(*stride, len) == 1)
+        .expect("some stride is coprime with the arm count");
+    (0..len).map(|step| arms[(step * stride) % len]).collect()
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// Union rank recovery answers exactly the order a per-entry search of the
+/// sorted list does — repeated node ids tie at their first occurrence and
+/// keep input order, in the forward and the reversed store order — and its
+/// rank-map probes grow linearly with the arm count from 128 to 1024 arms.
+#[test]
+fn union_rank_order_matches_searched_ranks_with_linear_probes() {
+    use crate::semantic_query::stable_key::union_rank_order_observed;
+    let mut probes_per_arm: Vec<(usize, usize)> = Vec::new();
+    for distinct in [96, 192, 384, 768] {
+        for reversed in [false, true] {
+            let graph = SemanticGraphStore::new();
+            if reversed {
+                graph.reverse_union_order_for_tests();
+            }
+            let arms = shuffled_arms_with_duplicates(&graph, distinct);
+            let (order, probes) = union_rank_order_observed(&graph, &arms);
+            assert_eq!(
+                order,
+                searched_union_rank_order(&graph, &arms),
+                "{} arms (reversed: {reversed}) recover the searched ranks",
+                arms.len()
+            );
+            for pair in order.windows(2) {
+                if arms[pair[0]] == arms[pair[1]] {
+                    assert!(pair[0] < pair[1], "repeated arms keep input order");
+                }
+            }
+            if !reversed {
+                probes_per_arm.push((arms.len(), probes));
+            }
+        }
+    }
+    assert_eq!(
+        probes_per_arm
+            .iter()
+            .map(|(arms, _)| *arms)
+            .collect::<Vec<_>>(),
+        [128, 256, 512, 1024]
+    );
+    for (arms, probes) in &probes_per_arm {
+        assert_eq!(
+            *probes,
+            2 * arms,
+            "{arms} arms recover their ranks with one insert and one lookup per arm"
+        );
+    }
+}

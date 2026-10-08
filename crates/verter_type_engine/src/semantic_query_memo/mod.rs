@@ -55,6 +55,7 @@ mod family_retention;
 mod flow_return_memo;
 mod hash_cons_memos;
 pub mod inflight;
+pub(crate) mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
 pub(crate) mod nodes;
@@ -74,6 +75,7 @@ pub mod unresolved_reach;
 
 pub use arena::UNALLOCATABLE_ID_FLOOR;
 pub(crate) use inflight::InlineMemberFlight;
+pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{
     Acquired, Claim, ClaimAttempt, Joined, ProducerLease, ReadCapture, Recursion, Subscription,
 };

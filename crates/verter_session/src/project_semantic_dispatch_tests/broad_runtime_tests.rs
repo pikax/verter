@@ -339,7 +339,7 @@ fn rootless_classifier_subject_stays_return_only_with_a_rooted_descendant() {
         classification_from_output(&output).kinds(),
         &[BroadRuntimeKind::String]
     );
-    assert!(!output.result_is_partial);
+    assert!(!output.result_is_partial());
     assert!(output.cache_suppress, "the rootless subject is ReturnOnly");
     assert_eq!(graph.memo_entry_count(), memo_entries_before);
 }
@@ -365,7 +365,7 @@ fn all_unknown_intersection_is_explicit_complete_unknown() {
         classification_from_output(&output).kinds(),
         &[BroadRuntimeKind::Unknown]
     );
-    assert!(!output.result_is_partial);
+    assert!(!output.result_is_partial());
 }
 
 #[test]
@@ -605,7 +605,7 @@ fn missing_semantic_node_data_is_partial_unknown_and_return_only() {
         &[BroadRuntimeKind::Unknown]
     );
     assert!(
-        output.result_is_partial,
+        output.result_is_partial(),
         "missing arena data is not Complete"
     );
     assert!(output.cache_suppress, "a partial result is ReturnOnly");
@@ -655,7 +655,7 @@ fn classifier_work_exhaustion_is_partial_unknown_and_never_warms() {
         &[BroadRuntimeKind::Unknown],
         "an unfinished classifier must not expose a discovered subset"
     );
-    assert!(output.result_is_partial);
+    assert!(output.result_is_partial());
     assert!(output.cache_suppress);
     assert!(completeness
         .reasons()
@@ -689,7 +689,7 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
         classification_from_output(&fault).kinds(),
         &[BroadRuntimeKind::Unknown]
     );
-    assert!(fault.result_is_partial);
+    assert!(fault.result_is_partial());
     assert!(fault.cache_suppress);
     assert!(fault_completeness
         .reasons()
@@ -705,7 +705,7 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
         classification_from_output(&miss).kinds(),
         &[BroadRuntimeKind::Unknown]
     );
-    assert!(!miss.result_is_partial, "honest Miss is semantic Unknown");
+    assert!(!miss.result_is_partial(), "honest Miss is semantic Unknown");
     assert!(
         miss.cache_suppress,
         "transient classification is ReturnOnly"
@@ -760,7 +760,10 @@ fn the_positional_marker_classifies_with_the_flow_class_through_the_classifier()
         &[BroadRuntimeKind::Unknown],
         "a position the substrate cannot name classifies as nothing in particular"
     );
-    assert!(output.result_is_partial, "the marker is a genuine partial");
+    assert!(
+        output.result_is_partial(),
+        "the marker is a genuine partial"
+    );
     assert!(
         output.cache_suppress,
         "a partial classification never warms"
@@ -809,7 +812,7 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
         classification_from_output(&output).kinds(),
         &[BroadRuntimeKind::Unknown]
     );
-    assert!(output.result_is_partial);
+    assert!(output.result_is_partial());
     assert!(output.cache_suppress);
     assert!(completeness
         .reasons()
@@ -837,5 +840,5 @@ fn finite_deep_alias_chain_is_iterative_and_complete() {
         classification_from_output(&output).kinds(),
         &[BroadRuntimeKind::String]
     );
-    assert!(!output.result_is_partial);
+    assert!(!output.result_is_partial());
 }

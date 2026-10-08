@@ -5,6 +5,7 @@ use crate::flow::binding::FlowBindingMap;
 use crate::flow::binding::FlowBindingMapError;
 use crate::flow::binding::FlowBindingRef;
 use crate::flow::frame_span::FrameSpan;
+use crate::flow::span_index::SkeletonSpanIndex;
 use crate::function_program::FunctionProgramEntry;
 use std::sync::Arc;
 use verter_no_typeexpr::NoTypeExpr;
@@ -661,6 +662,11 @@ pub struct FunctionBodySkeleton {
     /// assignment the checker's `isSymbolAssigned` reads; a closure that
     /// only reads a binding, or writes one of its members, adds nothing.
     pub closure_assignments: Arc<[SkeletonBindingId]>,
+    /// The containment / read index over the tables above. Empty until
+    /// [`prepare_function_body_skeleton`] builds it from the prepared
+    /// tables; a consumer asking which sites, writes or bindings a span
+    /// contains, or which reads follow it, asks this index.
+    pub span_index: SkeletonSpanIndex,
 }
 
 /// The authored kind of one function body — the `async` and `generator`
@@ -977,6 +983,7 @@ pub fn prepare_function_body_skeleton(
         }
     }
     attach_declaration_closures(&mut skeleton, &bindings, entry)?;
+    skeleton.span_index = SkeletonSpanIndex::build(&skeleton, &bindings);
     Ok(PreparedFunctionBodySkeleton { skeleton, bindings })
 }
 

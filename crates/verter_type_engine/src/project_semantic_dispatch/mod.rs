@@ -126,8 +126,10 @@ pub mod call_resolve;
 pub mod dispatch_txn;
 pub mod flow_return;
 pub(crate) mod flow_return_callee;
+mod flow_return_fact;
 pub mod flow_return_products;
 mod flow_return_widening;
+mod projection_fact;
 // The completeness-proof layer for flow-bearing operations: production-live
 // (the flow evaluator's demand preparation installs demands from here and
 // the component close finalizes through it), and the `FlowReturnKey`
@@ -2539,10 +2541,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
         carrier_prelude: &CarrierNormalizationPrelude,
         evidence_target_key: Option<&SemanticQueryKey>,
+        key: &SemanticQueryKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
-        output.result_is_partial |= build_local.result_is_partial;
+        output.fold_partial(build_local.result_is_partial);
         output.cache_suppress |= build_local.cache_suppress;
-        output.partial_reasons = output.partial_reasons.union(build_local.partial_reasons);
+        output.add_partial_reasons(build_local.partial_reasons);
+        // A build that observed cancellation or a superseded/torn view is no
+        // fact: its value flows to the caller but is never admitted.
+        output.cache_suppress |= output.projection_fact(key).is_err();
         // Canonical-construction self-roots deposited during this build
         // (discarded structural duplicates included) join the build's
         // own observed roots on the memo entry.
@@ -2739,7 +2745,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.project_generation_signature(),
                 )
                     .into();
-                output.result_is_partial = true;
+                output.mark_partial();
                 output.cache_suppress = true;
                 return Some(output);
             }
@@ -2760,7 +2766,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     output.walker_diagnostics =
                         self.connected_limit_diagnostics(carrier, reasons).to_vec();
                     output.cache_suppress = true;
-                    output.result_is_partial = true;
+                    output.mark_partial();
                     return Some(output);
                 }
             }
@@ -3091,6 +3097,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         let key_for_build = key.clone();
+        let key_for_close = key.clone();
         let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
             SemanticQueryValue,
         > {
@@ -3127,7 +3134,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context,
             } = &key_for_build
             {
-                return self.build_signatures_of_type(*subject, *kind, *context);
+                return self.build_signatures_of_type(*subject, *kind, context.clone());
             }
             if let SemanticQueryKey::ReadSignatureResult(key) = &key_for_build {
                 return self.build_read_signature_result(key);
@@ -3209,7 +3216,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     input,
                     purpose,
                     context,
-                } => self.build_reduce_intersection(*input, *purpose, *context),
+                } => self.build_reduce_intersection(input.clone(), *purpose, context.clone()),
                 SemanticQueryKey::ProjectObjectSpread { .. } => {
                     unreachable!(
                         "ProjectObjectSpread returns its typed projection value before node-domain build"
@@ -3329,9 +3336,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // read's diagnostic rail (the recorded reason, not
                         // just its presence).
                         output.cache_suppress = true;
-                        output.result_is_partial = true;
-                        output.partial_reasons =
-                            crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+                        output.mark_partial();
+                        output.add_partial_reasons(crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE);
                         output
                             .walker_diagnostics
                             .push(crate::project_semantic_dispatch::walk::ShallowDiagnostic::PendingFlowRoot { gap });
@@ -3428,6 +3434,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 finalise,
                 &carrier_prelude_for_build,
                 evidence_target_key.as_ref(),
+                &key_for_close,
             )
         };
         let authority = SemanticOperandAuthority::mint_for_forcing_boundary();
@@ -3562,7 +3569,7 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
 ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<T> {
     let mut output = output;
     if carrier_prelude.is_partial() {
-        output.result_is_partial = true;
+        output.mark_partial();
         output.cache_suppress = true;
         crate::request_context::fold_result_completeness(
             crate::semantic_query::ResultCompleteness::partial(carrier_prelude.partial_reasons()),
@@ -3730,11 +3737,11 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
     // results (`cache_suppress=true, result_is_partial=false`) are left
     // untouched: they stay out of the memo but still warm component-meta
     // (which gates on `result_is_partial` ONLY).
-    if output.result_is_partial {
+    if output.result_is_partial() {
         output.cache_suppress = true;
     }
     verter_debug_assert!(
-        !output.result_is_partial || output.cache_suppress,
+        !output.result_is_partial() || output.cache_suppress,
         "§1 invariant violated at finalisation: result_is_partial \
          without cache_suppress would launder a partial into the memo"
     );

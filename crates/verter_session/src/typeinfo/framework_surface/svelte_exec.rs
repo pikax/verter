@@ -55,6 +55,7 @@ use crate::typeinfo::framework_surface::vue_exec::{
 };
 use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
 use crate::typeinfo::surface::{TypeInfoSurface, TypeInfoSurfaceEntry};
+use crate::typeinfo::surface_resolution::adopt_surface;
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use verter_type_engine::project_semantic_dispatch::callable_view::{
     CallableNodeView, PositionalParamNode,
@@ -905,7 +906,9 @@ fn resolve_bindable(
         .as_ref()
         .copied()
         .and_then(|props_type| {
-            navigate_param_to_object_surface(ctx, dispatch, owner, props_type).recorded()
+            adopt_surface(navigate_param_to_object_surface(
+                ctx, dispatch, owner, props_type,
+            ))
         })
         .map(|surface| {
             props_from_typeinfo_surface(
@@ -977,9 +980,9 @@ fn resolve_snippet_props(
     // An INCOMPLETE props-surface resolution records its typed reason; the
     // enclosing cold-compute scope then publishes the snippet surface as
     // PARTIAL instead of laundering it into an ordinary absent macro.
-    let Some(surface) =
-        navigate_param_to_object_surface(ctx, dispatch, owner, props_type).recorded()
-    else {
+    let Some(surface) = adopt_surface(navigate_param_to_object_surface(
+        ctx, dispatch, owner, props_type,
+    )) else {
         return ResolvedOutcome::Missing;
     };
 
@@ -1511,16 +1514,17 @@ fn resolve_dispatcher(
     // An UNRESOLVABLE event map records its typed reason (the enclosing
     // cold-compute scope publishes PARTIAL); a genuinely surface-less event
     // map stays the present-but-empty emits surface.
-    let fields = navigate_param_to_object_surface(ctx, dispatch, owner, event_map)
-        .recorded()
-        .map(|surface| {
-            emits_from_typeinfo_surface(
-                ctx,
-                dispatch,
-                &macro_surface_shell(surface, AnalyzedMacroKind::DefineEmits, owner),
-            )
-        })
-        .unwrap_or_default();
+    let fields = adopt_surface(navigate_param_to_object_surface(
+        ctx, dispatch, owner, event_map,
+    ))
+    .map(|surface| {
+        emits_from_typeinfo_surface(
+            ctx,
+            dispatch,
+            &macro_surface_shell(surface, AnalyzedMacroKind::DefineEmits, owner),
+        )
+    })
+    .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
         emits: Some(EmitsSurface {
             fields,
@@ -1561,12 +1565,13 @@ fn resolve_callback_prop_events(
     // An UNRESOLVABLE `$props()` source records its typed reason (the
     // enclosing cold-compute scope publishes PARTIAL); a resolvable props
     // type with no `on*` members stays the present-but-empty emits surface.
-    let fields = navigate_param_to_object_surface(ctx, dispatch, owner, props_type)
-        .recorded()
-        .map(|surface| {
-            callback_events_from_props_surface(dispatch, &surface, &props_type.locator, owner)
-        })
-        .unwrap_or_default();
+    let fields = adopt_surface(navigate_param_to_object_surface(
+        ctx, dispatch, owner, props_type,
+    ))
+    .map(|surface| {
+        callback_events_from_props_surface(dispatch, &surface, &props_type.locator, owner)
+    })
+    .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
         emits: Some(EmitsSurface {
             fields,

@@ -3,8 +3,8 @@ use verter_session_query::resolution::{
 };
 
 use super::semantic_context::{
-    project_order_domain, project_union_order, SemanticContext, SemanticOrderPolicyId,
-    SemanticPolicySet, SemanticUnionMembersKey,
+    context_records_resident, project_order_domain, project_union_order, SemanticContext,
+    SemanticContextId, SemanticOrderPolicyId, SemanticPolicySet, SemanticUnionMembersKey,
 };
 use super::SemanticNodeId;
 
@@ -17,7 +17,7 @@ fn ctx_with(
     SemanticContext {
         effective_semantic_options: options,
         resolver_library_project_environment: env,
-        policy_set: policy.intern(),
+        policy_set: policy.id(),
         project_identity,
     }
 }
@@ -85,7 +85,7 @@ fn leaf_key_projects_policy_from_context() {
     );
     let key = SemanticUnionMembersKey::from_context(SemanticNodeId(1), &ctx);
     assert_eq!(key.policy(), project_union_order(&ctx));
-    assert_eq!(key.domain(), project_order_domain(&ctx));
+    assert_eq!(key.domain(), &project_order_domain(&ctx));
     assert_eq!(key.policy(), SemanticOrderPolicyId::VerterStableV1);
 }
 
@@ -125,4 +125,51 @@ fn formatting_only_option_spelling_does_not_change_context_id() {
         ctx_with(a, env, policy, [0; 16]).intern(),
         ctx_with(b, env, policy, [0; 16]).intern()
     );
+}
+
+/// A context whose project identity no other test mints.
+fn churn_context(i: u32) -> SemanticContext {
+    let mut identity = [0xC7; 16];
+    identity[..4].copy_from_slice(&i.to_le_bytes());
+    ctx_with(
+        SemanticCompilerOptions::default(),
+        EnvHashes::default(),
+        SemanticPolicySet::production(),
+        identity,
+    )
+}
+
+#[test]
+fn context_and_order_domain_churn_leaves_no_record_after_owners_drain() {
+    let held: Vec<_> = (0..2_000)
+        .map(|i| {
+            let ctx = churn_context(i);
+            let leaf = SemanticUnionMembersKey::from_context(SemanticNodeId(1), &ctx);
+            (ctx.intern(), leaf)
+        })
+        .collect();
+    assert!((0..2_000).all(|i| context_records_resident(&churn_context(i)) == (true, true)));
+    // An interned id keeps only its own record; the leaf key owns its domain.
+    let (ids, leaves): (Vec<_>, Vec<_>) = held.into_iter().unzip();
+    drop(leaves);
+    assert!((0..2_000).all(|i| context_records_resident(&churn_context(i)) == (true, false)));
+    drop(ids);
+    assert!(
+        (0..2_000).all(|i| context_records_resident(&churn_context(i)) == (false, false)),
+        "every churned context and order domain is reclaimed once its owners drop"
+    );
+}
+
+#[test]
+fn a_held_context_id_stays_valid_and_production_is_one_permanent_record() {
+    let ctx = churn_context(0xFFFF_0000);
+    let id = ctx.clone().intern();
+    assert_eq!(id.context(), &ctx);
+    assert_eq!(ctx.clone().intern(), id);
+    let production = SemanticContextId::production();
+    assert_eq!(production.context(), &SemanticContext::production());
+    assert_eq!(SemanticContext::production().intern(), production);
+    assert_ne!(production, id);
+    drop(production);
+    assert!(context_records_resident(&SemanticContext::production()).0);
 }
