@@ -53,7 +53,7 @@ use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
-    FlowReturnUnsupported, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
+    FlowReturnUnsupported, PartialReason, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
 };
 use verter_session_query::facts::fact_cache::{FactVersionRef, ProgramAnalysisFactRef};
@@ -138,7 +138,10 @@ pub enum FunctionReturnNode {
 /// `tsc_class_inference_budget_is_exact_partial_and_non_cacheable`), and
 /// the typed `FlowReturnFailure` itself is what the flow-return consumers
 /// branch on.
-pub(super) const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+pub(super) const NO_VALUE_REASON_CLASS: PartialReasonSet = NO_VALUE_REASON.bit();
+
+/// The one typed reason behind [`NO_VALUE_REASON_CLASS`].
+pub(super) const NO_VALUE_REASON: PartialReason = PartialReason::FlowReturnNoSurface;
 
 /// The partial class a DEGRADED SUCCESS's typed
 /// [`FlowReturnDegradation`] carries.
@@ -206,21 +209,23 @@ pub(super) fn plan_refusal_reason_class(refusal: Option<FlowPlanRefusal>) -> Par
     }
 }
 
-fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReasonSet {
+/// The one partial reason a DEGRADED SUCCESS's typed
+/// [`FlowReturnDegradation`] names. A single typed reason rather than a
+/// set, so the fact a degraded success establishes
+/// ([`super::flow_return_fact`]) is non-empty by construction.
+pub(super) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialReason {
     match degradation {
-        FlowReturnDegradation::FlowGap(_) => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        FlowReturnDegradation::FlowGap(_) => PartialReason::FlowReturnUnverified,
         FlowReturnDegradation::UnmodeledPosition
         | FlowReturnDegradation::UnresolvedValue
         | FlowReturnDegradation::UnrepresentableCallee
-        | FlowReturnDegradation::FailedBindingInitializer => {
-            PartialReasonSet::FLOW_RETURN_UNINFERRED
-        }
+        | FlowReturnDegradation::FailedBindingInitializer => PartialReason::FlowReturnUninferred,
         FlowReturnDegradation::NonCallableBinding
         | FlowReturnDegradation::UnappliedWriteEffect
         | FlowReturnDegradation::ConditionalVarDefinition
         | FlowReturnDegradation::UnreducedDeclaredUnion
-        | FlowReturnDegradation::PartialInterior => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-        FlowReturnDegradation::OperationBudget => PartialReasonSet::OPERATION_BUDGET,
+        | FlowReturnDegradation::PartialInterior => PartialReason::FlowReturnUnverified,
+        FlowReturnDegradation::OperationBudget => PartialReason::OperationBudget,
     }
 }
 
@@ -251,7 +256,7 @@ pub(super) fn flow_partial_reason_class(
 ) -> PartialReasonSet {
     use super::flow_solve::{FlowFailureClass, FlowPartialReason};
     let value_class = match degradation {
-        Some(degradation) => degradation_reason_class(degradation),
+        Some(degradation) => degradation_reason(degradation).bit(),
         None => PartialReasonSet::default(),
     };
     let reason_class = match reason {
@@ -2232,21 +2237,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // build-local taint frame, the per-cold-compute completeness
         // scope, and the request-level partial sticky (deferred — the
         // sticky has no un-mark).
-        let sticky_defer = crate::request_context::DeferredPartialStickyScope::enter();
-        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        let observation =
-            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let step = self.execute_flow_return(key);
-        let observed = observation.finish();
-        let completeness = crate::request_context::current_cold_compute_completeness();
-        completeness_scope.discard();
-        drop(sticky_defer);
-        if matches!(&step, FlowReturnStep::Complete(result) if result.degradation().is_none()) {
-            crate::request_context::fold_result_completeness(completeness);
-            self.fold_observed_frame_into_top(&observed);
+        let read = self.observe_flow_read(|| self.execute_flow_return(key));
+        // The probe consumes an exact member, or an undegraded value whose
+        // read observed partiality (adopted with it). A degraded success
+        // has no exact member to hand over, and a value-less or aborted
+        // read none at all: the generic unwrap route owns those.
+        let consumed = match read.fact() {
+            Ok(crate::semantic_query::FactResult::Complete(_)) => true,
+            Ok(crate::semantic_query::FactResult::Approximate { value, .. }) => {
+                value.degradation().is_none()
+            }
+            Ok(crate::semantic_query::FactResult::Unavailable { .. }) | Err(_) => false,
+        };
+        if !consumed {
+            let _declined = read.discard();
+            return None;
         }
-        match step {
-            FlowReturnStep::Complete(result) if result.degradation().is_none() => {
+        match read.adopt(self) {
+            FlowReturnStep::Complete(result) => {
                 // `ReturnType<…>` is a signature UTILITY, not a call: it
                 // has no call site to be argument-free at, so every free
                 // clause parameter instantiates at its BASE constraint and
@@ -2271,10 +2279,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // members this rail exists to leave cold.
                 self.instantiate_callee_clause_at_base_constraints(&identity, result.return_type())
             }
-            // Degraded success / typed failure / in-flight hold: the
-            // generic unwrap route decides (it already owns these
-            // shapes for every other consumer).
-            _ => None,
+            // A consumed read always carries a value.
+            FlowReturnStep::NoValue(_) | FlowReturnStep::Hold(_) => None,
         }
     }
 
@@ -2860,8 +2866,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let mut output: QueryBuildOutput<SemanticQueryValue> =
                         (QueryResult::Error(QueryError::Miss), fence).into();
                     output.cache_suppress = true;
-                    output.result_is_partial = true;
-                    output.partial_reasons = NO_VALUE_REASON_CLASS;
+                    output.mark_partial();
+                    output.add_partial_reasons(NO_VALUE_REASON_CLASS);
                     return output;
                 }
                 let proof = match &verdict {
@@ -2901,9 +2907,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // class.
                     Some(FlowSolveOutcome::Partial(partial)) => {
                         output.cache_suppress = true;
-                        output.result_is_partial = true;
-                        output.partial_reasons =
-                            flow_partial_reason_class(&partial.reason, partial.value.degradation());
+                        output.mark_partial();
+                        output.add_partial_reasons(flow_partial_reason_class(
+                            &partial.reason,
+                            partial.value.degradation(),
+                        ));
                     }
                     // The demand could not be planned at all, or a
                     // refused member batch withheld the root's proof:
@@ -2916,9 +2924,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // cause) keeps the contained degraded-success class.
                     None => {
                         output.cache_suppress = true;
-                        output.result_is_partial = true;
-                        output.partial_reasons = plan_refusal_reason_class(plan_refusal)
-                            .union(member_batch_partial_reasons);
+                        output.mark_partial();
+                        output.add_partial_reasons(
+                            plan_refusal_reason_class(plan_refusal)
+                                .union(member_batch_partial_reasons),
+                        );
                     }
                     // Handled above.
                     Some(FlowSolveOutcome::NoValue(_)) => unreachable!(),
@@ -2936,8 +2946,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // enclosing build.
                 self.dispatch_txn.borrow_mut().flow.last_root_failure = Some(failure);
                 output.cache_suppress = true;
-                output.result_is_partial = true;
-                output.partial_reasons = NO_VALUE_REASON_CLASS;
+                output.mark_partial();
+                output.add_partial_reasons(NO_VALUE_REASON_CLASS);
                 output
             }
         };
