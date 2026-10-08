@@ -1081,7 +1081,8 @@ pub(super) fn is_canonical_index_digits(key: &str) -> bool {
 /// The prefix receipts a path walk seals as it materializes each linear
 /// prefix ([`PathWalker::record_prefix_receipts`]).
 struct WalkPrefixes<'a, 'b> {
-    recording: crate::project_semantic_dispatch::connected_demand::PrefixRecording<'a, 'b>,
+    /// Open until the walk leaves its linear run; the receipts it sealed stay.
+    recording: Option<crate::project_semantic_dispatch::connected_demand::PrefixRecording<'a, 'b>>,
     base: SemanticNodeId,
     path: Arc<[PathSegment]>,
     receipts: Vec<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
@@ -1520,7 +1521,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         self.prefixes = ledger
             .record_prefixes(ledger.recording_depth())
             .map(|recording| WalkPrefixes {
-                recording,
+                recording: Some(recording),
                 base,
                 path: Arc::clone(path),
                 receipts: Vec::new(),
@@ -1548,10 +1549,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let Some(prefixes) = self.prefixes.as_mut() else {
             return;
         };
+        let Some(recording) = prefixes.recording.as_ref() else {
+            return;
+        };
         // The linear run ends at the first arm split, and the terminal is
         // the build's own result, not a prefix.
         if node.is_none() || index + 1 >= prefixes.path.len() || prefixes.receipts.len() != index {
-            self.prefixes = None;
+            prefixes.recording = None;
             return;
         }
         let key = SemanticQueryKey::ProjectPath {
@@ -1566,9 +1570,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 .as_task_producer(),
         );
         let request = crate::request_context::current_request_budget();
-        match prefixes.recording.seal_prefix(identity, request.as_deref()) {
+        match recording.seal_prefix(identity, request.as_deref()) {
             Some(receipt) => prefixes.receipts.push(receipt),
-            None => self.prefixes = None,
+            None => prefixes.recording = None,
         }
     }
 

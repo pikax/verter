@@ -887,6 +887,66 @@ fn a_refusal_answers_only_its_own_allowances() {
     );
 }
 
+/// The path projection `A` → `path` on `host`, navigated, as a root key.
+fn path_key(
+    host: &Arc<VerterHost>,
+    path: &[&str],
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    use verter_type_engine::semantic_query::{
+        PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, SemanticQueryKey,
+    };
+    let path: Arc<[PathSegment]> = path
+        .iter()
+        .map(|member| PathSegment::Member(PropertyKey::identifier(Arc::from(*member))))
+        .collect();
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        "type A = { x: X }; type X = { y: Y }; type Y = { z: Z }; type Z = { w: W }; type W = { v: number };",
+        "A",
+        |_, base| SemanticQueryKey::ProjectPath {
+            base,
+            path,
+            context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+        },
+    )
+}
+
+/// A prefix a longer path walk materialized and kept is charged what
+/// reaching it costs — the hops up to it — never the whole walk it was
+/// reached on the way to: served after the longer path, it costs what it
+/// costs computed alone.
+#[test]
+fn a_backfilled_prefix_costs_what_computing_it_alone_costs() {
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let alone = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let prefix = path_key(&host, &["x"]);
+        root_read(&host, &prefix, full)
+    };
+    assert!(!alone.partial, "the prefix projects");
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let longer = path_key(&host, &["x", "y", "z", "w"]);
+    let walked = root_read(&host, &longer, full);
+    assert!(!walked.partial, "the longer path projects");
+    let prefix = path_key(&host, &["x"]);
+    let misses = semantic_misses(&host);
+    let served = root_read(&host, &prefix, full);
+    assert_eq!(
+        semantic_misses(&host),
+        misses,
+        "the prefix is served from the longer walk's backfill"
+    );
+    assert_eq!(served, alone, "and charged as it is alone");
+    assert!(
+        served.work < walked.work,
+        "never the whole walk ({} of {})",
+        served.work,
+        walked.work
+    );
+}
+
 /// An operation that exhausts its own allowance at an isolated root — a
 /// relation past its structured-comparison allowance, TS2859 — refuses as
 /// a function of the root, its inputs and its allowances alone, without

@@ -4,7 +4,7 @@
 use super::*;
 use crate::semantic_query::RelationOutcome;
 use verter_session_query::retention::{
-    ChargeClass, RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
+    RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
 };
 
 #[test]
@@ -53,10 +53,13 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
         0,
         &receipt,
     );
-    let root_charge = account
-        .reserve(ChargeClass::Retained, root.retained_footprint_bytes())
-        .admitted()
+    // The root is admitted as every memo candidate is: its entry and its
+    // receipt, which the component's members share.
+    let root_charge = store
+        .reserve_memo_candidate(&root)
         .expect("the root is admitted");
+    assert!(root_charge.bytes() >= root.retained_footprint_bytes());
+    let after_root = account.snapshot().retained_bytes;
     let member_unique = member.unique_retained_footprint_bytes();
     let batch = store
         .reserve_scc_batch(&[&member])
@@ -64,8 +67,8 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
 
     assert_eq!(
         account.snapshot().retained_bytes,
-        root_charge.bytes() + member_unique,
-        "the root already owns the shared carrier and self-root allocations"
+        after_root + member_unique,
+        "the root already owns the shared carrier, self-root and receipt allocations"
     );
     drop(batch);
     drop(root_charge);
