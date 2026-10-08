@@ -1203,11 +1203,12 @@ fn nested_v_if_bare() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const a = ref(true)
 const b = ref(true)
-const el = ref<HTMLSpanElement>()
+const el = ref()
 </script>
-<template><div v-if="a"><span v-if="b" ref="el">nested</span></div></template>"#,
+<template><div v-if="a"><Child v-if="b" ref="el">nested</Child></div></template>"#,
     );
     // Positive: condition uses bare identifier for outer
     assert!(
@@ -1235,10 +1236,11 @@ fn v_for_with_v_if() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const items = ref([{active: true, name: 'a'}])
-const el = ref<HTMLDivElement>()
+const el = ref()
 </script>
-<template><div v-for="item in items" v-if="item.active" ref="el">{{ item.name }}</div></template>"#,
+<template><Child v-for="item in items" v-if="item.active" ref="el">{{ item.name }}</Child></template>"#,
     );
     // Positive: items in destructuring
     assert!(
@@ -1323,10 +1325,11 @@ fn v_for_scoped_variable_not_in_destructuring() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const items = ref([{name: 'a'}])
-const el = ref<HTMLDivElement>()
+const el = ref()
 </script>
-<template><div v-for="item in items" v-if="item.active" ref="el">{{ item.name }}</div></template>"#,
+<template><Child v-for="item in items" v-if="item.active" ref="el">{{ item.name }}</Child></template>"#,
     );
     // Positive: iterable 'items' IS in destructuring
     assert!(

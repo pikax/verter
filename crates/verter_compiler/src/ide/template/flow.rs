@@ -410,6 +410,13 @@ pub(crate) fn record(_update: impl FnOnce(&mut FlowWork)) {}
 
 /// Read and reset the per-thread narrowing work counters.
 #[cfg(any(test, feature = "semantic-observe"))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "measurement harnesses reach it only through an observation build"
+    )
+)]
 pub fn take_flow_work() -> FlowWork {
     FLOW_WORK.with(|cell| cell.replace(FlowWork::default()))
 }

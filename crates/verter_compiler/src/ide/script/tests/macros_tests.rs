@@ -575,10 +575,16 @@ const el = ref<HTMLDivElement>()
 </script>
 <template><div v-if="isTypeA" ref="el">A</div></template>"#,
     );
-    // Comp function should have condition guard
+    // An element function reads nothing its conditions narrow: its guard only
+    // contributes `| null` to the return type and stays constant-size.
     assert!(
-        code.contains("if(!((isTypeA))) return null;"),
-        "Comp for v-if should have condition guard, got:\n{}",
+        code.contains("if(!___VERTER___flowBranch) return null;"),
+        "element Comp under v-if should have the constant guard, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("if(!((isTypeA))) return null;"),
+        "element Comp must not re-state the condition path, got:\n{}",
         code
     );
 }
@@ -588,16 +594,18 @@ fn comp_v_else_if_negates_prior_siblings() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const isTypeA = true
 const isTypeB = true
-const el = ref<HTMLDivElement>()
+const el = ref()
 </script>
 <template>
   <div v-if="isTypeA">A</div>
-  <div v-else-if="isTypeB" ref="el">B</div>
+  <Child v-else-if="isTypeB" ref="el">B</Child>
 </template>"#,
     );
-    // v-else-if Comp should negate prior v-if and include own condition
+    // A component function's props read narrowed values: its guard negates the
+    // prior v-if and includes its own condition.
     assert!(
         code.contains("!((isTypeA)) && (isTypeB)"),
         "Comp for v-else-if should negate prior v-if, got:\n{}",
@@ -610,12 +618,13 @@ fn comp_v_else_negates_all_prior() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const isTypeA = true
-const el = ref<HTMLDivElement>()
+const el = ref()
 </script>
 <template>
   <div v-if="isTypeA">A</div>
-  <div v-else ref="el">B</div>
+  <Child v-else ref="el">B</Child>
 </template>"#,
     );
     // v-else Comp should negate all prior conditions
@@ -631,14 +640,15 @@ fn comp_nested_v_if_combines_parent_and_own() {
     let (code, _, _tc) = gen_tsx_script_full(
         r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const parent = true
 const child = true
-const el = ref<HTMLSpanElement>()
+const el = ref()
 </script>
-<template><div v-if="parent"><span v-if="child" ref="el">nested</span></div></template>"#,
+<template><div v-if="parent"><Child v-if="child" ref="el">nested</Child></div></template>"#,
     );
     // Nested Comp should combine parent + own condition
-    // The span's Comp should have: if(!((parent) && (child))) return null;
+    // The component's Comp should have: if(!((parent) && (child))) return null;
     assert!(
         code.contains("(parent) && (child)"),
         "nested Comp should combine parent + own condition, got:\n{}",
