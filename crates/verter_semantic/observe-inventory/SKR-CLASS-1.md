@@ -8,6 +8,9 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | --- | --- | --- | --- | --- | --- |
 | `ClassCollector` recorded classes, seen-span set, frame stack, file-scope depth and `const` class-initializer table | `ClassCollector::finish`, which resolves each class's base and hands the records to `FunctionProgramIndex::from_discovery` | REQUIRED | Owned by one function-program discovery build; consumed by `finish` and dropped when the build returns | `src/analysis/class_index.rs` | always |
 | `HashVisitor::classes` hook: the hash fold records each class it walks into the build's `ClassCollector` | Class index population for every served body | REQUIRED | Borrowed for one function's hash fold | `src/analysis/function_program_hash.rs` | always |
+| `DiscoveryWalk`: discovery's one walk of the syntax outside every served function, which discovers each top-level and namespace-member statement's served positions and records the classes it meets into the build's `ClassCollector` | Served-position discovery and class index population outside every served body | REQUIRED | Borrows the discovery build for its walk | `src/analysis/function_program_discovery_walk.rs` | always |
+| `DiscoveryCtx::served`: the span of each served function and served field initializer, inserted as discovery serves it | `DiscoveryWalk`'s skip of the syntax the hash fold walks; the parameter-decorator class walk | REQUIRED | Owned by one discovery build | `src/analysis/function_program.rs` | always |
+| Discovery statement-entry counter (`take_statement_entries_for_tests`) | none; tests only | OPTIONAL | Thread-local, reset on read | `src/analysis/function_program_discovery_walk.rs` | `cfg(test)` |
 
 ## verter_semantic_source
 

@@ -53,6 +53,9 @@ use verter_session_query::facts::SymbolSpace;
 #[path = "function_program_access.rs"]
 pub(crate) mod access;
 
+#[path = "function_program_discovery_walk.rs"]
+mod discovery_walk;
+
 #[cfg(test)]
 #[path = "function_program_tests.rs"]
 mod function_program_tests;
@@ -83,6 +86,10 @@ struct DiscoveryCtx<'source, 'ast> {
     /// nested function declarations and call-argument function values)
     /// across the file.
     next_nested_ordinal: u32,
+    /// The span of every served function whose body the hash fold walks
+    /// ([`hash_entries`]): discovery's walk of the syntax outside them
+    /// skips each.
+    served: rustc_hash::FxHashSet<(u32, u32)>,
     /// The classes the discovery walks meet.
     classes: crate::analysis::class_index::ClassCollector,
 }
@@ -131,6 +138,10 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
                     enclosing_heritage: self.enclosing_heritage,
                     enclosing_this: self.enclosing_this,
                 });
+        }
+        if node.body().is_some() {
+            let span = node.span();
+            self.served.insert((span.start, span.end));
         }
         self.hashed_nodes.push((self.entries.len(), node));
         self.entries.push(entry);
@@ -195,9 +206,9 @@ fn build_function_program_index_impl<'ast>(
         hashed_nodes: Vec::new(),
         expressions: Vec::new(),
         next_nested_ordinal: 0,
+        served: rustc_hash::FxHashSet::default(),
         classes: crate::analysis::class_index::ClassCollector::default(),
     };
-    let mut overload_tracker = OverloadTracker::default();
     // Discovery walks every function of the program, each walk sized for
     // what it walks: they all run inside one containment sized for the
     // program, which a walk of any node in it cannot exceed, rather than
@@ -206,20 +217,11 @@ fn build_function_program_index_impl<'ast>(
         &mut ctx,
         |ctx| &ctx.walks,
         |ctx| {
-            for (contributor_index, stmt) in program.body.iter().enumerate() {
-                discover_statement(stmt, contributor_index, None, &mut overload_tracker, ctx);
-            }
-            let served = served_spans(ctx);
-            // Folding each served body's hashes records the classes inside it.
-            hash_entries(ctx, &served);
-            let classes = &mut ctx.classes;
-            ctx.walks.with_node_stack(program.span, || {
-                crate::analysis::class_index::collect_top_level_classes(
-                    &program.body,
-                    &served,
-                    classes,
-                );
-            });
+            // Discovery's one walk of the syntax outside every served
+            // function records the classes there; folding each served
+            // body's hashes records the classes inside it.
+            discovery_walk::DiscoveryWalk::new(ctx).program(&program.body);
+            hash_entries(ctx);
         },
     );
     resolve_captures(&mut ctx.entries);
@@ -234,19 +236,6 @@ fn build_function_program_index_impl<'ast>(
     )
 }
 
-/// The span of every served function whose body the hash fold walks
-/// ([`hash_entries`]).
-fn served_spans(ctx: &DiscoveryCtx<'_, '_>) -> rustc_hash::FxHashSet<(u32, u32)> {
-    ctx.hashed_nodes
-        .iter()
-        .filter(|(_, node)| node.body().is_some())
-        .map(|(_, node)| {
-            let span = node.span();
-            (span.start, span.end)
-        })
-        .collect()
-}
-
 /// Fold every entry's stable and exact hashes, the functions nested in a
 /// function before it (discovery lists a function before the functions
 /// nested in it), each nested function's hashes folded into the one around
@@ -257,7 +246,7 @@ fn served_spans(ctx: &DiscoveryCtx<'_, '_>) -> rustc_hash::FxHashSet<(u32, u32)>
 /// directly in it replaced by that function's exact hash and length: equal
 /// exactly when the function's text is (a function with none nested hashes
 /// its text).
-fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>, served: &rustc_hash::FxHashSet<(u32, u32)>) {
+fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
     use crate::analysis::function_program_hash::{hash_function_body, NestedHashes};
     let mut nested: NestedHashes = rustc_hash::FxHashMap::default();
     // The exact hash and span of each hashed function, and the functions
@@ -301,14 +290,9 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>, served: &rustc_hash::FxHashSet<(
             &nested,
             &mut ctx.classes,
         );
-        let classes = &mut ctx.classes;
-        ctx.walks.with_node_stack(node.span(), || {
-            crate::analysis::class_index::collect_parameter_decorator_classes(
-                node.param_items(),
-                served,
-                classes,
-            );
-        });
+        // The fold does not walk the decorators of the function's
+        // parameters.
+        discovery_walk::DiscoveryWalk::new(ctx).parameter_decorators(node.param_items());
         ctx.classes.exit_frame();
         let span = node.span();
         nested.insert((span.start, span.end), part);
@@ -1332,16 +1316,8 @@ fn discover_statement<'ast>(
                 oxc_ast::ast::Declaration::ClassDeclaration(class) => {
                     discover_class(class, contributor_index, namespace_prefix, ctx);
                 }
-                oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => {
-                    discover_namespace_block(
-                        module,
-                        contributor_index,
-                        &FunctionDescent::new(),
-                        namespace_prefix,
-                        overload_tracker,
-                        ctx,
-                    );
-                }
+                // A namespace's members are discovered as discovery's walk
+                // enters its block.
                 _ => {}
             }
         }
@@ -1416,52 +1392,7 @@ fn discover_statement<'ast>(
                 }
             }
         },
-        Statement::TSNamespaceDeclaration(module) => {
-            discover_namespace_block(
-                module,
-                contributor_index,
-                &FunctionDescent::new(),
-                namespace_prefix,
-                overload_tracker,
-                ctx,
-            );
-        }
         _ => {}
-    }
-}
-
-/// Discover the served positions of one namespace declaration — written
-/// `namespace N { … }` or `export namespace N { … }` — at the statement
-/// `descent` reaches: its members are qualified `N.name` under
-/// `namespace_prefix`, and every locator extends `descent` with one
-/// [`FunctionDescentStep::NamespaceMember`] step. `declare module
-/// "specifier" { .. }` is an ambient augmentation, not a file-scope function
-/// owner — never indexed here.
-fn discover_namespace_block<'ast>(
-    module: &'ast oxc_ast::ast::TSNamespaceDeclaration<'ast>,
-    contributor_index: usize,
-    descent: &FunctionDescent,
-    namespace_prefix: Option<&str>,
-    overload_tracker: &mut OverloadTracker,
-    ctx: &mut DiscoveryCtx<'_, 'ast>,
-) {
-    let id = &module.id;
-    let prefix = match namespace_prefix {
-        Some(prefix) => format!("{prefix}.{}", id.name),
-        None => id.name.to_string(),
-    };
-    if let oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) = &module.body {
-        for (statement_ordinal, inner) in block.body.iter().enumerate() {
-            let inner_descent = descent.then(namespace_member_step(statement_ordinal));
-            discover_namespaced_statement(
-                inner,
-                contributor_index,
-                &inner_descent,
-                &prefix,
-                overload_tracker,
-                ctx,
-            );
-        }
     }
 }
 
@@ -1513,16 +1444,6 @@ fn discover_namespaced_statement<'ast>(
                 oxc_ast::ast::Declaration::ClassDeclaration(class) => {
                     discover_class_ns(class, contributor_index, descent, namespace, ctx);
                 }
-                oxc_ast::ast::Declaration::TSNamespaceDeclaration(module) => {
-                    discover_namespace_block(
-                        module,
-                        contributor_index,
-                        descent,
-                        Some(namespace),
-                        overload_tracker,
-                        ctx,
-                    );
-                }
                 _ => {}
             }
         }
@@ -1541,16 +1462,6 @@ fn discover_namespaced_statement<'ast>(
         }
         Statement::ClassDeclaration(class) => {
             discover_class_ns(class, contributor_index, descent, namespace, ctx);
-        }
-        Statement::TSNamespaceDeclaration(module) => {
-            discover_namespace_block(
-                module,
-                contributor_index,
-                descent,
-                Some(namespace),
-                overload_tracker,
-                ctx,
-            );
         }
         _ => {}
     }

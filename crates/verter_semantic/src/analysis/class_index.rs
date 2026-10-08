@@ -3,9 +3,9 @@
 //!
 //! Discovery already walks every served function body once, to fold its
 //! hashes: [`ClassCollector`] records the classes that walk meets. The
-//! classes outside every served body are recorded by a walk of the top-level
-//! statements ([`collect_top_level_classes`]) that skips each served
-//! function, so no syntax is walked twice.
+//! classes outside every served body are recorded by discovery's one walk
+//! (`DiscoveryWalk` in `function_program_discovery_walk.rs`), which skips
+//! each served function, so no syntax is walked twice.
 //!
 //! A class records its members, the name it is bound to (a declaration's
 //! name, or the `const` a class expression initializes) and the bare name
@@ -17,10 +17,9 @@
 use std::sync::Arc;
 
 use oxc_ast::ast::{
-    BindingPattern, Class, ClassElement, Expression, MethodDefinitionKind, Statement,
-    VariableDeclaration, VariableDeclarationKind,
+    BindingPattern, Class, ClassElement, Expression, MethodDefinitionKind, VariableDeclaration,
+    VariableDeclarationKind,
 };
-use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::function_program::{
@@ -89,6 +88,16 @@ impl ClassCollector {
         self.frames.pop();
     }
 
+    /// Walk inside a scope narrower than the file (a block, a class body,
+    /// a namespace) until the matching [`Self::exit_scope`].
+    pub(super) fn enter_scope(&mut self) {
+        self.file_scopes += 1;
+    }
+
+    pub(super) fn exit_scope(&mut self) {
+        self.file_scopes -= 1;
+    }
+
     /// Note the class expressions a `const` declaration initializes, so the
     /// class records the name it is bound to.
     pub(super) fn note_variable_declaration(&mut self, declaration: &VariableDeclaration<'_>) {
@@ -112,9 +121,12 @@ impl ClassCollector {
         }
     }
 
-    /// Record `class`, once.
+    /// Record `class`, once. A second walk that met a class again would
+    /// only be absorbed here, so tests count the absorbed repeats.
     pub(super) fn record(&mut self, class: &Class<'_>) {
         if !self.seen.insert(class.span.start) {
+            #[cfg(test)]
+            REPEATED_RECORDS.with(|repeats| repeats.set(repeats.get() + 1));
             return;
         }
         let mut members = Vec::with_capacity(class.body.body.len());
@@ -299,133 +311,14 @@ impl ClassCollector {
     }
 }
 
-/// Record the classes the program's top-level statements hold outside every
-/// served function — a class declaration, a class expression a variable, a
-/// default export, a call argument, an array, a block, a namespace, a class
-/// field initializer or a static block holds. Served functions are skipped:
-/// the hash fold of each records the classes inside it.
-pub(super) fn collect_top_level_classes(
-    statements: &[Statement<'_>],
-    served: &FxHashSet<(u32, u32)>,
-    collector: &mut ClassCollector,
-) {
-    let mut walk = ClassWalk { collector, served };
-    for statement in statements {
-        walk.visit_statement(statement);
-    }
+#[cfg(test)]
+std::thread_local! {
+    static REPEATED_RECORDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Record the classes of the decorators of `params`, which the hash fold
-/// of a served function does not walk.
-pub(super) fn collect_parameter_decorator_classes(
-    params: &[oxc_ast::ast::FormalParameter<'_>],
-    served: &FxHashSet<(u32, u32)>,
-    collector: &mut ClassCollector,
-) {
-    let mut walk = ClassWalk { collector, served };
-    for param in params {
-        walk.visit_decorators(&param.decorators);
-    }
-}
-
-struct ClassWalk<'c> {
-    collector: &'c mut ClassCollector,
-    served: &'c FxHashSet<(u32, u32)>,
-}
-
-impl ClassWalk<'_> {
-    fn is_served(&self, span: oxc_span::Span) -> bool {
-        self.served.contains(&(span.start, span.end))
-    }
-
-    fn scoped(&mut self, walk: impl FnOnce(&mut Self)) {
-        self.collector.file_scopes += 1;
-        walk(self);
-        self.collector.file_scopes -= 1;
-    }
-}
-
-impl<'a> Visit<'a> for ClassWalk<'_> {
-    fn visit_statement(&mut self, statement: &Statement<'a>) {
-        walk::walk_statement(self, statement);
-    }
-
-    fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
-        self.scoped(|walk| walk::walk_block_statement(walk, block));
-    }
-
-    fn visit_for_statement(&mut self, statement: &oxc_ast::ast::ForStatement<'a>) {
-        self.scoped(|walk| walk::walk_for_statement(walk, statement));
-    }
-
-    fn visit_for_in_statement(&mut self, statement: &oxc_ast::ast::ForInStatement<'a>) {
-        self.scoped(|walk| walk::walk_for_in_statement(walk, statement));
-    }
-
-    fn visit_for_of_statement(&mut self, statement: &oxc_ast::ast::ForOfStatement<'a>) {
-        self.scoped(|walk| walk::walk_for_of_statement(walk, statement));
-    }
-
-    fn visit_switch_statement(&mut self, statement: &oxc_ast::ast::SwitchStatement<'a>) {
-        self.scoped(|walk| walk::walk_switch_statement(walk, statement));
-    }
-
-    fn visit_catch_clause(&mut self, clause: &oxc_ast::ast::CatchClause<'a>) {
-        self.scoped(|walk| walk::walk_catch_clause(walk, clause));
-    }
-
-    fn visit_ts_module_block(&mut self, block: &oxc_ast::ast::TSModuleBlock<'a>) {
-        self.scoped(|walk| walk::walk_ts_module_block(walk, block));
-    }
-
-    fn visit_expression(&mut self, expression: &Expression<'a>) {
-        if self.is_served(expression.span()) {
-            return;
-        }
-        walk::walk_expression(self, expression);
-    }
-
-    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
-        self.collector.note_variable_declaration(declaration);
-        walk::walk_variable_declaration(self, declaration);
-    }
-
-    fn visit_class(&mut self, class: &Class<'a>) {
-        self.collector.record(class);
-        // A class's heritage reads the scope around it; its body is a scope
-        // of its own (a class expression's name binds inside it).
-        self.visit_decorators(&class.decorators);
-        if let Some(heritage) = &class.heritage {
-            self.visit_expression(&heritage.expression);
-        }
-        self.scoped(|walk| walk.visit_class_body(&class.body));
-    }
-
-    fn visit_function(
-        &mut self,
-        function: &oxc_ast::ast::Function<'a>,
-        flags: oxc_syntax::scope::ScopeFlags,
-    ) {
-        if self.is_served(function.span) {
-            return;
-        }
-        self.collector.enter_frame(ClassFrame::Unserved);
-        walk::walk_function(self, function, flags);
-        self.collector.exit_frame();
-    }
-
-    fn visit_arrow_function_expression(
-        &mut self,
-        arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>,
-    ) {
-        if self.is_served(arrow.span) {
-            return;
-        }
-        self.collector.enter_frame(ClassFrame::Unserved);
-        walk::walk_arrow_function_expression(self, arrow);
-        self.collector.exit_frame();
-    }
-
-    // No class is written in a type.
-    fn visit_ts_type(&mut self, _ty: &oxc_ast::ast::TSType<'a>) {}
+/// Classes recorded again on this thread since the last call: each is a
+/// class some second traversal met after the first had recorded it.
+#[cfg(test)]
+pub(super) fn take_repeated_records_for_tests() -> usize {
+    REPEATED_RECORDS.with(|repeats| repeats.replace(0))
 }
