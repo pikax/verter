@@ -244,11 +244,9 @@ fn a_class_expression_extending_a_class_expression_derives_from_it() {
 ///
 /// Measured on TypeScript 7.0.2 (all four settings, `--noEmit`):
 /// `Ext<InstanceType<typeof CE2>, PR>` is `"n"`. The instance a `const`
-/// holding `class extends CE1 { … }` constructs keeps its base as a
-/// reference to the value `CE1`, which names no type, so the relation
-/// stays undecided.
+/// holding `class extends CE1 { … }` constructs composes the instance of the
+/// base VALUE `CE1`, which names no type, beneath its own members.
 #[test]
-#[ignore = "a const-held class expression's base naming a value composes no base instance"]
 fn a_class_expression_extending_a_class_expression_is_not_an_unrelated_class() {
     let failures = mismatches(HERITAGE, &[("Ext<InstanceType<typeof CE2>, PR>", "\"n\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -296,19 +294,55 @@ fn a_function_local_class_extending_a_mixin_application_derives_from_its_base() 
 /// still produces its value, the self-read degrading in place.
 #[test]
 fn a_local_class_read_inside_its_own_lowering_is_unmodelled() {
-    use super::checker_probe_lane_tests::{degradation_in, ProbeProject};
+    use super::checker_probe_lane_tests::{is_unmodelled_in, ProbeProject};
     let source = "\
 function selfStatic() { class A { static s = new A(); } return A; }
 function selfExtends() { class L extends L {} return L; }
 function mutual() { class P extends Q {} class Q extends P {} return P; }
 ";
     for function in ["selfStatic", "selfExtends", "mutual"] {
-        assert_eq!(
-            degradation_in(ProbeProject::default(), source, function),
-            Ok(Some(
-                verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition
-            )),
+        assert!(
+            is_unmodelled_in(ProbeProject::default(), source, function),
             "{function}"
         );
     }
+}
+
+/// A member read through `this` selects only the class elements that
+/// declare it: the class's other members never lower. The work count is
+/// the number of class elements a demand lowered, so it depends on the
+/// elements declaring the demanded name alone — not on how many other
+/// members the class has.
+#[test]
+fn a_member_read_through_this_lowers_only_the_elements_declaring_it() {
+    use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host, ProbeProject};
+    let lowered_by = |source: &str, probe: &str| {
+        let host = default_probe_host();
+        host.provenance().reset();
+        with_probe_on_host(&host, ProbeProject::default(), source, probe, |_, _| ());
+        host.provenance().snapshot().class_elements_lowered
+    };
+    let unrelated: String = (0..40).map(|i| format!("  u{i} = {i};\n")).collect();
+    let field = |extra: &str| format!("class W {{\n  a: string = 's';\n  b = this.a;\n{extra}}}\n");
+    let narrow = lowered_by(&field(""), "W['b']");
+    let wide = lowered_by(&field(&unrelated), "W['b']");
+    assert!(narrow > 0, "the read lowered the element declaring `a`");
+    assert!(
+        narrow <= 2,
+        "only the one element declaring `a` lowers; got {narrow}"
+    );
+    assert_eq!(narrow, wide, "40 unrelated members add no lowering");
+
+    let overloaded = |extra: &str| {
+        format!(
+            "class O {{\n  m(x: string): string;\n  m(x: number): number;\n  m(x: any) {{ return x; }}\n  n = this.m;\n{extra}}}\n"
+        )
+    };
+    let narrow = lowered_by(&overloaded(""), "O['n']");
+    let wide = lowered_by(&overloaded(&unrelated), "O['n']");
+    assert!(
+        narrow >= 3,
+        "the overloads and the implementation of `m` all lower; got {narrow}"
+    );
+    assert_eq!(narrow, wide, "40 unrelated members add no lowering");
 }

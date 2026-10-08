@@ -591,6 +591,8 @@ impl MetaProvenance {
             vue_script_snapshot_parses: self.vue_script_snapshot_parses.load(Relaxed),
             eval_env_builds: self.decl_lowering.eval_env_builds.load(Relaxed),
             decl_bodies_lowered: self.decl_lowering.decl_bodies_lowered.load(Relaxed),
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            class_elements_lowered: self.decl_lowering.class_elements_lowered.load(Relaxed),
             shallow_state_builds: self.shallow_state_builds.load(Relaxed),
             indexed_ready_materializes: self.indexed_ready_materializes.load(Relaxed),
             ensure_loaded_calls: self.ensure_loaded_calls.load(Relaxed),
@@ -706,6 +708,8 @@ impl MetaProvenance {
         self.vue_script_snapshot_parses.store(0, Relaxed);
         self.decl_lowering.eval_env_builds.store(0, Relaxed);
         self.decl_lowering.decl_bodies_lowered.store(0, Relaxed);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        self.decl_lowering.class_elements_lowered.store(0, Relaxed);
         self.shallow_state_builds.store(0, Relaxed);
         self.indexed_ready_materializes.store(0, Relaxed);
         self.ensure_loaded_calls.store(0, Relaxed);
@@ -823,6 +827,10 @@ pub struct MetaProvenanceSnapshot {
     pub vue_script_snapshot_parses: u64,
     pub eval_env_builds: u64,
     pub decl_bodies_lowered: u64,
+    /// Class elements lowered by selective class-body lowering; a demand
+    /// for one class member lowers only the elements declaring it.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    pub class_elements_lowered: u64,
     pub shallow_state_builds: u64,
     pub indexed_ready_materializes: u64,
     /// Contention instrumentation counters surfaced through the

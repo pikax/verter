@@ -210,16 +210,8 @@ fn build_function_program_index_impl<'ast>(
             for (contributor_index, stmt) in program.body.iter().enumerate() {
                 discover_statement(stmt, contributor_index, None, &mut overload_tracker, ctx);
             }
-            // The classes outside every served body, then (folding each
-            // served body's hashes) the classes inside them.
             let served = served_spans(ctx);
-            ctx.walks.with_node_stack(program.span, || {
-                crate::analysis::class_index::collect_top_level_classes(
-                    program,
-                    &served,
-                    &mut ctx.classes,
-                );
-            });
+            // Folding each served body's hashes records the classes inside it.
             hash_entries(ctx, &served);
         },
     );
@@ -1441,6 +1433,7 @@ fn discover_statement<'ast>(
     overload_tracker: &mut OverloadTracker,
     ctx: &mut DiscoveryCtx<'_, 'ast>,
 ) {
+    ctx.classes.record_statement(stmt);
     match stmt {
         Statement::FunctionDeclaration(func) => {
             discover_function_declaration(

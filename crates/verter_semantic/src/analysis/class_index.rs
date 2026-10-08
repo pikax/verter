@@ -2,11 +2,12 @@
 //! discovery.
 //!
 //! Discovery already walks every served function body once, to fold its
-//! hashes: [`ClassCollector`] records the classes that walk meets. The rest
-//! of the program — top-level statements outside every served body — is
-//! walked once by [`collect_top_level_classes`], which stops at each served
-//! body. No syntax is walked twice to find a class, so indexing classes adds
-//! no walk of the program of its own.
+//! hashes: [`ClassCollector`] records the classes that walk meets. The
+//! classes outside every served body are recorded where discovery already
+//! stands on them, as it visits each top-level statement
+//! ([`ClassCollector::record_statement`]): a class declaration, a class
+//! expression a variable or a default export holds. Indexing classes walks
+//! no syntax of its own.
 //!
 //! A class records its members, the name it is bound to (a declaration's
 //! name, or the `const` a class expression initializes) and the bare name
@@ -80,14 +81,6 @@ pub(super) struct ClassCollector {
     const_initializers: FxHashMap<u32, (Arc<str>, verter_span::Span)>,
 }
 
-#[cfg(any(test, feature = "semantic-observe"))]
-std::thread_local! {
-    /// Statements and expressions the top-level class walk visits; test
-    /// and measurement builds only.
-    pub static TOP_LEVEL_CLASS_WALK_VISITS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
 impl ClassCollector {
     /// Walk inside `frame` until the matching [`Self::exit_frame`].
     pub(super) fn enter_frame(&mut self, frame: ClassFrame) {
@@ -117,6 +110,47 @@ impl ClassCollector {
                         verter_span::Span::new(id.span.start, id.span.end),
                     ),
                 );
+            }
+        }
+    }
+
+    /// Record the classes a top-level `statement` itself holds — a class
+    /// declaration, or a class expression a variable or a default export
+    /// holds — as discovery visits it.
+    pub(super) fn record_statement(&mut self, statement: &Statement<'_>) {
+        use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+        match statement {
+            Statement::ClassDeclaration(class) => self.record(class),
+            Statement::VariableDeclaration(declaration) => self.record_variable(declaration),
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::ClassDeclaration(class) => self.record(class),
+                Declaration::VariableDeclaration(declaration) => self.record_variable(declaration),
+                _ => {}
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => self.record(class),
+                other => {
+                    if let Some(class) = other
+                        .as_expression()
+                        .and_then(crate::analysis::type_eval_build::initializer_class_expression)
+                    {
+                        self.record(class);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn record_variable(&mut self, declaration: &VariableDeclaration<'_>) {
+        self.note_variable_declaration(declaration);
+        for declarator in &declaration.declarations {
+            if let Some(class) = declarator
+                .init
+                .as_ref()
+                .and_then(crate::analysis::type_eval_build::initializer_class_expression)
+            {
+                self.record(class);
             }
         }
     }
@@ -308,21 +342,6 @@ impl ClassCollector {
     }
 }
 
-/// Record the classes of the program outside every served body: each
-/// top-level statement, stopping at each function or initializer whose
-/// span is in `served` (its body's classes are recorded by the walk that
-/// folds its hashes).
-pub(super) fn collect_top_level_classes(
-    program: &oxc_ast::ast::Program<'_>,
-    served: &FxHashSet<(u32, u32)>,
-    collector: &mut ClassCollector,
-) {
-    let mut walk = TopLevelClassWalk { collector, served };
-    for statement in &program.body {
-        walk.visit_statement(statement);
-    }
-}
-
 /// Record the classes of the decorators of `params`, which the hash fold
 /// of a served function does not walk.
 pub(super) fn collect_parameter_decorator_classes(
@@ -330,18 +349,18 @@ pub(super) fn collect_parameter_decorator_classes(
     served: &FxHashSet<(u32, u32)>,
     collector: &mut ClassCollector,
 ) {
-    let mut walk = TopLevelClassWalk { collector, served };
+    let mut walk = DecoratorClassWalk { collector, served };
     for param in params {
         walk.visit_decorators(&param.decorators);
     }
 }
 
-struct TopLevelClassWalk<'c> {
+struct DecoratorClassWalk<'c> {
     collector: &'c mut ClassCollector,
     served: &'c FxHashSet<(u32, u32)>,
 }
 
-impl TopLevelClassWalk<'_> {
+impl DecoratorClassWalk<'_> {
     fn is_served(&self, span: oxc_span::Span) -> bool {
         self.served.contains(&(span.start, span.end))
     }
@@ -353,10 +372,8 @@ impl TopLevelClassWalk<'_> {
     }
 }
 
-impl<'a> Visit<'a> for TopLevelClassWalk<'_> {
+impl<'a> Visit<'a> for DecoratorClassWalk<'_> {
     fn visit_statement(&mut self, statement: &Statement<'a>) {
-        #[cfg(any(test, feature = "semantic-observe"))]
-        TOP_LEVEL_CLASS_WALK_VISITS.with(|visits| visits.set(visits.get() + 1));
         walk::walk_statement(self, statement);
     }
 
@@ -389,8 +406,6 @@ impl<'a> Visit<'a> for TopLevelClassWalk<'_> {
     }
 
     fn visit_expression(&mut self, expression: &Expression<'a>) {
-        #[cfg(any(test, feature = "semantic-observe"))]
-        TOP_LEVEL_CLASS_WALK_VISITS.with(|visits| visits.set(visits.get() + 1));
         if self.is_served(expression.span()) {
             return;
         }

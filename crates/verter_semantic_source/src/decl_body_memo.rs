@@ -394,6 +394,17 @@ impl FunctionIndexDemand {
     }
 }
 
+/// The position of a class declaration's body a selective re-borrow reads
+/// ([`DeclBodyMemo::transient_class_body_selection`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ClassBodyRequest {
+    /// The instance members whose name hashes to this
+    /// `class_member_name_hash`.
+    MembersNamed(u64),
+    /// The `extends` base reference.
+    Heritage,
+}
+
 /// Owned, statically dispatched expression demands for one exact observed
 /// source. Selecting this capability performs no parsing or lowering.
 #[derive(Clone)]
@@ -2290,6 +2301,86 @@ impl DeclBodyMemo {
             // Fatal parse: a genuine, cacheable body-less miss.
             Some(None) => DemandOutcome::Ready(None),
             Some(Some(parts)) => DemandOutcome::Ready(Some(Arc::new(parts))),
+        }
+    }
+
+    /// Lease-only re-borrow of ONE selected position of the single-statement
+    /// class declaration `name`: the instance members `member` names (every
+    /// overload and accessor of it), or the `extends` reference — the class's other
+    /// members are never lowered. `Ready(None)` when the symbol is not a
+    /// class one top-level statement declares (a merged or namespaced
+    /// class), or has no such position.
+    pub(crate) fn transient_class_body_selection(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        select: ClassBodyRequest,
+    ) -> DemandOutcome<verter_semantic::analysis::type_eval_build::ClassBodySelection> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        let Some(header) = self
+            .header_index
+            .type_header_in(owner, name)
+            .filter(|header| {
+                header.kind == verter_session_query::declarations::TypeDeclKind::Class
+                    && header.jsdoc_typedef.is_none()
+            })
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        let [contributor] = header.contributors.as_slice() else {
+            return DemandOutcome::Ready(None);
+        };
+        let statement_index = contributor.anchor.contributor_index as usize;
+        let heritage = matches!(select, ClassBodyRequest::Heritage);
+        let name_hash = match select {
+            ClassBodyRequest::MembersNamed(name_hash) => name_hash,
+            ClassBodyRequest::Heritage => 0,
+        };
+        self.ensure_lease();
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
+        let class_name = name.to_string();
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            let stmt = program.body.get(statement_index)?;
+            Some(
+                verter_semantic::analysis::type_eval_build::lower_class_body_selection(
+                    stmt,
+                    source,
+                    &class_name,
+                    &class_fields,
+                    if heritage {
+                        verter_semantic::analysis::type_eval_build::ClassBodySelect::Heritage
+                    } else {
+                        verter_semantic::analysis::type_eval_build::ClassBodySelect::MembersNamed(
+                            name_hash,
+                        )
+                    },
+                ),
+            )
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient class-body selection missed the \
+                     retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            // A statement that declares no such class, or a class with no
+            // `extends` clause: a genuine, cacheable miss.
+            Some(None) | Some(Some(None)) => DemandOutcome::Ready(None),
+            Some(Some(Some(selection))) => {
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                self.counters
+                    .class_elements_lowered
+                    .fetch_add(selection.elements_lowered as u64, Ordering::Relaxed);
+                DemandOutcome::Ready(Some(Arc::new(selection)))
+            }
         }
     }
 

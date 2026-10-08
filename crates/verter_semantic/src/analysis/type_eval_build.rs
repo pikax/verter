@@ -1739,6 +1739,180 @@ fn lower_named_type_alias_parts(
     }
 }
 
+/// A class's `extends` base as the `Ref` its body's heritage arm carries:
+/// the base name with the clause's lowered type arguments.
+fn class_heritage_ref(decl: &Class<'_>, source: &str, base_name: String) -> TypeExpr {
+    let base_args: Vec<TypeExpr> = decl
+        .heritage
+        .as_ref()
+        .and_then(|heritage| heritage.type_arguments.as_ref())
+        .map(|tp| tp.params.iter().map(|p| lower_ts_type(p, source)).collect())
+        .unwrap_or_default();
+    if base_args.is_empty() {
+        TypeExpr::named(base_name)
+    } else {
+        TypeExpr::named_with_args(base_name, base_args)
+    }
+}
+
+/// What one class declaration's body selection reads.
+#[derive(Debug, Clone, Copy)]
+pub enum ClassBodySelect {
+    /// The instance members whose static name hashes to the given
+    /// `class_member_name_hash`.
+    MembersNamed(u64),
+    /// The `extends` base reference.
+    Heritage,
+}
+
+/// The selected position of a class declaration's body, lowered without the
+/// class's other members.
+#[derive(Debug, Clone)]
+pub struct ClassBodySelection {
+    /// The class's header type parameters.
+    pub type_parameters: Vec<TypeParam>,
+    /// An object of the selected elements' members in source order, or the
+    /// `extends` base reference.
+    pub body: TypeExpr,
+    /// The class elements this selection lowered (zero for the `extends`
+    /// reference): the work count of the selective path.
+    pub elements_lowered: usize,
+}
+
+/// The static names of the instance members a class element declares: a
+/// field's or method's own key, a constructor's property parameters. A
+/// static member, a `#private` name and a computed key declare none.
+fn instance_element_names(element: &ClassElement<'_>, source: &str) -> std::vec::IntoIter<String> {
+    let names: Vec<String> = match element {
+        ClassElement::PropertyDefinition(prop) if !prop.r#static => {
+            class_member_spelling(&prop.key, source)
+        }
+        ClassElement::MethodDefinition(method)
+            if method.kind == MethodDefinitionKind::Constructor =>
+        {
+            method
+                .value
+                .params
+                .items
+                .iter()
+                .filter(|parameter| {
+                    parameter.accessibility.is_some() || parameter.readonly || parameter.r#override
+                })
+                .filter_map(|parameter| match &parameter.pattern {
+                    BindingPattern::BindingIdentifier(identifier) => {
+                        Some(identifier.name.to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        ClassElement::MethodDefinition(method) if !method.r#static => {
+            class_member_spelling(&method.key, source)
+        }
+        _ => Vec::new(),
+    };
+    names.into_iter()
+}
+
+/// The string spelling of a class member's key (`#p` for a private name),
+/// as the lowered member carries it; none for a computed or numeric key.
+fn class_member_spelling(key: &PropertyKey<'_>, source: &str) -> Vec<String> {
+    class_member_key(key, source)
+        .as_string()
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+}
+
+/// The class declaration the top-level `stmt` declares under `class_name`
+/// (its own name, or `default` for an `export default class`).
+fn statement_class<'s, 'a>(stmt: &'s Statement<'a>, class_name: &str) -> Option<&'s Class<'a>> {
+    let class = match stmt {
+        Statement::ClassDeclaration(class) => class,
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            oxc_ast::ast::Declaration::ClassDeclaration(class) => class,
+            _ => return None,
+        },
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => class,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let named = class.id.as_ref().is_some_and(|id| id.name == class_name);
+    let default_export =
+        class_name == "default" && matches!(stmt, Statement::ExportDefaultDeclaration(_));
+    (named || default_export).then_some(class)
+}
+
+/// Lower one selected position of the class declaration `class_name` that
+/// the top-level statement `stmt` declares — the demanded members, or the
+/// `extends` reference — leaving every other member unlowered. `None` when
+/// the statement declares no such class or the class has no `extends`
+/// clause for [`ClassBodySelect::Heritage`].
+pub fn lower_class_body_selection(
+    stmt: &Statement<'_>,
+    source: &str,
+    class_name: &str,
+    class_fields: &Arc<ClassFieldValues>,
+    select: ClassBodySelect,
+) -> Option<ClassBodySelection> {
+    let class = statement_class(stmt, class_name)?;
+    // An `export default class C` serves the name `default` too: the class
+    // lowers under its own name, as the whole declaration does.
+    let class_name = class.id.as_ref().map_or(class_name, |id| id.name.as_str());
+    let type_parameters = class
+        .type_parameters
+        .as_ref()
+        .map(|tp| lower_type_param_decls(tp, source))
+        .unwrap_or_default();
+    let mut elements_lowered = 0;
+    let body = match select {
+        ClassBodySelect::Heritage => {
+            let heritage = class.heritage.as_ref()?;
+            let base_name = heritage_expression_name(&heritage.expression)
+                .unwrap_or_else(|| class_heritage_value_name(class_name));
+            class_heritage_ref(class, source, base_name)
+        }
+        ClassBodySelect::MembersNamed(name_hash) => {
+            let elements: Vec<u32> = class
+                .body
+                .body
+                .iter()
+                .enumerate()
+                .filter(|(_, element)| {
+                    instance_element_names(element, source).any(|name| {
+                        verter_type_expr::locators::class_member_name_hash(&name) == name_hash
+                    })
+                })
+                .map(|(ordinal, _)| u32::try_from(ordinal).unwrap_or(u32::MAX))
+                .collect();
+            let mut selection = ClassElementSelection {
+                elements: &elements,
+                members: Vec::new(),
+                lowered: 0,
+            };
+            let mut scratch = LoweredStatementParts::reading(class_fields);
+            collect_named_class_selecting(
+                class,
+                source,
+                &mut scratch,
+                class_name.to_string(),
+                Some(&mut selection),
+            );
+            elements_lowered = selection.lowered;
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: selection.members,
+            }))
+        }
+    };
+    Some(ClassBodySelection {
+        type_parameters,
+        body,
+        elements_lowered,
+    })
+}
+
 /// The value a class declaration's `extends` EXPRESSION registers under
 /// (`K:extends` for `class K extends Mixin(Base)`): not an authorable
 /// name, so it never collides with a declaration, and the class's heritage
@@ -2655,6 +2829,32 @@ fn collect_named_class(
     out: &mut LoweredStatementParts,
     name: String,
 ) {
+    collect_named_class_selecting(decl, source, out, name, None);
+}
+
+/// The instance members of the listed raw elements of one class body, as
+/// selective class lowering delivers them.
+struct ClassElementSelection<'a> {
+    elements: &'a [u32],
+    members: Vec<ObjectMember>,
+    /// The listed elements lowered.
+    lowered: usize,
+}
+
+/// [`collect_named_class`], or — with `selection` — only the instance
+/// members the listed raw `ClassBody.body` elements declare, delivered to
+/// the selection's member list. An element outside the list lowers nothing
+/// (no member type, no signature) and the class's value side is not built;
+/// a skipped method still counts toward its name's overload ordinal, so a
+/// selected overload carries the same served-function identity the whole
+/// class gives it.
+fn collect_named_class_selecting(
+    decl: &Class<'_>,
+    source: &str,
+    out: &mut LoweredStatementParts,
+    name: String,
+    mut selection: Option<&mut ClassElementSelection<'_>>,
+) {
     // Extract the public instance shape AND the value-side static surface
     // from the class body. Instance members go to the TYPE-space body;
     // static members ride INSIDE the value-side constructor-shape
@@ -2680,6 +2880,23 @@ fn collect_named_class(
 
     for (raw_member_ordinal, element) in decl.body.body.iter().enumerate() {
         let raw_member_ordinal = u32::try_from(raw_member_ordinal).unwrap_or(u32::MAX);
+        if let Some(selection) = selection.as_mut() {
+            if !selection.elements.contains(&raw_member_ordinal) {
+                if let ClassElement::MethodDefinition(method) = element {
+                    if !(method.r#static && matches!(method.key, PropertyKey::PrivateIdentifier(_)))
+                    {
+                        let _ = class_method_flow_identity(
+                            method,
+                            &name,
+                            raw_member_ordinal,
+                            &mut member_overload_ordinals,
+                        );
+                    }
+                }
+                continue;
+            }
+            selection.lowered += 1;
+        }
         match element {
             ClassElement::PropertyDefinition(prop) => {
                 // Record every class field WITH its declared accessibility
@@ -3097,6 +3314,10 @@ fn collect_named_class(
             _ => {}
         }
     }
+    if let Some(selection) = selection {
+        selection.members = members;
+        return;
+    }
 
     let type_parameters = decl
         .type_parameters
@@ -3149,17 +3370,7 @@ fn collect_named_class(
     };
     let body = match base_name {
         Some(base_name) => {
-            let base_args: Vec<TypeExpr> = decl
-                .heritage
-                .as_ref()
-                .and_then(|heritage| heritage.type_arguments.as_ref())
-                .map(|tp| tp.params.iter().map(|p| lower_ts_type(p, source)).collect())
-                .unwrap_or_default();
-            let base_ref = if base_args.is_empty() {
-                TypeExpr::named(base_name)
-            } else {
-                TypeExpr::named_with_args(base_name, base_args)
-            };
+            let base_ref = class_heritage_ref(decl, source, base_name);
             // Heritage base first, own body last — matches the interface
             // fold order (`parts.push(base); parts.push(body)`), so the
             // first-writer-wins member precedence in downstream surface
@@ -4096,6 +4307,7 @@ fn lower_class_expression_value(
         .value_decls
         .into_iter()
         .find(|decl| decl.name == name)?;
+    let instance = value_base_instance(instance, class);
     let named_instance = TypeExpr::named(name.to_string());
     let retarget = |return_type: &mut Option<Arc<TypeExpr>>| {
         if return_type.as_deref() == Some(&named_instance) {
@@ -4110,6 +4322,37 @@ fn lower_class_expression_value(
     value.kind = kind;
     value.signatures = Vec::new();
     Some(value)
+}
+
+/// A class expression's instance, its `extends` base read as the instance
+/// of the base VALUE (`InstanceType<typeof Base>`): the class expression
+/// declares no type, and the base it extends may be a value only (another
+/// `const`-held class expression), which a type reference to its name does
+/// not reach. The base arm stays first and the own body last, so own
+/// members still shadow inherited ones.
+fn value_base_instance(instance: TypeExpr, class: &Class<'_>) -> TypeExpr {
+    let TypeExpr::Intersection(arms) = &instance else {
+        return instance;
+    };
+    let (Some(heritage), [TypeExpr::Ref { type_arguments, .. }, own]) =
+        (class.heritage.as_ref(), &arms[..])
+    else {
+        return instance;
+    };
+    let Some(base_name) = heritage_expression_name(&heritage.expression) else {
+        return instance;
+    };
+    if heritage.type_arguments.is_some() || !type_arguments.is_empty() {
+        return instance;
+    }
+    let constructor = TypeExpr::TypeOf(ValueRef {
+        path: base_name.split('.').map(str::to_string).collect(),
+        type_args: Vec::new(),
+    });
+    TypeExpr::intersection(vec![
+        TypeExpr::named_with_args("InstanceType", vec![constructor]),
+        own.clone(),
+    ])
 }
 
 /// The value declarations one declarator makes: the binding identifier's,

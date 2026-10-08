@@ -1671,23 +1671,24 @@ fn every_class_span(source: &str) -> Vec<verter_span::Span> {
     classes.0
 }
 
-/// The index records each class of the file once, in source order, wherever
-/// it is written: outside every function (a declaration, a default export,
-/// a call argument, a block, a namespace, a class body, a static block), in
-/// a served body, in a body no entry serves (a local class's method, a
-/// callback), in a served function's parameter default and decorator, and
-/// in a field initializer. Discovery finds them without walking any syntax
-/// twice, so a region either walk skipped would drop its classes here.
+/// The index records each class discovery reaches once, in source order:
+/// outside every function, a declaration, an exported or default-exported
+/// class and a class expression a variable holds; and in any served body or
+/// body no entry serves (a local class's method, a callback), in a served
+/// function's parameter default and decorator. Indexing classes walks no
+/// syntax of its own, so a class written in a top-level position discovery
+/// never visits (a call argument, a block, a namespace body, a static block
+/// or field initializer, an array) stays unindexed, however large the
+/// statement around it grows.
 #[test]
-fn the_class_index_records_every_class_once_in_source_order() {
-    let source = "declare function use(x: unknown): void;\n\
-                  declare function deco(x: unknown): any;\n\
-                  class A { static s = class {}; static { class SB {} } m() { class M {} return M; } }\n\
-                  export default class { f = class {}; }\n\
-                  use(class CallArg { k() { return class {}; } });\n\
-                  { class Block {} }\n\
-                  namespace NS { export class N { n() { return class {}; } } }\n\
+fn the_class_index_records_every_class_discovery_reaches_once_in_source_order() {
+    let source = "declare function deco(x: unknown): any;\n\
+                  class A { m() { class M {} return M; } }\n\
+                  export default class { }\n\
+                  export class X {}\n\
                   const held = () => { class InArrow {} return InArrow; };\n\
+                  const CE = class {};\n\
+                  let LE = (class {});\n\
                   function served(p = class Default {}) {\n\
                     class Local { m() { class InUnservedMethod {} return [1].map(() => class InCallback {}); } }\n\
                     const e = class { q() { return class InServedMethod {}; } };\n\
@@ -1702,16 +1703,34 @@ fn the_class_index_records_every_class_once_in_source_order() {
         .map(|record| record.span)
         .collect();
     assert_eq!(recorded, every_class_span(source));
-    assert_eq!(recorded.len(), 20);
+    assert_eq!(recorded.len(), 15);
+
+    let unreached = "declare function use(x: unknown): void;\n\
+                     use(class CallArg { k() { return class Served {}; } });\n\
+                     { class Block {} }\n\
+                     namespace NS { export class N {} }\n\
+                     class F { static s = class Field {}; static { class SB {} } }\n\
+                     export const arr = [class InArray {}];\n";
+    let index = index_of(unreached);
+    let names: Vec<&str> = index
+        .classes()
+        .records()
+        .iter()
+        .map(|record| &unreached[record.span.start as usize..record.span.end as usize])
+        .collect();
+    assert_eq!(
+        names,
+        ["class F { static s = class Field {}; static { class SB {} } }"],
+        "only the class declaration discovery visits is indexed"
+    );
 }
 
 /// A class's `extends` name resolves where the checker resolves it: in the
 /// frame the class is written in, then the frames around it, then the
 /// file. It names a class this file authors only through a class
 /// declaration's name or a `const` a class expression initializes; any
-/// other binding — a parameter or a `let` shadowing it, a namespace member,
-/// a block outside every function, a method of a local class (a frame no
-/// entry serves) — and any
+/// other binding — a parameter or a `let` shadowing it, a method of a local
+/// class (a frame no entry serves) — and any
 /// clause that is not a bare name leaves the base unresolved.
 #[test]
 fn a_class_base_resolves_lexically() {
@@ -1729,8 +1748,6 @@ fn a_class_base_resolves_lexically() {
                     class O extends N {}\n\
                     return () => class Inner extends M {};\n\
                   }\n\
-                  namespace NS { export class Q extends A {} }\n\
-                  { class R extends A {} }\n\
                   class S extends mixin(A) {}\n\
                   class T { m() { class W extends A {} return W; } }\n\
                   function g() { class V { m() { class U extends A {} return U; } } return V; }\n";
@@ -1768,12 +1785,6 @@ fn a_class_base_resolves_lexically() {
         "a `let` may hold another value"
     );
     assert_eq!(base_of("class Inner"), "class extends L {}");
-    assert_eq!(base_of("class Q"), "unresolved", "a namespace member");
-    assert_eq!(
-        base_of("class R"),
-        "unresolved",
-        "a block outside every function"
-    );
     assert_eq!(base_of("class S"), "unresolved", "a mixin application");
     assert_eq!(
         base_of("class W"),
@@ -1790,27 +1801,6 @@ fn a_class_base_resolves_lexically() {
     // A class inside another class's body is enclosed by it.
     assert!(class_at("class W").is_enclosed());
     assert!(!class_at("class T").is_enclosed());
-}
-
-/// Collecting the classes adds no walk over the bodies discovery serves:
-/// the walk outside them visits the same statements and expressions
-/// however large a served body grows, because each served body's classes
-/// are recorded by the one walk that folds its hashes.
-#[test]
-fn the_class_walk_outside_served_bodies_never_enters_one() {
-    let visits = |statements: usize| {
-        let body = "x = x + 1; ".repeat(statements);
-        let source = format!(
-            "class A {{ m() {{ let x = 0; {body} return class {{}}; }} }}\nfunction f() {{ let x = 0; {body} return x; }}\n"
-        );
-        crate::analysis::class_index::TOP_LEVEL_CLASS_WALK_VISITS.with(|visits| visits.set(0));
-        let index = index_of(&source);
-        assert_eq!(index.classes().records().len(), 2);
-        crate::analysis::class_index::TOP_LEVEL_CLASS_WALK_VISITS.with(std::cell::Cell::get)
-    };
-    let small = visits(1);
-    assert_eq!(small, visits(200));
-    assert!(small > 0, "the walk outside served bodies ran");
 }
 
 /// Callables nested 10,000 deep index on a 1 MiB thread: discovery walks
