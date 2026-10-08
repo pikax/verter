@@ -710,6 +710,10 @@ impl Drop for FileArtifactRoot {
 struct RetiredArtifactVersion {
     span: VersionSpan,
     payload: Arc<FileArtifacts>,
+    /// The version's freshness evidence, shared with the live entry it was
+    /// copied from: a root that still reaches this payload keeps its
+    /// canonical's transition evidence owned.
+    _freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
 }
 
 /// One version of a canonical→keys index membership entry.
@@ -763,15 +767,28 @@ struct StoredArtifact {
     /// [`FileArtifactStore::access_tick`]). Consumed by the LRU
     /// floor's recency ordering.
     last_access_tick: AtomicU64,
+    /// Ownership of the canonical's content-transition evidence while this
+    /// version is reachable. `indexed.built_at_content_generation` is
+    /// compared against the workspace's per-canonical transition rail; the
+    /// lease keeps that rail answering from this canonical's own evidence,
+    /// so retiring unrelated workspace history never makes this artifact
+    /// look stale. `None` when the store has no workspace history installed.
+    freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
 }
 
 impl StoredArtifact {
-    fn new(payload: Arc<FileArtifacts>, tick: u64, birth_epoch: u64) -> Self {
+    fn new(
+        payload: Arc<FileArtifacts>,
+        tick: u64,
+        birth_epoch: u64,
+        freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
+    ) -> Self {
         Self {
             payload,
             birth_epoch,
             hits: AtomicU32::new(0),
             last_access_tick: AtomicU64::new(tick),
+            freshness,
         }
     }
 
@@ -962,6 +979,16 @@ pub struct FileArtifactStore {
     /// artifact ingestion. Lookup of a global symbol reads the
     /// snapshot rather than scanning program membership.
     global_contributors: crate::global_contributors::GlobalContributorIndex,
+    /// The live workspace's content-transition history, through which
+    /// every stored version owns its canonical's freshness evidence.
+    /// Installed by the host for each workspace it serves; `None` leaves
+    /// versions unleased.
+    freshness_readers: parking_lot::RwLock<Option<verter_workspace::FreshnessReaders>>,
+    /// Test-only hook run once at the start of the next
+    /// [`Self::install_freshness_readers`], so a test can hold an
+    /// installation open while another workspace swap runs.
+    #[cfg(test)]
+    freshness_install_hook: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Test-only host-level audit hook.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
@@ -1033,9 +1060,45 @@ impl FileArtifactStore {
             schema_version,
             augmentation_index: DashMap::new(),
             global_contributors: crate::global_contributors::GlobalContributorIndex::new(),
+            freshness_readers: parking_lot::RwLock::new(None),
+            #[cfg(test)]
+            freshness_install_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Install the content-transition history of the workspace this store's
+    /// artifacts are built from. Versions published afterwards own their
+    /// canonical's freshness evidence in it; versions already stored keep
+    /// whatever they held.
+    pub(crate) fn install_freshness_readers(
+        &self,
+        readers: Option<verter_workspace::FreshnessReaders>,
+    ) {
+        #[cfg(test)]
+        {
+            let hook = self.freshness_install_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        *self.freshness_readers.write() = readers;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_freshness_install(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.freshness_install_hook.lock() = Some(hook);
+    }
+
+    fn lease_freshness(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_workspace::CanonicalFreshnessLease>> {
+        self.freshness_readers
+            .read()
+            .as_ref()
+            .map(|readers| Arc::new(readers.lease_canonical(canonical)))
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1746,8 +1809,11 @@ impl FileArtifactStore {
             }
         }
         self.global_contributors.note_live(key.clone(), &payload);
-        self.artifacts
-            .insert(key.clone(), StoredArtifact::new(payload, tick, epoch));
+        let freshness = self.lease_freshness(&key.canonical);
+        self.artifacts.insert(
+            key.clone(),
+            StoredArtifact::new(payload, tick, epoch, freshness),
+        );
         slot.push(CanonicalKeyVersion {
             key,
             span: VersionSpan::born(epoch),
@@ -1790,11 +1856,12 @@ impl FileArtifactStore {
         key: &FileArtifactKey,
         epoch: u64,
     ) -> Option<Arc<FileArtifacts>> {
-        let (birth, payload) = {
+        let (birth, payload, freshness) = {
             let entry = self.artifacts.get(key)?;
             (
                 entry.value().birth_epoch,
                 Arc::clone(&entry.value().payload),
+                entry.value().freshness.clone(),
             )
         };
         self.retired_artifacts
@@ -1806,6 +1873,7 @@ impl FileArtifactStore {
                     retirement: Some(epoch),
                 },
                 payload: Arc::clone(&payload),
+                _freshness: freshness,
             });
         Some(payload)
     }

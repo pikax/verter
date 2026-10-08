@@ -96,6 +96,8 @@ mod component_meta_cache_discipline_tests;
 mod fallthrough_admission_tests;
 pub mod host_audit_runtime;
 #[cfg(test)]
+mod host_freshness_evidence_tests;
+#[cfg(test)]
 mod host_lifecycle_cascade_tests;
 #[cfg(test)]
 mod lazy_decl_body_tests;
