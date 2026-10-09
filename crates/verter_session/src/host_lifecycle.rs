@@ -837,14 +837,13 @@ impl VerterHost {
         let indexed = self.project_type_store.indexed();
         let account = self.project_type_store.retention_account().snapshot();
         let workspace = self.ws().resource_snapshot();
-        let (capture_summaries, capture_summary_files) = indexed.capture_summary_occupancy();
+        let (capture_summaries, capture_summary_files) =
+            verter_session_query::function_program::CaptureSummaryCounts::resident();
         HostRetentionSnapshot {
             capture_summaries,
             capture_summary_files,
-            skeleton_name_indexes: self
-                .project_type_store
-                .flow_slice()
-                .skeleton_name_index_occupancy(),
+            skeleton_name_indexes:
+                verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy::resident(),
             overlay_resolution_slots: workspace.overlay_resolution_slots,
             overlay_value_versions: workspace.overlay_value_versions,
             fallthrough_nodes: self.resolver.runtime.fallthrough.retained_node_count(),
