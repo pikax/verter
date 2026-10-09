@@ -87,14 +87,14 @@ describe("VS Code E2E extension provisioning", () => {
     ).toThrow(/configured VERTER_TSGO_BIN does not exist/i);
   });
 
-  it("installs into the exact isolated profile while preserving platform CLI bootstrap args", () => {
+  it("installs into the exact isolated profile while preserving platform CLI bootstrap args", async () => {
     const run = vi.fn<SynchronousCommandRunner>(() => ({
       status: 0,
       stdout: "installed",
       stderr: "",
     }));
 
-    provisionVsCodeExtension({
+    await provisionVsCodeExtension({
       cliArgs: [
         "/Applications/Code",
         "--ms-enable-electron-run-as-node",
@@ -124,22 +124,62 @@ describe("VS Code E2E extension provisioning", () => {
     expect(options).toMatchObject({ timeout: 180_000, shell: false, windowsHide: true });
   });
 
-  it("turns a missing or failed installation into a hard gate failure", () => {
-    const run: SynchronousCommandRunner = () => ({
-      status: 1,
-      stdout: "",
-      stderr: "extension not found",
-    });
+  it("turns a missing or failed installation into a hard gate failure", async () => {
+    let attempts = 0;
+    const run: SynchronousCommandRunner = () => {
+      attempts++;
+      return { status: 1, stdout: "", stderr: "extension not found" };
+    };
 
-    expect(() =>
+    await expect(
       provisionVsCodeExtension({
         cliArgs: ["code"],
         extension: "TypeScriptTeam.native-preview@0.20260708.2",
         extensionsDir: "/isolated/extensions",
         userDataDir: "/isolated/user-data",
         run,
+        retry: { attempts: 3, delayMs: 1, sleep: async () => undefined, warn: () => undefined },
       }),
-    ).toThrow(/extension not found/);
+    ).rejects.toThrow(
+      /Failed to provision VS Code extension TypeScriptTeam\.native-preview@0\.20260708\.2 after 3 attempt\(s\)[\s\S]*extension not found/,
+    );
+    expect(attempts).toBe(3);
+  });
+
+  it("retries a marketplace outage during installation before the profile is used", async () => {
+    // The marketplace answering 503 is a network outage, not a product
+    // regression: a later attempt that installs must let the route run.
+    const outcomes = [
+      { status: 1, stdout: "Installing extensions...", stderr: "Server returned 503" },
+      { status: 1, stdout: "", stderr: "Error while installing extensions: Server returned 503" },
+      { status: 0, stdout: "installed", stderr: "" },
+    ];
+    const run = vi.fn<SynchronousCommandRunner>(() => outcomes.shift()!);
+    const waits: number[] = [];
+    const warnings: string[] = [];
+
+    await provisionVsCodeExtension({
+      cliArgs: ["code"],
+      extension: "TypeScriptTeam.native-preview@0.20260708.2",
+      extensionsDir: "/isolated/extensions",
+      userDataDir: "/isolated/user-data",
+      run,
+      retry: {
+        attempts: 4,
+        delayMs: 10,
+        sleep: async (ms) => void waits.push(ms),
+        warn: (message) => void warnings.push(message),
+      },
+    });
+
+    expect(run).toHaveBeenCalledTimes(3);
+    for (const [, args] of run.mock.calls) {
+      expect(args).toContain("--extensions-dir=/isolated/extensions");
+      expect(args).toContain("--user-data-dir=/isolated/user-data");
+    }
+    expect(waits).toEqual([10, 20]);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toMatch(/attempt 1\/4 failed.*Server returned 503/s);
   });
 
   it("seeds Native Preview enablement in the isolated user profile without dropping existing settings", () => {
