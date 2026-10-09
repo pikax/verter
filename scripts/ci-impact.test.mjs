@@ -2,13 +2,15 @@
 
 // Tests for ci-impact.mjs. Run: node --test scripts/ci-impact.test.mjs
 //
-// The classifier decides which CONSUMER lanes of ci.yml (artifact builds and
-// the suites that consume them) a change can affect, from the real Cargo
-// dependency graph instead of hand-written `crates/**` wildcards. These tests
-// run against small synthetic `cargo metadata`-shaped fixtures. The few tests
-// that read the repository check only inventories: that every lane root is a
-// crate that exists, and that the lanes whose selection is derived from an
-// inventory (provider selectors, compile-contract owners) cover all of it.
+// The classifier is the one lane-selection authority for ci.yml: its path
+// filters own every non-crate input, and the real Cargo dependency graph
+// decides which CONSUMER lanes (artifact builds and the suites that consume
+// them) a crate change can affect. Most tests run against small synthetic
+// `cargo metadata`-shaped fixtures. The tests that read the repository check
+// inventories: that every lane root is a crate that exists, that the lanes
+// whose selection is derived from an inventory (provider selectors,
+// compile-contract owners) cover all of it, that every tracked file is owned
+// or explicitly inert, and that no filter pattern matches nothing.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -24,13 +26,17 @@ import {
   ESCAPE_HATCHES,
   LANE_GATES,
   LANE_ROOTS,
+  PATH_FILTERS,
   PROVIDER_PACKAGES,
+  auditSelection,
   classifyCiImpact,
+  compileGlob,
+  compilePathFilters,
   composeLaneGates,
   formatGithubOutput,
   isCiInert,
+  matchPathFilters,
   releaseGates,
-  ownedFilesFromFilterOutputs,
 } from "./ci-impact.mjs";
 import { buildWorkspaceIndex } from "./lib/crate-graph.mjs";
 import { PROVIDER_LIVE_SELECTORS } from "./provider-ci-internals.mjs";
@@ -90,6 +96,25 @@ const metadata = fixtureMetadata(PKGS);
 const allOff = { native: false, wasm: false, lsp: false, harness: false };
 const allOn = { native: true, wasm: true, lsp: true, harness: true };
 
+// The real lanes: every root crate as an independent fixture member, so a
+// changed crate impacts exactly the lanes that root it.
+const LANE_ROOT_CRATES = [...new Set(Object.values(LANE_ROOTS).flat())];
+const laneMetadata = fixtureMetadata(
+  LANE_ROOT_CRATES.map((name) => ({ name, dir: `crates/${name}` })),
+);
+
+/** The gates ci.yml would publish for `files`, through the real filters. */
+function select(files) {
+  const { hits, owned } = matchPathFilters(files);
+  const impact = classifyCiImpact(files, laneMetadata, LANE_ROOTS, { ownedFiles: owned });
+  return { hits, impact, gates: composeLaneGates(hits, impact) };
+}
+
+const gatesOn = (gates) =>
+  Object.keys(gates)
+    .filter((gate) => gates[gate] === "true")
+    .sort();
+
 test("a change inside a lane root's dependency closure impacts that lane and no other", () => {
   const result = classifyCiImpact(["crates/lsp/src/lib.rs"], metadata, ROOTS);
   assert.equal(result.full, false);
@@ -133,7 +158,7 @@ test("a non-crate file a path filter owns, or an explicitly CI-inert one, impact
       "pnpm-lock.yaml",
       "packages/vue-vscode/src/extension.ts",
       "docs/guide.md",
-      "CHANGELOG.md",
+      "CONTRIBUTING.md",
     ],
     metadata,
     ROOTS,
@@ -163,25 +188,41 @@ test("no top-level directory is inert by assumption: an unowned file under one f
     assert.equal(result.full, true, file);
     assert.equal(result.fullReasons[0].id, "unrecognized-path", file);
   }
-  // The inert list is small and names only files with no CI consumer.
-  assert.ok(CI_INERT_PATHS.length <= 16);
+  // The inert list names what no ci.yml job reads, never a whole input tree:
+  // a new file under one must reach an owner or the fallback, not silence.
   for (const entry of CI_INERT_PATHS) {
     assert.doesNotMatch(
       entry,
-      /^(schemas|test-corpora|extensions|examples|tools|mcp|packages|crates|scripts)\b/,
+      /^(?:\*\*|(?:schemas|test-corpora|extensions|editors|examples|tools|mcp|packages|crates|scripts|tests|\.github)\/\*\*)$/,
+      entry,
     );
   }
 });
 
-test("the rust filter owns the directories Rust tests read", () => {
-  const ci = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const start = ci.indexOf("\n            rust:\n");
-  assert.notEqual(start, -1, "ci.yml must declare the rust filter");
-  const rest = ci.slice(start + 1);
-  const next = rest.search(/\n(?: {12}#[^\n]*\n)* {12}[a-z_]+:\n/);
-  const block = next === -1 ? rest : rest.slice(0, next);
-  for (const owned of ["schemas/**", "test-corpora/**"]) {
-    assert.ok(block.includes(`- '${owned}'`), `the rust filter must own ${owned}`);
+test("the rust filter owns the files Rust tests read, and only those", () => {
+  for (const file of [
+    "schemas/scanners-replacement-v1.schema.json",
+    "test-corpora/style-ir/css-baseline-legacy.json",
+    // include_str!-ed by verter_compiler and verter_session tests
+    "tests/sfc-projection/STP12/fixtures/jsx.vue",
+    "tests/sfc-projection/STP16/probes/components/Picker.vue.ts",
+    // read by the STS0 profile gate and the leaked-path scan
+    "tests/sfc-projection/STS0/products/svelte-projection-policy.json",
+    "tests/sfc-projection/STP6/packed/types/index.d.ts.map",
+    "docs/audit-footprint/api-reference.md",
+    "CHANGELOG.md",
+    ".gitignore",
+    "clippy.toml",
+  ]) {
+    assert.equal(matchPathFilters([file]).hits.rust, true, `the rust filter must own ${file}`);
+  }
+  // The rest of the node tree is the verifiers' input, not the Rust suite's.
+  for (const file of [
+    "tests/sfc-projection/STP16/manifest.json",
+    "tests/sfc-projection/STP9/protocol.mjs",
+    "docs/guide/getting-started.md",
+  ]) {
+    assert.equal(matchPathFilters([file]).hits.rust, false, file);
   }
 });
 
@@ -191,6 +232,7 @@ test("a non-crate file no path filter owns forces every lane on rather than gues
       ownedFiles: new Set(["scripts/jetbrains-gate.mjs"]),
     });
     assert.equal(result.full, true, file);
+    assert.equal(result.everything, true, file);
     assert.equal(result.fullReasons[0].id, "unrecognized-path", file);
     assert.equal(result.fullReasons[0].file, file);
     assert.deepEqual(result.lanes, allOn, file);
@@ -198,24 +240,26 @@ test("a non-crate file no path filter owns forces every lane on rather than gues
 });
 
 test("the classifier's own escape hatches force every lane on and name why", () => {
+  // [id, whether every gate runs rather than every impact-bearing one]
   const cases = {
-    "Cargo.lock": "workspace-manifest",
-    "Cargo.toml": "workspace-manifest",
-    ".config/nextest.toml": "nextest-config",
-    "rust-toolchain.toml": "toolchain",
-    ".cargo/config.toml": "toolchain",
-    ".github/workflows/ci.yml": "ci-workflows",
-    ".github/actions/download-artifact/action.yml": "ci-actions",
-    "scripts/ci-impact.mjs": "lane-classifier",
-    "scripts/lib/crate-graph.mjs": "lane-classifier",
-    "crates/derive/src/lib.rs": "proc-macro-crate",
+    "Cargo.lock": ["workspace-manifest", false],
+    "Cargo.toml": ["workspace-manifest", false],
+    ".config/nextest.toml": ["nextest-config", false],
+    "rust-toolchain.toml": ["toolchain", false],
+    ".cargo/config.toml": ["toolchain", false],
+    ".github/workflows/ci.yml": ["ci-workflow", true],
+    ".github/actions/download-artifact/action.yml": ["ci-actions", true],
+    "scripts/ci-impact.mjs": ["lane-classifier", true],
+    "scripts/lib/crate-graph.mjs": ["lane-classifier", true],
+    "crates/derive/src/lib.rs": ["proc-macro-crate", false],
   };
-  for (const [file, id] of Object.entries(cases)) {
+  for (const [file, [id, everything]] of Object.entries(cases)) {
     // Owned by a filter too: a hatch wins over ownership.
     const result = classifyCiImpact(["crates/tool/src/main.rs", file], metadata, ROOTS, {
       ownedFiles: new Set([file]),
     });
     assert.equal(result.full, true, file);
+    assert.equal(result.everything, everything, file);
     assert.deepEqual(
       result.fullReasons.map((r) => [r.file, r.id]),
       [[file, id]],
@@ -224,12 +268,129 @@ test("the classifier's own escape hatches force every lane on and name why", () 
     assert.deepEqual(result.lanes, allOn, file);
   }
   // Ordinary tooling is NOT a hatch here: its lane's filter owns it, unlike
-  // affected-tests.mjs, which has no filters to defer to.
+  // affected-tests.mjs, which has no filters to defer to. Neither is a
+  // workflow other than ci.yml: it runs on its own trigger.
   const index = buildWorkspaceIndex(metadata);
-  assert.equal(
-    ESCAPE_HATCHES.some((rule) => rule.test("scripts/jetbrains-gate.mjs", index)),
-    false,
+  for (const file of ["scripts/jetbrains-gate.mjs", ".github/workflows/nightly.yml"]) {
+    assert.equal(
+      ESCAPE_HATCHES.some((rule) => rule.test(file, index)),
+      false,
+      file,
+    );
+  }
+});
+
+test("a change to CI-inert paths only runs no lane", () => {
+  // The shape of a kernel architecture pull request: prose and the inventory
+  // products it ratifies, which no CI job reads.
+  const { hits, impact, gates } = select([
+    "docs/arch/kernel/carrier-frontend-backend.md",
+    "tests/kernel/CPF0/products/carrier-split-inventory.v1.json",
+    "CONTRIBUTING.md",
+    "tests/web-product/WDX0/manifest.json",
+    "examples/src/App.vue",
+    ".github/workflows/benchmark.yml",
+  ]);
+  assert.equal(impact.full, false, JSON.stringify(impact.fullReasons));
+  assert.deepEqual(
+    Object.keys(hits).filter((name) => hits[name]),
+    [],
   );
+  assert.deepEqual(gatesOn(gates), []);
+});
+
+test("an exclusion removes only what the filter's own includes matched", () => {
+  // The js filter covers packages/** except the playground, which has its
+  // own lane; a paths-filter negation once made it cover every other file.
+  const playground = select(["packages/playground/src/App.vue"]);
+  assert.equal(playground.hits.js, false);
+  assert.deepEqual(gatesOn(playground.gates), ["native_artifact", "playground", "wasm_artifact"]);
+  assert.equal(matchPathFilters(["packages/vue-vscode/src/extension.ts"]).hits.js, true);
+  assert.equal(matchPathFilters(["docs/guide.md"]).hits.js, false);
+
+  const { hits } = matchPathFilters(
+    ["a/x.ts", "a/skip/y.ts"],
+    compilePathFilters({ lane: { include: ["a/**"], exclude: ["a/skip/**"] } }),
+  );
+  assert.deepEqual(hits, { lane: true });
+  assert.deepEqual(
+    matchPathFilters(["a/skip/y.ts", "b/z.ts"], {
+      lane: { include: ["a/**"], exclude: ["a/skip/**"] },
+    }).hits,
+    { lane: false },
+  );
+});
+
+test("filter globs are plain positive globs; anything else is refused", () => {
+  const cases = [
+    ["crates/**", ["crates/a/src/lib.rs", "crates/.cargo-ok"], ["crate/a.rs", "crates"]],
+    [
+      "scripts/gate*.mjs",
+      ["scripts/gate.mjs", "scripts/gate-internals.mjs"],
+      ["scripts/lib/gate.mjs"],
+    ],
+    ["tsconfig*.json", ["tsconfig.json", "tsconfig.base.json"], ["packages/a/tsconfig.json"]],
+    ["a/**/b.md", ["a/b.md", "a/x/b.md", "a/x/y/b.md"], ["a/xb.md", "b.md"]],
+    ["**", ["anything", ".hidden/file"], []],
+    [".cargo/**", [".cargo/config.toml"], ["cargo/config.toml"]],
+  ];
+  for (const [glob, yes, no] of cases) {
+    const re = compileGlob(glob);
+    for (const file of yes) assert.ok(re.test(file), `${glob} must match ${file}`);
+    for (const file of no) assert.ok(!re.test(file), `${glob} must not match ${file}`);
+  }
+  for (const glob of [
+    "!packages/playground/**",
+    "packages/{a,b}/**",
+    "packages/[ab]/**",
+    "file?.md",
+    "a/**b",
+    "/abs/**",
+    "./rel/**",
+    "dir/",
+    "a//b",
+    "a\\b",
+    "",
+  ]) {
+    assert.throws(() => compileGlob(glob), /ci-impact: /, glob);
+  }
+  assert.throws(() => compilePathFilters({ lane: [] }), /must be a non-empty glob list/);
+  assert.throws(
+    () => compilePathFilters({ lane: { include: ["a/**"], exclude: "a/b/**" } }),
+    /must be a non-empty glob list/,
+  );
+});
+
+test("the sfc-projection verifiers run for their node trees and crates, not for JavaScript changes", () => {
+  for (const file of [
+    "tests/sfc-projection/STP16/probes/components/Picker.vue.ts",
+    "scripts/sfc-projection/verify-node.mjs",
+    "packages/framework-conformance-harness/evidence/svelte-options.tsv",
+    "crates/verter_compiler/src/lib.rs",
+    "crates/verter_validation_probe/manifest/svelte.toml",
+  ]) {
+    assert.equal(select([file]).gates.sfc_projection, "true", file);
+  }
+  for (const file of ["packages/vue-vscode/src/extension.ts", "scripts/perf-breakdown.mjs"]) {
+    assert.equal(select([file]).gates.sfc_projection, "false", file);
+  }
+});
+
+test("a script with no lane consumer runs the scripts' self-tests and nothing else", () => {
+  assert.deepEqual(gatesOn(select(["scripts/perf-breakdown.mjs"]).gates), ["js"]);
+});
+
+test("ci.yml, the local actions, the classifier and an unclassified path run every lane", () => {
+  for (const file of [
+    ".github/workflows/ci.yml",
+    ".github/actions/download-artifact/action.yml",
+    "scripts/ci-impact.mjs",
+    "brand-new-dir/thing.txt",
+  ]) {
+    const { impact, gates } = select([file]);
+    assert.equal(impact.everything, true, file);
+    assert.deepEqual(gatesOn(gates), Object.keys(LANE_GATES).sort(), file);
+  }
 });
 
 test("a lane root that is not a workspace member is refused, never silently empty", () => {
@@ -247,7 +408,7 @@ test("composeLaneGates ORs filters, impact lanes and earlier gates, and fails cl
     contracts: { filters: [], impact: ["lsp"] },
     wasm_artifact: { gates: ["wasm", "vscode"] },
   };
-  const filters = { rust: "true", wasm: "false", vscode: "false", wasm_files: "[]" };
+  const filters = { rust: true, wasm: false, vscode: false };
   const impact = { full: false, lanes: { wasm: false, lsp: true } };
   assert.deepEqual(composeLaneGates(filters, impact, gates), {
     rust: "true",
@@ -258,18 +419,33 @@ test("composeLaneGates ORs filters, impact lanes and earlier gates, and fails cl
   });
 
   // The path filter alone is enough.
-  assert.equal(composeLaneGates({ ...filters, wasm: "true" }, impact, gates).wasm, "true");
+  assert.equal(composeLaneGates({ ...filters, wasm: true }, impact, gates).wasm, "true");
   // A full fallback turns on every impact-bearing gate and leaves pass-through
   // gates to their filter.
   assert.deepEqual(
-    composeLaneGates({ ...filters, rust: "false" }, { full: true, lanes: {} }, gates),
+    composeLaneGates({ ...filters, rust: false }, { full: true, lanes: {} }, gates),
     { rust: "false", wasm: "true", vscode: "true", contracts: "true", wasm_artifact: "true" },
   );
-  // A gate naming a filter the workflow did not produce is a wiring bug.
-  assert.throws(
-    () => composeLaneGates({ rust: "true" }, impact, gates),
-    /filter "wasm" is not among the paths-filter outputs/,
+  // Everything turns pass-through gates on as well.
+  assert.deepEqual(
+    composeLaneGates(
+      { ...filters, rust: false },
+      { full: true, everything: true, lanes: {} },
+      gates,
+    ),
+    { rust: "true", wasm: "true", vscode: "true", contracts: "true", wasm_artifact: "true" },
   );
+  // A gate naming a filter that does not exist is a wiring bug.
+  assert.throws(
+    () => composeLaneGates({ rust: true }, impact, gates),
+    /names filter "wasm", which is not a path filter/,
+  );
+  // Every gate's filters are real path filters.
+  for (const [gate, spec] of Object.entries(LANE_GATES)) {
+    for (const filter of spec.filters ?? []) {
+      assert.ok(filter in PATH_FILTERS, `gate ${gate} names unknown filter ${filter}`);
+    }
+  }
   // Unknown impact lane names are refused the same way.
   assert.throws(
     () => composeLaneGates(filters, impact, { x: { filters: [], impact: ["nope"] } }),
@@ -287,11 +463,7 @@ test("every consumer gate implies its producer's artifact gate, for every input 
   // over every combination of the inputs that can switch them.
   const filterNames = ["js", "wasm", "playground", "transport"];
   const impactNames = ["native", "wasm", "playground"];
-  const baseFilters = Object.fromEntries(
-    Object.values(LANE_GATES)
-      .flatMap((spec) => spec.filters ?? [])
-      .map((name) => [name, "false"]),
-  );
+  const baseFilters = Object.fromEntries(Object.keys(PATH_FILTERS).map((name) => [name, false]));
   const baseLanes = Object.fromEntries(Object.keys(LANE_ROOTS).map((lane) => [lane, false]));
   const bits = filterNames.length + impactNames.length;
   let playgroundOnlyChecked = false;
@@ -299,7 +471,7 @@ test("every consumer gate implies its producer's artifact gate, for every input 
     const filters = { ...baseFilters };
     const lanes = { ...baseLanes };
     filterNames.forEach((name, i) => {
-      filters[name] = mask & (1 << i) ? "true" : "false";
+      filters[name] = Boolean(mask & (1 << i));
     });
     impactNames.forEach((name, i) => {
       lanes[name] = Boolean(mask & (1 << (filterNames.length + i)));
@@ -337,21 +509,22 @@ test("every consumer gate implies its producer's artifact gate, for every input 
   assert.ok(playgroundOnlyChecked);
 });
 
-test("ownedFilesFromFilterOutputs unions every filter's file list except the catch-all", () => {
-  const owned = ownedFilesFromFilterOutputs({
-    js: "true",
-    js_files: JSON.stringify(["package.json", "packages/a/x.ts"]),
-    wasm: "false",
-    wasm_files: "[]",
-    jetbrains_files: JSON.stringify(["scripts\\jetbrains-gate.mjs"]),
-    any_files: JSON.stringify(["everything.md"]),
-  });
+test("matchPathFilters reports every filter and owns exactly the files some filter matched", () => {
+  const { hits, owned } = matchPathFilters([
+    "package.json",
+    "packages/vue-vscode/src/extension.ts",
+    "scripts/jetbrains-gate.mjs",
+    "docs/guide.md",
+  ]);
+  assert.deepEqual(Object.keys(hits).sort(), Object.keys(PATH_FILTERS).sort());
+  assert.equal(hits.jetbrains, true);
+  assert.equal(hits.js, true);
+  assert.equal(hits.proto, true);
   assert.deepEqual([...owned].sort(), [
     "package.json",
-    "packages/a/x.ts",
+    "packages/vue-vscode/src/extension.ts",
     "scripts/jetbrains-gate.mjs",
   ]);
-  assert.throws(() => ownedFilesFromFilterOutputs({ x_files: "not json" }), /not a JSON file list/);
 });
 
 test("formatGithubOutput emits one gate line per gate plus the fallback flag", () => {
@@ -383,34 +556,22 @@ test("a release pull request keeps its lanes and names its kind; its landed comm
     "release=landed",
   ]);
 
-  const rootCrates = [...new Set(Object.values(LANE_ROOTS).flat())];
-  const metadata = fixtureMetadata(rootCrates.map((name) => ({ name, dir: `crates/${name}` })));
   const dir = mkdtempSync(join(tmpdir(), "ci-impact-release-"));
   try {
-    const outputsPath = join(dir, "filter-outputs.json");
+    const changedFilesPath = join(dir, "changed-files.json");
     const metadataPath = join(dir, "metadata.json");
     const githubOutput = join(dir, "github-output");
-    // A version bump rewrites the workspace manifests, which selects every lane.
-    const filterOutputs = {
-      any: "true",
-      any_files: JSON.stringify(["Cargo.toml", "package.json"]),
-    };
-    for (const spec of Object.values(LANE_GATES)) {
-      for (const filter of spec.filters ?? []) {
-        filterOutputs[filter] = "true";
-        filterOutputs[`${filter}_files`] = "[]";
-      }
-    }
-    writeFileSync(outputsPath, JSON.stringify(filterOutputs));
-    writeFileSync(metadataPath, JSON.stringify(metadata));
+    // A change that selects every lane, so dropping one shows.
+    writeFileSync(changedFilesPath, JSON.stringify([".github/workflows/ci.yml", "Cargo.toml"]));
+    writeFileSync(metadataPath, JSON.stringify(laneMetadata));
     const run = (release) => {
       writeFileSync(githubOutput, "");
       const result = spawnSync(
         process.execPath,
         [
           join(SCRIPT_DIR, "ci-impact.mjs"),
-          "--filter-outputs",
-          outputsPath,
+          "--changed-files",
+          changedFilesPath,
           "--metadata",
           metadataPath,
           "--github-output",
@@ -512,49 +673,33 @@ test("every declared lane root is a crate in this workspace", () => {
   }
 });
 
-test("the CLI reads arbitrarily large filter outputs from a file, not the environment", () => {
-  // The CI step hands the classifier `toJSON(steps.filter.outputs)` through a
-  // file: on a large diff the `<filter>_files` lists exceed Linux's 128 KiB
-  // cap on one environment string and bash cannot even be started.
-  const rootCrates = [...new Set(Object.values(LANE_ROOTS).flat())];
-  const pkgs = rootCrates.map((name) => ({ name, dir: `crates/${name}` }));
-  const laneMetadata = fixtureMetadata(pkgs);
-
+test("the CLI reads an arbitrarily large changed-file list from a file, not the environment", () => {
+  // The CI step hands the classifier the changed-file list through a file:
+  // on a large diff it exceeds Linux's 128 KiB cap on one environment string
+  // and bash cannot even be started.
   const ownedTs = Array.from(
     { length: 6000 },
     (_, i) => `packages/some-long-package-name/src/generated/module-${i}.ts`,
   );
   const changedFiles = ["crates/verter_wasm/src/lib.rs", ...ownedTs];
-  const filterOutputs = { any: "true", any_files: JSON.stringify(changedFiles) };
-  for (const spec of Object.values(LANE_GATES)) {
-    for (const filter of spec.filters ?? []) {
-      filterOutputs[filter] = "false";
-      filterOutputs[`${filter}_files`] = "[]";
-    }
-  }
-  filterOutputs.js = "true";
-  filterOutputs.js_files = JSON.stringify(ownedTs);
-  filterOutputs.rust = "true";
-  filterOutputs.rust_files = JSON.stringify(["crates/verter_wasm/src/lib.rs"]);
 
   const dir = mkdtempSync(join(tmpdir(), "ci-impact-"));
   try {
-    const outputsPath = join(dir, "filter-outputs.json");
+    const changedFilesPath = join(dir, "changed-files.json");
     const metadataPath = join(dir, "metadata.json");
     const githubOutput = join(dir, "github-output");
-    writeFileSync(outputsPath, JSON.stringify(filterOutputs, null, 2));
+    writeFileSync(changedFilesPath, JSON.stringify(changedFiles));
     writeFileSync(metadataPath, JSON.stringify(laneMetadata));
-    assert.ok(statSync(outputsPath).size > 256 * 1024, "the fixture must exceed the env cap");
+    assert.ok(statSync(changedFilesPath).size > 256 * 1024, "the fixture must exceed the env cap");
 
     const env = { ...process.env };
     delete env.CI_IMPACT_CHANGED_FILES_JSON;
-    delete env.CI_IMPACT_FILTER_OUTPUTS_JSON;
     const run = spawnSync(
       process.execPath,
       [
         join(SCRIPT_DIR, "ci-impact.mjs"),
-        "--filter-outputs",
-        outputsPath,
+        "--changed-files",
+        changedFilesPath,
         "--metadata",
         metadataPath,
         "--github-output",
@@ -565,14 +710,42 @@ test("the CLI reads arbitrarily large filter outputs from a file, not the enviro
     assert.equal(run.status, 0, run.stderr);
     assert.match(run.stdout, /6001 changed file\(s\) classified/);
 
-    const impact = classifyCiImpact(changedFiles, laneMetadata, LANE_ROOTS, {
-      ownedFiles: ownedFilesFromFilterOutputs(filterOutputs),
-    });
+    const { hits, impact, gates } = select(changedFiles);
     assert.equal(impact.full, false, "the owned files must not force the fallback");
     assert.equal(impact.lanes.wasm, true);
-    const expected = formatGithubOutput(composeLaneGates(filterOutputs, impact), impact);
-    assert.deepEqual(readFileSync(githubOutput, "utf8").trimEnd().split("\n"), expected);
+    assert.equal(hits.js, true);
+    const expected = formatGithubOutput(gates, impact);
+    assert.deepEqual(readFileSync(githubOutput, "utf8").trimEnd().split(/\r?\n/u), expected);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the audit names a path nothing owns and a glob that matches nothing", () => {
+  const tracked = [
+    "crates/verter_wasm/src/lib.rs",
+    "docs/guide.md",
+    "package.json",
+    "brand-new-dir/thing.txt",
+    ...Object.values(PATH_FILTERS)
+      .flatMap((spec) => (Array.isArray(spec) ? spec : [...spec.include, ...(spec.exclude ?? [])]))
+      .concat(CI_INERT_PATHS)
+      // One concrete file per glob keeps every glob live but the one dropped.
+      .map((glob) => glob.replaceAll("**", "x").replaceAll("*", "x"))
+      .filter((file) => file !== "scripts/gate-internals.mjs"),
+  ];
+  const { unowned, dead } = auditSelection(tracked, laneMetadata);
+  assert.deepEqual(unowned, ["brand-new-dir/thing.txt"]);
+  assert.deepEqual(dead, ["wasm: scripts/gate-internals.mjs"]);
+});
+
+test("the tracked tree passes the selection audit", () => {
+  // detect-changes runs the same audit (`--audit`) on every change; this is
+  // its local run.
+  const run = spawnSync(process.execPath, [join(SCRIPT_DIR, "ci-impact.mjs"), "--audit"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+  });
+  assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stdout, /tracked files all owned; every filter glob matches/);
 });
