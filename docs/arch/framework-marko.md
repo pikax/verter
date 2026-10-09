@@ -274,15 +274,12 @@ route's disposition and owning acceptances; the two must agree row for row.
   and proof after MRK0; receiver ratification supplies no conformance pass.
 
 - **F-MRK0-06 (MRK5R).** Cell `C36` claims rename refusal for core tags,
-  native tags **and native HTML attributes**. MRK5R's Outcome lists native
-  attributes among its refused targets, but `MRK5R-AC4` as written requires
-  refusal only for `<let>`, `<for>` and a native `<div>`, and `MRK5R-AC2`
-  only checks that an attribute stays untouched when a tag variable is
-  renamed. `C36` therefore names the amended `MRK5R-AC4` below, submitted to
-  the architect for ratification with the same disposition as F-MRK0-05.
-  Until that amendment is ratified, `C36`'s native-attribute operation has no
-  proving receiver and the cell cannot be promoted. MRK5R delivers the
-  implementation and proof after MRK0.
+  native tags **and native HTML attributes**. It names the ratified amended
+  `MRK5R-AC4` below, which requires refusal when the attribute itself is the
+  rename target. `MRK5R-AC2` separately checks that an attribute stays
+  untouched when a tag variable is renamed. MRK5R delivers the implementation
+  and proof after MRK0. The obligation-only receiver supplies no MRK9 pass;
+  promotion under `MRK10-AC1` still needs a pass or ratified exclusion.
 
 ### Rename refusal receiving requirement
 
@@ -293,6 +290,11 @@ TS-symbol rename at a sibling position in the same fixture still succeeds.
 A planted authored edit to the native attribute (`id` renamed to `data-id`)
 and a planted empty edit each fail. Proof (unchanged):
 `cargo nextest run -p verter_session -E 'test(/framework_corpus_marko::rename/)'`.
+
+MRK1G-ACV implements `attribute-refusal-receiver-omitted` from `cases.md`,
+rejecting it as `feature-fabricated` against its passing clean twin. Its
+`unqualified-cell-promoted` case includes `C36`: a ratified refusal receiver
+without an MRK9 pass or ratified exclusion still fails `matrix-incomplete`.
 
 ### Navigation receiving requirements
 
