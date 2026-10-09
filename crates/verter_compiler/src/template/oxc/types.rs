@@ -6,7 +6,7 @@
 
 use std::cell::OnceCell;
 
-use oxc_ast::ast::Expression;
+use oxc_ast::ast::{Expression, Program};
 use oxc_diagnostics::OxcDiagnostic;
 
 use crate::ast::types::TemplateAst;
@@ -164,6 +164,10 @@ pub struct OxcParsedExpression<'alloc> {
     /// Always `false` for a single-expression value, so a directive value that
     /// is one expression classifies exactly as before.
     pub multi_statement: bool,
+
+    /// The statements of a `multi_statement` value the statement grammar read.
+    /// `None` for every other value (one expression, or an unreadable list).
+    pub statements: Option<&'alloc Program<'alloc>>,
 
     /// Parse errors, if any. Spans are **file-relative** (adjusted for reporting).
     #[allow(dead_code)] // Read by tests and downstream consumers
@@ -582,6 +586,7 @@ mod iter_expressions_tests {
             offset,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
             ide_recovery_scope: None,
