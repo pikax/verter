@@ -1,7 +1,7 @@
 //! Typed input/output seam of the flow-transparent callback check.
 //!
-//! The production IDE emitter (or a test builder) resolves a template into a
-//! [`CheckPlan`]; [`super::generator::generate`] lowers that plan, through one
+//! A builder resolves a template into a [`CheckPlan`];
+//! [`super::generator::generate`] lowers that plan, through one
 //! `CodeTransform` over the authored template source, into a [`GeneratedCheck`].
 //!
 //! Everything here is plain data. The seam names no parser, scope, resolver or

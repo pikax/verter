@@ -81,6 +81,14 @@ import {
   checkRequiredSlots,
   globalComponentsNav,
 } from "@verter/types";
+import {
+  flowNarrow,
+  flowExcluded,
+  flowBranch,
+  flowEach1,
+  flowEach2,
+  flowEach3,
+} from "@verter/types";
 
 declare const Component: new () => { $props: { label: string }; $el: HTMLDivElement };
 type Props = Prettify<ExtractComponentProps<typeof Component>>;
@@ -133,6 +141,35 @@ void runCustomDirective;
 void retrieveSetupDirectives;
 void strictRenderSlot;
 void checkRequiredSlots;
+// Template condition re-narrowing: a callback starts from the declared type of
+// a property access and is re-narrowed from the snapshot taken in the
+// narrowed flow.
+type FlowU = { kind: "a"; a: string } | { kind: "b"; b: number };
+declare const flowState: { u: FlowU };
+if (flowState.u.kind === "a") {
+  const snapshot = flowState.u;
+  const guarded = () => {
+    if (!flowNarrow(flowState.u, snapshot) || flowExcluded(snapshot)(flowState.u)) throw 0;
+    return flowState.u.a;
+  };
+  const unguarded = () => {
+    // @ts-expect-error without the re-narrowing the callback sees the whole union
+    return flowState.u.a;
+  };
+  void guarded;
+  void unguarded;
+}
+const flowItem: string = flowEach1(["a"]);
+const flowPair: [number, "x"] = flowEach2({ x: 1 });
+const flowTriple: [number, number, number] = flowEach3(2);
+// @ts-expect-error a frame alias keeps its element type
+const flowWrong: number = flowEach1(["a"]);
+const flowBranchValue: boolean = flowBranch;
+void flowItem;
+void flowPair;
+void flowTriple;
+void flowWrong;
+void flowBranchValue;
 `;
 
 // The `v-color:badarg` contract. `runCustomDirective` must carry the FOURTH
@@ -441,6 +478,44 @@ describe("declaration-surface parity", () => {
       const wrongString: number = text.value;
       // @ts-expect-error each instance retains its own inferred type
       const wrongNumber: string = number.value;
+    `,
+    );
+    for (const [copy, diagnostics] of perCopy) expect(diagnostics, copy).toEqual([]);
+  });
+
+  it("re-narrows a template callback and types v-for frames identically in every shipped copy", () => {
+    const perCopy = typecheckStubCopies(
+      [
+        ["plugin", VERTER_TYPES_STUB],
+        ["lsp", readFileSync(LSP_STUB_PATH, "utf8")],
+        ["standalone", readFileSync(GENERATED_STANDALONE_DTS_PATH, "utf8")],
+      ],
+      `
+      import { flowNarrow, flowExcluded, flowEach1, flowEach2 } from "@verter/types";
+      type U = { kind: "a"; a: string } | { kind: "b"; b: number };
+      declare const state: { u: U };
+      if (state.u.kind === "a") {
+        const snapshot = state.u;
+        const guarded = () => {
+          if (!flowNarrow(state.u, snapshot) || flowExcluded(snapshot)(state.u)) throw 0;
+          return state.u.a;
+        };
+        // @ts-expect-error the callback without its guard sees the whole union
+        const unguarded = () => state.u.a;
+        void guarded;
+        void unguarded;
+      }
+      function generic<T extends { name: string }, L extends T[]>(list: L) {
+        const name: string = flowEach1(list).name;
+        const [value, key] = flowEach2({ x: 1 });
+        const exact: [number, "x"] = [value, key];
+        // @ts-expect-error the frame alias must not degrade to any
+        const wrong: number = flowEach1(list).name;
+        void name;
+        void exact;
+        void wrong;
+      }
+      void generic;
     `,
     );
     for (const [copy, diagnostics] of perCopy) expect(diagnostics, copy).toEqual([]);

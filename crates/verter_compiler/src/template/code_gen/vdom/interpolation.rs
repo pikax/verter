@@ -89,6 +89,7 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
             ide_recovery_scope: None,
@@ -121,6 +122,7 @@ mod tests {
             offset: 2,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
             ide_recovery_scope: None,
@@ -146,6 +148,7 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
@@ -182,6 +185,7 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
@@ -218,6 +222,7 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None, // No bindings extracted
             ide_recovery_scope: None,
@@ -245,6 +250,7 @@ mod tests {
             offset: 13,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
             ide_recovery_scope: None,

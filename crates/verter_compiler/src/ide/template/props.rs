@@ -8,10 +8,10 @@
 //! - `v-on="{ ... }"` → `{...{ ... }}` (spread events, #49)
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::Expression;
 
 use verter_span::{SourceByteOffset, SourceByteRange};
 
+use super::flow::{CallbackSource, FlowNarrowing};
 use crate::ast::types::{ElementNode, TagType};
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, plan_user_expr, trim_span, EmitOp,
@@ -235,8 +235,8 @@ fn push_camel_segment(
 
 /// Process all props on an element, converting to JSX syntax.
 ///
-/// `condition_guard` is the accumulated condition text from v-if scopes
-/// (parent + own), used for type narrowing guards in arrow function props.
+/// `flow` is the walk's narrowing state: a callback value under a condition
+/// gets a re-narrowing guard (see [`super::flow`]).
 #[allow(clippy::too_many_arguments)]
 pub fn process_element_props<'alloc>(
     el: &ElementNode,
@@ -246,11 +246,10 @@ pub fn process_element_props<'alloc>(
     alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     components: &TemplateComponentBindings,
-    condition_guard: Option<&str>,
+    flow: &mut FlowNarrowing,
     is_jsx: bool,
 ) -> Vec<CollectedDirective<'alloc>> {
     let mut collected_directives: Vec<CollectedDirective<'alloc>> = Vec::new();
-    let v_if_guard = condition_guard;
 
     // Pre-scan: does this element have v-show? If so, :style will be handled
     // by emit_v_show and must be skipped here to avoid orphaned binding prepends.
@@ -433,7 +432,7 @@ pub fn process_element_props<'alloc>(
                 out,
                 alloc,
                 resolver,
-                v_if_guard,
+                flow,
                 is_jsx,
                 el.tag_type == TagType::Component,
             ),
@@ -453,8 +452,7 @@ pub fn process_element_props<'alloc>(
                     false
                 };
                 super::von::process_v_on(
-                    prop, el, oxc_prop, source, out, alloc, resolver, components, v_if_guard,
-                    use_spread,
+                    prop, el, oxc_prop, source, out, alloc, resolver, components, flow, use_spread,
                 );
             }
             "html" => process_v_html(prop, oxc_prop, source, out, resolver),
@@ -752,7 +750,7 @@ fn process_v_bind<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
-    v_if_guard: Option<&str>,
+    flow: &mut FlowNarrowing,
     is_jsx: bool,
     is_component: bool,
 ) {
@@ -956,11 +954,15 @@ fn process_v_bind<'alloc>(
         let tvs = vs + leading_ws;
         let tve = ve - trailing_ws;
 
-        // Type narrowing guard for function-typed props under a v-if scope.
-        // Located in SOURCE coordinates from the OXC AST so the user expression
-        // stays preserved IN PLACE and only the guard is synthetic.
-        let guard_injection =
-            v_if_guard.and_then(|guard| compute_function_guard_injection(guard, oxc_prop));
+        // Re-narrowing guard for a function value under a condition. Located in
+        // SOURCE coordinates from the OXC AST so the user expression stays
+        // preserved IN PLACE and only the guard is synthetic.
+        let guard_injection = oxc_prop
+            .and_then(|p| p.exp.as_ref())
+            .and_then(|exp| exp.expression.as_ref().map(|expression| (exp, expression)))
+            .and_then(|(exp, expression)| {
+                flow.callback_guard(source, exp, CallbackSource::Function(expression), resolver)
+            });
 
         if let Some(injection) = guard_injection {
             // Function value under v-if: keep the whole expression in place (each
@@ -976,10 +978,9 @@ fn process_v_bind<'alloc>(
             // shared anchor — an arrow-EXPRESSION body whose first identifier sits
             // exactly at the injection offset (`() => handle()` injects at `handle`) —
             // the stable-sorted same-position prepend order is
-            // `<guard><accessor-prefix><identifier>`, preserving
-            // `() => !((cond))?undefined:$setup.handle()`. Arrow-block / fn-expr
-            // inject after the body `{`, strictly before any body identifier, so
-            // there is no position collision there.
+            // `<guard><accessor-prefix><identifier>`. Arrow-block / fn-expr inject
+            // after the body `{`, strictly before any body identifier, so there is
+            // no position collision there.
             out.prepend_alloc(injection.source_offset, &injection.text);
             // The value expression is planned + emitted IN PLACE through the unified
             // planner — each identifier stays an `Original` chunk (1:1 mapped) while
@@ -998,6 +999,9 @@ fn process_v_bind<'alloc>(
                 ExprOptions::in_place(),
             );
             emit_expr_plan(out, &value_plan, Placement::InPlace, source);
+            if let Some((at, close)) = injection.close {
+                out.prepend_alloc(at, close);
+            }
             return;
         }
 
@@ -1220,79 +1224,6 @@ pub(crate) fn get_prop_end(prop: &NodeProp) -> u32 {
         ae
     } else {
         prop.name_end
-    }
-}
-
-/// A synthetic v-if narrowing guard to inject into a function-typed value
-/// expression, located in SOURCE coordinates.
-///
-/// The guard is unmapped synthetic text spliced into the MIDDLE of the user
-/// expression at `source_offset`. It is NEVER baked into a mapped overwrite — the
-/// user expression bytes stay in place (each identifier 1:1 mapped via
-/// `collect_binding_patches`), and only this guard text maps to `None`.
-struct GuardInjection {
-    /// File-relative byte offset (inside the value expression span) where the
-    /// guard text is inserted as an unmapped prepend.
-    source_offset: u32,
-    /// The synthetic guard text (ternary `!((cond))?undefined:` for an
-    /// arrow-expression body, block `if(!((cond))) return;` after an opening `{`).
-    text: String,
-}
-
-/// Compute the type-narrowing guard injection for a function-typed v-bind value
-/// expression, in SOURCE coordinates, from the OXC AST.
-///
-/// Detects function types via the OXC AST and locates the injection point so the
-/// user expression can stay PRESERVED IN PLACE while only the guard is synthetic:
-/// - Arrow expression `() => expr` → guard `!((cond))?undefined:` before the body
-///   expression (at the body expression's source start).
-/// - Arrow block `() => { stmts }` → guard `if(!((cond))) return;` right after the
-///   body `{`.
-/// - Function expression `function() { stmts }` → guard `if(!((cond))) return;`
-///   right after the body `{`.
-/// - Non-function: returns `None` (no guard needed).
-///
-/// The returned offset is file-relative (`exp.offset + substring-relative span`),
-/// so it indexes directly into `source`.
-fn compute_function_guard_injection(
-    guard: &str,
-    oxc_prop: Option<&OxcParsedProp<'_>>,
-) -> Option<GuardInjection> {
-    use oxc_span::GetSpan;
-
-    let oxc_p = oxc_prop?;
-    let exp = oxc_p.exp.as_ref()?;
-    let expression = exp.expression.as_ref()?;
-    let base = exp.offset;
-
-    match expression {
-        Expression::ArrowFunctionExpression(arrow) => {
-            if let Some(body) = arrow.get_expression() {
-                // Arrow expression body. Inject the ternary guard right before it
-                // (the `=>` and any whitespace stay as preserved source).
-                Some(GuardInjection {
-                    source_offset: base + body.span().start,
-                    text: crate::ide::condition::build_ternary_guard(guard),
-                })
-            } else {
-                // Arrow block body: `arrow.body.span()` covers `{ … }`; inject the
-                // block guard right after the opening `{`.
-                Some(GuardInjection {
-                    source_offset: base + arrow.body.span().start + 1,
-                    text: crate::ide::condition::build_block_guard(guard),
-                })
-            }
-        }
-        Expression::FunctionExpression(func) => {
-            // Function expression: `func.body` spans `{ … }`; inject the block guard
-            // right after the opening `{`.
-            let body = func.body.as_ref()?;
-            Some(GuardInjection {
-                source_offset: base + body.span().start + 1,
-                text: crate::ide::condition::build_block_guard(guard),
-            })
-        }
-        _ => None, // Non-function: no guard needed
     }
 }
 

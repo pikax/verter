@@ -31,7 +31,6 @@
 //!   └── ide::template::generate_ide_template() → IDE template JSX
 //! ```
 
-pub mod condition;
 pub mod condition_narrowing;
 pub mod script;
 pub mod script_recover;
