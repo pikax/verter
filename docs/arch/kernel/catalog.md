@@ -88,12 +88,15 @@ manifest yet.
   tables, no per-framework arm in a shared table type and no second registry.
 - **CR03.** Registration carries no `Any`. Rows are concrete types; a frontend,
   backend or leg is a typed trait object of its capability trait. This is the
-  successor state. Today `FrameworkRegistration` still carries
-  `ErasedFrameworkSurfaceStore` and `FrameworkSurfaceDtoBundle` `Any` bridges
-  (`CAT-F04`, deleted with the surface stores by `D14`) and the
-  `FrameworkScriptFactPayload` `Any` bridge reachable from
-  `script_fact_providers` (`CAT-F05`, dropped from the snapshot row by CPF1).
-  The carrier-parse downcast in `parse_artifact` stays outside registration.
+  successor state. Today `FrameworkRegistration` still carries three `Any`
+  bridges reachable from the row: the surface-store bridges (`CAT-F04`,
+  deleted with the surface stores by `D14`), the script-fact payload bridge
+  reachable from `script_fact_providers` (`CAT-F05`, removed from the snapshot
+  row by CPF1, session files only) and the carrier leg
+  (`CAT-F06`, `CarrierLeg` plus `FrameworkAdapterCtx::carrier_for`, removed
+  from the snapshot row by CPF1). The doc-hidden helpers
+  `__carrier_downcast_ref` and `__carrier_downcast_arc` read the artifact's
+  private carrier and do not read `FrameworkRegistration`.
 - **CR04.** No runtime plugin loading and no dynamic native ABI. An external
   contribution enters only as a validated `T09` row; admitting it yields a new
   snapshot with a new identity and never mutates a built one.
@@ -239,10 +242,18 @@ to them.
   carries `FrameworkSurfaceDtoBundle::as_any`. A `T03` row carries no cache
   and no `Any` bridge; `D14` deletes the stores.
 - **Script-fact payloads downcast from the registration row** (`CAT-F05`,
-  CPF1). `script_fact_providers` returns `FrameworkScriptFactPayload` values
-  whose `as_any` / `as_any_arc` bridges are reachable from the registration
-  row. CPF1 drops that bridge from the snapshot row. `D14` does not own it:
-  `D14` deletes surface stores only.
+  CPF1, `CPF1-AC1`). `script_fact_providers` is a session registration leg.
+  `crates/verter_session/src/framework/script_facts.rs` downcasts the payload
+  with `as_any_arc`. CPF1 removes that leg from the snapshot row. The edit is
+  those session files; CPF1's charter covers `crates/verter_session/src` and
+  this row does not credit a `verter_semantic` edit. `D14` deletes surface
+  stores only.
+- **The carrier leg downcasts from the registration row** (`CAT-F06`, CPF1,
+  `CPF1-AC1`). `FrameworkRegistration.carrier` is `Option<CarrierLeg>`, and
+  `FrameworkAdapterCtx::carrier_for` downcasts the opened carrier with
+  `CarrierParse::__verter_as_any_arc`. That use is reachable from the row, so
+  it is in the CR03 population. CPF1 removes the leg from the snapshot row.
+  The production paths are `framework/registry.rs` and `framework/ctx.rs`.
 
 ## Acceptance evidence
 
@@ -254,8 +265,9 @@ coverage and bounded inspection discriminate it. The diff adds no test.
   from CAT0 and a receiving acceptance ID; UAK0, UAK1 and VID0 rows are
   referenced, not re-owned. The executable validator is UAI0's
   (`UAI0-AC-R1`). It must accept `CN00` and refuse the six fixtures:
-  known-non-production-owner (`CN01`: a docs-only or lock owner with a valid
-  node, path and acceptance ID), unknown-owner (`CN02`), omission (`CN03`),
+  known-non-production-owner (`CN01`: a docs-only owner with a valid
+  node, path and acceptance ID, including findings rows `CAT-F05` and
+  `CAT-F06`), unknown-owner (`CN02`), omission (`CN03`),
   path (`CN04`), acceptance (`CN05`) and conflict (`CN06`).
 - **AC2 — positive contract.** Existing coverage pins the identities,
   provenance, completeness and ordering of today's registration:

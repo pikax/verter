@@ -9,7 +9,7 @@
   "target": "catalog-inventory.v1.json",
   "executableOwner": "UAI0",
   "receivingAcceptance": "UAI0-AC-R1",
-  "rule": "Each fixture is one mutation of the unmodified inventory. The validator accepts the unmodified inventory (positive control) and refuses every mutation with the named reason. A mutation is applied only to the row it names; every other row stays as committed. Owners, paths and acceptance IDs are checked against the controller-owned plan, never against a repository copy of it. CAT0 ships the data; UAI0 ships the validator.",
+  "rule": "Each fixture is one mutation of the unmodified inventory. The validator accepts the unmodified inventory (positive control) and refuses every mutation with the named reason. A mutation is applied only to the row it names; every other row stays as committed. Owners, paths and acceptance IDs are checked against the controller-owned plan, never against a repository copy of it. The same checks apply to findings rows that credit a production deletion (CAT-F04, CAT-F05, CAT-F06): the owner must be a plan node whose charter authorizes a production change and covers every path on the row, the successor path must be a predecessor chain from CAT0, and the receiving acceptance must be that owner's sole-owner deletion criterion. No owner is credited a production obligation its charter does not cover. CAT0 ships the data; UAI0 ships the validator.",
   "positiveControl": {
     "id": "CN00",
     "mutation": "none",
@@ -32,12 +32,27 @@
       "reason": "production obligation assigned to an owner whose charter authorizes no production change (COX0D is a docs-only contract node with a zero production budget)",
       "variants": [
         {
-          "set": { "deletionOwner": "UAI0", "successorPath": ["CAT0", "UAI0"], "receivingAcceptance": "UAI0-AC1" },
-          "reason": "UAI0 is a family lock and deletes nothing"
+          "set": { "deletionOwner": "VIM0", "successorPath": ["CAT0", "VIM0"], "receivingAcceptance": "VIM0-AC1" },
+          "reason": "VIM0 is a docs-only contract node with a zero production budget and changes no production route"
         },
         {
           "set": { "deletionOwner": "TIF1D", "successorPath": ["CAT0", "TIF1D"], "receivingAcceptance": "TIF1D-AC1" },
           "reason": "TIF1D is a docs-only contract node"
+        },
+        {
+          "row": "findings[CAT-F06]",
+          "set": { "owner": "VIM0", "successorPath": ["CAT0", "VIM0"], "receivingAcceptance": "VIM0-AC1" },
+          "reason": "a findings row credits a production deletion to VIM0, whose charter authorizes no production change and whose budget is zero"
+        },
+        {
+          "row": "findings[CAT-F05]",
+          "set": {
+            "owner": "COX0D",
+            "paths": ["crates/verter_semantic/src/analysis/framework_facts/mod.rs"],
+            "successorPath": ["CAT0", "DEM0", "COX0D"],
+            "receivingAcceptance": "COX0D-AC1"
+          },
+          "reason": "a findings row credits COX0D, a zero-production-budget owner, with a path that owner does not cover"
         }
       ]
     },

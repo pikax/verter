@@ -205,7 +205,7 @@
   "catalogRules": [
     { "id": "CR01", "rule": "One CatalogSnapshot per host, built once by the composition root (UAK1 layer LR) from static row providers. Nothing is registered, replaced or removed after construction." },
     { "id": "CR02", "rule": "The catalog is a set of separately typed tables T01-T09. There is no flat row enum spanning tables, no per-framework enum arm in a shared table type and no second registry beside the snapshot." },
-    { "id": "CR03", "rule": "Registration carries no Any. Rows are concrete types; a frontend, backend or leg is a typed trait object of its capability trait. This is the successor state. At this head FrameworkRegistration still carries the Any bridges in CAT-F04 and CAT-F05; they are the deletion population, and the rule holds once those owners remove them from the registration row. The carrier-parse downcast in verter_language parse_artifact (__verter_as_any) stays outside registration." },
+    { "id": "CR03", "rule": "Registration carries no Any. Rows are concrete types; a frontend, backend or leg is a typed trait object of its capability trait. This is the successor state. At this head FrameworkRegistration still carries three Any bridges reachable from the row: the surface-store bridges in CAT-F04, the script-fact payload bridge in CAT-F05, and the carrier leg in CAT-F06. They are the deletion population, and the rule holds once those owners remove them from the registration row. The doc-hidden helpers __carrier_downcast_ref and __carrier_downcast_arc read UnregisteredFrameworkParseArtifact's private carrier and do not read FrameworkRegistration, so they are not another registration bridge." },
     { "id": "CR04", "rule": "No runtime plugin loading and no dynamic native ABI. An external contribution enters only as a validated T09 row admitted by XSDK1, which yields a new snapshot with a new identity; it never mutates a built snapshot." },
     { "id": "CR05", "rule": "Each table is ordered by the canonical encoding of its row key. The order rows were provided in, the order the composition root calls providers and hash-map iteration never decide table order." },
     { "id": "CR06", "rule": "Snapshot identity (VID0 I09) is the canonical tagged encoding of the ProfileSchemaEpoch and the semantic fields of every table in canonical order. Presentation fields (CR09) are excluded. It never includes provider order, admission options, workspace or project state, revisions, or process/backend identity (VID0 R14)." },
@@ -516,13 +516,31 @@
       "id": "CAT-F04",
       "finding": "FrameworkRegistration.surface_store is Arc<dyn ErasedFrameworkSurfaceStore>, whose as_any and into_any_arc bridges, and FrameworkSurfaceDtoBundle::as_any on the stored bundle, are registration-carried Any (crates/verter_session/src/framework/surface_store.rs). D14 (TIF1) already deletes those stores. After that cutover they are not a CR03 population. The T03 row carries no cache and no Any bridge.",
       "owner": "TIF1",
+      "paths": ["crates/verter_session/src/framework/surface_store.rs"],
+      "successorPath": ["CAT0", "TIF1"],
       "receivingAcceptance": "TIF1-AC1"
     },
     {
       "id": "CAT-F05",
-      "finding": "FrameworkRegistration.script_fact_providers returns payloads that implement FrameworkScriptFactPayload::{as_any, as_any_arc} (crates/verter_semantic/src/analysis/framework_facts/mod.rs). That Any bridge is reachable from the registration row, so it is not the parse_artifact downcast and not an empty population. D14 deletes surface stores only. CPF1 drops this bridge from the snapshot registration row (CR03); a downcast that remains inside an owning adapter, outside the row, is not a catalog field.",
+      "finding": "FrameworkRegistration.script_fact_providers (crates/verter_session/src/framework/registry.rs) is a registration-row leg. Session resolution downcasts its payloads with FrameworkScriptFactPayload::as_any_arc in crates/verter_session/src/framework/script_facts.rs, so the bridge is reachable from the row and is not an empty population. The production edit is those two session files only: CPF1 removes the leg from the snapshot registration row (CR03). CPF1's charter covers crates/verter_session/src and does not cover crates/verter_semantic, and this row does not credit a verter_semantic edit. The trait declaration in verter_semantic may remain an adapter-internal downcast once the snapshot row no longer returns the erased payload; a downcast outside the row is not a catalog field. D14 deletes surface stores only. The receiving criterion is the sole-owner deletion CPF1-AC1.",
       "owner": "CPF1",
-      "receivingAcceptance": "CPF1-AC2"
+      "paths": [
+        "crates/verter_session/src/framework/registry.rs",
+        "crates/verter_session/src/framework/script_facts.rs"
+      ],
+      "successorPath": ["CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "CAT-F06",
+      "finding": "FrameworkRegistration.carrier is Option<CarrierLeg> (crates/verter_session/src/framework/registry.rs). CarrierLeg::open returns Arc<dyn CarrierParse>, and FrameworkAdapterCtx::carrier_for (crates/verter_session/src/framework/ctx.rs) downcasts that value with CarrierParse::__verter_as_any_arc. That Any bridge is reachable from the registration row and runs in session code, so it is the same shape as CAT-F04 and CAT-F05. CPF1 removes the leg from the snapshot registration row (CR03). The production edit is those two session files, which CPF1's charter covers. The compiler openers open_vue_carrier and open_svelte_carrier, and the doc-hidden artifact helpers in parse_artifact, are not installed as a catalog field once the row no longer carries the leg. The receiving criterion is the sole-owner deletion CPF1-AC1.",
+      "owner": "CPF1",
+      "paths": [
+        "crates/verter_session/src/framework/registry.rs",
+        "crates/verter_session/src/framework/ctx.rs"
+      ],
+      "successorPath": ["CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
     }
   ],
   "transferredObligations": [
