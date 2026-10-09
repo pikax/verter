@@ -794,6 +794,8 @@ struct RootAnswer {
     reasons: verter_type_engine::semantic_query::PartialReasonSet,
     work: usize,
     bytes: usize,
+    /// The operation refusals the read reports.
+    refusals: Vec<super::walk::ShallowDiagnostic>,
 }
 
 /// Run `key` as an isolated root demand with `work` units over a fresh
@@ -824,6 +826,12 @@ fn root_read(
         reasons: read.partial_reason_classes(),
         work: dispatch.connected_demand().work_used_for_tests(),
         bytes: dispatch.connected_demand().bytes_used_for_tests(),
+        refusals: read
+            .walker_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_operation_refusal())
+            .cloned()
+            .collect(),
     }
 }
 
@@ -977,6 +985,142 @@ fn an_operation_refusal_answers_its_repeat_without_evaluating() {
         "the checker's comparison allowance relates them"
     );
     assert!(semantic_misses(&host) > before, "another profile evaluates");
+}
+
+/// `[S] extends [T] ? 1 : 2` over [`reversed_unions`] with `arms` arms, as
+/// a root query key on `host`, with the check and extends types it relates.
+fn reversed_conditional_key(
+    host: &Arc<VerterHost>,
+    arms: usize,
+) -> (
+    verter_type_engine::semantic_query::SemanticQueryKey,
+    [verter_type_engine::semantic_query::SemanticNodeId; 2],
+) {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        &reversed_unions(arms),
+        "[[S], [T], 1, 2]",
+        |dispatch, node| {
+            let elements = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) if elements.len() == 4 => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads [[S], [T], 1, 2], got {other:?}"),
+            };
+            (
+                verter_type_engine::semantic_query::SemanticQueryKey::Conditional {
+                    check: elements[0],
+                    extends: elements[1],
+                    true_branch: elements[2],
+                    false_branch: elements[3],
+                    distributive: false,
+                    pending: None,
+                },
+                [elements[0], elements[1]],
+            )
+        },
+    )
+}
+
+/// A relation refused at its comparison allowance (TS2859) names the two
+/// types its check compared, and the refusal rides with every read
+/// composed over it: the conditional consuming the check answers its false
+/// branch as a resource partial and reports the same refusal, naming the
+/// check and extends types, on the cold read and on its sealed repeat
+/// alike. Under the checker's allowance nothing is refused and nothing is
+/// reported.
+#[test]
+fn a_relation_refusal_names_its_subjects_through_its_consumer() {
+    use super::walk::ShallowDiagnostic;
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::{PartialReasonSet, SemanticQueryKey};
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let limited = |key: &SemanticQueryKey| {
+        with_relation_comparisons_for_tests(50, || root_read(&host, key, full))
+    };
+
+    let relation = reversed_relation_key(&host, 40, false);
+    let SemanticQueryKey::Relate { source, target, .. } = &relation else {
+        panic!("the relation key relates a pair, got {relation:?}");
+    };
+    let named = vec![ShallowDiagnostic::RelationTooComplex {
+        source: *source,
+        target: *target,
+    }];
+    let refused = limited(&relation);
+    assert!(
+        refused.reasons.contains(PartialReasonSet::OPERATION_BUDGET),
+        "50 comparisons cannot relate 40 reversed arms: {refused:?}"
+    );
+    assert_eq!(
+        refused.refusals, named,
+        "the refusal names the check's pair"
+    );
+    assert_eq!(
+        limited(&relation),
+        refused,
+        "its sealed repeat reports it too"
+    );
+    assert!(
+        root_read(&host, &relation, full).refusals.is_empty(),
+        "the checker's allowance refuses nothing"
+    );
+
+    let (conditional, [check, extends]) = reversed_conditional_key(&host, 40);
+    let consumed = limited(&conditional);
+    assert_eq!(
+        (consumed.partial, consumed.reasons),
+        (true, PartialReasonSet::OPERATION_BUDGET),
+        "the conditional is a resource partial of the operation budget alone"
+    );
+    assert_eq!(
+        consumed.refusals,
+        vec![ShallowDiagnostic::RelationTooComplex {
+            source: check,
+            target: extends,
+        }],
+        "the conditional reports the refusal of its check"
+    );
+    assert_eq!(limited(&conditional), consumed, "cold and repeat agree");
+    let decided = root_read(&host, &conditional, full);
+    assert!(
+        !decided.partial && decided.refusals.is_empty(),
+        "the checker's allowance decides the conditional: {decided:?}"
+    );
+}
+
+/// Each relation check starts with the whole allowance: two checks of one
+/// demand, each within it but not together, both relate. Forty reversed
+/// arms record about 820 comparisons; an allowance of 1,000 holds each check
+/// and not their sum.
+#[test]
+fn each_relation_check_records_against_a_fresh_allowance() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let arms = |prefix: &str| {
+        let source: Vec<String> = (0..40).map(|i| format!("{{ {prefix}{i}: {i} }}")).collect();
+        let target: Vec<String> = (0..40)
+            .rev()
+            .map(|i| format!("{{ {prefix}{i}: number }}"))
+            .collect();
+        (source.join(" | "), target.join(" | "))
+    };
+    let (s, t) = arms("p");
+    let (u, v) = arms("q");
+    let source = format!("type S = {s};\ntype T = {t};\ntype U = {u};\ntype V = {v};\n");
+    let probe = "[[S] extends [T] ? 1 : 2, [U] extends [V] ? 1 : 2]";
+    with_relation_comparisons_for_tests(1_000, || {
+        let failures = super::checker_probe_lane_tests::mismatches(&source, &[(probe, "[1, 1]")]);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
+    with_relation_comparisons_for_tests(500, || {
+        super::checker_probe_lane_tests::with_recovered_probe(&source, probe, |_, _| {});
+    });
 }
 
 /// A relation warmed under the checker's comparison allowance never

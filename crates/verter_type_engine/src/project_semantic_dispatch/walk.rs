@@ -211,6 +211,30 @@ pub enum ShallowDiagnostic {
         /// The operation-specific gap the pending root surfaces.
         gap: verter_session_query::flow::policy::FlowGap,
     },
+    /// TS2859: one relation check recorded as many structured comparisons
+    /// as its allowance holds and was refused. The relation recovers as
+    /// false, a resource partial of the operation budget; this names the
+    /// check's two subjects — the source and target the checker's message
+    /// prints. An operation's refusal travels with every read composed
+    /// over it ([`Self::is_operation_refusal`]).
+    RelationTooComplex {
+        /// The check's source.
+        source: SemanticNodeId,
+        /// The check's target.
+        target: SemanticNodeId,
+    },
+}
+
+impl ShallowDiagnostic {
+    /// Whether this records an operation's own refusal at its allowance:
+    /// a diagnostic the checker reports wherever the refused operation's
+    /// recovery is consumed, so it rides out of the read that refused it
+    /// into every enclosing build, warm and cold alike. Every other
+    /// diagnostic describes only the read that emitted it.
+    #[must_use]
+    pub fn is_operation_refusal(&self) -> bool {
+        matches!(self, Self::RelationTooComplex { .. })
+    }
 }
 
 /// Build output threaded through `build_project_path` so the dispatch
