@@ -4,6 +4,7 @@ import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
 import {
   loadManifest,
   loadProducts,
@@ -182,20 +183,15 @@ test("source references are optional context, independent of commit identity", (
 });
 
 test("ARH5 CI: architecture-health filter still selects the train home", () => {
-  const ci = fs.readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const start = ci.indexOf("\n            arch:\n");
-  assert.notEqual(start, -1, "ci.yml must declare the arch filter");
-  const rest = ci.slice(start + 1);
-  const next = rest.search(/\n            [a-z_]+:\n/);
-  const block = next === -1 ? rest : rest.slice(0, next);
-  const paths = [...block.matchAll(/- '([^']+)'/g)].map((m) => m[1]);
-  assert.ok(
-    paths.includes("tests/architecture-health/**"),
-    `arch filter omits tests/architecture-health/**: ${paths.join(", ")}`,
+  assert.equal(
+    matchPathFilters(["tests/architecture-health/ARH5/verify.mjs"]).hits.arch,
+    true,
+    "arch filter omits tests/architecture-health/**",
   );
-  assert.ok(
-    paths.includes("examples/reference/**"),
-    `arch filter omits examples/reference/**, the ARH5 public-example guard input: ${paths.join(", ")}`,
+  assert.equal(
+    matchPathFilters(["examples/reference/README.md"]).hits.arch,
+    true,
+    "arch filter omits examples/reference/**, the ARH5 public-example guard input",
   );
 });
 
