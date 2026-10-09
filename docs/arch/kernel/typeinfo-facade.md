@@ -36,15 +36,17 @@ The reviewed contract data lives in `tests/kernel/TIF0/products/`:
 
 Every `successorPath` starts at TIF0 and follows successor edges in the
 controller-owned plan. UAO0 is reached through TIF1 and IDX0 through TIF1D.
-UAK0, DEM0, VID0 and ENC0 rows keep their owners; TIF0 only references them.
+UAK0, DEM0, VID0 and ENC0 rows keep their owners in those nodes' products.
+TIF0 references them by id and does not copy an owner or a receiving
+acceptance.
 
 ## Imported identities
 
 | Id | Identity | Home | Use here |
 | -- | -------- | ---- | -------- |
 | `TI01` | `QueryIdentity<Q>` | `verter_identity` | candidate-lookup key; TypeInfo supplies the `Q` marker and the semantic-argument digest |
-| `TI02` | `SemanticFlightKey<Q>` | `verter_identity` | in-flight key, owned by the flight runtime |
-| `TI03` | `InputBasisId` | `verter_identity`; minted by `InputBasis` and `PublishSnapshot::input_basis` | the basis of every fact |
+| `TI02` | `SemanticFlightKey<Q>` | `verter_identity` | in-flight key for a fact whose basis is one `InputBasisId`; a composed result has none (`TR02`, `TR28`) |
+| `TI03` | `InputBasisId` | `verter_identity`; minted by `InputBasis` and `PublishSnapshot::input_basis` | the basis of a native or TypeScript-authoritative fact |
 | `TI04` | `ResultContractId` | `verter_identity` | per-descriptor result contract |
 | `TI05` | `TypeObservationBasis` | none | a role name, not a type (`TR02`, `TIF-F01`) |
 | `TI06` | `CertifiedTypeEngineBinding`, `BoundProject`, `EngineBackend` | `verter_session` | the only route to TypeScript-authoritative facts |
@@ -69,8 +71,11 @@ UAK0, DEM0, VID0 and ENC0 rows keep their owners; TIF0 only references them.
 - **TR02.** A native fact's basis is the `InputBasisId` of the captured view
   the request resolved against. A TypeScript-authoritative fact's basis is the
   `PublishSnapshot::input_basis` its binding certified. A composed result's
-  basis is the ordered list of its children's bases; it mints none.
-  `TypeObservationBasis` names this role and is not a new type.
+  basis is the ordered list of its children's bases. That list is not an
+  `InputBasisId`, so it cannot fill `SemanticFlightKey.input_basis`. The
+  composed result mints no basis and no flight key. Each child keeps the one
+  `InputBasisId` it was observed under. `TypeObservationBasis` names this
+  role and is not a new type (`TIF-F01`).
 - **TR03.** Execution limits never enter `QueryIdentity`, `ResultContractId`
   or `SemanticFlightKey`: `ExecutionPolicy` and the SKR-READS `BudgetProfile`.
   A budget changes only the identity of a refusal (DEM0 `DR19`); it never
@@ -147,9 +152,12 @@ UAK0, DEM0, VID0 and ENC0 rows keep their owners; TIF0 only references them.
 - **TR15.** Canonical equality material is
   `QueryIdentity::compose(descriptor tag, digest(canonical selector subject +
   semantic arguments), observed profiles, ResultContractId)`. The basis is not
-  in it; it enters only the `SemanticFlightKey` and the value-side
-  provenance. Requests that differ only in presentation, serialization,
-  execution limits or requester encoding have equal `QueryIdentity`.
+  in it. It enters a `SemanticFlightKey` only when the fact's basis is one
+  `InputBasisId` (`TR28`), and it always enters value-side provenance. A
+  composed request's `QueryIdentity` is `TR21`; it has no
+  `SemanticFlightKey`, and its cache scope is `TR32`. Requests that differ
+  only in presentation, serialization, execution limits or requester encoding
+  have equal `QueryIdentity`.
 - **TR16.** Canonical semantic equality is separate from presentation order.
   Facts, candidates and members are ordered by canonical encoding (union and
   intersection arms by `VerterStableV1`); authored order is a presentation
@@ -160,20 +168,34 @@ UAK0, DEM0, VID0 and ENC0 rows keep their owners; TIF0 only references them.
   a selector the descriptor does not accept, or an out-of-range argument is a
   typed request error.
 
-| Op | Operation | Selectors | Route class | Execution owner | Served at the head |
-| -- | --------- | --------- | ----------- | --------------- | ------------------ |
-| `OP01` | `ResolveSymbol` | FileName, ProjectName, WorkspaceName | Native | `ProjectSemanticDispatch` | yes |
-| `OP02` | `ProjectPath` | FileName, ProjectName, NodeRef | Native | `ProjectSemanticDispatch` | validated, no executor |
-| `OP03` | `EvaluateTypeExpression` | FileName | Native | `ProjectSemanticDispatch` | serde entry only |
-| `OP04` | `ExpandAround` | NodeRef | Native | `ProjectSemanticDispatch` | validated, no executor |
-| `OP05` | `FlowNarrowingAt` | Position | Native | `ProjectSemanticDispatch` (flow substrate) | validated, no executor |
-| `OP06` | `ContextualTypeAt` | Position | Native | `ProjectSemanticDispatch` | validated, no executor |
-| `OP07` | `Relate` | NodeRef, FileName | Native | `ProjectSemanticDispatch` (relation oracle) | rejected as `MalformedPayload` |
-| `OP08` | `ListSymbols` | FileName | Native | `IndexedReady` shallow inventory | `list_file_symbols` |
-| `OP09` | `ShallowSurface` | FileName, NodeRef | Native | `ProjectSemanticDispatch` | `resolve_shallow_surface` |
-| `OP10` | `ComponentFacets` | Component | Native; Composed when a facet needs a TypeScript fact | adapter plan + `ProjectSemanticDispatch` (schema: TIF1D) | `resolve_framework_surface_with_audit` |
-| `OP11` | `TypeAtPosition` | Position | TypeScriptAuthoritative; Composed at a framework template position | `EngineBackend` over the binding | no; LSP reads `get_hover` |
-| `OP12` | `DeclarationAtPosition` | Position | TypeScriptAuthoritative; Composed at a framework template position | `EngineBackend` over the binding | no; LSP reads `get_definition` |
+| Op | Operation | Selectors | Region claim | Route class | Execution owner | Served at the head |
+| -- | --------- | --------- | ------------ | ----------- | --------------- | ------------------ |
+| `OP01` | `ResolveSymbol` | FileName, ProjectName, WorkspaceName | whole operation | Native | `ProjectSemanticDispatch` | yes |
+| `OP02` | `ProjectPath` | FileName, ProjectName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
+| `OP03` | `EvaluateTypeExpression` | FileName | whole operation | Native | `ProjectSemanticDispatch` | serde entry only |
+| `OP04` | `ExpandAround` | NodeRef | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
+| `OP05` | `FlowNarrowingAt` | Position | whole operation | Native | `ProjectSemanticDispatch` (flow substrate) | validated, no executor |
+| `OP06` | `ContextualTypeAt` | Position | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
+| `OP07` | `Relate` | NodeRef, FileName | whole operation | Native | `ProjectSemanticDispatch` (relation oracle) | rejected as `MalformedPayload` |
+| `OP08` | `ListSymbols` | FileName | shallow symbol inventory | Native | `IndexedReady` shallow inventory | `list_file_symbols` |
+| `OP09` | `ShallowSurface` | FileName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | `resolve_shallow_surface` |
+| `OP10` | `ComponentFacets` | Component | macro and declaration facets | Native | `ProjectSemanticDispatch` | `resolve_framework_surface_with_audit` |
+| `OP10` | `ComponentFacets` | Component | a facet needs a TypeScript fact | Composed | TIF1; executes no child | native child served; TypeScript child unserved |
+| `OP10` child | framework facet | Component | Native child of that composed claim | Native | `ProjectSemanticDispatch` | served with the facet |
+| `OP10` child | path-mapped member type | Component | TypeScript child of that composed claim | TypeScriptAuthoritative | `EngineBackend` over `CertifiedTypeEngineBinding` | unserved |
+| `OP11` | `TypeAtPosition` | Position | script or projected template position in a configured project | TypeScriptAuthoritative | `EngineBackend` over the binding | no; LSP reads `get_hover` |
+| `OP11` | `TypeAtPosition` | Position | framework template position whose binding is a framework fact | Composed | TIF1; executes no child | no |
+| `OP11` child | framework binding | Position | Native child of that composed claim | Native | `ProjectSemanticDispatch` | no TypeInfo route |
+| `OP11` child | type at the position | Position | TypeScript child of that composed claim | TypeScriptAuthoritative | `EngineBackend` over the binding | no; LSP reads `get_hover` |
+| `OP12` | `DeclarationAtPosition` | Position | position that is not a framework template position | TypeScriptAuthoritative | `EngineBackend` over the binding | no; LSP reads `get_definition` |
+| `OP12` | `DeclarationAtPosition` | Position | framework template position | Composed | TIF1; executes no child | no |
+| `OP12` child | framework binding | Position | Native child of that composed claim | Native | `ProjectSemanticDispatch` | no TypeInfo route |
+| `OP12` child | declaration | Position | TypeScript child of that composed claim | TypeScriptAuthoritative | `EngineBackend` over the binding | no; LSP reads `get_definition` |
+
+TIF1D owns the `OP10` facet schema (`TIF1D-AC2`). That schema is not an
+execution owner. Every region and every composed child above has one route
+class and one execution owner. The implementation node for each is TIF1
+(`TIF1-AC2`).
 
 ### Owner-routed plans (subblock 4)
 
@@ -181,28 +203,41 @@ UAK0, DEM0, VID0 and ENC0 rows keep their owners; TIF0 only references them.
   route class: `Native`, `TypeScriptAuthoritative` or `Composed`. The route
   class decides the execution owner. Nothing tries one owner and falls back
   to another.
-- **TR19.** A `Native` route executes only through `ProjectSemanticDispatch`,
-  the one type-resolution engine. It answers facts Verter's engine owns:
-  declarations lowered to typed IR, macro payloads and framework facets.
+- **TR19.** A `Native` route that answers a fact Verter's engine owns — a
+  declaration lowered to typed IR, a macro payload, or a framework facet —
+  executes only through `ProjectSemanticDispatch`, the one type-resolution
+  engine. The parentheticals on `OP05` (flow substrate) and `OP07` (relation
+  oracle) name that engine's substrate. They are the same owner and the same
+  route class. A `Native` route that answers the shallow symbol inventory
+  (`OP08` `ListSymbols`) reads the `IndexedReady` artifact through the session
+  and does not issue a `ProjectSemanticDispatch` query. `OP08`'s one
+  execution owner is that `IndexedReady` read.
 - **TR20.** A `TypeScriptAuthoritative` route executes only through
   `EngineBackend` over a `CertifiedTypeEngineBinding` reached from a
   `BoundProject`. The native engine never recreates such a fact. Without a
   binding the fact is `Unavailable { NoProject | ProviderUnavailable |
   NotReady }`, never a native answer.
 - **TR21.** A `Composed` route is an ordered list of child observations, each
-  a full observation with its own route. Composition is per fact: each fact
+  a full observation with its own route class and its own execution owner.
+  The composition owner executes no child. Composition is per fact: each fact
   keeps the one authority that produced it. Two authorities answering the
   same question both appear with their authorities; no field-wise winner is
   chosen. The composed `QueryIdentity` is composed over the composition
-  descriptor and the child identities.
-- **TR22.** A descriptor row without exactly one route class and one
-  execution owner for a selector kind is a construction failure of the
-  descriptor table. A row the host does not serve answers a typed
-  `Unsupported` refusal; it is never validated and then dropped.
+  descriptor and the child identities. The composed result mints no
+  `InputBasisId` and no `SemanticFlightKey` (`TR02`, `TR28`).
+- **TR22.** Each `(descriptor, selector kind, region claim)` has exactly one
+  route class and exactly one execution owner. A `Composed` region's
+  execution owner is its composition owner; it executes no child. Each child
+  in that plan has exactly one route class and one execution owner: `Native`
+  through the owner `TR19` names, or `TypeScriptAuthoritative` through
+  `EngineBackend` (`TR20`). A region missing that shape is a construction
+  failure of the descriptor table. A row the host does not serve answers a
+  typed `Unsupported` refusal; it is never validated and then dropped.
 
-Every row in the table above has exactly one execution owner, so the charter's
-abort condition ("an operation lacks exactly one ratified execution owner")
-does not fire. Five rows are validated today without an executor; that is
+Every region claim in the table above has exactly one route class and one
+execution owner, and every composed child does too, so the charter's abort
+condition ("an operation lacks exactly one ratified execution owner") does
+not fire. Five rows are validated today without an executor; that is
 displaced route `TIF-D06`, not a missing owner.
 
 ### Result DTOs (subblock 5)
@@ -238,10 +273,16 @@ displaced route `TIF-D06`, not a missing owner.
 
 ### Caching and invalidation (subblock 6)
 
-- **TR28.** Candidate lookup is keyed by `QueryIdentity` and in-flight
-  production by `SemanticFlightKey`; both belong to the accepted runtime owner
-  (the G2 flight law, PER0D). TypeInfo adds no key, flight, coalescer or
-  store; every cache it reads is a `ProjectTypeStore` cache.
+- **TR28.** Candidate lookup is keyed by `QueryIdentity`. In-flight production
+  of a fact whose basis is one `InputBasisId` is keyed by `SemanticFlightKey`
+  `(QueryIdentity, that InputBasisId)`. Both keys belong to the accepted
+  runtime owner (the G2 flight law, PER0D). A composed request has no
+  `SemanticFlightKey`: its basis is the ordered child list (`TR02`), which is
+  not an `InputBasisId`, and TypeInfo mints no basis, alias, wrapper or
+  second key to collapse it (`TR01`). Concurrent composed requests share work
+  only through their children's flights. The composed cache entry is `TR32`,
+  not a flight. TypeInfo adds no key, flight, coalescer or store; every cache
+  it reads is a `ProjectTypeStore` cache.
 - **TR29.** A warm hit requires the value-side `ReadSetSignature` facts and
   self roots to validate against the live store view. A TypeScript-
   authoritative fact also requires its certified basis to be the live
@@ -317,16 +358,19 @@ production-capable deletion owner, TIF1 (`TIF1-AC1`).
 | `TIF-D05` | `current_store_view_for_query` reports a non-current view as `None`, the same signal as "could not be resolved" | replace with `Unavailable { UnsettledInput }` |
 | `TIF-D06` | Five operations pass validation and reach no executor; `Relate` is rejected as `MalformedPayload` | replace: one execution owner per row, a typed `Unsupported` for unserved rows |
 
-TIF0 references these routes owned elsewhere:
+TIF0 references these routes owned elsewhere. Deletion owner and receiving
+acceptance stay in the owning product. This table records only the TIF0-side
+concern: why the route matters here, and the successor node this contract
+names.
 
-| Route | Owner | Concern |
-| ----- | ----- | ------- |
-| UAK0 `D12`, `D13`, `D14` | TIF1 | Component-meta, public-API and off-store framework-surface authorities; `OP10` and `TR28` name their successor |
-| UAK0 `D15` | TIF1 | The FFI serde request vocabulary, the FFI half of `TIF-D04` |
-| UAK0 `D10`, `D11` | COX0 | Per-framework LSP branches and MCP `is_vue()` gates |
-| DEM0 `DEM-D03` | TIF1 | The executor resolves every surface kind; `OP10` demands requested facets only |
-| VID0 `V-D02` | TIF1 | Open `framework_adapter_id` string; `TR06` makes it a typed profile |
-| ENC0 `P19` | ENCF0 | `GraphSpanRef` and `GraphDiagnostic` spans with no stated unit |
+| Route | Successor | Why | Owning product |
+| ----- | --------- | --- | -------------- |
+| UAK0 `D12`, `D13`, `D14` | TIF1 | Component-meta, public-API and off-store framework-surface authorities; `OP10` names the component successor and `TR28` forbids a second store | `tests/kernel/UAK0/products/deletion-retag-ledger.v1.json` |
+| UAK0 `D15` | TIF1 | The FFI serde request vocabulary, the FFI half of `TIF-D04` | `tests/kernel/UAK0/products/deletion-retag-ledger.v1.json` |
+| UAK0 `D10`, `D11` | COX0 | Per-framework LSP branches and MCP `is_vue()` gates | `tests/kernel/UAK0/products/deletion-retag-ledger.v1.json` |
+| DEM0 `DEM-D03` | TIF1 | The executor resolves every surface kind; `OP10` demands requested facets only | `tests/kernel/DEM0/products/demand-inventory.v1.json` |
+| VID0 `V-D02` | TIF1 | Open `framework_adapter_id` string; `TR06` makes it a typed profile | `tests/kernel/VID0/products/identity-inventory.v1.json` |
+| ENC0 `P19` | ENCF0 | `GraphSpanRef` and `GraphDiagnostic` spans with no stated unit | `tests/kernel/ENC0/products/boundary-route-ledger.v1.json` |
 
 Deletion-category coverage:
 
@@ -334,7 +378,7 @@ Deletion-category coverage:
 | -------- | ------------- | ---------- |
 | central framework switch | none: framework surfaces dispatch through the adapter registry, and its open selector string is `V-D02` | `D10`, `D11` |
 | untagged coordinate/public identity | `TIF-D01`–`TIF-D03` | `V-D02`, `P19` |
-| duplicate component information authority | none: UAK0 already assigns every component-information authority to TIF1 | `D12`–`D15` |
+| duplicate component information authority | none: UAK0's deletion ledger owns `D12`–`D15`; this decision does not copy that assignment | `D12`–`D15` |
 | broad or untruthful TypeInfo request vocabulary (this decision's own population) | `TIF-D04`–`TIF-D06` | — (`D15`, its FFI half, keeps its UAK0 category) |
 
 `DEM-D03` keeps DEM0's eager-selector category.
@@ -348,9 +392,14 @@ feature menu out of the descriptor set.
 
 ## Findings recorded for the receiving owners
 
-- **`TypeObservationBasis` has no type** (`TIF-F01`, UAO0 `UAO0-AC2`). The
-  accepted basis is `InputBasisId`. `TR02` mints nothing; UAO0 revalidates the
-  generic observation identity against TypeInfo ownership.
+- **`TypeObservationBasis` has no type, and a composed list is not a flight
+  key** (`TIF-F01`, UAO0 `UAO0-AC2`). The accepted basis of a native or
+  TypeScript-authoritative fact is `InputBasisId`. A composed result's basis
+  is the ordered list of its children's bases. That list is not an
+  `InputBasisId` and forms no `SemanticFlightKey`; each child flights on its
+  own key. `TR02` and `TR28` mint nothing. UAO0 revalidates that no downstream
+  node names the role as a type or fills `SemanticFlightKey` from a composed
+  list.
 - **The certified engine answer has no payload** (`TIF-F02`, TIF1).
   `EngineBackend::query` returns `Answered` or `NoResultVersionMismatch`; the
   engine-native answer rides an out-of-band channel. `OP11` and `OP12` need a
