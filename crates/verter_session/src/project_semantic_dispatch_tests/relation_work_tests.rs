@@ -277,11 +277,13 @@ fn false_aligned_object_unions_decide_at_the_first_arm() {
         assert!(related, "{count} arms: every arm relates");
         work
     });
-    for step in 0..2 {
-        assert!(
-            false_work[step + 1] * 10 <= false_work[step] * 22,
-            "doubling the arms at most about doubles the false relation's work: {false_work:?}"
-        );
+    for (series, work) in [("false", false_work), ("true", true_work)] {
+        for step in 0..2 {
+            assert!(
+                work[step + 1] * 10 <= work[step] * 22,
+                "doubling the arms at most about doubles the {series} relation's work: {work:?}"
+            );
+        }
     }
     for (index, count) in sizes.iter().enumerate() {
         assert!(
