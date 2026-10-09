@@ -154,6 +154,10 @@ fn dropping_an_essential_condition_removes_exactly_its_branch() {
             ide_fixtures::deep_positives(40, false),
             ide_fixtures::deep_positives(40, true),
         ),
+        (
+            ide_fixtures::component_ref_narrowing(40, false),
+            ide_fixtures::component_ref_narrowing(40, true),
+        ),
     ] {
         let full = compile(&complete);
         let without = compile(&dropped);
@@ -213,7 +217,14 @@ fn production_series(
         let w = compiled.work;
         work.push((
             n,
-            w.conditions + w.chain_members + w.scopes + w.callbacks + w.outer_refs + w.snapshots,
+            w.conditions
+                + w.chain_members
+                + w.scopes
+                + w.callbacks
+                + w.outer_refs
+                + w.snapshots
+                + w.component_branches
+                + w.component_functions,
         ));
         snapshots.push((n, w.snapshots + w.outer_refs));
     }
@@ -236,6 +247,53 @@ fn flat_and_nested_matrices_grow_linearly() {
         &production_series(|n| ide_fixtures::nested_matrix(n, false)),
     )
     .unwrap();
+    assert_linear(
+        "component matrix",
+        &production_series(|n| ide_fixtures::component_matrix(n, false)),
+    )
+    .unwrap();
+}
+
+#[test]
+fn component_functions_read_one_flow_of_every_branch() {
+    // Each component function, its branch's navigator and each chain block is
+    // emitted once, and no component function re-states a condition: a
+    // dropped branch, navigator or component fails the counts.
+    for &n in &MATRIX_SIZES {
+        let compiled = compile(&ide_fixtures::component_matrix(n, false));
+        // The root chain's members and the nested `v-if` of every non-`v-else`
+        // branch.
+        assert_eq!(compiled.work.component_branches as usize, 2 * n - 1);
+        // The root chain function; per non-`v-else` branch its navigator, the
+        // component's function, the nested chain's block, its navigator and
+        // its component's function; the `v-else` navigator and function.
+        assert_eq!(
+            compiled.work.component_functions as usize,
+            1 + 5 * (n - 1) + 2
+        );
+        assert_eq!(
+            compiled.code.matches("function ___VERTER___Comp").count(),
+            2 * n - 1,
+            "every ref'd component, root branch and slot component has a function"
+        );
+        for i in 0..n - 1 {
+            for condition in [
+                format!("state.c{i} !== undefined"),
+                format!("state.c{i}.length > 0"),
+            ] {
+                // Once in the template's flow and once in the component flow.
+                assert_eq!(
+                    compiled.code.matches(&condition).count(),
+                    2,
+                    "`{condition}` is emitted once per flow"
+                );
+            }
+        }
+        assert!(
+            !compiled.code.contains("if(!("),
+            "no component function guards with its condition path"
+        );
+    }
 }
 
 #[test]

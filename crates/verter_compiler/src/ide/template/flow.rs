@@ -378,6 +378,11 @@ pub struct FlowWork {
     pub outer_refs: u64,
     /// Snapshot declarations emitted.
     pub snapshots: u64,
+    /// Chain members the script-side component-function flow records.
+    pub component_branches: u64,
+    /// Component-function flow blocks, navigators and component functions
+    /// emitted.
+    pub component_functions: u64,
 }
 
 #[cfg(any(test, feature = "semantic-observe"))]
@@ -390,6 +395,8 @@ thread_local! {
             callbacks: 0,
             outer_refs: 0,
             snapshots: 0,
+            component_branches: 0,
+            component_functions: 0,
         })
     };
 }

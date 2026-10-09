@@ -153,23 +153,35 @@ struct Draft {
 impl Draft {
     /// Start a fixture: `script` writes the script body after the imports.
     fn new(name: String, typescript: bool, script: impl FnOnce(&mut Sfc)) -> Self {
+        Self::new_with(name, typescript, script).0
+    }
+
+    /// [`Self::new`], also returning what `script` returns (spans it marked).
+    fn new_with<R>(
+        name: String,
+        typescript: bool,
+        script: impl FnOnce(&mut Sfc) -> R,
+    ) -> (Self, R) {
         let mut sfc = if typescript {
             Sfc::typescript()
         } else {
             Sfc::javascript()
         };
-        script(&mut sfc);
+        let marked = script(&mut sfc);
         let canary = sfc.template(typescript);
-        Self {
-            name,
-            typescript,
-            sfc,
-            canary,
-            expected: Vec::new(),
-            hovers: Vec::new(),
-            guarded_callbacks: 0,
-            conditions: 0,
-        }
+        (
+            Self {
+                name,
+                typescript,
+                sfc,
+                canary,
+                expected: Vec::new(),
+                hovers: Vec::new(),
+                guarded_callbacks: 0,
+                conditions: 0,
+            },
+            marked,
+        )
     }
 
     fn expect(&mut self, code: u32, authored: Span) {
@@ -658,6 +670,8 @@ pub fn semantic_suite() -> Vec<SfcFixture> {
     }
     fixtures.push(deep_positives(40, false));
     fixtures.push(deep_positives(40, true));
+    fixtures.push(component_ref_narrowing(40, false));
+    fixtures.push(component_ref_narrowing(40, true));
     fixtures.push(mutation_and_nested_closure());
     fixtures.push(mapping());
     fixtures.push(javascript());
@@ -710,6 +724,136 @@ pub fn flat_matrix(n: usize, broken: bool) -> SfcFixture {
         d.sfc.push(")\"></i></b>\n");
         d.guarded_callbacks += 1;
     }
+    d.finish()
+}
+
+const LEAF: &str = "const Leaf = defineComponent({\n\
+  props: { value: { type: String, required: true } },\n\
+  setup() { return { leaf: 1 as const }; },\n\
+});\n";
+
+/// The component-chain matrix: an `n`-branch root chain of components on
+/// optional `reactive` members `c0..`. Every branch carries a template ref, a
+/// function-valued prop and a scoped slot whose binding is itself a component;
+/// inside the slot, a nested `v-if` on the branch's narrowed member holds that
+/// component with a ref, and a slot callback reads the slot binding and the
+/// branch's member. The `v-else` reads the negation of the opening condition.
+/// With `broken`, every callback reads a member its branch does not narrow.
+pub fn component_matrix(n: usize, broken: bool) -> SfcFixture {
+    let mut d = Draft::new(
+        format!("ComponentMatrix{n}{}", if broken { "Broken" } else { "" }),
+        true,
+        |s| {
+            s.push(TAKE);
+            s.push("function none(value: undefined): void {}\n");
+            s.push("function pair(row: string, value: string): void {}\n");
+            s.push(LEAF);
+            s.push(
+                "const Cell = defineComponent({\n\
+                 \x20 props: {\n\
+                 \x20   value: { type: String, required: true },\n\
+                 \x20   onPick: { type: Function as PropType<() => void>, required: true },\n\
+                 \x20 },\n\
+                 \x20 slots: Object as SlotsType<{ default: { row: string; Inner: typeof Leaf } }>,\n\
+                 });\n",
+            );
+            s.push("const state = reactive({\n");
+            for i in 0..n {
+                s.push(&format!("  c{i}: undefined as string | undefined,\n"));
+            }
+            s.push("});\n");
+        },
+    );
+    for i in 0..n {
+        let last = i == n - 1;
+        let read = format!("state.c{}", if broken { i + 1 } else { i });
+        if last {
+            d.sfc.push(&format!(
+                "<Cell v-else ref=\"r{i}\" value=\"none\" :onPick=\"() => "
+            ));
+            d.sfc.push(if broken { "take(" } else { "none(" });
+            d.mark_if(broken, TS2345, "state.c0");
+        } else {
+            let directive = if i == 0 { "v-if" } else { "v-else-if" };
+            d.sfc.push(&format!(
+                "<Cell {directive}=\"state.c{i} !== undefined\" ref=\"r{i}\" :value=\"state.c{i}\" :onPick=\"() => take("
+            ));
+            d.mark_if(broken, TS2345, &read);
+            d.conditions += 1;
+        }
+        d.sfc.push(")\" v-slot=\"{ row, Inner }\">");
+        if !last {
+            d.sfc.push(&format!(
+                "<Inner v-if=\"state.c{i}.length > 0\" ref=\"in{i}\" :value=\"row\" />"
+            ));
+            d.conditions += 1;
+        }
+        if last {
+            d.sfc.push("<i @click=\"() => ");
+            d.sfc.push(if broken { "take(" } else { "none(" });
+            d.mark_if(broken, TS2345, "state.c0");
+        } else {
+            d.sfc.push("<i @click=\"() => pair(row, ");
+            d.mark_if(broken, TS2345, &read);
+        }
+        d.sfc.push(")\"></i></Cell>\n");
+        d.guarded_callbacks += 2;
+    }
+    d.finish()
+}
+
+/// Component-function narrowing a template ref's type depends on: an
+/// `n`-branch discriminant chain whose `v-else` renders a `v-for` alias as a
+/// component with a ref. The alias's type is the element type of a member
+/// only the `v-else`'s every predecessor negation (the essential one `n - 1`
+/// terms back) narrows to an array, and the script reads the ref's instance
+/// through `useTemplateRef`, planting an error only a precise instance type
+/// reports. With `drop_first`, the opening branch is removed: the member is no
+/// longer narrowed, and the instance type no longer carries the planted error.
+pub fn component_ref_narrowing(n: usize, drop_first: bool) -> SfcFixture {
+    assert!(n >= 3);
+    let (mut d, planted) = Draft::new_with(
+        format!(
+            "ComponentRef{n}{}",
+            if drop_first { "WithoutFirst" } else { "" }
+        ),
+        true,
+        |s| {
+            s.push("import { useTemplateRef } from 'vue';\n");
+            s.push(LEAF);
+            let members: Vec<String> = (0..n)
+                .map(|i| {
+                    let list = if i == n - 1 {
+                        "(typeof Leaf)[]"
+                    } else {
+                        "undefined"
+                    };
+                    format!("{{ kind: 'k{i}'; list: {list} }}")
+                })
+                .collect();
+            // Inline, so the union stays in the scope `Leaf` is declared in.
+            s.push(&format!("const pick = {{}} as {};\n", members.join(" | ")));
+            s.push("const items = useTemplateRef('items');\n");
+            s.push("function readItems(): void {\n  const ");
+            let planted = s.mark("leafKind");
+            s.push(": 2 = items.value![0]!.leaf;\n}\n");
+            planted
+        },
+    );
+    if !drop_first {
+        d.expect(TS2322, planted);
+    }
+    let first = usize::from(drop_first);
+    for i in first..n - 1 {
+        let directive = if i == first { "v-if" } else { "v-else-if" };
+        d.sfc.push(&format!(
+            "  <p {directive}=\"pick.kind === 'k{i}'\">{i}</p>\n"
+        ));
+        d.conditions += 1;
+    }
+    d.sfc.push(
+        "  <div v-else><Item v-for=\"Item in pick.list\" ref=\"items\" value=\"x\" /></div>\n",
+    );
     d.finish()
 }
 

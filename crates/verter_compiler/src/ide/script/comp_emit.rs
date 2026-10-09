@@ -6,14 +6,17 @@
 //!   the two public entry points.
 //! - `CompScope`: the scope-stack enum used while walking the template
 //!   arena.
+//! - `ComponentFlow`: the conditional structure component functions read
+//!   their narrowing from, emitted once per chain.
 //! - `extract_vslot_binding_names` / `extract_vfor_binding_names`,
 //!   `find_scope_for_tag`, `walk_children_for_comp`,
-//!   `build_condition_scope_raw`, `collect_sibling_negations_raw`,
 //!   `serialize_element_props`, `resolve_all_prop_refs_in_expr`, the
 //!   `collect_prop_refs*` family, `collect_binding_pattern_names`, and
 //!   `emit_comp_function_for_element`.
 
-use crate::ast::types::{AstNodeKind, ElementNode, TagType, TemplateAst};
+use crate::ast::types::{
+    AstNodeKind, ConditionalChain, ElementNode, ElementNodeConditionKind, TagType, TemplateAst,
+};
 use crate::ide::event_to_jsx_name;
 
 use super::{to_pascal_case, PREFIX};
@@ -94,6 +97,7 @@ pub(super) fn emit_comp_functions_to_string(
 
     let mut root_comp_entries: Vec<(u32, String, Option<String>)> = Vec::new();
     let mut all_comp_offsets: Vec<u32> = Vec::new();
+    let mut flow = ComponentFlow::default();
 
     walk_children_for_comp(
         buf,
@@ -102,7 +106,13 @@ pub(super) fn emit_comp_functions_to_string(
         ast,
         source,
         root_children,
-        &mut Vec::new(),
+        ast.root
+            .content
+            .as_ref()
+            .map(|c| c.v_if_chains.as_slice())
+            .unwrap_or(&[]),
+        None,
+        &mut flow,
         &[],
         &mut root_comp_entries,
         &mut all_comp_offsets,
@@ -110,6 +120,7 @@ pub(super) fn emit_comp_functions_to_string(
         is_jsx,
         prop_names,
     );
+    flow.emit(buf, gs, gn);
 
     (root_comp_entries, all_comp_offsets)
 }
@@ -383,13 +394,253 @@ fn find_scope_for_tag<'a>(tag_name: &str, comp_scopes: &'a [CompScope]) -> Optio
     None
 }
 
-/// Emit Comp{offset} functions for template elements.
-/// Recursively walk children to emit Comp functions with condition tracking.
+/// A branch of the component-function flow: one `v-if` / `v-else-if` /
+/// `v-else` member, addressed by its chain and position.
+#[derive(Debug, Clone, Copy)]
+struct FlowRegionRef {
+    chain: usize,
+    branch: usize,
+}
+
+/// The conditional structure component functions read their narrowing from.
 ///
-/// `conditional_ancestors` is the stack of enclosing elements that carry a
-/// `v-if` / `v-else-if` / `v-else` (the current element included while its
-/// children are walked). Their condition text is materialized only for a
-/// component function, whose props read narrowed values.
+/// TypeScript narrows a reference only along one function's flow, so a
+/// component function that re-stated its condition path would grow with the
+/// path (every enclosing positive and predecessor negation). Instead each
+/// chain enclosing a component function is emitted ONCE — the outermost as a
+/// function, a nested one as an immediately invoked block, which continues its
+/// enclosing flow — and every branch evaluates its components' tags and props
+/// in the narrowed flow, returning each behind a deferred instantiation:
+///
+/// ```text
+/// function ___VERTER___Flow12() {
+///   if (A) {
+///   const ___VERTER___s20 = { t: Foo, p: {"x": state.a} };
+///   const ___VERTER___f40 = (() => { … })();
+///   return { b: 0, c20: () => ___VERTER___instantiateComponent(___VERTER___s20.t, ___VERTER___s20.p), f40: ___VERTER___f40 } as const;
+///   } else if (B) {
+///   return { b: 1 } as const;
+///   }
+///   return null;
+/// }
+/// function ___VERTER___R12() { const f = ___VERTER___Flow12(); return f !== null && f.b === 0 ? f : null; }
+/// function ___VERTER___Comp20() { const r = ___VERTER___R12(); return r === null ? null : r.c20(); }
+/// ```
+///
+/// Every authored condition appears once, each live branch has one
+/// constant-size navigator reading its parent's, and each component function
+/// reads its branch's navigator, so the output is linear in the template. A
+/// component function still returns `<instance> | null`. The deferred call
+/// keeps a branch record's type independent of what its components
+/// instantiate: a component whose props read another one's template ref does
+/// not make the chain's inferred type circular.
+#[derive(Default)]
+struct ComponentFlow {
+    chains: Vec<FlowChain>,
+}
+
+struct FlowChain {
+    parent: Option<FlowRegionRef>,
+    branches: Vec<FlowBranch>,
+    /// Some branch holds a component function, directly or nested.
+    live: bool,
+}
+
+struct FlowBranch {
+    /// The member's `tag_open.start`, naming its navigator.
+    offset: u32,
+    /// The resolved condition; `None` for `v-else`.
+    test: Option<String>,
+    items: Vec<FlowItem>,
+    live: bool,
+}
+
+enum FlowItem {
+    /// A component function's tag and props, captured in the branch's flow.
+    Component { offset: u32, capture: String },
+    /// A chain nested in the branch.
+    Chain(usize),
+}
+
+impl ComponentFlow {
+    /// Open a chain inside `parent` (or at the top level).
+    fn open_chain(&mut self, parent: Option<FlowRegionRef>) -> usize {
+        let chain = self.chains.len();
+        self.chains.push(FlowChain {
+            parent,
+            branches: Vec::new(),
+            live: false,
+        });
+        if let Some(parent) = parent {
+            self.chains[parent.chain].branches[parent.branch]
+                .items
+                .push(FlowItem::Chain(chain));
+        }
+        chain
+    }
+
+    /// Append the member at `offset` to `chain`.
+    fn open_branch(&mut self, chain: usize, offset: u32, test: Option<String>) -> FlowRegionRef {
+        crate::ide::template::flow::record(|work| work.component_branches += 1);
+        let branches = &mut self.chains[chain].branches;
+        branches.push(FlowBranch {
+            offset,
+            test,
+            items: Vec::new(),
+            live: false,
+        });
+        FlowRegionRef {
+            chain,
+            branch: branches.len() - 1,
+        }
+    }
+
+    /// Capture a component function's tag and props in `region`'s flow.
+    /// `bindings` are statements binding names the tag and props read.
+    fn add_component(
+        &mut self,
+        region: FlowRegionRef,
+        offset: u32,
+        bindings: &str,
+        tag: &str,
+        props: &str,
+    ) {
+        let capture = if bindings.is_empty() {
+            format!("{{ t: {tag}, p: {props} }}")
+        } else {
+            format!("(() => {{{bindings}\n  return {{ t: {tag}, p: {props} }};\n  }})()")
+        };
+        self.chains[region.chain].branches[region.branch]
+            .items
+            .push(FlowItem::Component { offset, capture });
+        // Mark the branch and its ancestors live, stopping at one already live.
+        let mut current = Some(region);
+        while let Some(region) = current {
+            let chain = &mut self.chains[region.chain];
+            let branch = &mut chain.branches[region.branch];
+            if branch.live {
+                break;
+            }
+            branch.live = true;
+            chain.live = true;
+            current = chain.parent;
+        }
+    }
+
+    /// The name suffix of `chain`: its first member's offset.
+    fn chain_offset(&self, chain: usize) -> u32 {
+        self.chains[chain].branches[0].offset
+    }
+
+    /// Emit every live chain once, its branches' navigators and the
+    /// component functions reading them.
+    fn emit(&self, buf: &mut String, gs: &str, gn: &str) {
+        use std::fmt::Write;
+        for (chain, flow_chain) in self.chains.iter().enumerate() {
+            if !flow_chain.live {
+                continue;
+            }
+            let chain_offset = self.chain_offset(chain);
+            if flow_chain.parent.is_none() {
+                crate::ide::template::flow::record(|work| work.component_functions += 1);
+                write!(buf, "\nfunction {PREFIX}Flow{chain_offset}{gs}() {{")
+                    .expect("write to String is infallible");
+                self.write_chain(buf, chain);
+                buf.push_str("\n}");
+            }
+            for (index, branch) in flow_chain.branches.iter().enumerate() {
+                if !branch.live {
+                    continue;
+                }
+                crate::ide::template::flow::record(|work| work.component_functions += 1);
+                let offset = branch.offset;
+                match flow_chain.parent {
+                    None => write!(
+                        buf,
+                        "\nfunction {PREFIX}R{offset}{gs}() {{ const f = {PREFIX}Flow{chain_offset}{gn}(); \
+                         return f !== null && f.b === {index} ? f : null; }}"
+                    ),
+                    Some(parent) => {
+                        let parent_offset = self.chains[parent.chain].branches[parent.branch].offset;
+                        write!(
+                            buf,
+                            "\nfunction {PREFIX}R{offset}{gs}() {{ const p = {PREFIX}R{parent_offset}{gn}(); \
+                             const f = p === null ? null : p.f{chain_offset}; \
+                             return f !== null && f.b === {index} ? f : null; }}"
+                        )
+                    }
+                }
+                .expect("write to String is infallible");
+                for item in &branch.items {
+                    if let FlowItem::Component { offset: comp, .. } = item {
+                        crate::ide::template::flow::record(|work| work.component_functions += 1);
+                        write!(
+                            buf,
+                            "\nfunction {PREFIX}Comp{comp}{gs}() {{ const r = {PREFIX}R{offset}{gn}(); \
+                             return r === null ? null : r.c{comp}(); }}"
+                        )
+                        .expect("write to String is infallible");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Write `chain`'s `if` / `else if` / `else` statement: each branch
+    /// captures its components and nested live chains in its narrowed flow
+    /// and returns its record.
+    fn write_chain(&self, buf: &mut String, chain: usize) {
+        use std::fmt::Write;
+        let mut exhaustive = false;
+        for (index, branch) in self.chains[chain].branches.iter().enumerate() {
+            match (&branch.test, index) {
+                (Some(test), 0) => write!(buf, "\n  if ({test}) {{"),
+                (Some(test), _) => write!(buf, " else if ({test}) {{"),
+                (None, 0) => write!(buf, "\n  {{"),
+                (None, _) => write!(buf, " else {{"),
+            }
+            .expect("write to String is infallible");
+            exhaustive |= branch.test.is_none();
+            let mut fields = format!("b: {index}");
+            for item in &branch.items {
+                match item {
+                    FlowItem::Component { offset, capture } => {
+                        write!(buf, "\n  const {PREFIX}s{offset} = {capture};")
+                            .expect("write to String is infallible");
+                        write!(
+                            fields,
+                            ", c{offset}: () => {PREFIX}instantiateComponent({PREFIX}s{offset}.t, {PREFIX}s{offset}.p)"
+                        )
+                        .expect("write to String is infallible");
+                    }
+                    FlowItem::Chain(nested) if self.chains[*nested].live => {
+                        crate::ide::template::flow::record(|work| work.component_functions += 1);
+                        let nested_offset = self.chain_offset(*nested);
+                        write!(buf, "\n  const {PREFIX}f{nested_offset} = (() => {{")
+                            .expect("write to String is infallible");
+                        self.write_chain(buf, *nested);
+                        buf.push_str("\n  })();");
+                        write!(fields, ", f{nested_offset}: {PREFIX}f{nested_offset}")
+                            .expect("write to String is infallible");
+                    }
+                    FlowItem::Chain(_) => {}
+                }
+            }
+            write!(buf, "\n  return {{ {fields} }} as const;\n  }}")
+                .expect("write to String is infallible");
+        }
+        if !exhaustive {
+            buf.push_str("\n  return null;");
+        }
+    }
+}
+
+/// Emit Comp{offset} functions for template elements.
+/// Recursively walk children to emit Comp functions, recording the conditional
+/// structure component functions read their narrowing from.
+///
+/// `region` is the innermost `v-if` / `v-else-if` / `v-else` branch enclosing
+/// `children`; `chains` are the parser's chains among `children`.
 #[allow(clippy::too_many_arguments)]
 fn walk_children_for_comp(
     buf: &mut String,
@@ -398,7 +649,9 @@ fn walk_children_for_comp(
     ast: &TemplateAst,
     source: &str,
     children: &[crate::types::NodeId],
-    conditional_ancestors: &mut Vec<crate::types::NodeId>,
+    chains: &[ConditionalChain],
+    region: Option<FlowRegionRef>,
+    flow: &mut ComponentFlow,
     comp_scopes: &[CompScope],
     root_comp_entries: &mut Vec<(u32, String, Option<String>)>,
     all_comp_offsets: &mut Vec<u32>,
@@ -406,13 +659,52 @@ fn walk_children_for_comp(
     is_jsx: bool,
     prop_names: &rustc_hash::FxHashSet<&str>,
 ) {
-    for &child_id in children {
+    // The flow chain each authored chain of this list opened, by chain index.
+    let mut opened: Vec<(usize, usize)> = Vec::new();
+    for (index, &child_id) in children.iter().enumerate() {
         let node = &ast.nodes[child_id.0];
         if let AstNodeKind::Element(el) = &node.kind {
-            let conditional = el.v_condition.is_some();
-            if conditional {
-                conditional_ancestors.push(child_id);
-            }
+            // The element's own branch encloses it and its children.
+            let region = match &el.v_condition {
+                Some(condition) => {
+                    let authored = chains
+                        .iter()
+                        .position(|chain| chain.member_indices.contains(&index));
+                    let continued = authored.and_then(|chain| {
+                        opened
+                            .iter()
+                            .find(|(opened_chain, _)| *opened_chain == chain)
+                            .map(|&(_, flow_chain)| flow_chain)
+                    });
+                    let flow_chain = match continued {
+                        Some(flow_chain) => flow_chain,
+                        None => {
+                            let flow_chain = flow.open_chain(region);
+                            if let Some(chain) = authored {
+                                opened.push((chain, flow_chain));
+                            }
+                            flow_chain
+                        }
+                    };
+                    let test = match condition.kind {
+                        ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
+                            Some(
+                                match (condition.prop.value_start, condition.prop.value_end) {
+                                    (Some(vs), Some(ve)) => resolve_all_prop_refs_in_expr(
+                                        &source[vs as usize..ve as usize],
+                                        prop_names,
+                                    ),
+                                    // A valueless condition narrows nothing.
+                                    _ => format!("{PREFIX}flowBranch"),
+                                },
+                            )
+                        }
+                        ElementNodeConditionKind::Else => None,
+                    };
+                    Some(flow.open_branch(flow_chain, el.tag_open.start, test))
+                }
+                None => region,
+            };
 
             // Build comp scope chain for v-slot and v-for
             let mut new_comp_scopes = comp_scopes.to_vec();
@@ -495,14 +787,13 @@ fn walk_children_for_comp(
                     gs,
                     gn,
                     el,
-                    ast,
                     source,
                     offset,
-                    conditional_ancestors,
+                    region,
+                    flow,
                     &new_comp_scopes,
                     is_jsx,
                     &props_lit,
-                    prop_names,
                 );
                 all_comp_offsets.push(offset);
                 if emit_root_comps {
@@ -584,7 +875,9 @@ fn walk_children_for_comp(
                     ast,
                     source,
                     &content.children,
-                    conditional_ancestors,
+                    &content.v_if_chains,
+                    region,
+                    flow,
                     &child_comp_scopes,
                     root_comp_entries,
                     all_comp_offsets,
@@ -593,106 +886,8 @@ fn walk_children_for_comp(
                     prop_names,
                 );
             }
-            if conditional {
-                conditional_ancestors.pop();
-            }
         }
     }
-}
-
-/// The accumulated condition scopes of `conditional_ancestors`, in raw source
-/// text, for a component function's guard.
-fn condition_scopes_raw(
-    conditional_ancestors: &[crate::types::NodeId],
-    ast: &TemplateAst,
-    source: &str,
-) -> Vec<crate::ide::condition::ConditionScope> {
-    conditional_ancestors
-        .iter()
-        .filter_map(|&id| match &ast.nodes[id.0].kind {
-            AstNodeKind::Element(el) => build_condition_scope_raw(el, ast, id, source),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Build a condition scope using raw source expressions (no binding prefixes).
-/// For use in Comp functions where the enclosing scope provides variables directly.
-fn build_condition_scope_raw(
-    el: &ElementNode,
-    ast: &TemplateAst,
-    node_id: crate::types::NodeId,
-    source: &str,
-) -> Option<crate::ide::condition::ConditionScope> {
-    use crate::ast::types::ElementNodeConditionKind;
-
-    let condition = el.v_condition.as_ref()?;
-
-    let positive = match condition.kind {
-        ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
-            let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end)
-            else {
-                return None;
-            };
-            Some(source[vs as usize..ve as usize].to_string())
-        }
-        ElementNodeConditionKind::Else => None,
-    };
-
-    let sibling_negations = match condition.kind {
-        ElementNodeConditionKind::If => vec![],
-        ElementNodeConditionKind::ElseIf | ElementNodeConditionKind::Else => {
-            collect_sibling_negations_raw(ast, node_id, source)
-        }
-    };
-
-    Some(crate::ide::condition::ConditionScope {
-        positive,
-        sibling_negations,
-    })
-}
-
-/// Walk backward through siblings to collect raw condition expressions for negation.
-fn collect_sibling_negations_raw(
-    ast: &TemplateAst,
-    node_id: crate::types::NodeId,
-    source: &str,
-) -> Vec<String> {
-    use crate::ast::types::ElementNodeConditionKind;
-
-    let mut negations = Vec::new();
-    let mut current = node_id;
-
-    while let Some(prev) = ast.prev_sibling(current) {
-        let prev_node = &ast.nodes[prev.0];
-        match &prev_node.kind {
-            AstNodeKind::Element(prev_el) => {
-                if let Some(ref cond) = prev_el.v_condition {
-                    if let (Some(vs), Some(ve)) = (cond.prop.value_start, cond.prop.value_end) {
-                        negations.push(source[vs as usize..ve as usize].to_string());
-                    }
-                    if matches!(cond.kind, ElementNodeConditionKind::If) {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            AstNodeKind::Text(t) => {
-                let text = &source[t.start as usize..t.end as usize];
-                if text.trim().is_empty() {
-                    current = prev;
-                    continue;
-                }
-                break;
-            }
-            _ => break,
-        }
-        current = prev;
-    }
-
-    negations.reverse();
-    negations
 }
 
 /// Serialize an element's template props as a TS object literal string.
@@ -1075,45 +1270,44 @@ fn collect_binding_pattern_names<'a>(
 
 // camelize_event removed — use event_to_jsx_name from super instead
 
-/// Emit a single Comp{offset} function for an element, with optional condition guards.
+/// Emit a single Comp{offset} function for an element.
 ///
 /// When `comp_scopes` indicates the tag comes from a v-slot or v-for scope,
 /// the function reconstructs the type through the parent's instantiated type
 /// rather than referencing the tag name directly (which isn't in top-level scope).
+///
+/// Under a condition (`region`), an element function's body reads nothing the
+/// conditions narrow, so a constant guard only contributes `| null` to its
+/// return type. A component function's tag and props read narrowed values:
+/// they are captured in the branch's block of the [`ComponentFlow`], and the
+/// function reads them back through the branch's navigator.
 #[allow(clippy::too_many_arguments)]
 fn emit_comp_function_for_element(
     buf: &mut String,
     gs: &str,
     _gn: &str,
     el: &ElementNode,
-    ast: &TemplateAst,
     source: &str,
     offset: u32,
-    conditional_ancestors: &[crate::types::NodeId],
+    region: Option<FlowRegionRef>,
+    flow: &mut ComponentFlow,
     comp_scopes: &[CompScope],
     is_jsx: bool,
     props_literal: &str,
-    prop_names: &rustc_hash::FxHashSet<&str>,
 ) {
     use std::fmt::Write;
 
     let raw_tag = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+    let guard = if region.is_some() {
+        "\n  if(!___VERTER___flowBranch) return null;"
+    } else {
+        ""
+    };
 
     // <component :is="..."> — the component type is dynamic, so we can't
     // reference a `component` variable. Emit a function that returns `unknown`
     // so that getRootComponent/void chains still resolve.
     if raw_tag == "component" {
-        use std::fmt::Write;
-        let guard = crate::ide::condition::generate_condition_text(&condition_scopes_raw(
-            conditional_ancestors,
-            ast,
-            source,
-        ))
-        .map(|text| {
-            let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
-            format!("\n  if(!({})) return null;", resolved)
-        })
-        .unwrap_or_default();
         write!(
             buf,
             "\nfunction {P}Comp{offset}{gs}() {{{guard}\
@@ -1137,29 +1331,6 @@ fn emit_comp_function_for_element(
         &pascal_tag
     } else {
         raw_tag
-    };
-
-    // The guard under a condition. An element function's body reads nothing
-    // the conditions narrow, so its guard only contributes `| null` to the
-    // return type and stays constant-size. A component function's props read
-    // narrowed values: its guard re-states the condition path, with prop names
-    // resolved to `__props.propName` because Comp functions are outside the
-    // template block scope where `__props` destructuring is available.
-    let guard = if conditional_ancestors.is_empty() {
-        String::new()
-    } else if el.tag_type == TagType::Element {
-        "\n  if(!___VERTER___flowBranch) return null;".to_string()
-    } else {
-        crate::ide::condition::generate_condition_text(&condition_scopes_raw(
-            conditional_ancestors,
-            ast,
-            source,
-        ))
-        .map(|text| {
-            let resolved = resolve_all_prop_refs_in_expr(&text, prop_names);
-            format!("\n  if(!({})) return null;", resolved)
-        })
-        .unwrap_or_default()
     };
 
     match el.tag_type {
@@ -1195,74 +1366,48 @@ fn emit_comp_function_for_element(
             }
         }
         TagType::Component => {
-            // Check if the tag comes from a v-slot or v-for scope
-            if let Some(scope) = find_scope_for_tag(tag_name, comp_scopes) {
-                match scope {
-                    CompScope::VSlot {
-                        parent_comp_offset,
-                        slot_name,
-                        params_expr,
-                        ..
-                    } => {
-                        // Reconstruct type through parent's instantiated slot type.
-                        // The parent Comp function instantiates the parent component with
-                        // its actual props, so TypeScript infers generics correctly.
-                        // We drill into $slots to extract the slot prop type, then
-                        // destructure to get the specific binding.
-                        write!(
-                            buf,
-                            "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                             \n  type __Parent = ReturnType<typeof {P}Comp{parent_offset}>;\
-                             \n  type __SlotFn = NonNullable<__Parent['$slots']['{slot}']>;\
-                             \n  type __SlotProps = __SlotFn extends (...args: infer A) => any ? A[0] : {{}};\
-                             \n  const {params} = {{}} as __SlotProps;\
-                             \n  return {P}instantiateComponent({tag}, {props});\
-                             \n}}",
-                            P = PREFIX,
-                            offset = offset,
-                            gs = gs,
-                            guard = guard,
-                            parent_offset = parent_comp_offset,
-                            slot = slot_name,
-                            params = params_expr,
-                            tag = tag_name,
-                            props = props_literal,
-                        )
-                        .expect("write to String is infallible");
-                    }
-                    CompScope::VFor { iterable_expr, .. } => {
-                        // Reconstruct type from the v-for iterable's element type.
-                        write!(
-                            buf,
-                            "\nfunction {P}Comp{offset}{gs}() {{{guard}\
-                             \n  const {tag} = {{}} as (typeof {iter})[number];\
-                             \n  return {P}instantiateComponent({tag}, {props});\
-                             \n}}",
-                            P = PREFIX,
-                            offset = offset,
-                            gs = gs,
-                            guard = guard,
-                            tag = tag_name,
-                            iter = iterable_expr,
-                            props = props_literal,
-                        )
-                        .expect("write to String is infallible");
-                    }
-                }
-            } else {
-                write!(
+            // The statements that bind the tag and props before the component
+            // is instantiated, and the instantiated tag and props.
+            let (bindings, tag, props) = match find_scope_for_tag(tag_name, comp_scopes) {
+                // Reconstruct the type through the parent's instantiated slot
+                // type. The parent Comp function instantiates the parent
+                // component with its actual props, so TypeScript infers generics
+                // correctly. We drill into $slots to extract the slot prop type,
+                // then destructure to get the specific binding.
+                Some(CompScope::VSlot {
+                    parent_comp_offset,
+                    slot_name,
+                    params_expr,
+                    ..
+                }) => (
+                    format!(
+                        "\n  type __Parent = ReturnType<typeof {P}Comp{parent_comp_offset}>;\
+                         \n  type __SlotFn = NonNullable<__Parent['$slots']['{slot_name}']>;\
+                         \n  type __SlotProps = __SlotFn extends (...args: infer A) => any ? A[0] : {{}};\
+                         \n  const {params_expr} = {{}} as __SlotProps;",
+                        P = PREFIX,
+                    ),
+                    tag_name,
+                    props_literal,
+                ),
+                // Reconstruct the type from the v-for iterable's element type.
+                Some(CompScope::VFor { iterable_expr, .. }) => (
+                    format!("\n  const {tag_name} = {{}} as (typeof {iterable_expr})[number];"),
+                    tag_name,
+                    props_literal,
+                ),
+                None => (String::new(), tag_name, props_literal),
+            };
+            match region {
+                Some(region) => flow.add_component(region, offset, &bindings, tag, props),
+                None => write!(
                     buf,
-                    "\nfunction {P}Comp{offset}{gs}() {{{guard}\
+                    "\nfunction {P}Comp{offset}{gs}() {{{bindings}\
                      \n  return {P}instantiateComponent({tag}, {props});\
                      \n}}",
                     P = PREFIX,
-                    offset = offset,
-                    gs = gs,
-                    guard = guard,
-                    tag = tag_name,
-                    props = props_literal,
                 )
-                .expect("write to String is infallible");
+                .expect("write to String is infallible"),
             }
         }
         TagType::SlotOutlet | TagType::Template => {

@@ -198,6 +198,8 @@ real_provider_test!(
                 ide_fixtures::flat_matrix(n, true),
                 ide_fixtures::nested_matrix(n, false),
                 ide_fixtures::nested_matrix(n, true),
+                ide_fixtures::component_matrix(n, false),
+                ide_fixtures::component_matrix(n, true),
             ] {
                 assert_fixture(session, &fixture).await;
                 if fixture.name.ends_with("Broken") {
