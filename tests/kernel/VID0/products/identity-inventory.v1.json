@@ -20,7 +20,7 @@
       "tests/kernel/UAK1/products/constitution-inventory.v1.json",
       "tests/kernel/UAK1/products/firewall-route-ledger.v1.json"
     ],
-    "rule": "UAK0 boundaries B01-B06, outcomes O01-O13, consumers C01-C17, seams S01-S13 and routes D01-D19, and UAK1 outcomes U01-U12 and routes K01-K04, keep their owners. VID0 references them by id and adds no second owner. VID0 adds identity rows I01-I12, law rules R01-R16, outcomes V-O01-V-O12, consumers V-C01-V-C11 and displaced routes V-D01-V-D06."
+    "rule": "UAK0 boundaries B01-B06, outcomes O01-O13, consumers C01-C17, seams S01-S13 and routes D01-D19, and UAK1 outcomes U01-U12 and routes K01-K04, keep their owners. VID0 references them by id and adds no second owner. VID0 adds identity rows I01-I12, law rules R01-R16, outcomes V-O01-V-O12, consumers V-C01-V-C11 and displaced routes V-D01-V-D06, and maps each charter deletion category to its recorded and referenced routes (categoryCoverage)."
   },
   "identities": [
     {
@@ -28,7 +28,10 @@
       "name": "SourceUnitId",
       "axis": "stable source-unit lineage",
       "disposition": "imported",
-      "home": "crates/verter_identity/src/identity.rs",
+      "homePaths": [
+        "crates/verter_identity/src/identity.rs"
+      ],
+      "homeStatus": "existing",
       "derivedFrom": [
         "SourceId",
         "logical role"
@@ -48,7 +51,11 @@
       "name": "SourceRevision, ContentId, MapRevision",
       "axis": "exact version, exact bytes and exact map construction of one unit",
       "disposition": "imported",
-      "home": "crates/verter_identity/src/identity.rs, crates/verter_identity/src/mapping.rs",
+      "homePaths": [
+        "crates/verter_identity/src/identity.rs",
+        "crates/verter_identity/src/mapping.rs"
+      ],
+      "homeStatus": "existing",
       "derivedFrom": [
         "source version facts",
         "exact bytes",
@@ -66,7 +73,11 @@
       "name": "CarrierProfileId",
       "axis": "syntax carrier: bytes, geometry, parse and recovery",
       "disposition": "new",
-      "home": "crates/verter_identity/src/successor/",
+      "homePaths": [
+        "crates/verter_identity/src/successor/"
+      ],
+      "homeStatus": "planned",
+      "homeNote": "Directory created by VID0T; absent at this head.",
       "derivedFrom": [
         "carrier family key",
         "carrier syntax-schema epoch (ProfileSchemaEpoch)"
@@ -92,7 +103,11 @@
       "name": "ReleaseId",
       "axis": "exact semantic release declared by one manifest",
       "disposition": "new",
-      "home": "crates/verter_identity/src/successor/",
+      "homePaths": [
+        "crates/verter_identity/src/successor/"
+      ],
+      "homeStatus": "planned",
+      "homeNote": "Directory created by VID0T; absent at this head.",
       "derivedFrom": [
         "framework family key",
         "exact major",
@@ -119,7 +134,11 @@
       "name": "FrameworkProfileId",
       "axis": "semantic (framework) profile: the meaning of one exact release over one or more carriers",
       "disposition": "new",
-      "home": "crates/verter_identity/src/successor/",
+      "homePaths": [
+        "crates/verter_identity/src/successor/"
+      ],
+      "homeStatus": "planned",
+      "homeNote": "Directory created by VID0T; absent at this head.",
       "derivedFrom": [
         "exactly one ReleaseId",
         "the ordered set of CarrierProfileIds it claims",
@@ -143,9 +162,13 @@
     {
       "id": "I06",
       "name": "AttachmentId and RegionId",
-      "axis": "attachment: one semantic claim bound to one addressed region of one source unit",
+      "axis": "attachment: one profile-qualified semantic claim on one addressed region of one source unit",
       "disposition": "new",
-      "home": "crates/verter_identity/src/successor/",
+      "homePaths": [
+        "crates/verter_identity/src/successor/"
+      ],
+      "homeStatus": "planned",
+      "homeNote": "Directory created by VID0T; absent at this head.",
       "derivedFrom": [
         "AttachmentId = SourceUnitId + RegionId + FrameworkProfileId",
         "RegionId = SourceUnitId + carrier-minted region role"
@@ -160,14 +183,19 @@
         "VID0",
         "VID0T"
       ],
-      "receivingAcceptance": "VID0T-AC1"
+      "receivingAcceptance": "VID0T-AC1",
+      "claimGroupingKey": "(SourceUnitId, RegionId): the profile-independent region every competing claim on it shares; ambiguity (R10) is decided over this key, never by AttachmentId equality"
     },
     {
       "id": "I07",
       "name": "ProjectProfileId",
       "axis": "project-profile overlay over semantic profiles",
       "disposition": "new",
-      "home": "crates/verter_identity/src/successor/",
+      "homePaths": [
+        "crates/verter_identity/src/successor/"
+      ],
+      "homeStatus": "planned",
+      "homeNote": "Directory created by VID0T; absent at this head.",
       "derivedFrom": [
         "project-profile family key",
         "exact ReleaseId of the meta-framework release",
@@ -191,7 +219,11 @@
       "name": "ConfiguredProjectId",
       "axis": "one configured project instance (one project configuration file and its derived membership)",
       "disposition": "new",
-      "home": "crates/verter_identity/src/successor/",
+      "homePaths": [
+        "crates/verter_identity/src/successor/"
+      ],
+      "homeStatus": "planned",
+      "homeNote": "Directory created by VID0T; absent at this head.",
       "derivedFrom": [
         "canonical configuration identity",
         "ConfigurationRevision basis is a neighbour, never folded in"
@@ -216,7 +248,9 @@
       "name": "CatalogSnapshot identity",
       "axis": "snapshot: the one immutable registration catalog a host was built with",
       "disposition": "new",
-      "home": "the CatalogSnapshot type (CAT0 contract)",
+      "homePaths": [],
+      "homeStatus": "decided-by-contract",
+      "homeNote": "The CatalogSnapshot type and its module are fixed by the CAT0 contract and implemented by CPF1; no path exists at this head.",
       "derivedFrom": [
         "ordered registered CarrierProfileIds, FrameworkProfileIds, ProjectProfileIds and backend registrations",
         "ProfileSchemaEpoch"
@@ -239,7 +273,11 @@
       "name": "CapabilityId",
       "axis": "capability: one feature a profile provides, qualified by its FrameworkProfileId or CarrierProfileId",
       "disposition": "retag",
-      "home": "crates/verter_language/src/ids.rs (existing type, reused; no second CapabilityId)",
+      "homePaths": [
+        "crates/verter_language/src/ids.rs"
+      ],
+      "homeStatus": "existing",
+      "homeNote": "The existing CapabilityId type is reused; no second CapabilityId is defined.",
       "derivedFrom": [
         "profile identity",
         "capability key"
@@ -261,7 +299,11 @@
       "name": "ProfileSchemaEpoch",
       "axis": "schema epoch of the canonical descriptor behind I03-I09",
       "disposition": "new",
-      "home": "crates/verter_identity/src/successor/",
+      "homePaths": [
+        "crates/verter_identity/src/successor/"
+      ],
+      "homeStatus": "planned",
+      "homeNote": "Directory created by VID0T; absent at this head.",
       "derivedFrom": [
         "the identity's domain tag version, as every digest identity already carries (verter.identity.*.v1)"
       ],
@@ -281,7 +323,10 @@
       "name": "CertifiedTypeEngineBinding",
       "axis": "certified TypeScript backend binding: project binding, observed profile, input basis, serving engine identity and lease",
       "disposition": "imported unchanged",
-      "home": "crates/verter_session/src/semantic_capability.rs",
+      "homePaths": [
+        "crates/verter_session/src/semantic_capability.rs"
+      ],
+      "homeStatus": "existing",
       "derivedFrom": [
         "CertifiedTypeEngineBinding::certify (the only constructor)"
       ],
@@ -304,9 +349,10 @@
     {
       "id": "R02",
       "group": "orthogonality",
-      "rule": "Each identity is minted from the inputs its row lists and nothing else. Carrier, release, attachment, project profile, configured project, snapshot and capability vary independently: changing one never changes another.",
+      "rule": "Each identity is minted from the inputs its row lists in derivedFrom and nothing else. Changing one input changes exactly the identities that derive from it, directly or transitively, and no other: a new ReleaseId yields new FrameworkProfileId, AttachmentId, profile-qualified CapabilityId and CatalogSnapshot identities, while CarrierProfileId, SourceUnitId and RegionId stay equal. Carrier, release, attachment, project profile, configured project, snapshot and capability never vary through an input their row does not list.",
       "executableOwner": "VID0T",
-      "receivingAcceptance": "VID0T-AC3"
+      "receivingAcceptance": "VID0T-AC3",
+      "note": "Case VC11 is the smallest discriminator: carrier and source fixed, ReleaseId changed."
     },
     {
       "id": "R03",
@@ -360,7 +406,7 @@
     {
       "id": "R10",
       "group": "multi-version",
-      "rule": "When two active profiles claim the same attachment and no per-file narrowing (a pragma or carrier rule) selects one, the outcome is typed ambiguous. No first-registered, first-loaded or newest profile wins.",
+      "rule": "Ambiguity is decided per claimed region, keyed by the profile-independent (SourceUnitId, RegionId). When two active profiles each mint a claim (distinct AttachmentIds) on the same RegionId and no per-file narrowing (a pragma or carrier rule) selects one, the outcome is typed ambiguous. AttachmentId stays the profile-qualified identity of one claim and is never the grouping key. No first-registered, first-loaded or newest profile wins.",
       "executableOwner": "COX0",
       "receivingAcceptance": "COX0-AC2"
     },
@@ -368,8 +414,12 @@
       "id": "R11",
       "group": "multi-version",
       "rule": "A family whose admitted line is one major admits only that major. The Qwik profile admits Qwik 2 only; a resolved Qwik 1 package is unsupported-version, so Qwik-2-only behavior needs no in-profile version gate.",
-      "executableOwner": "QWK0",
-      "receivingAcceptance": "QWK0-AC1"
+      "executableOwner": "QWK1",
+      "receivingAcceptance": "QWK1-AC4",
+      "releaseContract": "QWK0",
+      "releaseContractAcceptance": "QWK0-AC1",
+      "lockProofAcceptance": "QWK1-ACV",
+      "note": "QWK0 is docs-only and fixes the pinned release; its executable rejection proof moved to QWK1 (QWK1-ACV for the lock validator, QWK1-AC4 for activation). FWA1 keeps activation (FWA1-AC1)."
     },
     {
       "id": "R12",
@@ -473,7 +523,7 @@
     },
     {
       "id": "V-O07",
-      "outcome": "Typed ambiguity when two active profiles claim one attachment",
+      "outcome": "Typed ambiguity when two active profiles claim one RegionId (distinct profile-qualified AttachmentIds) without narrowing",
       "owner": "COX0",
       "successorPath": [
         "VID0",
@@ -759,30 +809,37 @@
     },
     {
       "id": "V-C10",
-      "consumer": "LSP document classification by editor languageId and carrier structure",
+      "consumer": "LSP FileLanguage producers and consumers: document classification by editor languageId and carrier structure",
       "symbols": [
         "document_file_language",
         "carrier_structure FileLanguage producers",
-        "FileLanguage::vue() literals in verter_lsp"
+        "FileLanguage and ScriptFlavor uses in verter_lsp production code, including FileLanguage::vue() constructors"
       ],
       "paths": [
         "crates/verter_lsp/src/documents/mod.rs",
         "crates/verter_lsp/src/documents/carrier_structure.rs",
         "crates/verter_lsp/src/lib.rs",
-        "crates/verter_lsp/src/workspace_scanner.rs"
+        "crates/verter_lsp/src/workspace_scanner.rs",
+        "crates/verter_lsp/src/carrier_cache.rs",
+        "crates/verter_lsp/src/provider_sync.rs",
+        "crates/verter_lsp/src/server_utils.rs",
+        "crates/verter_lsp/src/server/aux_features.rs",
+        "crates/verter_lsp/src/server/nav_features_completion_resolve.rs",
+        "crates/verter_lsp/src/type_provider/auto_import.rs",
+        "crates/verter_lsp/src/features/auto_close_tag.rs"
       ],
       "consumes": [
         "I03",
         "I05"
       ],
-      "owner": "COX0",
+      "owner": "CPF1",
       "successorPath": [
         "VID0",
         "VID0T",
-        "COX0"
+        "CPF1"
       ],
-      "receivingAcceptance": "COX0-AC2",
-      "note": "Within UAK0 C06/D10."
+      "receivingAcceptance": "CPF1-AC2",
+      "note": "Within UAK0 D08. The mechanical FileLanguage-to-CarrierProfileId replacement in verter_lsp lands in CPF1's one atomic cutover with the producers (V-C02) and the deletion (D08), because documents/mod.rs returns the host classifier's FileLanguage directly. Per-profile editor participation (capability masks, per-framework branches) stays COX0's under UAK0 C06/D10."
     },
     {
       "id": "V-C11",
@@ -949,33 +1006,120 @@
   "referencedRoutes": [
     {
       "id": "D05",
+      "category": "central-framework-switch",
       "why": "is_vue/is_svelte dispatch on display family (R03)",
-      "owner": "CPF1"
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
     },
     {
       "id": "D06",
+      "category": "central-framework-switch",
       "why": "hard-coded registrations without a release (R04)",
-      "owner": "CPF1"
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
     },
     {
       "id": "D07",
+      "category": "central-framework-switch",
       "why": "extension table as identity (R03)",
-      "owner": "CPF1"
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
     },
     {
       "id": "D08",
+      "category": "untagged-coordinate-or-public-identity",
       "why": "conflated FileLanguage and untagged adapter/language ids (I03, I05)",
-      "owner": "CPF1"
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
     },
     {
       "id": "D09",
+      "category": "untagged-coordinate-or-public-identity",
       "why": "untagged CapabilityId and process-wide framework gates (I10)",
-      "owner": "COX0"
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC1"
     },
     {
       "id": "D19",
+      "category": "untagged-coordinate-or-public-identity",
       "why": "ProjectRegistry as project authority (I07, I08)",
-      "owner": "PM1"
+      "owner": "PM1",
+      "receivingAcceptance": "PM1-AC1"
+    },
+    {
+      "id": "D12",
+      "category": "duplicate-component-information-authority",
+      "why": "component-meta result cache and schema keyed by an adapter spelling; ComponentInfo is selected by the typed FrameworkProfileId (I05, R15)",
+      "owner": "TIF1",
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D13",
+      "category": "duplicate-component-information-authority",
+      "why": "public-API projectors chosen per Vue/Svelte family; the facet is selected by FrameworkProfileId, never the display family (I05, R03)",
+      "owner": "TIF1",
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D14",
+      "category": "duplicate-component-information-authority",
+      "why": "family-wide VueSurfaceKey/SvelteSurfaceKey surface caches; semantic results are keyed by the exact FrameworkProfileId (R15)",
+      "owner": "TIF1",
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D15",
+      "category": "duplicate-component-information-authority",
+      "why": "legacy serde request vocabulary beside the graph envelope; the one TypeInfoRequest carries the typed profile selector that replaces V-D02 (I05)",
+      "owner": "TIF1",
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D18",
+      "category": "duplicate-component-information-authority",
+      "why": "per-request framework component scan; index contributions are keyed by FrameworkProfileId and AttachmentId (V-C07; I05, I06)",
+      "owner": "IDX0",
+      "receivingAcceptance": "IDX0-AC1"
+    }
+  ],
+  "categoryCoverage": [
+    {
+      "category": "central-framework-switch",
+      "recorded": [
+        "V-D03"
+      ],
+      "referenced": [
+        "D05",
+        "D06",
+        "D07"
+      ]
+    },
+    {
+      "category": "untagged-coordinate-or-public-identity",
+      "recorded": [
+        "V-D01",
+        "V-D02",
+        "V-D04",
+        "V-D05",
+        "V-D06"
+      ],
+      "referenced": [
+        "D08",
+        "D09",
+        "D19"
+      ]
+    },
+    {
+      "category": "duplicate-component-information-authority",
+      "recorded": [],
+      "referenced": [
+        "D12",
+        "D13",
+        "D14",
+        "D15",
+        "D18"
+      ],
+      "note": "Every identity concern of this category is already a UAK0 route (D12-D15 TIF1, D18 IDX0); VID0 records no new route in it. V-D02 is the identity half of the TypeInfo request surface D15 replaces."
     }
   ],
   "emptyPopulations": [

@@ -36,14 +36,16 @@
       "id": "VC03",
       "name": "one TSX byte stream, exclusive React and Solid 2 claims",
       "input": "The same .tsx bytes under a React 19 package and under a Solid 2 package, and once under a React package with a @jsxImportSource solid-js pragma",
-      "required": "One CarrierProfileId (TSX) in every case; the React and Solid 2 claims are two distinct FrameworkProfileIds and mutually exclusive for one attachment; the pragma narrows that one file to Solid 2",
-      "forbidden": "A React profile derived from the Solid claim or the reverse; both claims active on one attachment without a typed ambiguous outcome",
+      "required": "One CarrierProfileId (TSX) and one RegionId in every case; the React and Solid 2 claims are two distinct FrameworkProfileIds and two distinct AttachmentIds on that one RegionId; with no narrowing, two active claims on the RegionId yield typed ambiguous; the pragma narrows that one file to Solid 2",
+      "forbidden": "A React profile derived from the Solid claim or the reverse; both claims active on one RegionId without a typed ambiguous outcome; ambiguity decided by AttachmentId equality, which never matches across profiles",
       "rules": ["R02", "R10"],
       "existingEvidence": [],
       "executableOwner": "VID0T",
       "receivingAcceptance": "VID0T-AC3",
       "activationOwner": "FWA1",
-      "activationAcceptance": "FWA1-AC2"
+      "activationAcceptance": "FWA1-AC2",
+      "ambiguityOwner": "COX0",
+      "ambiguityAcceptance": "COX0-AC2"
     },
     {
       "id": "VC04",
@@ -112,8 +114,12 @@
       "forbidden": "A Qwik 1 package receiving Qwik 2 semantics; a Qwik profile whose behavior branches on major",
       "rules": ["R06", "R11"],
       "existingEvidence": [],
-      "executableOwner": "QWK0",
-      "receivingAcceptance": "QWK0-AC1",
+      "releaseContract": "QWK0",
+      "releaseContractAcceptance": "QWK0-AC1",
+      "note": "QWK0 is docs-only and fixes the pinned release. Its executable rejection proof belongs to QWK1: the lock validator (QWK1-ACV) and activation rejection (QWK1-AC4).",
+      "executableOwner": "QWK1",
+      "receivingAcceptance": "QWK1-AC4",
+      "lockProofAcceptance": "QWK1-ACV",
       "activationOwner": "FWA1",
       "activationAcceptance": "FWA1-AC1"
     },
@@ -127,6 +133,17 @@
       "existingEvidence": [],
       "executableOwner": "FWA1",
       "receivingAcceptance": "FWA1-AC5"
+    },
+    {
+      "id": "VC11",
+      "name": "a release change moves exactly its dependent identities",
+      "input": "One .vue unit with fixed bytes and regions, minted once under the Vue 2.6 release and once under the Vue 3 release (identity-level fixture values, as in VC02)",
+      "required": "CarrierProfileId, SourceUnitId and RegionId are equal across both; ReleaseId, FrameworkProfileId, AttachmentId and the profile-qualified CapabilityId differ, as do the catalog snapshot identities that register them",
+      "forbidden": "A dependent identity left unchanged, aliasing two releases in one key; a carrier, source or region identity that changes with the release",
+      "rules": ["R02", "R05", "R15"],
+      "existingEvidence": [],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3"
     }
   ]
 }

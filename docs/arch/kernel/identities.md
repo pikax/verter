@@ -20,8 +20,8 @@ The reviewed contract data lives in `tests/kernel/VID0/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `identity-inventory.v1.json` | Identities `I01`–`I12`, law rules `R01`–`R16`, outcomes `V-O01`–`V-O12`, consumers `V-C01`–`V-C11`, displaced routes `V-D01`–`V-D06`, the UAK0 routes it references, empty populations and transferred obligations |
-| `identity-case-table.v1.json` | Cases `VC01`–`VC10`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable |
+| `identity-inventory.v1.json` | Identities `I01`–`I12` (each with its home paths and whether they exist yet), law rules `R01`–`R16`, outcomes `V-O01`–`V-O12`, consumers `V-C01`–`V-C11`, displaced routes `V-D01`–`V-D06`, the UAK0 routes it references, coverage of each deletion category, empty populations and transferred obligations |
+| `identity-case-table.v1.json` | Cases `VC01`–`VC11`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable |
 
 Every `successorPath` starts at VID0 and follows predecessor edges in the
 controller-owned plan. UAK0's `B..`, `O..`, `C..`, `S..` and `D..` rows keep
@@ -53,8 +53,9 @@ never contains. The short form:
   floating tag or an implied major.
 - A **semantic profile** holds exactly one release and the carriers it
   claims. It never holds a source unit or a project.
-- An **attachment** survives edits that keep its region. Revision and content
-  are never part of it.
+- An **attachment** is one profile's claim on one region. It survives edits
+  that keep its region. Revision and content are never part of it. Competing
+  claims are grouped by the region they share, never by attachment equality.
 - A **project profile** references the semantic profiles it overlays and never
   re-mints them. A **configured project** is a separate identity and never
   carries a profile.
@@ -68,8 +69,11 @@ never contains. The short form:
 
 - **R01.** Every identity is a distinct nominal type: no type alias, shared
   base or implicit conversion.
-- **R02.** Each identity is minted only from the inputs its row names. Changing
-  one axis never changes another.
+- **R02.** Each identity is minted only from the inputs its row names.
+  Changing one input changes exactly the identities derived from it, directly
+  or through another identity, and nothing else. A new release yields new
+  semantic profile, attachment, capability and catalog identities; the carrier,
+  source unit and region stay equal (`VC11`).
 - **R03.** A display family (a `FrameworkTag` value, an adapter spelling, a
   file extension) is presentation only. It is never a dispatch key or a cache
   key.
@@ -92,12 +96,15 @@ never contains. The short form:
 - **R09.** Each package resolves its own release. Two packages in one
   workspace may hold different releases of one family, each with its own
   profile identity and cache entries.
-- **R10.** When two active profiles claim one attachment and no per-file
-  narrowing selects one, the outcome is typed ambiguous. Registration order,
-  load order or recency never decides.
+- **R10.** Ambiguity is decided per region, keyed by the profile-independent
+  `(SourceUnitId, RegionId)`. When two active profiles each claim the same
+  region (two distinct `AttachmentId`s) and no per-file narrowing selects one,
+  the outcome is typed ambiguous. Registration order, load order or recency
+  never decides.
 - **R11.** A family whose admitted line is one major admits only that major.
   Qwik admits Qwik 2 only. A Qwik 1 package is `unsupported-version`, so
-  Qwik-2-only rules need no version gate inside the profile.
+  Qwik-2-only rules need no version gate inside the profile. QWK0 fixes the
+  release; its executable rejection proof is QWK1's (`QWK1-ACV`, `QWK1-AC4`).
 
 ### Serialization and collision
 
@@ -135,8 +142,11 @@ assigns their deletion to CPF1 (`D08`) and their consumers to CPF1 (`C02`,
   `SourceEnvIdentity`, the framework script-fact `CandidateSlotKey`) follow
   `R15` (`V-C01`; it also covers the `FrameworkArtifactId` and
   `CarrierParseKey` adapter/language fields and the `FileSourceEnv` fact);
-- the LSP's own document classification moves with COX0 (`V-C10`, within
-  UAK0 `C06`).
+- the LSP's own `FileLanguage` producers and consumers, document
+  classification included, move in the same CPF1 change (`V-C10`): the LSP
+  returns the host classifier's `FileLanguage` directly, so they cannot wait
+  for another landing. Per-profile editor participation stays COX0's (UAK0
+  `C06`, `D10`).
 
 All consumers move in one change, and the conflated ids are deleted in that
 same change.
@@ -155,8 +165,22 @@ deletion owner.
 | `V-D05` | Svelte release admission by string prefix (`major == "5"`) in the LSP asset loader | replace: the loader reads the admitted release from the activation record | FWA1 (`FWA1-AC1`) |
 | `V-D06` | Untyped `ProjectStableKey::{Configured, Fallback}(Hash16)` as the cross-snapshot project key | retag to `ConfiguredProjectId`; the fallback arm becomes PM1's inferred-project identity | PM1 (`PM1-AC1`) |
 
-The inventory references UAK0's `D05`–`D09` and `D19` for the identity
-concerns they already own.
+The inventory references UAK0's routes for the identity concerns they already
+own, and maps every deletion category this decision must inventory:
+
+| Category | Recorded here | Referenced UAK0 routes |
+| -------- | ------------- | ---------------------- |
+| central framework switch | `V-D03` | `D05`–`D07` (CPF1) |
+| untagged coordinate/public identity | `V-D01`, `V-D02`, `V-D04`–`V-D06` | `D08` (CPF1), `D09` (COX0), `D19` (PM1) |
+| duplicate component information authority | none | `D12`–`D15` (TIF1), `D18` (IDX0) |
+
+The duplicate component information routes already carry their identity
+concern: the component-meta, public-API and framework-surface authorities
+(`D12`–`D14`) are replaced by one TypeInfo view selected by the typed semantic
+profile, so `D14`'s family-wide surface keys fall under `R15`; `D15` is the
+request vocabulary whose open selector string is `V-D02`; and `D18`'s
+replacement index contributions are keyed by profile and attachment
+(`V-C07`).
 
 Empty populations at this head:
 
