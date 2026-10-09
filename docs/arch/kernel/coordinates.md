@@ -10,10 +10,10 @@ kernel services.
 It describes the repository at `fix(ci): retry marketplace extension installs
 in the VS Code E2E (#798)`, 2026-10-09.
 
-**Status: stopped at the charter's abort clause.** Five current wires cannot
-identify their encoding (see [Abort check](#abort-check-triggered)). The
-inventory below is complete and reviewed data, but this decision is not
-accepted until the operator or architect rules on those wires.
+Six current wires do not let a consumer identify their unit today (see
+[Wires with no identifiable unit today](#wires-with-no-identifiable-unit-today)).
+This decision fixes the target contract for each of them and binds each to the
+owner that repairs it; it does not repair them.
 
 It follows the docs-only rule in [README.md](README.md): it changes no production route and adds no check. It
 builds on the [authority inventory](authority-inventory.md) and the
@@ -30,7 +30,7 @@ The reviewed contract data lives in `tests/kernel/ENC0/products/`:
 | File | Holds |
 | ---- | ----- |
 | `coordinate-inventory.v1.json` | The law `R01`–`R10`, coordinate domains `CD1`–`CD6`, line-index ownership `LI1`–`LI7`, the re-derived accepted Rev11 owners `T01`–`T06`, outcomes `E-O1`–`E-O7`, consumers `E-C01`–`E-C06` and transferred obligations |
-| `boundary-route-ledger.v1.json` | Every position-bearing boundary at the described head (`P01`–`P31`): direction, encoding, whether a consumer can identify it, whether it is tagged, its parent UAK0 route, one owner, successor path and receiving acceptance ID |
+| `boundary-route-ledger.v1.json` | Every position-bearing boundary at the described head (`P01`–`P32`): direction, encoding at the head, whether a consumer can identify it, whether it is tagged, whether the head produces it (`emission`), the intended contract (domain, encoding, base, terminators, refusal), its parent UAK0 route, one owner, successor path and receiving acceptance ID; plus the completeness audit |
 | `case-table.v1.json` | The checked-arithmetic, invalid-boundary, overflow, line-terminator, Unicode-property and baseline-cost cases `K01`–`K28` that ENC0T implements |
 
 Every owner exists in the controller-owned plan. Every `successorPath` starts at
@@ -170,9 +170,25 @@ The full rows are in `boundary-route-ledger.v1.json`.
 | Owner | Rows | What changes |
 | ----- | ---- | ------------ |
 | ENCL0 (`ENCL0-AC1`) | `P01`–`P09` | Negotiated LSP positions reach the UTF-16 source-map mapper untranslated; the editor encoding enum and UTF-16 literals used for the provider wire; the duplicate `encoded_len` counter; `LI1` lacks lone `\r`; an unknown encoding kind silently becomes UTF-16; the pre-initialize default; analysis spans converted through the FFI index; audit position records that do not carry the session's encoding; VS Code client conversions |
-| ENCF0 (`ENCF0-AC1`) | `P10`–`P24` | NAPI/WASM/FFI/MCP/CLI/proto positions without a tag; diagnostic and lint spans whose unit depends on source availability; byte and UTF-16 fields mixed in one response; zero offsets when the source is missing; the FFI char-boundary clamp; preprocessor line/column with no stated base or unit; `GraphSpanRef` with no stated unit; `verter-tsc` 1-based columns with an implicit unit |
+| ENCF0 (`ENCF0-AC1`) | `P10`–`P24`, `P32` | NAPI/WASM/FFI/MCP/CLI/proto positions without a tag; diagnostic and lint spans whose unit depends on source availability; byte and UTF-16 fields mixed in one response; zero offsets when the source is missing; the FFI char-boundary clamp; preprocessor line/column with no stated base or unit; `GraphSpanRef` with no stated unit; `verter-tsc` 1-based columns with an implicit unit; schema DTO spans with no producer |
 | ENCT0 (verify only) | `P25`–`P29` | Accepted TCM1/TCM2/TCM3/H2 boundaries and the TCM4 residual; residue reopens its Rev11 owner |
 | Retained / recorded | `P30`–`P31` | Duplicate source-map decoders; coordinate types with no production consumer |
+
+Every migrated row (`P01`–`P24`, `P32`) carries an `intendedContract`: the
+domain, encoding, line/column base, terminator set and refusal rule its owner
+converges on. Every row carries `emission`, which separates positions the head
+actually produces or reads from schema fields with no producer, ingress fields
+accepted but never read, and retained values never interpreted as positions.
+
+**Completeness audit.** Every public struct or wire message in the production
+boundary crates (`verter_protocol` source and proto, `verter_ffi`,
+`verter_napi`, `verter_wasm`, `verter_mcp`, `verter_tsc`, `verter_audit`
+payloads, the `verter_lsp` custom protocol) with an integer field named
+`span_start`/`span_end`, `start`/`end`, `offset`, `line`, `column` or
+`character`, and its generated TS binding, maps to exactly one row or to the
+ledger's excluded set. The audit added `P32` (the `verter_protocol::schema`
+DTO spans, which nothing outside that module constructs) and the FFI
+component-meta structs to `P18`.
 
 Already tagged, no shape migration: the carrier-geometry wire `CanonicalRange`
 in `component_meta.proto` carries a `PositionEncoding` enum and a source-space
@@ -181,7 +197,7 @@ tag (`P18`).
 
 ## The three deletion categories, coordinate scope
 
-- **Untagged coordinate/public identity.** Every row `P01`–`P24` names its
+- **Untagged coordinate/public identity.** Every row `P01`–`P24` and `P32` names its
   deletion owner: ENCL0 or ENCF0. UAK0 `D16` and `D17` are their parents; no
   row has a second owner.
 - **Central framework switch.** No coordinate route branches on a framework.
@@ -214,34 +230,26 @@ tag (`P18`).
 Each failure is a typed error (`InvalidBoundary`, `Overflow`,
 `NotCharBoundary`); nothing clamps.
 
-## Abort check: triggered
+## Wires with no identifiable unit today
 
-The charter says: "abort if a current wire cannot identify its encoding—first
-fix that boundary contract." Five current wires cannot (`identifiable: false`,
-`abortEvidence: true` in the ledger):
+These rows have `identifiable: false`: a consumer cannot tell the unit from the
+wire, its type or a fixed contract. That is an observed defect and a migration
+input, not a prerequisite of this decision. This node is docs-only: it fixes
+the target contract below, and the named owner repairs the wire under its own
+acceptance. Nothing here certifies a wire as fixed.
 
-- **`P11` diagnostic spans.** `FfiDiagnostic`/`NapiDiagnostic`/`HostDiagnostic`
-  `spanStart`/`spanEnd` are UTF-16 when the adapter can fetch the file's
-  source and raw UTF-8 bytes when it cannot (`mandatory_utf16_offset` passes
-  the byte offset through). `compileMany` entries always pass no source, so
-  they are always bytes, under the same TypeScript type. A consumer cannot
-  tell which unit it received.
-- **`P12` lint spans.** The same `spanStart`/`spanEnd` JSON is UTF-16 from
-  NAPI/WASM when a source exists, bytes otherwise, and bytes from MCP. The
-  Rust `Span`, documented as bytes, is rewritten in place with UTF-16 values.
-- **`P19` `GraphSpanRef`.** A typeinfo wire field with no stated unit and no
-  producer.
-- **`P20` preprocessor diagnostics.** `line`/`column` arrive from JavaScript
-  with neither base nor column unit defined and are passed through.
-- **`P08` audit position records.** `PositionInfo.character` is the
-  negotiated LSP column, but the record does not carry the encoding.
+| Row | Emitted at the head | Observed defect | Intended contract (domain; encoding; base; refusal) | Owner, path, acceptance |
+| --- | ------------------- | --------------- | --------------------------------------------------- | ----------------------- |
+| `P08` audit `PositionInfo` | produced | `line`/`character` are the negotiated LSP position, but the record does not carry the session's encoding | `CD5` of the audited LSP request; the negotiated encoding recorded on the record as a closed field beside `line`/`character`; 0-based line and character, LSP 3.17 terminators; before negotiation the record carries no position (typed absence), never a UTF-16 default | ENCL0; `UAK0 → UAK1 → ENC0 → ENCL0`; `ENCL0-AC1` |
+| `P11` host diagnostic spans | produced | `FfiDiagnostic`/`NapiDiagnostic`/`HostDiagnostic` `spanStart`/`spanEnd` are UTF-16 when the adapter has the source and raw UTF-8 bytes when it does not: `mandatory_utf16_offset[_with]` pass the byte offset through, and `napi_diagnostic_from_host` (so every `compileMany` entry) supplies no source | `CD1` half-open range; UTF-16 code units from file start on NAPI/WASM under a versioned encoding tag, converted once through `LI4` against the exact source the compile read; 0-based; no source is a typed `SourceUnavailable` on that diagnostic, an off-boundary or past-end endpoint is `NotCharBoundary`/`InvalidBoundary`; never a byte pass-through | ENCF0; `UAK0 → UAK1 → ENC0 → ENCF0`; `ENCF0-AC1` |
+| `P12` lint spans | produced | `lint_diagnostics_to_utf16` rewrites the byte `Span` in place with UTF-16 values when a source exists and returns bytes otherwise; MCP emits bytes under the same JSON shape | `CD1`; `LintDiagnostic.span` stays UTF-8 bytes in Rust and is never rewritten; NAPI/WASM emit a separate tagged wire span in UTF-16, MCP emits bytes with the same tag field (`P21`); 0-based; missing source is a typed `SourceUnavailable`, endpoints refuse with `NotCharBoundary`/`InvalidBoundary` | ENCF0; `UAK0 → UAK1 → ENC0 → ENCF0`; `ENCF0-AC1` |
+| `P19` typeinfo spans | mixed | `SymbolEntryDto` and `FrameworkSurfaceMemberDeclaration` spans are produced as UTF-8 bytes; `GraphDiagnostic` is produced as 0 with `has_span=false`; `GraphSpanRef` has no stated unit — as member/index spans it is a schema field with no producer, and as the `FlowNarrowingRequest`/`ContextualTypeRequest` span it is validated for presence and read by no executor | `CD1` of the file named by `canonical_id`; UTF-8 bytes stated in the typeinfo proto contract under its schema-version rules; 0-based half-open; on ingress an inverted, past-end or off-boundary span is a typed `TypeInfoRequestError` before execution; on egress a span is emitted only when exact, otherwise absent or `has_span=false` | ENCF0; `UAK0 → UAK1 → ENC0 → ENCF0`; `ENCF0-AC1` |
+| `P20` preprocessor diagnostics | retained, never interpreted | `line`/`column` arrive from JavaScript with no stated base or column unit; the host retains them and no Rust consumer maps or re-emits the position (`style_diagnostic_of` records it absent) | `CD5` of the preprocessor's own input text; UTF-16 columns fixed by a versioned NAPI/WASM ingress contract; 1-based line and column, terminators `\n`, `\r\n`, lone `\r`; the adapter validates against the input it was given and rejects an out-of-range or in-pair position as typed (the diagnostic keeps its message without a position), never passing it through | ENCF0; `UAK0 → UAK1 → ENC0 → ENCF0`; `ENCF0-AC1` |
+| `P32` schema DTO spans | schema field, no producer | `PropDto`, `EventDto`, `SlotDto`, `ModelDto`, `ExposeDto`, `BoundaryIssueDto`, `ProvenanceStepDto`, `BindingRefDto`, `ComponentRefDto` carry `spanStart`/`spanEnd` with no stated unit; nothing outside `verter_protocol::schema` constructs them, and the generated TS mirror is re-exported by `@verter/component-meta` | `CD1`; UTF-8 bytes in the tagged range shape of `P18`, or the unproduced fields are removed when generated consumers migrate; 0-based half-open; `InvalidBoundary` for inverted or past-end ranges | ENCF0; `UAK0 → UAK1 → ENC0 → ENCF0`; `ENCF0-AC1` |
 
-These are not untagged-but-fixed positions, which ENCL0/ENCF0 can retag; the
-unit itself is undetermined. A docs-only node cannot fix a production wire, so
-this decision records the inventory and stops for a ruling. The rest of the
-inventory has a determinate encoding: for example, NAPI `getCodeActions` takes
-UTF-16, MCP `QuickFixParams.offset` takes bytes, and
-`external_ts::Query.carrier_offset` is a `CD1` byte offset.
+The rest of the inventory has a determinate unit at the head: for example,
+NAPI `getCodeActions` takes UTF-16, MCP `QuickFixParams.offset` takes bytes,
+and `external_ts::Query.carrier_offset` is a `CD1` byte offset.
 
 ## Findings recorded for the receiving owners
 
@@ -285,18 +293,34 @@ coverage and bounded inspection discriminate it. The diff adds no test.
   outcome, consumer and boundary to one owner, a successor path and a
   receiving acceptance ID. UAK0's `D16`/`D17` stay the parents of the split
   rows, so no route has two owners. The executable validator is UAI0's.
-  The five abort rows (`P08`, `P11`, `P12`, `P19`, `P20`) have an owner but
-  no determinate encoding, so the charter's "zero unknown integer positions"
-  is not met until the ruling.
-- **AC2 — positive contract.** Identity, provenance and ordering of the named
-  boundaries are already pinned by the coverage UAK0 cites. The coordinate
-  behaviour is pinned by: `utf16_line_index_tests.rs` and the `tsgo_offset`
-  tests in `verter_span`; the `codec.rs` tests in `verter_type_runtime`
+  Every integer position in the inventory now has a named domain, encoding,
+  base and refusal rule: the six rows with no identifiable unit today (`P08`,
+  `P11`, `P12`, `P19`, `P20`, `P32`) have theirs in `intendedContract`, so
+  the inventory has no unknown integer position. Making the wires conform is
+  acceptance of their owners (`ENCL0-AC1`, `ENCF0-AC1`).
+- **AC2 — positive contract.** Of the named boundaries, only `TypeInfoRequest`
+  exists at the head and carries positions (the `GraphSpanRef` request spans
+  of `P19`); its envelope identity, validation and round-trip are pinned by
+  `crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs`,
+  `crates/verter_session/tests/cases/g_type/typeinfo_request_validation.rs`
+  (including the missing-span rejection), and
+  `crates/verter_session/tests/cases/g_block/typeinfo_request_contract_guards.rs`.
+  `CarrierProfileId`, `FrameworkProfileId`, `ProjectProfileId`,
+  `CatalogSnapshot` and `DemandPlan` are absent at the head and carry no
+  coordinate; their owners are assigned in the
+  [authority inventory](authority-inventory.md). The coordinate behaviour is
+  pinned by: `crates/verter_span/src/utf16_line_index_tests.rs` and the
+  `tsgo_offset` unit tests; the `codec.rs` unit tests in `verter_type_runtime`
   (checked versus clamped conversion, surrogate pairs, CRLF);
-  `source_map_tests.rs` and `segmented_tests.rs` (UTF-16 columns);
-  `content_mapper_projection.rs` (typed refusal, no clamping);
-  `position_mapper_strict.rs` in `verter_lsp`; the UTF-16 conversion tests in
-  `verter_ffi/src/convert/tests.rs`. New tests belong to ENC0T.
+  `crates/verter_compiler/src/code_transform/{source_map,segmented,mapping_product,chain}_tests.rs`
+  (UTF-16 columns, mapping products);
+  `crates/verter_session/tests/cases/content_mapper_projection.rs` (typed
+  refusal, no clamping); `crates/verter_session/tests/g_extts/{semantic_capability_closure,certified_engine_seam}.rs`
+  and the `uncertified_engine_answer_is_unrepresentable` compile-fail case
+  (the content/map-hash fenced query offset);
+  `crates/verter_lsp/tests/cases/position_mapper_strict.rs`; the UTF-16
+  conversion tests in `crates/verter_ffi/src/convert/tests.rs`. New tests
+  belong to ENC0T.
 - **AC3 — incremental equivalence: not applicable.** No cache, cancellation,
   stale-publication or partial-result authority changes, and no production
   byte changes. `R08` and `R09` state the rule PER0D consumes.

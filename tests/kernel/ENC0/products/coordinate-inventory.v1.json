@@ -71,7 +71,7 @@
     { "id": "E-O4", "outcome": "Every NAPI/WASM/FFI/MCP/CLI/proto position carries a versioned encoding tag or a versioned fixed-encoding contract, converted once through LI4", "parentOutcome": "O07", "owner": "ENCF0", "successorPath": ["ENC0", "ENCF0"], "receivingAcceptance": "ENCF0-AC2" },
     { "id": "E-O5", "outcome": "Accepted TCM1/TCM2/TCM3/H2 coordinate boundaries verified with no residual implicit adapter; T05 residue returned to its Rev11 owner", "owner": "ENCT0", "successorPath": ["ENC0", "ENCT0"], "receivingAcceptance": "ENCT0-AC1" },
     { "id": "E-O6", "outcome": "Embedded and derived text (CD4) maps exactly to authored UTF-8 bytes through the codec map chain", "owner": "EMB0I", "successorPath": ["ENC0", "EMB0", "EMB0I"], "receivingAcceptance": "EMB0I-AC3" },
-    { "id": "E-O7", "outcome": "Zero unknown or duplicate conversion owners across all boundaries (P01-P31, LI1-LI7)", "owner": "ENC1", "successorPath": ["ENC0", "ENCL0", "ENC1"], "receivingAcceptance": "ENC1-AC1" }
+    { "id": "E-O7", "outcome": "Zero unknown or duplicate conversion owners across all boundaries (P01-P32, LI1-LI7)", "owner": "ENC1", "successorPath": ["ENC0", "ENCL0", "ENC1"], "receivingAcceptance": "ENC1-AC1" }
   ],
   "consumers": [
     { "id": "E-C01", "consumer": "TypeInfo/ComponentInfo product positions (TIF1)", "consumesOutcomes": ["E-O1", "E-O4"], "owner": "TIF1", "successorPath": ["ENC0", "ENCF0", "TIF1"], "receivingAcceptance": "TIF1-AC2" },

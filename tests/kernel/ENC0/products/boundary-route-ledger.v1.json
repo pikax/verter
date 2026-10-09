@@ -13,8 +13,10 @@
     "oneOwnerPerRoute": "Every row names exactly one production-capable deletion owner (ENCL0 or ENCF0), or names no deletion owner because it is an accepted Rev11 surface that ENCT0 verifies, or a recorded retained/unused item.",
     "inheritedRoutes": "parentRoute names the UAK0 route a row splits (D16 for non-editor public positions, D17 for editor contracts). The parent keeps its owner; the row only narrows it. parentRoute null marks a route UAK0 did not list.",
     "productionCapable": "ENCT0, ENC1 and UAI0 delete nothing and are never deletion owners here.",
-    "identifiable": "identifiable=false marks a wire whose encoding a consumer cannot determine from the wire, its type or its fixed contract. Each such row has abortEvidence=true: it triggers the charter clause 'abort if a current wire cannot identify its encoding'.",
-    "excluded": "Test-only conversions, tooling crates outside the production closure (verter_bench examples, verter_dx_baseline, lsp-test-client) and JS-internal string indices that never cross a Rust boundary (unplugin ssr-transforms) are outside the population."
+    "identifiable": "identifiable=false marks a wire whose unit a consumer cannot determine today from the wire, its type or its fixed contract. It is an observed migration input, not a prerequisite of this contract: the row's intendedContract fixes the encoding, base, domain and refusal rule, and the row's deletion owner delivers it. Production repair is acceptance of that owner.",
+    "excluded": "Test-only conversions, tooling crates outside the production closure (verter_bench examples, verter_dx_baseline, lsp-test-client) and JS-internal string indices that never cross a Rust boundary (unplugin ssr-transforms) are outside the population.",
+    "emission": "emission distinguishes positions the head actually produces or reads (produced) from schema fields with no producer (schemaWithoutProducer), ingress fields accepted but never read as a position (acceptedUnread), retained values never interpreted as a position (retainedUninterpreted), dormant internal routes (dormant) and types with no production consumer (noProductionConsumer). A row whose symbols differ is mixed and splits them in emissionBySymbol.",
+    "intendedContract": "intendedContract is the target each migrated row converges on: domain (CD1-CD6), encoding, base, terminators where a line/column form exists, and refusal. Refusal uses the case-table vocabulary (InvalidBoundary, Overflow, NotCharBoundary) or a named typed failure; nothing clamps, defaults or passes a unit through."
   },
   "routes": [
     {
@@ -51,7 +53,15 @@
         "prepare_carrier_provider_imports"
       ],
       "defect": "A UTF-8 or UTF-32 session maps any position after a non-ASCII character on the same line to the wrong generated column. VS Code offers only UTF-16, so it does not observe it.",
-      "successor": "the carrier position converts once to a CD1 byte offset at the LSP boundary; the mapper is addressed in bytes or in its own UTF-16 unit through an explicit conversion"
+      "successor": "the carrier position converts once to a CD1 byte offset at the LSP boundary; the mapper is addressed in bytes or in its own UTF-16 unit through an explicit conversion",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5 (negotiated LSP) at ingress, CD1 inside the server",
+        "encoding": "the session's negotiated positionEncoding, converted once through LI1 to a CD1 byte offset; the source-map mapper is addressed in CD1 bytes or in its own UTF-16 column through one explicit conversion",
+        "base": "0-based line, 0-based character",
+        "terminators": "LSP 3.17: \\n, \\r\\n, lone \\r",
+        "refusal": "NotCharBoundary inside a sequence or surrogate pair; InvalidBoundary past the document end; a character past the line length uses the LSP 3.17 rule only for read-only queries, edits refuse"
+      }
     },
     {
       "id": "P02",
@@ -86,7 +96,15 @@
         "ts_position_utf16_to_byte_offset",
         "carrier_completion_member_boundary_offset"
       ],
-      "successor": "provider-wire encoding is named by the provider adapter's own type; the editor enum names only the editor wire"
+      "successor": "provider-wire encoding is named by the provider adapter's own type; the editor enum names only the editor wire",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5/CD6 of the provider wire",
+        "encoding": "UTF-16, named by the provider adapter's own encoding type, never by the editor enum",
+        "base": "the provider's own (tsgo LSP-wire 0-based, tsserver 1-based)",
+        "terminators": "the provider's (TypeScript getLineStarts)",
+        "refusal": "typed provider-boundary failure; no fallback to the editor encoding"
+      }
     },
     {
       "id": "P03",
@@ -113,7 +131,14 @@
         "SelfFileProviderMapper::new",
         "TransformedBufferMap::from_transform_geometry"
       ],
-      "successor": "widths come from LI1"
+      "successor": "widths come from LI1",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5",
+        "encoding": "widths computed only by LI1",
+        "base": "n/a",
+        "refusal": "as LI1"
+      }
     },
     {
       "id": "P04",
@@ -141,7 +166,15 @@
         "IndexRef::line_end"
       ],
       "defect": "LSP 3.17 also ends a line at a lone \\r; a lone-\\r file gets wrong line numbers on every LSP surface and on tsgo LSP-wire responses (K15).",
-      "successor": "LI1 implements the LSP 3.17 terminator set"
+      "successor": "LI1 implements the LSP 3.17 terminator set",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5",
+        "encoding": "negotiated",
+        "base": "0-based line, 0-based character",
+        "terminators": "LSP 3.17: \\n, \\r\\n, lone \\r",
+        "refusal": "a position between \\r and \\n is InvalidBoundary (K14)"
+      }
     },
     {
       "id": "P05",
@@ -166,7 +199,14 @@
       "symbols": [
         "to_runtime_encoding"
       ],
-      "successor": "a closed encoding type; an unknown kind is unrepresentable after negotiation"
+      "successor": "a closed encoding type; an unknown kind is unrepresentable after negotiation",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5",
+        "encoding": "closed set UTF-8/UTF-16/UTF-32; negotiation selects only a kind the server implements",
+        "base": "n/a",
+        "refusal": "an unrecognised advertised kind is skipped at negotiation and is unrepresentable afterwards; never mapped to UTF-16"
+      }
     },
     {
       "id": "P06",
@@ -195,7 +235,14 @@
         "DocumentRegistry encoding RwLock initial value",
         "server position_encoding initial value"
       ],
-      "successor": "the default is the wire's rule, applied once at negotiation; no document is converted before negotiation"
+      "successor": "the default is the wire's rule, applied once at negotiation; no document is converted before negotiation",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5",
+        "encoding": "UTF-16 only when the client advertises no positionEncodings (the LSP 3.17 wire rule), applied once at initialize",
+        "base": "0-based",
+        "refusal": "no document position is converted before initialize; a request before negotiation is refused"
+      }
     },
     {
       "id": "P07",
@@ -222,7 +269,15 @@
         "convert_analysis_spans_json",
         "get_analysis_json"
       ],
-      "successor": "editor conversions go through LI1 only"
+      "successor": "editor conversions go through LI1 only",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1 bytes converted to CD5",
+        "encoding": "negotiated, through LI1 only",
+        "base": "0-based line, 0-based character",
+        "terminators": "LSP 3.17: \\n, \\r\\n, lone \\r",
+        "refusal": "NotCharBoundary/InvalidBoundary; the span is dropped with a typed reason, never clamped"
+      }
     },
     {
       "id": "P08",
@@ -240,7 +295,6 @@
       "unit": "Audit LSP position records",
       "encodingAtHead": "raw negotiated LSP character; the session's encoding is not recorded",
       "identifiable": false,
-      "abortEvidence": true,
       "tagged": "no",
       "paths": [
         "crates/verter_audit/src/payloads/lsp.rs",
@@ -252,7 +306,15 @@
         "PositionInfo.character"
       ],
       "note": "The value is identifiable inside the session but the record does not carry the encoding, so a reader of the audit record cannot identify it.",
-      "successor": "the record carries the negotiated encoding or a CD1 byte offset"
+      "successor": "the record carries the session's negotiated encoding beside line/character",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5 of the LSP request being audited",
+        "encoding": "the session's negotiated positionEncoding, recorded on the PositionInfo record as a closed encoding field beside line/character",
+        "base": "0-based line, 0-based character (LSP)",
+        "terminators": "LSP 3.17: \\n, \\r\\n, lone \\r",
+        "refusal": "a record whose session encoding is not yet negotiated carries no position (typed absence); it never defaults to UTF-16"
+      }
     },
     {
       "id": "P09",
@@ -284,7 +346,15 @@
         "utf8OffsetToUtf16",
         "lineCol"
       ],
-      "successor": "the client consumes server ranges already in the negotiated encoding"
+      "successor": "the client consumes server ranges already in the negotiated encoding",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5",
+        "encoding": "the negotiated encoding the server already converted to (UTF-16 for VS Code); the client does no byte or UTF-8 conversion",
+        "base": "0-based",
+        "terminators": "LSP 3.17: \\n, \\r\\n, lone \\r",
+        "refusal": "a range the client cannot place is not rendered"
+      }
     },
     {
       "id": "P10",
@@ -313,7 +383,14 @@
         "getCodeActions(offset)",
         "utf16_to_byte_offset"
       ],
-      "successor": "versioned encoding-tagged offset converted once at the adapter"
+      "successor": "versioned encoding-tagged offset converted once at the adapter",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD6 at ingress, CD1 inside",
+        "encoding": "UTF-16 code units from file start, declared by a versioned encoding tag on the request, converted once through LI4",
+        "base": "0-based offset",
+        "refusal": "NotCharBoundary inside a surrogate pair; InvalidBoundary past the end"
+      }
     },
     {
       "id": "P11",
@@ -354,9 +431,15 @@
         "HostDiagnostic.spanStart/spanEnd",
         "CompileBatchEntry.diagnostics"
       ],
-      "abortEvidence": true,
       "defect": "The same field and TS type carry UTF-16 or UTF-8 bytes depending on runtime source availability and on which API produced them; nothing on the wire says which.",
-      "successor": "versioned encoding-tagged spans; a span that cannot be converted is a typed failure, never a silent byte pass-through"
+      "successor": "versioned encoding-tagged spans; a span that cannot be converted is a typed failure, never a silent byte pass-through",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1 (half-open range in the authored file the diagnostic names)",
+        "encoding": "UTF-16 code units from file start on NAPI/WASM, declared by a versioned encoding tag on the response; converted once through LI4 against the exact source the compile read (compileMany supplies its own input)",
+        "base": "0-based offsets",
+        "refusal": "no source snapshot for the span is a typed SourceUnavailable failure on that diagnostic, never a byte pass-through; NotCharBoundary/InvalidBoundary for an off-boundary or past-end endpoint"
+      }
     },
     {
       "id": "P12",
@@ -388,9 +471,15 @@
         "NapiLintDiagnostic.spanStart/spanEnd",
         "EvidenceSnippet.highlight_start/end"
       ],
-      "abortEvidence": true,
       "defect": "Same JSON shape, different units per surface and per runtime source availability; a CD1 Span holds UTF-16 values.",
-      "successor": "the CD1 span stays bytes; the adapter emits a tagged wire span"
+      "successor": "the CD1 span stays bytes; the adapter emits a tagged wire span",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "LintDiagnostic.span stays UTF-8 bytes in Rust and is never rewritten in place; the NAPI/WASM adapter emits a separate wire span in UTF-16 code units with a versioned tag; MCP emits UTF-8 bytes with the same tag field (P21)",
+        "base": "0-based offsets",
+        "refusal": "missing source is a typed SourceUnavailable on NAPI/WASM, never a byte pass-through; NotCharBoundary/InvalidBoundary per endpoint"
+      }
     },
     {
       "id": "P13",
@@ -423,7 +512,14 @@
         "collectResolvableModuleReferenceSpecifiers",
         "resolveKnownModuleReferenceDependencies"
       ],
-      "successor": "tagged spans; one response, one declared encoding per field"
+      "successor": "tagged spans; one response, one declared encoding per field",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "one declared encoding per field, the same as the diagnostics in the same response (UTF-16 on NAPI/WASM), versioned tag; WASM read-back converts through the tag",
+        "base": "0-based offsets",
+        "refusal": "NotCharBoundary/InvalidBoundary"
+      }
     },
     {
       "id": "P14",
@@ -456,7 +552,14 @@
         "OffsetEncoding::Utf16 literal"
       ],
       "defect": "Missing source silently produces zero offsets.",
-      "successor": "tagged spans naming their domain (source or generated); missing source is a typed failure"
+      "successor": "tagged spans naming their domain (source or generated); missing source is a typed failure",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "bindings CD1, block bounds CD3; each field names its domain",
+        "encoding": "UTF-16 code units with a versioned tag",
+        "base": "0-based offsets",
+        "refusal": "missing source is a typed SourceUnavailable, never zero offsets; NotCharBoundary/InvalidBoundary"
+      }
     },
     {
       "id": "P15",
@@ -492,7 +595,14 @@
         "NapiElementMatch",
         "NapiSelectorMatchResult"
       ],
-      "successor": "versioned encoding-tagged ranges"
+      "successor": "versioned encoding-tagged ranges",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "UTF-16 code units with a versioned tag",
+        "base": "0-based offsets",
+        "refusal": "an edit whose range cannot be converted exactly is refused, never clamped"
+      }
     },
     {
       "id": "P16",
@@ -522,7 +632,14 @@
         "NapiSourceRange",
         "HostTscScriptSetupAttrsFailureSubject.sourceRange"
       ],
-      "successor": "tagged ranges"
+      "successor": "tagged ranges",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "UTF-8 bytes with a versioned tag on the range",
+        "base": "0-based half-open",
+        "refusal": "InvalidBoundary for an inverted or past-end range"
+      }
     },
     {
       "id": "P17",
@@ -558,7 +675,14 @@
         "FfiSymbolEntry.span_start/end",
         "utf8OffsetToUtf16 (unplugin)"
       ],
-      "successor": "tagged ranges; consumers stop converting locally"
+      "successor": "tagged ranges; consumers stop converting locally",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "UTF-8 bytes with a versioned tag; consumers convert through the tag, never by local recount",
+        "base": "0-based half-open",
+        "refusal": "InvalidBoundary/NotCharBoundary at the converting consumer"
+      }
     },
     {
       "id": "P18",
@@ -581,14 +705,24 @@
         "crates/verter_protocol/proto/verter/v1/component_meta.proto",
         "crates/verter_protocol/src/component_meta.rs",
         "packages/component-meta/src/native-component-meta.ts",
-        "packages/component-meta/src/type-graph-proto-decode.ts"
+        "packages/component-meta/src/type-graph-proto-decode.ts",
+        "crates/verter_protocol/src/types.rs"
       ],
       "symbols": [
         "ResolvedTypeDeclaration.span_start/end",
         "ResolvedNativeProp.span_start/end",
-        "CanonicalRange.encoding"
+        "CanonicalRange.encoding",
+        "FfiResolvedTypeDeclaration.span_start/end",
+        "FfiResolvedNativeProp.span_start/end"
       ],
-      "successor": "every span uses the tagged range shape; consumers honour the tag"
+      "successor": "every span uses the tagged range shape; consumers honour the tag",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "UTF-8 bytes in the tagged CanonicalRange shape for every span",
+        "base": "0-based half-open",
+        "refusal": "a consumer rejects an unknown encoding tag; InvalidBoundary for inverted ranges"
+      }
     },
     {
       "id": "P19",
@@ -609,17 +743,36 @@
       "tagged": "comment only (GraphDiagnostic), none otherwise",
       "paths": [
         "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
-        "crates/verter_session/src/typeinfo/framework_surface/graph_export.rs"
+        "crates/verter_session/src/typeinfo/framework_surface/graph_export.rs",
+        "crates/verter_session/src/typeinfo/request_validation.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/spread_program_export.rs"
       ],
       "symbols": [
         "SymbolEntryDto.span_start/end",
         "GraphDiagnostic.span_start/end",
         "GraphSpanRef.start/end",
-        "FrameworkSurfaceMemberDeclaration.span_start/end"
+        "FrameworkSurfaceMemberDeclaration.span_start/end",
+        "FlowNarrowingRequest.span",
+        "ContextualTypeRequest.span",
+        "GraphObjectMemberSpans",
+        "GraphObjectIndexSpans"
       ],
-      "abortEvidence": true,
-      "defect": "GraphSpanRef is a wire field whose unit is defined nowhere.",
-      "successor": "tagged spans under the typeinfo wire contract's schema-version rules"
+      "defect": "GraphSpanRef is a wire field whose unit is defined nowhere; no producer emits it and no executor reads it on ingress.",
+      "successor": "tagged spans under the typeinfo wire contract's schema-version rules",
+      "emission": "mixed",
+      "intendedContract": {
+        "domain": "CD1 of the file named by canonical_id",
+        "encoding": "UTF-8 bytes, stated in the typeinfo proto contract under its schema-version rules (GraphSpanRef, GraphDiagnostic, SymbolEntryDto, FrameworkSurfaceMemberDeclaration)",
+        "base": "0-based half-open",
+        "refusal": "ingress: an inverted, past-end or off-boundary GraphSpanRef is a typed TypeInfoRequestError before execution; egress: a producer emits a span only when exact, otherwise has_span=false or the field absent"
+      },
+      "emissionBySymbol": {
+        "SymbolEntryDto.span_start/end": "produced (UTF-8 bytes; the doc comment says SFC-absolute)",
+        "FrameworkSurfaceMemberDeclaration.span_start/end": "produced (UTF-8 bytes)",
+        "GraphDiagnostic.span_start/end": "produced as 0 with has_span=false, so no position is emitted (the proto comment says SFC-absolute bytes)",
+        "GraphObjectMemberSpans/GraphObjectIndexSpans (GraphSpanRef)": "schemaWithoutProducer: every producer emits the field absent",
+        "FlowNarrowingRequest.span/ContextualTypeRequest.span (GraphSpanRef)": "acceptedUnread: request validation requires presence; no executor reads the value"
+      }
     },
     {
       "id": "P20",
@@ -642,15 +795,25 @@
         "crates/verter_protocol/src/types.rs",
         "crates/verter_ffi/src/convert/input.rs",
         "crates/verter_napi/src/lib.rs",
-        "crates/verter_session/src/types.rs"
+        "crates/verter_session/src/types.rs",
+        "crates/verter_session/src/block_content.rs"
       ],
       "symbols": [
         "FfiPreprocessorDiagnostic.line/column",
         "NapiPreprocessorDiagnostic.line/column",
-        "PreprocessorDiagnostic.line/column"
+        "PreprocessorDiagnostic.line/column",
+        "style_diagnostic_of (records the position absent)"
       ],
-      "abortEvidence": true,
-      "successor": "an ingress contract that fixes base and unit, validated at the adapter"
+      "successor": "an ingress contract that fixes base and unit, validated at the adapter",
+      "emission": "retainedUninterpreted",
+      "intendedContract": {
+        "domain": "CD5 of the preprocessor's own input text (not the SFC)",
+        "encoding": "UTF-16 code units, fixed by a versioned NAPI/WASM ingress contract",
+        "base": "1-based line, 1-based column",
+        "terminators": "\\n, \\r\\n, lone \\r",
+        "refusal": "the adapter validates line/column against the input it was given; an out-of-range or in-pair position is a typed rejection of the position (the diagnostic keeps its message without a position), never passed through or guessed"
+      },
+      "note": "Accepted from JavaScript and retained on the block-override entry; no Rust consumer maps or re-emits the position: style_diagnostic_of records it absent."
     },
     {
       "id": "P21",
@@ -684,7 +847,14 @@
         "analyze_file",
         "get_framework_surface origin spans"
       ],
-      "successor": "versioned encoding-tagged positions; same concept, same unit across MCP and NAPI/WASM"
+      "successor": "versioned encoding-tagged positions; same concept, same unit across MCP and NAPI/WASM",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "UTF-8 bytes, stated as a versioned fixed-encoding property of every MCP tool schema",
+        "base": "0-based offsets",
+        "refusal": "QuickFixParams.offset inside a UTF-8 sequence is NotCharBoundary; past end is InvalidBoundary"
+      }
     },
     {
       "id": "P22",
@@ -713,7 +883,14 @@
         "utf16_to_byte_offset"
       ],
       "defect": "Clamp recovery forbidden by R06.",
-      "successor": "typed NotCharBoundary/InvalidBoundary (K10, K11, K20)"
+      "successor": "typed NotCharBoundary/InvalidBoundary (K10, K11, K20)",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1/CD6",
+        "encoding": "as the calling row",
+        "base": "n/a",
+        "refusal": "NotCharBoundary/InvalidBoundary (K10, K11, K20); no clamp"
+      }
     },
     {
       "id": "P23",
@@ -743,7 +920,15 @@
         "one_indexed_position",
         "line_col_via_cache"
       ],
-      "successor": "the CLI locks one-based code-unit coordinates in an explicitly selected encoding (ENCF0 subblock 3)"
+      "successor": "the CLI locks one-based code-unit coordinates in an explicitly selected encoding (ENCF0 subblock 3)",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD5 (CLI)",
+        "encoding": "an explicitly selected UTF-8/UTF-16/UTF-32 code unit, defaulted by the CLI contract",
+        "base": "1-based line, 1-based column",
+        "terminators": "TypeScript getLineStarts",
+        "refusal": "an unconvertible position is reported without line/column, never guessed"
+      }
     },
     {
       "id": "P24",
@@ -769,7 +954,14 @@
       "symbols": [
         "AuditDiagnosticEntry.span"
       ],
-      "successor": "tagged span"
+      "successor": "tagged span",
+      "emission": "produced",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "UTF-8 bytes with a versioned tag in the generated binding",
+        "base": "0-based half-open",
+        "refusal": "InvalidBoundary for inverted ranges"
+      }
     },
     {
       "id": "P25",
@@ -799,7 +991,8 @@
         "strictUtf8PointToUtf16",
         "utf8RangesToUtf16"
       ],
-      "note": "Accepted TCM1 surface: not migrated. ENCT0 confirms the byte-valued member is converted exactly once by its consumer."
+      "note": "Accepted TCM1 surface: not migrated. ENCT0 confirms the byte-valued member is converted exactly once by its consumer.",
+      "emission": "produced"
     },
     {
       "id": "P26",
@@ -823,7 +1016,8 @@
         "ContentMapper",
         "Refusal"
       ],
-      "note": "Dormant at the head."
+      "note": "Dormant at the head.",
+      "emission": "dormant"
     },
     {
       "id": "P27",
@@ -846,7 +1040,8 @@
       ],
       "symbols": [
         "Query.carrier_offset"
-      ]
+      ],
+      "emission": "produced"
     },
     {
       "id": "P28",
@@ -881,7 +1076,8 @@
         "parse_range_to_offsets[_strict]",
         "tsserver_pos_to_byte_offset_checked"
       ],
-      "note": "ENCT0 verifies the K16 terminator behaviour of the tsgo LSP wire against LI1, and the retention scope of LI2 under R05."
+      "note": "ENCT0 verifies the K16 terminator behaviour of the tsgo LSP wire against LI1, and the retention scope of LI2 under R05.",
+      "emission": "produced"
     },
     {
       "id": "P29",
@@ -910,7 +1106,8 @@
         "PositionMapper",
         "CarrierMapper"
       ],
-      "note": "Residual: TCM4's charter names these as displaced and they are still the live position authority. Under ENCT0's charter the residue reopens the Rev11 owner; ENC0 assigns no successor."
+      "note": "Residual: TCM4's charter names these as displaced and they are still the live position authority. Under ENCT0's charter the residue reopens the Rev11 owner; ENC0 assigns no successor.",
+      "emission": "produced"
     },
     {
       "id": "P30",
@@ -945,7 +1142,8 @@
         "classify_column",
         "position_within_utf16_content"
       ],
-      "note": "Recorded duplicate of LI3. Not a public boundary; ENC1 confirms whether it remains a duplicate conversion owner."
+      "note": "Recorded duplicate of LI3. Not a public boundary; ENC1 confirms whether it remains a duplicate conversion owner.",
+      "emission": "produced"
     },
     {
       "id": "P31",
@@ -967,7 +1165,52 @@
         "SourceUtf16Offset",
         "GeneratedUtf16Offset"
       ],
-      "note": "Recorded only. GeneratedSpan overloads Span for generated positions. ENC0T decides their fate inside coord/; deleting them is not ENC0T acceptance."
+      "note": "Recorded only. GeneratedSpan overloads Span for generated positions. ENC0T decides their fate inside coord/; deleting them is not ENC0T acceptance.",
+      "emission": "noProductionConsumer"
+    },
+    {
+      "id": "P32",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Component and reference schema DTO spans",
+      "encodingAtHead": "none produced; the fields carry no stated unit",
+      "identifiable": false,
+      "tagged": "no",
+      "emission": "schemaWithoutProducer",
+      "paths": [
+        "crates/verter_protocol/src/schema/component.rs",
+        "crates/verter_protocol/src/schema/refs.rs",
+        "packages/language-shared/src/generated.ts",
+        "packages/component-meta/src/semantic-bridge.ts"
+      ],
+      "symbols": [
+        "PropDto",
+        "EventDto",
+        "SlotDto",
+        "ModelDto",
+        "ExposeDto",
+        "BoundaryIssueDto",
+        "ProvenanceStepDto",
+        "BindingRefDto",
+        "ComponentRefDto"
+      ],
+      "note": "No Rust code outside verter_protocol::schema constructs these types; the generated TS mirror is re-exported by @verter/component-meta.",
+      "intendedContract": {
+        "domain": "CD1",
+        "encoding": "UTF-8 bytes in the tagged range shape (as P18), or the fields are removed",
+        "base": "0-based half-open",
+        "refusal": "InvalidBoundary for inverted or past-end ranges"
+      },
+      "successor": "tagged ranges, or removal of the unproduced fields when generated consumers migrate"
     }
   ],
   "alreadyTagged": [
@@ -979,5 +1222,13 @@
       "encodingAtHead": "PositionEncoding enum + source_space_token; always UTF8_BYTES offsets",
       "note": "No migration of the shape; P18 covers the consumers that ignore the tag."
     }
-  ]
+  ],
+  "completenessAudit": {
+    "method": "Every public struct or wire message in the production boundary crates (verter_protocol src and proto, verter_ffi, verter_napi, verter_wasm, verter_mcp, verter_tsc, verter_audit payloads, verter_lsp custom protocol) with an integer field named span_start/span_end, start/end, offset, line, column or character, plus their generated TS bindings, was matched to a row. Field-name matches that are counters rather than positions (verter_audit footprint counters) are not positions.",
+    "additions": [
+      "P18 gained FfiResolvedTypeDeclaration and FfiResolvedNativeProp (crates/verter_protocol/src/types.rs), the FFI side of the component-meta spans.",
+      "P32 records the verter_protocol::schema DTO spans and their generated TS mirror, which have no Rust producer."
+    ],
+    "result": "Every matched field maps to exactly one row P01-P32 or to the excluded set in rules.excluded."
+  }
 }
