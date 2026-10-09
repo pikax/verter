@@ -225,7 +225,12 @@
       "acceptance": "MDX9-AC2",
       "verterComputesTsAnswer": false,
       "tsgoOps": ["textDocument/publishDiagnostics"],
-      "tsgoLimitation": null
+      "tsgoLimitation": null,
+      "acceptanceGap": {
+        "gap": "MDX9-AC2 checks use-site diagnostic agreement with the oracle but no producer AC discriminates an in-.mdx diagnostic remapped to the wrong authored range; MDX6's acceptance covers hover/definition (MDX6-AC2) and the .tsx importer (MDX6-AC3) only",
+        "discriminatingCase": "a type error inside an .mdx {expression} region is published once by tsgo at its exact authored range; a planted off-by-one projection map fails",
+        "routedTo": "MDX6 (producer) through the controller as a charter amendment adding that case to its acceptance; MDX9-AC2 stays the receiving item until the amendment is ratified"
+      }
     },
     {
       "id": "C21",
@@ -247,7 +252,21 @@
       "acceptance": "MDX5-AC2",
       "verterComputesTsAnswer": false,
       "tsgoOps": ["textDocument/completion", "textDocument/hover", "textDocument/references"],
-      "tsgoLimitation": null
+      "tsgoLimitation": null,
+      "componentCandidateRule": {
+        "rule": "a JSX component completion or auto-import candidate is offered only for an export proven to be a React component (MDX3 use-site surface over RCT3's React facets, resolved through MDXR0's provider chain at MDX1M); a capitalised name is never proof, and a non-React profile or generic MDX still parses and binds without React",
+        "source": "MDX0 charter, Predecessor contracts (MDXR0 matrix rules); MDX1M amendment: no capitalised-name heuristic",
+        "forbidden": [
+          "capitalised-name heuristic",
+          "same-named file match",
+          "candidate from an unproven export"
+        ],
+        "discriminatingCase": "in one fixture, a capitalised export that is not a proven React component (for example `export const Title = 'x'`) is not a component auto-import candidate, while a proven React component export (`export function Note(props) { return <aside>{props.children}</aside> }`) is"
+      },
+      "acceptanceGap": {
+        "gap": "MDX5-AC2 discriminates duplicate results but not the component-candidate rule",
+        "routedTo": "MDX5 (producer) through the controller as a charter amendment adding the discriminatingCase of componentCandidateRule to MDX5-AC2"
+      }
     },
     {
       "id": "C23",
@@ -280,7 +299,13 @@
       "acceptance": "MDX9-AC1",
       "verterComputesTsAnswer": false,
       "tsgoOps": [],
-      "tsgoLimitation": null
+      "tsgoLimitation": null,
+      "attachesUnder": "C35 (MDX1S structural outline)",
+      "acceptanceGap": {
+        "gap": "MDX9-AC1 is a generic coverage join; no MDX5 AC discriminates the export and layout symbols",
+        "discriminatingCase": "the document-symbol tree contains each named ESM export and the layout default export under MDX1S's outline at exact ranges; a planted symbol for an import (not an export) fails",
+        "routedTo": "MDX5 (producer) through the controller as a charter amendment adding that case to its acceptance; MDX9-AC1 stays the receiving item until the amendment is ratified"
+      }
     },
     {
       "id": "C26",
@@ -368,6 +393,106 @@
       "verterComputesTsAnswer": false,
       "tsPluginMdxWork": "none",
       "tsgoOps": []
+    },
+    {
+      "id": "C34",
+      "operation": "native-syntax-diagnostics",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX1S",
+      "acceptance": "MDX1S-AC1",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C35",
+      "operation": "document-outline",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX1S",
+      "acceptance": "MDX1S-AC2",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C36",
+      "operation": "folding-and-selection-ranges",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX1S",
+      "acceptance": "MDX1S-AC3",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C37",
+      "operation": "carrier-semantic-tokens",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX1S",
+      "acceptance": "MDX1S-AC4",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null,
+      "tsRegionTokens": false
+    },
+    {
+      "id": "C38",
+      "operation": "carrier-structure-gating-and-incremental",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX1S",
+      "acceptance": "MDX1S-AC5",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C39",
+      "operation": "carrier-view-formatting",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX8F",
+      "acceptance": "MDX8F-AC1",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C40",
+      "operation": "formatting-preserves-children-mode",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX8F",
+      "acceptance": "MDX8F-AC2",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C41",
+      "operation": "formatting-markdown-verbatim-and-malformed-islands",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX8F",
+      "acceptance": "MDX8F-AC3",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C42",
+      "operation": "markdown-content-formatting",
+      "host": "lsp-enhancement",
+      "profile": "mdx-react",
+      "producer": "MDX8F-MD",
+      "acceptance": "MDX8F-MD-AC1",
+      "verterComputesTsAnswer": false,
+      "tsgoOps": [],
+      "tsgoLimitation": null
     }
   ],
   "exclusions": [
@@ -425,6 +550,11 @@
       "id": "X11",
       "operation": "MDX 1/2 legacy, next major, canary profiles",
       "reason": "decision 1"
+    },
+    {
+      "id": "X12",
+      "operation": "TextMate grammar colouring and VS Code language configuration (MDX1G)",
+      "reason": "a client-side editor contribution, not a product operation: syntax highlighting is never product evidence (productEvidenceRule) and MDX1G-AC6 forbids any cell citing the grammar; MDX1G owns it and accepts it at MDX1G-AC1-AC5, and MDX9 checks it only in its colouring lane"
     }
   ],
   "pluginSyntax": {
@@ -515,9 +645,18 @@
       "producer": "MDX3",
       "acceptance": "MDX3-AC2"
     },
-    "events": { "status": "UNSUPPORTED", "reason": "MDXContent has no events" },
-    "slots": { "status": "UNSUPPORTED", "reason": "MDXContent has no slots" },
-    "expose": { "status": "UNSUPPORTED", "reason": "MDXContent has no imperative handle" },
+    "events": {
+      "status": "UNSUPPORTED",
+      "reason": "MDXContent has no events"
+    },
+    "slots": {
+      "status": "UNSUPPORTED",
+      "reason": "MDXContent has no slots"
+    },
+    "expose": {
+      "status": "UNSUPPORTED",
+      "reason": "MDXContent has no imperative handle"
+    },
     "componentsUsedInside": "keep RCT3's React facets; MDX0 adds none"
   },
   "wireTag": {
@@ -546,5 +685,57 @@
     "rule": "no cell cites a proof node, an installed parser or highlighting as product evidence; a cell is evidenced only by its producer's acceptance"
   },
   "noDenominatorShrinking": true,
-  "notes": "Cells cover the mdx-react profile, the only admitted profile. Receiving acceptance MDX9-AC1 (matrix coverage joins every admitted cell to a passing fixture) carries cells whose producer charter names the operation without a dedicated AC. MDX10-AC1/AC4 hold the terminal: the generated rows equal this matrix and no cell shrinks to unsupported without a ratified replan."
+  "notes": "Cells cover the mdx-react profile, the only admitted profile. Every operation a plan node delivers for MDX has a cell or an exclusion: MDX1S's structure features (C34-C38), MDX8F's carrier formatting views (C39-C41), MDX8F-MD's Markdown content formatting (C42), and MDX1G's client grammar as exclusion X12. A cell carrying acceptanceGap names a receiving AC that does not yet discriminate the operation; the gap is routed to the producer through the controller, and the named receiving AC holds until the amendment is ratified. MDX10-AC1/AC4 hold the terminal: the generated rows equal this matrix and no cell shrinks to unsupported without a ratified replan.",
+  "overridableConstructs": {
+    "rule": "the closed set of Markdown constructs whose rendered element a provider or `components` prop can substitute; MDX2 records a slot only for these names and MDX4 resolves only these; every other lowercase tag is an intrinsic",
+    "source": "mdx-js/mdx 3.1.1 docs/table-of-components.mdx (the components you can overwrite); typed by @types/mdx@2.0.14 MDXComponents",
+    "markdown": [
+      "a",
+      "blockquote",
+      "br",
+      "code",
+      "em",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "hr",
+      "img",
+      "li",
+      "ol",
+      "p",
+      "pre",
+      "strong",
+      "ul"
+    ],
+    "gfm": {
+      "pluginSyntax": "P01",
+      "constructs": ["del", "input", "section", "sup", "table", "tbody", "td", "th", "thead", "tr"]
+    },
+    "layout": {
+      "name": "wrapper",
+      "meaning": "MDXComponents.wrapper; the layout slot, not a Markdown construct"
+    },
+    "consumers": ["MDX2-AC3", "MDX4-AC2", "MDX6-AC1"]
+  },
+  "featureSources": {
+    "rule": "conformance corpora MDX9 draws from; checked-in expected outputs are regenerated from the pinned release, and copied material keeps its licence notice",
+    "sources": [
+      {
+        "id": "S01",
+        "source": "mdxjs.com documentation examples: the docs/ tree of the mdx-js/mdx repository at the 3.1.1 tag",
+        "upstream": "https://github.com/mdx-js/mdx/tree/3.1.1/docs",
+        "licence": "MIT (repository license file and package.json license field at the 3.1.1 tag; Copyright (c) 2017 Compositor and Vercel, Inc.)"
+      },
+      {
+        "id": "S02",
+        "source": "mdx-js/mdx repository test fixtures: packages/mdx/test at the 3.1.1 tag",
+        "upstream": "https://github.com/mdx-js/mdx/tree/3.1.1/packages/mdx/test",
+        "licence": "MIT (same repository licence)"
+      }
+    ],
+    "consumer": "MDX9"
+  }
 }

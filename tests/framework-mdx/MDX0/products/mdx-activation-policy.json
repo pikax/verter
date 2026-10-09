@@ -60,7 +60,11 @@
       "case": "a Preact jsxImportSource (preact)",
       "reason": "A3 fails; the file is generic MDX under another JSX profile and attaches no React profile (MDX1M-AC4, MDX3-AC4)"
     },
-    { "id": "N3", "case": "a Vue jsxImportSource (vue)", "reason": "A3 fails" },
+    {
+      "id": "N3",
+      "case": "a Vue jsxImportSource (vue)",
+      "reason": "A3 fails"
+    },
     {
       "id": "N4",
       "case": "a Markdown-only project (no @mdx-js/mdx resolved)",
@@ -93,7 +97,7 @@
       "verterComputesTsAnswer": false
     },
     "verterLsp": {
-      "role": "MDX-only enhancements: carrier symbols and folding, provider-slot navigation, framework-only rename positions (LSO8 plans), Verter diagnostics",
+      "role": "MDX-only enhancements, each a matrix cell: native syntax diagnostics, outline, folding and selection ranges and carrier tokens (C34-C38, MDX1S), provider-slot navigation and export/layout symbols (C23, C25, MDX5), framework-only rename positions through LSO8 plans (C26-C28, MDX5R), Verter lint diagnostics (C30-C32, MDX8) and formatting (C39-C42, MDX8F, MDX8F-MD)",
       "stepDown": "LSPX11 owns(capability, position): tsgo probe, then COXD2, then the user's per-capability setting; Unknown means Verter owns"
     },
     "typescriptPlugin": {

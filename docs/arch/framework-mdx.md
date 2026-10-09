@@ -18,13 +18,13 @@ and re-owns nothing they assign.
 
 The reviewed contract data lives in `tests/framework-mdx/MDX0/`:
 
-| File                                  | Holds                                                                                                                                                      |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `products/mdx-version-lock.json`      | The exact MDX release, the React profile reference, next-major rule and excluded selectors                                                                 |
-| `products/mdx-activation-policy.json` | The FWA1 activation row (`A1`–`A4`), the never-activates rows (`N1`–`N6`) and the host policy                                                              |
-| `products/mdx-capability-matrix.json` | Cells `C01`–`C33` (operation, host, profile, producer, acceptance), exclusions `X01`–`X11`, plugin syntax, parser decisions, facets, wire tag and baseline |
-| `cases.md`                            | Every planted row and the reason it must fail                                                                                                              |
-| `manifest.json`                       | The product index and the validator's owner                                                                                                                |
+| File                                  | Holds                                                                                                                                                                                               |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `products/mdx-version-lock.json`      | The exact MDX release, the React profile reference, next-major rule and excluded selectors                                                                                                          |
+| `products/mdx-activation-policy.json` | The FWA1 activation row (`A1`–`A4`), the never-activates rows (`N1`–`N6`) and the host policy                                                                                                       |
+| `products/mdx-capability-matrix.json` | Cells `C01`–`C42` (operation, host, profile, producer, acceptance), exclusions `X01`–`X12`, plugin syntax, overridable constructs, feature sources, parser decisions, facets, wire tag and baseline |
+| `cases.md`                            | Every planted row and the reason it must fail                                                                                                                                                       |
+| `manifest.json`                       | The product index and the validator's owner                                                                                                                                                         |
 
 The validator is not part of this decision. MDX1G adds `contract.ts` and
 `mdx-lock.spec.ts` (`MDX1G-ACV`) and implements every row of `cases.md`
@@ -91,9 +91,11 @@ tsgo has replaced tsserver.
 - `.tsx` importers see `.mdx` modules through the companions tsgo opens
   directly — the carrier route `crates/verter_lsp/src/background_drain.rs`
   already uses.
-- The Verter LSP adds MDX-only enhancements: provider-slot navigation, document
-  symbols for exports and the layout, framework-only rename positions through
-  LSO8 plans, and Verter lint diagnostics. Each steps down through LSPX11's
+- The Verter LSP adds MDX-only enhancements: native syntax diagnostics, the
+  outline, folding and selection ranges and carrier tokens (MDX1S), provider-slot
+  navigation and document symbols for exports and the layout (MDX5),
+  framework-only rename positions through LSO8 plans (MDX5R), Verter lint
+  diagnostics (MDX8) and formatting (MDX8F, MDX8F-MD). Each steps down through LSPX11's
   `owns(capability, position)`.
 - `packages/typescript-plugin` gets compatibility only: its existing
   carrier-store reader resolves `.mdx` imports for tsserver users from the MDX6
@@ -171,11 +173,39 @@ receiving acceptance; the products file is authoritative.
 | `C26`–`C28`         | tag-pair rename, typed refusals, step-down                                              | LSP enhancement                   | MDX5R    |
 | `C29`               | style and accessibility facts                                                           | session                           | MDX7     |
 | `C30`–`C32`         | lint diagnostics, code actions, explicit unsupported                                    | LSP enhancement                   | MDX8     |
+| `C34`–`C38`         | syntax diagnostics, outline, folding and selection, carrier tokens, gating/incremental  | LSP enhancement                   | MDX1S    |
+| `C39`–`C41`         | carrier view formatting, children mode kept, Markdown verbatim and malformed islands    | LSP enhancement                   | MDX8F    |
+| `C42`               | Markdown content formatting                                                             | LSP enhancement                   | MDX8F-MD |
 
-Exclusions `X01`–`X11` record build, maps over build output, runtime, plugin
+Exclusions `X01`–`X12` record build, maps over build output, runtime, plugin
 execution, TS-plugin decoration, tsserver forwarding, Markdown structure
 navigation (DATA6), React-only navigation (RCT5), the unsupported facets,
-non-React profiles and unadmitted releases.
+non-React profiles, unadmitted releases, and MDX1G's client grammar and
+language configuration (highlighting is never a product operation).
+
+Component completion (`C22`) offers a component auto-import candidate only for
+an export proven to be a React component; a capitalised name is never proof,
+and generic MDX parses and binds without React.
+
+Three cells name a receiving AC that does not yet discriminate their operation:
+`C20` (in-`.mdx` diagnostics, MDX6), `C22` (the component-candidate rule,
+MDX5) and `C25` (export and layout symbols, MDX5). Each carries an
+`acceptanceGap` with its discriminating case, routed to the producer through the
+controller; the named receiving AC holds until that amendment is ratified.
+
+## Overridable constructs and feature sources
+
+The constructs a provider or `components` prop can substitute are the closed
+set of the pinned table of components (`docs/table-of-components.mdx` at
+`@mdx-js/mdx` `3.1.1`): `a`, `blockquote`, `br`, `code`, `em`, `h1`–`h6`,
+`hr`, `img`, `li`, `ol`, `p`, `pre`, `strong`, `ul`; with GFM (`P01`) also
+`del`, `input`, `section`, `sup`, `table`, `tbody`, `td`, `th`, `thead`,
+`tr`. `wrapper` is the layout slot. MDX2 records slots, MDX4 resolves them and
+MDX6 projects them only for these names.
+
+MDX9's feature sources are the mdxjs.com documentation examples (the `docs/`
+tree of `mdx-js/mdx` at the `3.1.1` tag) and that repository's
+`packages/mdx/test` fixtures, both under the repository's MIT licence.
 
 ## Proof is not support
 
