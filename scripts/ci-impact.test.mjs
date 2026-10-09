@@ -14,11 +14,20 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   CI_INERT_PATHS,
@@ -748,4 +757,61 @@ test("the tracked tree passes the selection audit", () => {
   });
   assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
   assert.match(run.stdout, /tracked files all owned; every filter glob matches/);
+});
+
+test("an unreadable STP1 inventory breaks no importer: every lane runs and the audit names it", async () => {
+  // The sfc-projection filter derives fixtures from the inventory. A change
+  // that breaks or moves it must not crash every tool importing this module,
+  // and must not narrow selection either.
+  const root = mkdtempSync(join(tmpdir(), "ci-impact-inventory-"));
+  try {
+    cpSync(SCRIPT_DIR, join(root, "scripts"), { recursive: true });
+    const inventory = join(
+      root,
+      "tests",
+      "sfc-projection",
+      "STP1",
+      "products",
+      "current-feature-inventory.json",
+    );
+    mkdirSync(dirname(inventory), { recursive: true });
+    writeFileSync(inventory, "{ not json");
+
+    const moved = await import(pathToFileURL(join(root, "scripts", "ci-impact.mjs")).href);
+    const audit = moved.auditSelection(["docs/guide.md"], laneMetadata);
+    assert.equal(audit.config.length, 1);
+    assert.match(audit.config[0], /current-feature-inventory\.json/);
+
+    writeFileSync(join(root, "changed.json"), JSON.stringify(["docs/guide.md"]));
+    writeFileSync(join(root, "metadata.json"), JSON.stringify(laneMetadata));
+    const githubOutput = join(root, "github-output");
+    writeFileSync(githubOutput, "");
+    const run = spawnSync(
+      process.execPath,
+      [
+        join(root, "scripts", "ci-impact.mjs"),
+        "--changed-files",
+        join(root, "changed.json"),
+        "--metadata",
+        join(root, "metadata.json"),
+        "--github-output",
+        githubOutput,
+      ],
+      { encoding: "utf8", cwd: root },
+    );
+    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+    assert.match(
+      run.stdout,
+      /::error title=ci-impact selection config::.*current-feature-inventory\.json/,
+    );
+    const gates = readFileSync(githubOutput, "utf8")
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("gate_"));
+    assert.ok(
+      gates.length === Object.keys(LANE_GATES).length && gates.every((l) => l.endsWith("=true")),
+      gates.join(" "),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

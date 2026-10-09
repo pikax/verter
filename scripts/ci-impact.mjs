@@ -127,17 +127,38 @@ const STP1_INVENTORY = "tests/sfc-projection/STP1/products/current-feature-inven
  * sfc-projection verifier fails when one of them is missing, so a change that
  * moves or deletes one must run it. Read from the inventory itself, so the
  * filter and the coverage it guards cannot drift apart.
+ *
+ * Never throws: the ARH verifiers, the lane self-tests and the specs that
+ * import this module must keep working when a change breaks or moves the
+ * inventory. The problem is recorded instead (`SELECTION_CONFIG_ERRORS`):
+ * the gates then run every lane, and the audit fails naming the file.
  */
-function stp1InventoryPaths() {
-  const inventory = JSON.parse(readFileSync(resolve(REPO_ROOT, STP1_INVENTORY), "utf8"));
-  const paths = [...(inventory.rows ?? []), ...(inventory.benchmarkManifests ?? [])].map(
-    (entry) => entry?.path,
-  );
-  if (paths.length === 0 || !paths.every((path) => typeof path === "string" && path !== "")) {
-    throw new Error(`ci-impact: ${STP1_INVENTORY} must list a path for every selected fixture`);
+function readStp1Inventory(root) {
+  // Literal repository paths only, checked here rather than by `compileGlob`,
+  // whose pattern constant is not initialised yet while this module loads.
+  const literal = (path) =>
+    typeof path === "string" && path !== "" && !/[*!?[\]{}\\]|^\.?\/|\/$|\/\//.test(path);
+  try {
+    const inventory = JSON.parse(readFileSync(resolve(root, STP1_INVENTORY), "utf8"));
+    const paths = [...(inventory?.rows ?? []), ...(inventory?.benchmarkManifests ?? [])].map(
+      (entry) => entry?.path,
+    );
+    if (paths.length === 0 || !paths.every(literal)) {
+      throw new Error("expected a literal repository path for every selected fixture");
+    }
+    return { paths: [...new Set(paths)].sort(), error: null };
+  } catch (error) {
+    return { paths: [], error: `${STP1_INVENTORY}: ${error.message}` };
   }
-  return [...new Set(paths)].sort();
 }
+
+const STP1 = readStp1Inventory(REPO_ROOT);
+
+/**
+ * Problems deriving the selection from repository data. Each one means a
+ * filter may be missing paths, so the gates run every lane and the audit fails.
+ */
+const SELECTION_CONFIG_ERRORS = Object.freeze(STP1.error ? [STP1.error] : []);
 
 /**
  * The non-crate inputs of each lane: the path half of selection.
@@ -534,7 +555,7 @@ export const PATH_FILTERS = Object.freeze({
     "packages/framework-conformance-harness/fixtures/svelte/**",
     "packages/svelte-jsx/**",
     "packages/playground/package.json",
-    ...stp1InventoryPaths(),
+    ...STP1.paths,
     ".npmrc",
     ".nvmrc",
     "package.json",
@@ -966,7 +987,8 @@ export function composeLaneGates(filterHits, impact, gates = LANE_GATES) {
  * tracked files no crate, hatch, path filter or inert glob owns — every change
  * to one would run every lane. `dead`: globs that match no tracked file — a
  * lane that silently stopped selecting the file it was written for (a moved
- * script, a renamed test).
+ * script, a renamed test). `config`: repository data a filter is derived from
+ * could not be read (`SELECTION_CONFIG_ERRORS`).
  *
  * @param {string[]} trackedFiles `git ls-files`, forward-slash paths
  * @param {object} workspaceMetadata `cargo metadata` (only the members are read)
@@ -992,7 +1014,13 @@ export function auditSelection(trackedFiles, workspaceMetadata) {
     for (const glob of [...include, ...exclude]) if (!anyMatch(glob)) dead.push(`${name}: ${glob}`);
   }
   for (const glob of CI_INERT_PATHS) if (!anyMatch(glob)) dead.push(`CI_INERT_PATHS: ${glob}`);
-  return { unowned, dead };
+  return { unowned, dead, config: [...SELECTION_CONFIG_ERRORS] };
+}
+
+function reportConfigErrors(consequence) {
+  for (const error of SELECTION_CONFIG_ERRORS) {
+    process.stdout.write(`::error title=ci-impact selection config::${error} — ${consequence}\n`);
+  }
 }
 
 function runAudit(cwd) {
@@ -1007,7 +1035,8 @@ function runAudit(cwd) {
       stdio: ["ignore", "pipe", "inherit"],
     }).toString("utf8"),
   );
-  const { unowned, dead } = auditSelection(tracked, workspace);
+  const { unowned, dead, config } = auditSelection(tracked, workspace);
+  reportConfigErrors("fix it, or point the classifier at where that data lives now");
   for (const file of unowned) {
     process.stdout.write(
       `::error title=ci-impact unowned path::${file} — give it an owner in PATH_FILTERS (the lanes that read it) or, when no ci.yml job reads it, a CI_INERT_PATHS entry\n`,
@@ -1018,7 +1047,7 @@ function runAudit(cwd) {
       `::error title=ci-impact dead glob::${entry} matches no tracked file — point it at what the lane reads now, or remove it\n`,
     );
   }
-  if (unowned.length === 0 && dead.length === 0) {
+  if (unowned.length === 0 && dead.length === 0 && config.length === 0) {
     process.stdout.write(
       `ci-impact audit: ${tracked.length} tracked files all owned; every filter glob matches\n`,
     );
@@ -1167,6 +1196,25 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
       directCrates: [],
       impactedCrates: [],
       ownedNonRust: [],
+      lanes: Object.fromEntries(Object.keys(LANE_ROOTS).map((lane) => [lane, true])),
+    };
+  }
+  if (SELECTION_CONFIG_ERRORS.length > 0) {
+    // A filter is derived from data that could not be read, so it may be
+    // missing paths: run everything rather than narrow on a partial filter.
+    reportConfigErrors("every lane runs until it is fixed");
+    impact = {
+      ...impact,
+      full: true,
+      everything: true,
+      fullReasons: [
+        ...impact.fullReasons,
+        ...SELECTION_CONFIG_ERRORS.map((reason) => ({
+          file: STP1_INVENTORY,
+          id: "selection-config",
+          reason,
+        })),
+      ],
       lanes: Object.fromEntries(Object.keys(LANE_ROOTS).map((lane) => [lane, true])),
     };
   }
