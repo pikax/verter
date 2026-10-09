@@ -241,7 +241,7 @@ fn emit_dataset(format: &str) {
             }
             println!("\n── top sites by calls ──");
             let mut by_calls = rows.clone();
-            by_calls.sort_by(|a, b| b.calls.cmp(&a.calls));
+            by_calls.sort_by_key(|row| std::cmp::Reverse(row.calls));
             println!("{:<44}{:>12}{:>14}{:>12}", "site", "calls", "amount", "ms");
             for row in by_calls.iter().take(25) {
                 println!(
