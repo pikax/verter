@@ -222,12 +222,14 @@ fn a_deep_extends_chain_answers_the_inherited_read() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A chain of `depth` classes over a base declaring `a` plus `base_extra`,
-/// read at its far end.
+/// A chain of `depth` classes read at its far end. `C0` declares `a`;
+/// `C1`, which the walk passes through before reaching `C0`, declares
+/// `base_extra`.
 fn deep_chain(depth: usize, base_extra: &str) -> String {
-    let mut source = format!("class C0 {{ a = 'deep' as const;\n{base_extra}}}\n");
+    let mut source = String::from("class C0 { a = 'deep' as const }\n");
     for i in 1..=depth {
-        source.push_str(&format!("class C{i} extends C{} {{}}\n", i - 1));
+        let body = if i == 1 { base_extra } else { "" };
+        source.push_str(&format!("class C{i} extends C{} {{\n{body}}}\n", i - 1));
     }
     source.push_str(&format!("function r(x: C{depth}) {{ return x.a }}\n"));
     source
@@ -235,7 +237,7 @@ fn deep_chain(depth: usize, base_extra: &str) -> String {
 
 /// However deep the `extends` chain, the inherited read follows only the
 /// demanded name to the declaring base: past three hundred classes the read
-/// still answers, and forty unrelated members on the far base add no work —
+/// still answers, and forty unrelated members on a class the walk passes through add no work —
 /// the chain is never escaped through a whole-class read. At an ordinary
 /// depth the same holds.
 #[test]

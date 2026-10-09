@@ -3127,10 +3127,12 @@ fn budget_tripping_content_trips_when_lowered() {
 
 /// The demand slice is the ONLY lowered content: an UNREAD binding's
 /// initializer is outside every selected slot, so its content never
-/// lowers — a leaf-lowering budget edge inside it cannot exist, and the
+/// lowers — a work-budget edge inside it cannot exist, and the
 /// whole-return evaluation stays complete. Mutation recipe: lowering the
-/// whole body (a pre-slice whole-function evaluator) trips the leaf
-/// budget on the unread initializer and degrades the function to a miss.
+/// whole body (a pre-slice whole-function evaluator) charges the unread
+/// initializer against the connected-work rail in `flow_return.rs` and the
+/// `SEMANTIC_INFERENCE_TRAVERSAL_BUDGET` traversal cap, degrading the
+/// function to a miss.
 #[test]
 fn flow_return_unread_binding_content_never_lowers() {
     let host = make_host();

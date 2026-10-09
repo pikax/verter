@@ -1652,10 +1652,9 @@ fn nested_arrow_expression(depth: usize) -> String {
     expression
 }
 
-/// Initializers nested a thousand levels deep, which the inference visits
-/// within its work budget and which a native level per nesting level would
+/// Initializers nested a thousand levels deep, which a native level per nesting level would
 /// overflow a 1 MiB thread at: the shallow inference infers every nest from
-/// its explicit stacks, bounded only by its work. TypeScript 7.0.2 infers
+/// its explicit stacks. TypeScript 7.0.2 infers
 /// the same module-level nests (72 levels of objects, arrays and arrows, and
 /// a 70-term `&&` chain) in all four strictNullChecks × noImplicitAny
 /// settings.

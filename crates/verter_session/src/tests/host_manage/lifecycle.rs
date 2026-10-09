@@ -1212,8 +1212,20 @@ defineProps<ReturnType<typeof make>>()
         "the name indexes held graph readers read stay counted"
     );
 
+    // Scheduler workers finishing the demand drop their last handles on
+    // their own threads, so a drain is awaited, not assumed.
+    let drained = |ready: &dyn Fn(&HostRetentionSnapshot) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let snapshot = host.retention_snapshot();
+            if ready(&snapshot) || std::time::Instant::now() >= deadline {
+                return snapshot;
+            }
+            std::thread::yield_now();
+        }
+    };
     drop(index);
-    let index_released = host.retention_snapshot();
+    let index_released = drained(&|snapshot| snapshot.capture_summary_files == 0);
     assert_eq!(
         index_released.capture_summaries,
         verter_session_query::function_program::CaptureSummaryCounts::default(),
@@ -1223,7 +1235,7 @@ defineProps<ReturnType<typeof make>>()
     assert_eq!(index_released.skeleton_name_indexes, read);
     drop(graphs);
     assert_eq!(
-        host.retention_snapshot().skeleton_name_indexes,
+        drained(&|snapshot| snapshot.skeleton_name_indexes.names == 0).skeleton_name_indexes,
         verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy::default(),
         "releasing the last graph reader drains its name indexes"
     );
