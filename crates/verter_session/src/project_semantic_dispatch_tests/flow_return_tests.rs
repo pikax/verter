@@ -7096,51 +7096,37 @@ fn assert_control_callee_narrows_warm(
     );
 }
 
-/// Assert that a class-evaluation-time WRITE to a frame binding never
-/// seals the unnarrowed superset warm: the join keeps BOTH arms of the
-/// unnarrowed `string | number` parameter, the demand carries the typed
-/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// Assert that a class-evaluation-time effect applied in the enclosing
+/// frame: the return's read is exactly `expected`, clean, and admitted warm.
 #[track_caller]
-fn assert_class_evaluation_write_gaps_unwarmed(
+fn assert_class_evaluation_applies_warm(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
+    expected: verter_type_expr::PrimitiveName,
 ) {
     let key = whole_return_key(dispatch, canonical, name);
     let result = flow_result_value(dispatch, key.clone());
     let expr = host
         .project_node_to_type_expr_for_test(result.return_type())
         .expect("return node must project to TypeExpr");
-    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
-        panic!("{name}: the join is a union, got {expr:?}");
-    };
-    for primitive in [
-        verter_type_expr::PrimitiveName::String,
-        verter_type_expr::PrimitiveName::Number,
-    ] {
-        assert!(
-            arms.iter()
-                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
-            "{name}: the unapplied class-evaluation write is never modelled as a narrow — \
-             the {primitive:?} arm survives, got {expr:?}"
-        );
-    }
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::Primitive(expected),
+        "{name}: the class-evaluation effect applies to the read"
+    );
     assert_eq!(
         result.degradation(),
-        Some(
-            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
-                verter_session_query::flow::policy::FlowGap::GuardNarrowing
-            )
-        ),
-        "{name}: the unmodelled write degrades to the typed guard-narrowing gap"
+        None,
+        "{name}: the applied effect is complete"
     );
     assert_eq!(
         dispatch
             .graph()
             .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
-        0,
-        "{name}: an unmodelled class-evaluation write never warms"
+        1,
+        "{name}: the complete result warms"
     );
 }
 
@@ -8794,23 +8780,19 @@ fn assert_never_entered_call_keeps_the_read(
 /// A class DECLARATION statement is not transparent: its static block
 /// runs at class evaluation — in THIS frame, at the statement — so the
 /// assertion in `class C { static { assertString(x); } }` narrows `x` to
-/// `string` for every read that follows in the checker. Treating the
-/// statement as a no-op minted neither a call obligation (the skeleton
-/// mints none for a class body) nor the typed gap: the unnarrowed
-/// `string | number` superset sealed complete and warm. The statement
-/// takes the same class discipline a class EXPRESSION leaf takes: the
-/// unprovable assertion keeps the return's read of `x` unnarrowed, the
-/// demand carries the typed `GuardNarrowing` gap, and the family slot
-/// holds zero candidates.
+/// `string` for every read that follows in the checker (TypeScript 7.0.2,
+/// `--strict` and without `strictNullChecks`). The static block lowers in
+/// the frame, so its entered assertion narrows the return's read and the
+/// evidenced call publishes complete and warm.
 #[test]
-fn class_declaration_static_block_assertion_never_seals_unnarrowed() {
+fn class_declaration_static_block_assertion_narrows_warm() {
     const CANONICAL: &str = "/ws/class-decl-static-block/main.ts";
     const FIXTURE: &str = r#"
 export {};
 
 function assertString(x: unknown): asserts x is string {}
 
-function f(x: string | number) {
+function f(x: string | number | boolean) {
   class C { static { assertString(x); } }
   return x;
 }
@@ -8818,7 +8800,13 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_class_evaluation_applies_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            verter_type_expr::PrimitiveName::String,
+        );
     });
 }
 
@@ -8899,16 +8887,12 @@ function f(x: string | number) {
 
 /// A class-evaluation position can WRITE a frame binding, not only call:
 /// the static block of `class C { static { x = "s"; } }` runs at class
-/// evaluation and retypes `x` to `"s"` in the checker for every read that
-/// follows. The flow skeleton skips the whole class subtree, so the write
-/// never entered the slice's effect ledger and the unapplied-write gate
-/// never saw it — the candidate minted a COMPLETE warm result with `x` at
-/// its pre-class `string | number`. The class scan flags the enclosing
-/// statement's typed gap instead: the return's read of `x` keeps the
-/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap,
-/// and the family slot holds zero candidates.
+/// evaluation and retypes `x` in the checker for every read that follows
+/// (TypeScript 7.0.2: `f` returns `string`). The static block lowers in
+/// the frame and its write applies there, once: the read is `string`,
+/// complete and warm.
 #[test]
-fn class_declaration_static_block_write_never_seals_unnarrowed() {
+fn class_declaration_static_block_write_applies_warm() {
     const CANONICAL: &str = "/ws/class-decl-static-block-write/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8921,19 +8905,24 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_class_evaluation_applies_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            verter_type_expr::PrimitiveName::String,
+        );
     });
 }
 
 /// The class's `super_class` heritage expression evaluates in the
 /// ENCLOSING frame at the class declaration, so the sequence write in
 /// `class C extends (x = "s", B) {}` retypes `x` in the checker exactly
-/// as a static block write does — and is exactly as invisible to the
-/// slice's effect ledger. The same fail-closed discipline applies: the
-/// return's read of `x` keeps the unnarrowed join, the demand carries the
-/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+/// as a static block write does (TypeScript 7.0.2: `f` returns `string`).
+/// The heritage's effects apply at the statement: the read is `string`,
+/// complete and warm.
 #[test]
-fn class_declaration_heritage_sequence_write_never_seals_unnarrowed() {
+fn class_declaration_heritage_sequence_write_applies_warm() {
     const CANONICAL: &str = "/ws/class-decl-heritage-write/main.ts";
     const FIXTURE: &str = r#"
 export {};
@@ -8947,7 +8936,13 @@ function f(x: string | number) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
-        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+        assert_class_evaluation_applies_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            verter_type_expr::PrimitiveName::String,
+        );
     });
 }
 
@@ -9103,10 +9098,10 @@ function f(x: string | number) {
 }
 
 /// A `for … of` whose left side is an assignment target WRITES the binding
-/// once per iteration — inside a class static block the write runs at
-/// class evaluation and retypes `x` in the checker, while the default walk
-/// visited the target as a plain read and the skeleton never entered the
-/// class subtree. The loop-head target takes the same whole-binding write
+/// once per iteration — inside a class expression's static block the write
+/// runs at class evaluation and retypes `x` in the checker, while the
+/// default walk visited the target as a plain read and the skeleton never
+/// entered the class subtree. The loop-head target takes the same whole-binding write
 /// discipline: the return's read of `x` keeps the unnarrowed join, the
 /// demand carries the typed `GuardNarrowing` gap, and the family slot
 /// holds zero candidates.
@@ -9119,7 +9114,7 @@ export {};
 declare const xs: string[];
 
 function f(x: string | number) {
-  class C { static { for (x of xs) {} } }
+  const C = class { static { for (x of xs) {} } };
   return { x };
 }
 "#;
@@ -11859,7 +11854,7 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
 /// admits no unproven one as exact, so a publication boundary that
 /// honours the verdict can only keep a correct answer clean when its
 /// proof closes.
-fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<String> {
+pub(super) fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<String> {
     const FILE: &str = "/ws/proof.ts";
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let _ = host.upsert(UpsertRequest {
@@ -12013,21 +12008,18 @@ fn a_parameter_default_callable_closes_its_proof() {
 /// flows through it inline: `x = 1` in `class C { static { x = 1; } }`
 /// reaches every later read of `x` in the frame. TypeScript 7.0.2, all four
 /// settings: `classStaticBlockAssigns` is `(x: string | number) =>
-/// boolean` (the assignment declines the predicate).
-///
-/// What the lane gives: `boolean`, the checker's answer, with the verdict
-/// partial (`DegradedValue`): the class declaration's unmodeled write
-/// lowers to the statement gap `FlowGap::GuardNarrowing`, which the value
-/// then carries. Proving it takes the static block's statements lowered
-/// in the frame, which the skeleton does not walk (a static block keeps
-/// its own scope and no index entry serves it).
+/// boolean` (the assignment declines the predicate). The static block's
+/// statements lower in the frame, so the proof closes.
 const STATIC_BLOCK_WRITES: &str = r#"
 export function classStaticBlockAssigns(x: string | number) { class C { static { x = 1; } } return typeof x === "string"; }
 "#;
 
 #[test]
-#[ignore = "a class static block's write is flowed in its frame"]
 fn a_class_static_block_write_is_flowed_in_its_frame() {
-    let unproven = flow_reads_without_proof(STATIC_BLOCK_WRITES, &["classStaticBlockAssigns"]);
-    assert!(unproven.is_empty(), "{}", unproven.join("\n"));
+    let mut failures = flow_reads_without_proof(STATIC_BLOCK_WRITES, &["classStaticBlockAssigns"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(STATIC_BLOCK_WRITES)
+            .returns(&[("classStaticBlockAssigns", "boolean")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
