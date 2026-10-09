@@ -83,6 +83,10 @@ pub struct Job {
     pub lib: String,
     /// How the library reaches the host.
     pub lib_mode: LibMode,
+    /// The program's other root files (relative to `dir`), opened before the
+    /// scenario in this order: the companions of a multi-file scenario.
+    #[serde(default)]
+    pub files: Vec<String>,
     /// The scenario module (relative to `dir`).
     pub scenario: String,
     /// The alias every scenario declares for the init request.
@@ -373,14 +377,19 @@ fn configure_project(
             .map_err(|err| JobError(format!("register the library: {err}")))?,
         LibMode::RootFile => {
             let lib_id = format!("{PROJECT_ROOT}/{lib}");
-            let language = verter_session::LanguageRegistry::global()
-                .classify_static(&lib_id)
-                .static_resolution();
+            let language = static_language(&lib_id);
             upsert(host, lib_id, &lib_text, language)
                 .map_err(|err| JobError(format!("upsert the library: {err}")))?;
         }
     }
     Ok(())
+}
+
+/// The language a file's extension selects (`.d.ts`, `.ts`, …).
+fn static_language(canonical_id: &str) -> FileLanguage {
+    verter_session::LanguageRegistry::global()
+        .classify_static(canonical_id)
+        .static_resolution()
 }
 
 /// Upsert one file's text into the host.
@@ -416,6 +425,13 @@ fn open_project(
         workspace,
         host,
     )?;
+    for file in &job.files {
+        let text = read(&job.dir, file)?;
+        let id = format!("{PROJECT_ROOT}/{file}");
+        let language = static_language(&id);
+        upsert(host, id, &text, language)
+            .map_err(|err| JobError(format!("upsert {file}: {err}")))?;
+    }
     let scenario = read(&job.dir, &job.scenario)?;
     let scenario_id = format!("{PROJECT_ROOT}/{}", job.scenario);
     upsert(

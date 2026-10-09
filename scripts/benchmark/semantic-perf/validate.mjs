@@ -50,7 +50,10 @@ import {
 import {
   allScenarios,
   cliSource,
+  companionFiles,
+  companionInputProblems,
   SCENARIO_TIERS,
+  scenarioSha256,
   SETTINGS,
   TIERS,
   tsconfigText,
@@ -245,14 +248,15 @@ export function validateRun(
     }
     if (cell.inputs?.["scenario.ts"] !== sha256Text(scenario.source))
       fail(`${key}: scenario.ts is not the catalog's source`);
-    if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting)))
+    for (const p of companionInputProblems(cell.inputs, scenario)) fail(`${key}: ${p}`);
+    if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting, scenario)))
       fail(`${key}: tsconfig.json is not the catalog's`);
     if (cell.inputs?.["cli/scenario.ts"] !== sha256Text(cliSource(scenario)))
       fail(`${key}: cli/scenario.ts is not the catalog's source plus the probe's use`);
     const measured = expected.scenarios?.[cell.id];
     if (!measured) warnings.push(`${key}: no measured reference`);
     else {
-      if (measured.sourceSha256 !== sha256Text(scenario.source))
+      if (measured.sourceSha256 !== scenarioSha256(scenario))
         fail(`${key}: the measured reference is stale (measured on a different source)`);
       if (expected.method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"])
         fail(`${key}: the measured reference used a different library`);
@@ -269,7 +273,7 @@ export function validateRun(
         expected.method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`
       )
         fail(`${key}: the reference was not measured by a verified tsc ${TYPESCRIPT_VERSION}`);
-      if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting)))
+      if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting, scenario)))
         fail(`${key}: the reference cell was measured with another tsconfig`);
       if (receipt?.sourceSha256 !== sha256Text(scenario.source + MEASURING_SUFFIX))
         fail(`${key}: the reference cell was measured on another source`);
@@ -473,8 +477,12 @@ export function validateRun(
         "/",
       );
       const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase().replace(/\\/g, "/"));
-      const want = [`${dir}/lib.bench.d.ts`, `${dir}/scenario.ts`].map((f) => f.toLowerCase());
-      if (roots.length !== 2 || want.some((w) => !roots.includes(w)))
+      const want = [
+        "lib.bench.d.ts",
+        ...companionFiles(byId.get(inv.scenario)),
+        "scenario.ts",
+      ].map((f) => `${dir}/${f}`.toLowerCase());
+      if (roots.length !== want.length || want.some((w) => !roots.includes(w)))
         fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
     }
     const answer = probeAnswer(inv, runLimits(opts));

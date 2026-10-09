@@ -40,6 +40,7 @@ import {
 import { canonicalDigest } from "../canonical.mjs";
 import { MEASURING_SUFFIX } from "../measure-expected.mjs";
 import { sha256Text } from "../provenance.mjs";
+import { companionFiles, companionInputProblems, writeCompanions } from "../scenarios.mjs";
 import { probeDigest, referenceFor } from "../summary.mjs";
 import { supervisorRecordProblems } from "../supervisor.mjs";
 import { classifyOssAnswer, OSS_CLASSES, readOssAnswer, tscMeasureStatus } from "./answers.mjs";
@@ -98,12 +99,14 @@ export function materializeMeasure(cellDir, scenario, tsconfigText, libText) {
   mkdirSync(dir, { recursive: true });
   const source = measureSource(scenario);
   writeFileSync(join(dir, "lib.bench.d.ts"), libText);
+  const companions = writeCompanions(dir, scenario);
   writeFileSync(join(dir, "scenario.ts"), source);
   writeFileSync(join(dir, "tsconfig.json"), tsconfigText);
   return {
     dir,
     inputs: {
       "lib.bench.d.ts": sha256Text(libText),
+      ...companions,
       "scenario.ts": sha256Text(source),
       "tsconfig.json": sha256Text(tsconfigText),
     },
@@ -111,13 +114,14 @@ export function materializeMeasure(cellDir, scenario, tsconfigText, libText) {
 }
 
 /** The Verter probe's job on one cell's measuring program: the demand only, no warm repeat. */
-export function verterJob(measureDir, libMode) {
+export function verterJob(measureDir, libMode, scenario = null) {
   return {
     schema: 1,
     dir: measureDir,
     tsconfig: "tsconfig.json",
     lib: "lib.bench.d.ts",
     libMode: libMode ?? "root-file",
+    files: companionFiles(scenario),
     scenario: "scenario.ts",
     initAlias: "__BenchInit",
     probes: ["__Probe"],
@@ -265,7 +269,7 @@ export async function runOss(ctx) {
     const m = materializeMeasure(
       cell.dir,
       cell.scenario,
-      ctx.tsconfigText(cell.setting),
+      ctx.tsconfigText(cell.setting, cell.scenario),
       ctx.libText,
     );
     cellMeta[key] = {
@@ -294,7 +298,7 @@ export async function runOss(ctx) {
     if (step.arm === VERTER_ARM)
       writeFileSync(
         `${runBase}.job.json`,
-        JSON.stringify(verterJob(meta.dir, opts.libMode), null, 2),
+        JSON.stringify(verterJob(meta.dir, opts.libMode, cell.scenario), null, 2),
       );
     const supOut = `${runBase}.sup.json`;
     const spawnedAtMs = Date.now();
@@ -617,6 +621,7 @@ export function validateOss(oss, expected, scenarios, options, schedule) {
     }
     if (cell.inputs?.["scenario.ts"] !== sha256Text(measureSource(scenario)))
       fail(`${key}: the measuring program is not the catalog's source plus the measuring suffix`);
+    for (const p of companionInputProblems(cell.inputs, scenario)) fail(`${key}: ${p}`);
     const receipt = expected.scenarios?.[cell.id]?.settings?.[cell.setting]?.receipt;
     if (receipt && receipt.sourceSha256 !== cell.inputs?.["scenario.ts"])
       fail(`${key}: the measuring program is not the one the reference was measured on`);

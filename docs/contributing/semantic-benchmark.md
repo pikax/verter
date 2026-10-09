@@ -189,9 +189,27 @@ No `cfg(test)` instrumentation is compiled into either probe binary.
 Why each probe demands the same work of both tools:
 
 1. **Same source.** One `scenario.ts` per (scenario, setting) is written
-   once; both arms read that file. The validator checks the tsc program's
-   root files are exactly that directory's library and scenario, and that
-   every input is the catalog's.
+   once; both arms read that file. A `program-*` scenario also has
+   companion files (other modules, scripts and `.d.ts` files of its
+   program), written beside it and listed as root files in its tsconfig,
+   between the library and the scenario: the Verter probe opens each one,
+   and tsc reads them as the project's roots. They test what a demand-driven
+   engine must still know about the whole program — global and module
+   augmentation and global interface merging from files the scenario never
+   imports — and a large type spread across modules. The validator checks
+   the tsc program's root files are exactly that directory's library,
+   companions and scenario, and that every input is the catalog's.
+
+   The `adv-*` scenarios (family `adversarial`; `--only adv-` runs them
+   alone) are built against a demand-driven engine: answers that need a
+   large fraction of the program (star-export barrels, globals and module
+   augmentations merged from thousands of files, an overload set merged
+   across files, return types inferred through a chain of modules),
+   full expansion of wide or deep types, heavy generic and contextual
+   inference (mixins, builders, `pipe`, `ThisType`), recursive route
+   extraction and control-flow narrowing. Each is one tsc 7.0.2 answers
+   cleanly (no diagnostics) and quickly, so Verter being slower, partial or
+   wrong there is a finding about Verter, not about the scenario.
 2. **Same library.** Both read `lib.bench.d.ts`, a copy of TypeScript 7.0.2's
    own declarations for the members the scenarios read. tsc reads it as a
    root file under `noLib`, so no other library is loaded; Verter upserts it
@@ -473,9 +491,9 @@ every arm, the same validation).
 
 | Tier | Scenarios | Arms | Deadline | Indicative duration (one developer machine, Ryzen 9 7950X on Windows; a planning figure, not a measurement) |
 |---|---|---|---|---|
-| `quick` (default) | one representative normal size per scenario series (21), and the three session workloads | Verter, tsc API, and the labelled observability-on, observe-build and counting Verter arms | 60 s | not yet measured with the session workloads and the observe arm (62 s and 336 invocations before them) |
-| `standard` | + the other normal sizes and the sizes at tsc's own limits (48) — the baseline | + `tsc -p` in both thread modes | 120 s | 564 s (1152 invocations) |
-| `stress` (opt-in) | + Verter's limit and pathological sizes (55): tsc exhausting 8 GiB, multi-second Verter requests | all seven | 600 s | hours |
+| `quick` (default) | one representative normal size per scenario series (43), and the three session workloads | Verter, tsc API, and the labelled observability-on, observe-build and counting Verter arms | 60 s | not yet measured with the session workloads and the observe arm (62 s and 336 invocations before them) |
+| `standard` | + the other normal sizes and the sizes at tsc's own limits (100) — the baseline | + `tsc -p` in both thread modes | 120 s | 564 s (1152 invocations) |
+| `stress` (opt-in) | + Verter's limit and pathological sizes (113): tsc exhausting 8 GiB, multi-second Verter requests | all seven | 600 s | hours |
 
 Every tier runs 1 warmup and 3 measured invocations per (scenario, arm) and
 3 warm repeats; any option given explicitly (`--repeat`, `--arms`,

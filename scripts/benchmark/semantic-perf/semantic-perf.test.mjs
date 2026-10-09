@@ -34,8 +34,10 @@ import {
 import {
   allScenarios,
   cliSource,
+  companionFiles,
   moduleText,
   scenariosForTier,
+  scenarioSha256,
   SETTINGS,
   TIERS,
   tsconfigText,
@@ -1659,16 +1661,24 @@ test("the real quick catalog and invocation manifest validate and reject a missi
       dir,
       inputs: {
         ...INPUTS,
+        ...Object.fromEntries(
+          Object.entries(s.files ?? {}).map(([name, text]) => [name, sha256Text(text)]),
+        ),
         "scenario.ts": sha256Text(s.source),
+        "tsconfig.json": sha256Text(tsconfigText(SETTINGS[0], s)),
         "cli/scenario.ts": sha256Text(cliSource(s)),
       },
     };
     expected.scenarios[s.id] = {
-      sourceSha256: sha256Text(s.source),
+      sourceSha256: scenarioSha256(s),
       settings: {
         strict: {
           ...RAW_ONE,
-          receipt: { ...RAW_ONE.receipt, sourceSha256: sha256Text(s.source + MEASURING_SUFFIX) },
+          receipt: {
+            ...RAW_ONE.receipt,
+            tsconfigSha256: sha256Text(tsconfigText(SETTINGS[0], s)),
+            sourceSha256: sha256Text(s.source + MEASURING_SUFFIX),
+          },
         },
       },
     };
@@ -1684,9 +1694,10 @@ test("the real quick catalog and invocation manifest validate and reject a missi
       : [];
     if (p.arm === "tsc-api")
       probe.rootFiles = [
-        join(run.meta.scenarios[p.key].dir, "lib.bench.d.ts"),
-        join(run.meta.scenarios[p.key].dir, "scenario.ts"),
-      ];
+        "lib.bench.d.ts",
+        ...companionFiles(scenarios.find((s) => s.id === scenario)),
+        "scenario.ts",
+      ].map((f) => join(run.meta.scenarios[p.key].dir, f));
     const fixture = syntheticRun().invocations.find(
       (i) => i.arm === (p.arm === "tsc-api" ? "tsc-api" : "verter"),
     );
@@ -1743,6 +1754,26 @@ test("the real quick catalog and invocation manifest validate and reject a missi
     if (Array.isArray(inv.probe?.rootFiles))
       inv.probe.rootFiles = inv.probe.rootFiles.map((f) => f.replace(/\//g, "\\"));
   assert.deepEqual(validateRun(run, expected, scenarios).failures, []);
+  // A program scenario's companion files are part of its cell: another
+  // companion, or a tsc program without one, is not the catalog's program.
+  const program = scenarios.find((s) => companionFiles(s).length > 1);
+  const programKey = `${program.id}/strict`;
+  const [companion] = companionFiles(program);
+  const altered = structuredClone(run);
+  altered.meta.scenarios[programKey].inputs[companion] = sha256Text("changed");
+  assert.ok(
+    validateRun(altered, expected, scenarios).failures.some(
+      (f) => f === `${programKey}: ${companion} is not the catalog's companion file`,
+    ),
+  );
+  const unrooted = structuredClone(run);
+  const tscInv = unrooted.invocations.find((i) => i.scenario === program.id && i.arm === "tsc-api");
+  tscInv.probe.rootFiles = tscInv.probe.rootFiles.filter((f) => !f.endsWith(companion));
+  assert.ok(
+    validateRun(unrooted, expected, scenarios).failures.some((f) =>
+      /tsc program roots .* are not the scenario's/.test(f),
+    ),
+  );
   delete run.meta.scenarios[keys[0]];
   assert.ok(
     validateRun(run, expected, scenarios).failures.some((f) => /recorded scenarios/.test(f)),

@@ -40,7 +40,13 @@ import { fileURLToPath } from "node:url";
 
 import { resolveTypeScript, sha256Text, TYPESCRIPT_VERSION } from "./provenance.mjs";
 import { interpretMeasurement } from "./reference.mjs";
-import { SETTINGS, selectScenarios, tsconfigText } from "./scenarios.mjs";
+import {
+  scenarioSha256,
+  SETTINGS,
+  selectScenarios,
+  tsconfigText,
+  writeCompanions,
+} from "./scenarios.mjs";
 import { resolveSupervisor, runSupervised } from "./supervisor.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -185,7 +191,7 @@ async function main() {
     writeFileSync(EXPECTED, JSON.stringify(out, null, 1) + "\n");
   };
   for (const scenario of selectScenarios(only)) {
-    const entry = { sourceSha256: sha256Text(scenario.source), settings: {} };
+    const entry = { sourceSha256: scenarioSha256(scenario), settings: {} };
     if (resume && out.scenarios[scenario.id]?.sourceSha256 === entry.sourceSha256) {
       console.log(`${scenario.id}: kept (already measured on this source by this method)`);
       continue;
@@ -195,8 +201,9 @@ async function main() {
       mkdirSync(dir, { recursive: true });
       const source = scenario.source + MEASURING_SUFFIX;
       writeFileSync(join(dir, "lib.bench.d.ts"), lib);
+      writeCompanions(dir, scenario);
       writeFileSync(join(dir, "scenario.ts"), source);
-      writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting));
+      writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting, scenario));
       const tscArgs = ["-p", join(dir, "tsconfig.json")];
       let exit;
       let stdout = "";
@@ -242,7 +249,7 @@ async function main() {
         exit,
         stdoutSha256: sha256Text(stdout),
         stdoutBytes: stdout.length,
-        tsconfigSha256: sha256Text(tsconfigText(setting)),
+        tsconfigSha256: sha256Text(tsconfigText(setting, scenario)),
         sourceSha256: sha256Text(source),
         method: methodKey,
         termination,

@@ -1,7 +1,10 @@
 // The scenario catalog of the equivalent-demand semantic benchmark.
 //
-// A scenario is ONE TypeScript module that both arms read byte for byte. It
-// declares two type aliases the harness demands, in this order:
+// A scenario is ONE TypeScript module (`scenario.ts`) that both arms read
+// byte for byte, and, for the program family, the companion files of its
+// program (`files`: name to text), which every arm reads as root files of the
+// same project. The module declares two type aliases the harness demands, in
+// this order:
 //
 //   __BenchInit  a trivial alias (`0`); its request absorbs each tool's
 //                one-time lazy initialisation and is reported separately;
@@ -19,6 +22,11 @@
 //
 // The perf-suite families this catalog does NOT cover, and why, are listed in
 // UNCOVERED; each needs its own harness.
+
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { sha256Text } from "./provenance.mjs";
 
 const range = (n) => Array.from({ length: n }, (_, i) => i);
 const union = (items) => items.join(" | ");
@@ -42,6 +50,40 @@ export const CLI_USE = "declare const __bench_use: __Probe;\n";
 /** The module the whole-program arms check. */
 export function cliSource(scenario) {
   return scenario.source + CLI_USE;
+}
+
+/** The scenario's companion file names, in root-file order (none for a one-module scenario). */
+export function companionFiles(scenario) {
+  return Object.keys(scenario?.files ?? {});
+}
+
+/**
+ * The digest of everything a scenario contributes to its program: the
+ * module's alone for a one-module scenario (so its recorded digests stay
+ * valid), else the module and every companion file.
+ */
+export function scenarioSha256(scenario) {
+  if (!companionFiles(scenario).length) return sha256Text(scenario.source);
+  return sha256Text(JSON.stringify({ source: scenario.source, files: scenario.files }));
+}
+
+/** Write a scenario's companion files into `dir`; returns their digests by name. */
+export function writeCompanions(dir, scenario) {
+  const inputs = {};
+  for (const [name, text] of Object.entries(scenario?.files ?? {})) {
+    writeFileSync(join(dir, name), text);
+    inputs[name] = sha256Text(text);
+  }
+  return inputs;
+}
+
+/** Problems with a cell's recorded companion inputs (prefix: the cell's subdirectory). */
+export function companionInputProblems(inputs, scenario, prefix = "") {
+  const problems = [];
+  for (const [name, text] of Object.entries(scenario?.files ?? {}))
+    if (inputs?.[`${prefix}${name}`] !== sha256Text(text))
+      problems.push(`${prefix}${name} is not the catalog's companion file`);
+  return problems;
 }
 
 /** Every scenario, in catalog order. */
@@ -419,7 +461,475 @@ export function allScenarios() {
     ),
   );
 
+  // Programs: answers that depend on files the module never imports (global
+  // and module augmentation, global declaration merging), and a large type
+  // spread across modules. Every companion file is a root file of the
+  // project, as in a tsconfig `include`.
+  out.push(
+    scenario(
+      "program-global-merge",
+      "program",
+      "keyof a global interface merged from two script files and a module's declare global, none imported",
+      "",
+      "keyof BenchConfig",
+      {
+        files: {
+          "config-base.ts": "interface BenchConfig { base: string; }\n",
+          "config-extra.ts": "interface BenchConfig { extra: number; }\n",
+          "config-late.ts":
+            "export {};\ndeclare global { interface BenchConfig { late: boolean; } }\n",
+        },
+      },
+    ),
+  );
+  out.push(
+    scenario(
+      "program-lib-augmentation",
+      "program",
+      "a library interface (Array) augmented by a module the scenario never imports",
+      "",
+      'string[]["benchFirst"]',
+      {
+        files: {
+          "augment.ts": "export {};\ndeclare global { interface Array<T> { benchFirst: T; } }\n",
+        },
+      },
+    ),
+  );
+  out.push(
+    scenario(
+      "program-module-augmentation",
+      "program",
+      "keyof an imported interface augmented by declare module in a file the scenario never imports",
+      'import type { Options } from "./dep";\n',
+      "keyof Options",
+      {
+        files: {
+          "dep.ts": "export interface Options { a: string; }\n",
+          "plugin.ts": 'export {};\ndeclare module "./dep" { interface Options { b: number; } }\n',
+        },
+      },
+    ),
+  );
+  out.push(
+    scenario(
+      "program-globals-mixed",
+      "program",
+      "an inferred return across modules reading globals declared in a .d.ts, a script and a module's declare global",
+      'import { describe } from "./service";\n',
+      "ReturnType<typeof describe>",
+      {
+        files: {
+          "globals.d.ts":
+            'declare const BENCH_ENV: "dev" | "prod";\n' +
+            "declare const BENCH_ID: `u-${number}`;\n" +
+            "interface BenchUser { id: number; name: string; }\n",
+          "roles.ts":
+            'export const ROLES = ["admin", "editor", "viewer"] as const;\n' +
+            "declare global { interface BenchUser { role: (typeof ROLES)[number]; } }\n",
+          "flags.ts": "interface BenchUser { flags: { beta: boolean; seats: number }; }\n",
+          "service.ts":
+            'import { ROLES } from "./roles";\n' +
+            "export function describe(u: BenchUser) {\n" +
+            "  return { id: BENCH_ID, env: BENCH_ENV, role: u.role, first: ROLES[0], name: u.name, flags: u.flags };\n" +
+            "}\n",
+        },
+      },
+    ),
+  );
+  for (const [n, depth] of [
+    [20, 3],
+    [100, 5],
+    [300, 5],
+  ]) {
+    out.push(
+      scenario(
+        `program-paths-${n}x${depth}`,
+        "program",
+        `every dotted path to depth ${depth} through ${n} cross-referencing interfaces in four modules (a template-literal recursive Paths<T>)`,
+        'import type { Api } from "./api";\nimport type { Paths } from "./utils";\n',
+        "Paths<Api>",
+        { files: pathsProgram(n, depth) },
+      ),
+    );
+  }
+
+  out.push(...adversarialScenarios());
   return out;
+}
+
+/**
+ * Demands aimed at a demand-driven engine's weak points, each answered by
+ * tsc cleanly and quickly: answers that need a large fraction of the program
+ * (star-export barrels, globals and augmentations merged from many files,
+ * inference chained across files), full expansion of wide or deep types,
+ * heavy generic and contextual inference, and control-flow narrowing. An
+ * object answer is read through a declared value (`typeof __v`): an alias
+ * whose own node is the object would be printed by its name.
+ */
+function adversarialScenarios() {
+  const out = [];
+  const add = (id, note, spec) =>
+    out.push(
+      scenario(`adv-${id}`, "adversarial", note, spec.body, spec.probe, {
+        ...(spec.files ? { files: spec.files } : {}),
+      }),
+    );
+
+  for (const n of [100, 500, 2000]) {
+    const group = 20;
+    const groups = Math.ceil(n / group);
+    const files = {};
+    for (let i = 0; i < n; i++)
+      files[`leaf-${i}.ts`] =
+        `export const v${i} = ${i} as const;\nexport interface T${i} { id: ${i} }\nexport type K${i} = "k${i}";\n`;
+    for (let g = 0; g < groups; g++)
+      files[`group-${g}.ts`] = range(group)
+        .map((j) => g * group + j)
+        .filter((i) => i < n)
+        .map((i) => `export * from "./leaf-${i}";\n`)
+        .join("");
+    files["index.ts"] =
+      range(groups)
+        .map((g) => `export * from "./group-${g}";\n`)
+        .join("") + 'export const v0 = "shadow" as const;\n';
+    add(
+      `barrel-star-${n}`,
+      `the value union of a namespace import through a two-level export * barrel over ${n} modules, one star export shadowed locally`,
+      { files, body: 'import * as ns from "./index";\n', probe: "(typeof ns)[keyof typeof ns]" },
+    );
+  }
+
+  for (const n of [100, 500, 2000]) {
+    const files = {};
+    for (let i = 0; i < n; i++)
+      files[`reg-${i}.ts`] =
+        i % 2
+          ? `export {};\ndeclare global { interface BenchRegistry { r${i}: { id: ${i}; tag: "t${i}" } } }\n`
+          : `interface BenchRegistry { r${i}: { id: ${i}; tag: "t${i}" } }\n`;
+    add(
+      `global-registry-${n}`,
+      `a global interface merged from ${n} files (scripts and declare global), indexed by its keys`,
+      { files, body: "", probe: 'BenchRegistry[keyof BenchRegistry]["tag"]' },
+    );
+  }
+
+  for (const n of [100, 500, 2000]) {
+    const files = { "core.ts": "export interface Props { base: -1 }\n" };
+    for (let i = 0; i < n; i++)
+      files[`plugin-${i}.ts`] =
+        `export {};\ndeclare module "./core" { interface Props { p${i}: ${i} } }\n`;
+    add(
+      `module-augment-${n}`,
+      `an imported interface augmented by ${n} plugin modules the scenario never imports`,
+      { files, body: 'import type { Props } from "./core";\n', probe: "Props[keyof Props]" },
+    );
+  }
+
+  for (const n of [10, 100, 500]) {
+    // Call resolution tries a later declaration's signatures first, so the
+    // call resolves to the last file in program order; file names run in
+    // the opposite order, so name order is not program order.
+    const files = {};
+    for (let i = 0; i < n; i++)
+      files[`bus-${String(n - 1 - i).padStart(4, "0")}.ts`] =
+        `interface BenchBus { emit(e: { k${i}: 1 }): ${i}; }\n`;
+    add(
+      `merged-overload-order-${n}`,
+      `a call on an overload set merged from ${n} global interface declarations, every overload applicable`,
+      {
+        files,
+        body:
+          `declare const bus: BenchBus;\ndeclare const ev: { ${range(n)
+            .map((i) => `k${i}: 1;`)
+            .join(" ")} };\n` + "const r = bus.emit(ev);\n",
+        probe: "typeof r",
+      },
+    );
+  }
+
+  for (const n of [20, 100, 300]) {
+    const files = { "m-0.ts": "export function f0() { return { k0: 0 as const }; }\n" };
+    for (let i = 1; i < n; i++)
+      files[`m-${i}.ts`] =
+        `import { f${i - 1} } from "./m-${i - 1}";\n` +
+        `export function f${i}() { const p = f${i - 1}(); return { ...p, k${i}: ${i} as const }; }\n`;
+    add(
+      `return-chain-${n}`,
+      `a return type inferred through ${n} modules, each spreading the previous module's result`,
+      {
+        files,
+        body: `import { f${n - 1} } from "./m-${n - 1}";\n`,
+        probe: `ReturnType<typeof f${n - 1}>`,
+      },
+    );
+  }
+
+  for (const n of [10, 25, 40]) {
+    let body =
+      "type Ctor<T = {}> = new (...args: any[]) => T;\nclass Base { base = -1 as const; }\n";
+    for (let i = 0; i < n; i++)
+      body += `function M${i}<TBase extends Ctor>(B: TBase) { return class extends B { p${i} = ${i} as const; }; }\n`;
+    let expr = "Base";
+    for (let i = 0; i < n; i++) expr = `M${i}(${expr})`;
+    body += `class C extends ${expr} {}\ndeclare const __v: { [K in keyof C]: C[K] };\n`;
+    add(`mixin-stack-${n}`, `the members of a class built from ${n} stacked generic mixins`, {
+      body,
+      probe: "typeof __v",
+    });
+  }
+
+  for (const n of [50, 200, 500])
+    add(
+      `builder-chain-${n}`,
+      `a fluent builder: ${n} chained generic calls growing an intersection, then flattened`,
+      {
+        body:
+          "interface Builder<T> {\n" +
+          "  add<K extends string, V extends string | number | boolean>(k: K, v: V): Builder<T & { [P in K]: V }>;\n" +
+          "  build(): { [K in keyof T]: T[K] };\n}\n" +
+          "declare function builder(): Builder<{}>;\n" +
+          `const r = builder()${range(n)
+            .map((i) => `.add("a${i}", ${i})`)
+            .join("")}.build();\n`,
+        probe: "typeof r",
+      },
+    );
+
+  for (const k of [5, 12, 20]) {
+    let body = "";
+    for (let a = 1; a <= 20; a++) {
+      const tp = range(a + 1).map((i) => `T${i}`);
+      const params = range(a).map((i) => `f${i}: (x: T${i}) => T${i + 1}`);
+      body += `declare function pipe<${tp.join(", ")}>(a: T0, ${params.join(", ")}): T${a};\n`;
+    }
+    body += `const r = pipe(0 as const, ${range(k)
+      .map((i) => `(x) => ({ v${i}: x })`)
+      .join(", ")});\n`;
+    add(
+      `pipe-contextual-${k}`,
+      `pipe() over 20 arity overloads with ${k} callbacks, each contextually typed by the previous inference`,
+      { body, probe: "typeof r" },
+    );
+  }
+
+  for (const n of [20, 100, 400])
+    add(
+      `options-this-${n}`,
+      `an options-API component: ${n} methods typed through ThisType reading ${n} data members`,
+      {
+        body:
+          "declare global { interface ThisType<T> {} }\n" +
+          "declare function defineComponent<D, M>(o: { data(): D; methods: M & ThisType<D & M> }): { [K in keyof M]: M[K] extends () => infer R ? R : never };\n" +
+          "const comp = defineComponent({\n" +
+          `  data() { return { ${range(n)
+            .map((i) => `d${i}: ${i} as const`)
+            .join(", ")} }; },\n` +
+          `  methods: { ${range(n)
+            .map((i) => `m${i}() { return this.d${i}; }`)
+            .join(", ")} },\n` +
+          "});\n",
+        probe: "typeof comp",
+      },
+    );
+
+  const routes = (n, which, k = 5) => ({
+    body:
+      `const routes = [\n${range(n)
+        .map(
+          (i) =>
+            `  { name: "r${i}", path: "/r${i}", children: [${range(k)
+              .map((j) => `{ name: "r${i}c${j}", path: "c${j}" }`)
+              .join(", ")}] },`,
+        )
+        .join("\n")}\n] as const;\n` +
+      "type Names<R> = R extends readonly (infer E)[]\n" +
+      "  ? E extends { name: infer N } ? N | (E extends { children: infer C } ? Names<C> : never) : never\n" +
+      "  : never;\n" +
+      'type Paths<R, P extends string = ""> = R extends readonly (infer E)[]\n' +
+      "  ? E extends { path: infer S extends string }\n" +
+      "    ? `${P}${S}` | (E extends { children: infer C } ? Paths<C, `${P}${S}/`> : never)\n" +
+      "    : never\n" +
+      "  : never;\n",
+    probe: `${which}<typeof routes>`,
+  });
+  for (const n of [20, 100, 300])
+    add(
+      `router-names-${n}`,
+      `route names from a nested as-const config of ${n} routes with five children each`,
+      routes(n, "Names"),
+    );
+  for (const n of [20, 100, 300])
+    add(
+      `router-paths-${n}`,
+      `full route paths from a nested as-const config of ${n} routes with five children each`,
+      routes(n, "Paths"),
+    );
+
+  for (const n of [50, 300, 1000])
+    add(
+      `switch-narrow-${n}`,
+      `a return type inferred through a switch narrowing a ${n}-member discriminated union`,
+      {
+        body:
+          `type U = ${range(n)
+            .map((i) => `{ kind: "k${i}"; v${i}: ${i} }`)
+            .join(" | ")};\n` +
+          `function f(x: U) {\n  switch (x.kind) {\n${range(n)
+            .map((i) => `    case "k${i}": return x.v${i};`)
+            .join("\n")}\n  }\n}\n`,
+        probe: "ReturnType<typeof f>",
+      },
+    );
+
+  for (const n of [10, 25, 50]) {
+    const files = { "enum-0.ts": "enum BenchFlag { F0 = 1 }\n" };
+    for (let i = 1; i < n; i++)
+      files[`enum-${i}.ts`] = `enum BenchFlag { F${i} = BenchFlag.F${i - 1} * 2 + ${i % 3} }\n`;
+    add(
+      `enum-merge-${n}`,
+      `an enum merged across ${n} script files, each member computed from the previous file's`,
+      { files, body: "", probe: "`${BenchFlag}`" },
+    );
+  }
+
+  for (const n of [1000, 3000, 10000])
+    add(
+      `mapped-collapse-${n}`,
+      `a mapped conditional over a ${n}-member interface collapsing to three members`,
+      {
+        body: `interface Big { ${range(n)
+          .map((i) => `k${i}: ${i % 3 === 0 ? i : i % 3 === 1 ? `"s${i}"` : "boolean"};`)
+          .join(" ")} }\n`,
+        probe:
+          '{ [K in keyof Big]: Big[K] extends number ? "n" : Big[K] extends string ? "s" : "b" }[keyof Big]',
+      },
+    );
+
+  for (const n of [100, 300, 600])
+    add(
+      `union-to-intersection-${n}`,
+      `keyof the intersection inferred contravariantly from a ${n}-member object union`,
+      {
+        body:
+          "type U2I<U> = (U extends unknown ? (x: U) => void : never) extends (x: infer I) => void ? I : never;\n" +
+          `type Parts = ${range(n)
+            .map((i) => `{ a${i}: ${i} }`)
+            .join(" | ")};\n`,
+        probe: "keyof U2I<Parts>",
+      },
+    );
+
+  for (const n of [100, 1000, 3000])
+    add(
+      `key-remap-${n}`,
+      `template-literal key remapping over a ${n}-member interface declared in another module`,
+      {
+        files: {
+          "model.ts": `export interface Model { ${range(n)
+            .map((i) => `field_${i}_name_x: ${i};`)
+            .join(" ")} }\n`,
+        },
+        body:
+          'import type { Model } from "./model";\n' +
+          "type Kebab<S extends string> = S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S;\n" +
+          "declare const __v: { [K in keyof Model as Kebab<K & string>]: Model[K] };\n",
+        probe: "typeof __v",
+      },
+    );
+
+  for (const n of [10, 40, 100]) {
+    let body = "interface L0<T> { p0: T }\n";
+    for (let i = 1; i < n; i++)
+      body += `interface L${i}<T> extends L${i - 1}<[T]> { p${i}: T }\n`;
+    body += `declare const __v: { [K in keyof L${n - 1}<0>]: L${n - 1}<0>[K] };\n`;
+    add(
+      `heritage-generic-${n}`,
+      `the members of a ${n}-deep generic interface heritage chain, each base instantiated with a wrapped argument`,
+      { body, probe: "typeof __v" },
+    );
+  }
+
+  return out;
+}
+
+/** Each adversarial series' tiers, smallest size first. */
+const ADVERSARIAL_TIERS = {
+  "barrel-star": [100, 500, 2000, ["quick", "standard", "standard"]],
+  "global-registry": [100, 500, 2000, ["quick", "standard", "stress"]],
+  "module-augment": [100, 500, 2000, ["quick", "standard", "standard"]],
+  "merged-overload-order": [10, 100, 500, ["quick", "standard", "standard"]],
+  "return-chain": [20, 100, 300, ["quick", "standard", "standard"]],
+  "mixin-stack": [10, 25, 40, ["quick", "standard", "standard"]],
+  "builder-chain": [50, 200, 500, ["quick", "standard", "stress"]],
+  "pipe-contextual": [5, 12, 20, ["quick", "standard", "standard"]],
+  "options-this": [20, 100, 400, ["quick", "standard", "standard"]],
+  "router-names": [20, 100, 300, ["quick", "standard", "stress"]],
+  "router-paths": [20, 100, 300, ["quick", "standard", "stress"]],
+  "switch-narrow": [50, 300, 1000, ["quick", "standard", "stress"]],
+  "enum-merge": [10, 25, 50, ["quick", "standard", "standard"]],
+  "mapped-collapse": [1000, 3000, 10000, ["quick", "standard", "standard"]],
+  "union-to-intersection": [100, 300, 600, ["quick", "standard", "standard"]],
+  "key-remap": [100, 1000, 3000, ["quick", "standard", "stress"]],
+  "heritage-generic": [10, 40, 100, ["quick", "standard", "standard"]],
+};
+
+const adversarialTierEntries = () =>
+  Object.entries(ADVERSARIAL_TIERS).flatMap(([series, [a, b, c, tiers]]) =>
+    [a, b, c].map((size, i) => [`adv-${series}-${size}`, tiers[i]]),
+  );
+
+/**
+ * A program of `n` interfaces spread over four entity modules, each pointing
+ * at two others (often in another module) and at a generic from a utility
+ * module, an `Api` module naming them all, and a recursive Paths<T> to
+ * `depth` levels.
+ */
+function pathsProgram(n, depth, shards = 4) {
+  const files = {};
+  const shardOf = (i) => i % shards;
+  for (let s = 0; s < shards; s++) {
+    const refs = new Set();
+    const decls = range(n)
+      .filter((i) => shardOf(i) === s)
+      .map((i) => {
+        const next = (i + 1) % n;
+        const owner = (i * 7 + 3) % n;
+        for (const r of [next, owner]) if (shardOf(r) !== s) refs.add(r);
+        return `export interface E${i} { id: ${i}; name: string; next: E${next}; owner: E${owner}; meta: Meta<${i}>; }`;
+      });
+    const imports = range(shards)
+      .filter((t) => t !== s)
+      .map((t) => {
+        const names = [...refs].filter((r) => shardOf(r) === t).sort((a, b) => a - b);
+        return names.length
+          ? `import type { ${names.map((r) => `E${r}`).join(", ")} } from "./entities-${t}";\n`
+          : "";
+      })
+      .join("");
+    files[`entities-${s}.ts`] =
+      `import type { Meta } from "./utils";\n${imports}${decls.join("\n")}\n`;
+  }
+  files["utils.ts"] =
+    "export interface Meta<T> { tag: T; created: number; }\n" +
+    `export type Paths<T, D extends unknown[] = []> = D["length"] extends ${depth}\n` +
+    "  ? never\n" +
+    "  : T extends object\n" +
+    "    ? { [K in keyof T & string]: K | `${K}.${Paths<T[K], [...D, 0]>}` }[keyof T & string]\n" +
+    "    : never;\n";
+  files["api.ts"] =
+    range(shards)
+      .map((s) => {
+        const names = range(n)
+          .filter((i) => shardOf(i) === s)
+          .map((i) => `E${i}`);
+        return `import type { ${names.join(", ")} } from "./entities-${s}";\n`;
+      })
+      .join("") +
+    `export interface Api { ${range(n)
+      .map((i) => `e${i}: E${i};`)
+      .join(" ")} }\n`;
+  return files;
 }
 
 /** Perf-suite families this harness does not measure, each with its reason. */
@@ -481,6 +991,11 @@ export const SCENARIO_TIERS = {
   "library-promise-then": "quick",
   "library-map-entries": "quick",
   "library-generic-call": "quick",
+  "program-global-merge": "quick",
+  "program-lib-augmentation": "quick",
+  "program-module-augmentation": "quick",
+  "program-globals-mixed": "quick",
+  "program-paths-20x3": "quick",
   "relation-aligned-600": "standard",
   "relation-aligned-1800": "standard",
   "relation-aligned-3200": "standard",
@@ -508,6 +1023,8 @@ export const SCENARIO_TIERS = {
   "reference-infer-aliases-1000": "standard",
   "base-signature-10": "standard",
   "base-signature-50": "standard",
+  "program-paths-100x5": "standard",
+  "program-paths-300x5": "standard",
   "relation-reversed-1800": "stress",
   "relation-reversed-3200": "stress",
   "spread-369x271": "stress",
@@ -515,6 +1032,7 @@ export const SCENARIO_TIERS = {
   "alias-chain-1000-1mib": "stress",
   "conditional-chain-500": "stress",
   "infer-pattern-repeat-1000": "stress",
+  ...Object.fromEntries(adversarialTierEntries()),
 };
 
 export const TIERS = ["quick", "standard", "stress"];
@@ -544,8 +1062,11 @@ export const SETTINGS = [
   { id: "both-off", strictNullChecks: false, noImplicitAny: false },
 ];
 
-/** The tsconfig both arms read for `setting`. */
-export function tsconfigText(setting) {
+/**
+ * The tsconfig both arms read for `setting`: the library, then the
+ * scenario's companion files (the program family), then the module.
+ */
+export function tsconfigText(setting, scenario = null) {
   return (
     JSON.stringify(
       {
@@ -560,7 +1081,7 @@ export function tsconfigText(setting) {
           skipLibCheck: false,
           noErrorTruncation: true,
         },
-        files: ["lib.bench.d.ts", "scenario.ts"],
+        files: ["lib.bench.d.ts", ...companionFiles(scenario), "scenario.ts"],
       },
       null,
       2,

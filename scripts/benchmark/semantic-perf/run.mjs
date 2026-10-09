@@ -38,10 +38,12 @@ import { renderMarkdown } from "./report.mjs";
 import {
   allScenarios,
   cliSource,
+  companionFiles,
   scenariosForTier,
   SETTINGS,
   TIERS,
   tsconfigText,
+  writeCompanions,
 } from "./scenarios.mjs";
 import { sessionArmsOf, sessionInputs } from "./session-analyze.mjs";
 import {
@@ -511,20 +513,24 @@ export function sameArchitecture(rustArch, nodeArch) {
 function materialize(outDir, scenario, setting, opts, libText) {
   const dir = join(outDir, "scenarios", scenario.id, setting.id);
   mkdirSync(dir, { recursive: true });
+  const tsconfig = tsconfigText(setting, scenario);
   writeFileSync(join(dir, "lib.bench.d.ts"), libText);
+  const companions = writeCompanions(dir, scenario);
   writeFileSync(join(dir, "scenario.ts"), scenario.source);
-  writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting));
+  writeFileSync(join(dir, "tsconfig.json"), tsconfig);
   const cliDir = join(dir, "cli");
   mkdirSync(cliDir, { recursive: true });
   writeFileSync(join(cliDir, "lib.bench.d.ts"), libText);
+  writeCompanions(cliDir, scenario);
   writeFileSync(join(cliDir, "scenario.ts"), cliSource(scenario));
-  writeFileSync(join(cliDir, "tsconfig.json"), tsconfigText(setting));
+  writeFileSync(join(cliDir, "tsconfig.json"), tsconfig);
   const baseJob = {
     schema: 1,
     dir,
     tsconfig: "tsconfig.json",
     lib: "lib.bench.d.ts",
     libMode: opts.libMode,
+    files: companionFiles(scenario),
     scenario: "scenario.ts",
     initAlias: "__BenchInit",
     probes: ["__Probe"],
@@ -534,8 +540,9 @@ function materialize(outDir, scenario, setting, opts, libText) {
     dir,
     inputs: {
       "lib.bench.d.ts": sha256Text(libText),
+      ...companions,
       "scenario.ts": sha256Text(scenario.source),
-      "tsconfig.json": sha256Text(tsconfigText(setting)),
+      "tsconfig.json": sha256Text(tsconfig),
       "cli/scenario.ts": sha256Text(cliSource(scenario)),
     },
     baseJob,
