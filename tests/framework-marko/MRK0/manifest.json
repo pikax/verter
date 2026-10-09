@@ -19,7 +19,7 @@
     {
       "id": "MRK0-AC2",
       "disposition": "reject",
-      "twins": ["clean products", "unowned-cell", "duplicate-owner", "unknown-receiving-acceptance", "bnd-build-cell", "runtime-cell", "fabricated-feature", "exclusion-without-reason", "borrowed-acceptance", "pending-without-proof", "tsgo-fields-unrecorded", "tsgo-limitation-unrecorded", "pending-cell-promoted", "unqualified-cell-promoted"]
+      "twins": ["clean products", "unowned-cell", "duplicate-owner", "unknown-receiving-acceptance", "bnd-build-cell", "runtime-cell", "fabricated-feature", "exclusion-without-reason", "borrowed-acceptance", "completion-receiver-omitted", "definition-receiver-omitted", "native-attribute-receiver-omitted", "pending-without-proof", "tsgo-fields-unrecorded", "tsgo-limitation-unrecorded", "pending-cell-promoted", "unqualified-cell-promoted"]
     },
     {
       "id": "MRK0-AC3",

@@ -396,6 +396,12 @@
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
       "receivingAcceptance": "MRK5-AC1",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["textDocument/hover", "textDocument/definition", "textDocument/references", "textDocument/completion"],
+        "test": "cargo nextest run -p verter_lsp -E 'test(/marko_tsgo_navigation/)'",
+        "controls": "At fixture positions with known results in statements, attributes, placeholders, parameters and tag variables, each mapped tsgo answer appears exactly once. Missing completion and a planted Verter-computed completion each fail; generated-only spans remain suppressed."
+      },
       "tsgoOperations": [
         "textDocument/hover",
         "textDocument/definition",
@@ -411,6 +417,12 @@
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
       "receivingAcceptance": "MRK5-AC2",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["textDocument/definition", "textDocument/references"],
+        "test": "cargo nextest run -p verter_lsp -E 'test(/marko_tsgo_references/)'",
+        "controls": "Definition on the discovered <card> invocation maps through ProviderPositionMapper to the canonical tags/card.marko selected by MRK2. References retain open/close tags, the marko.json entry and explicit imports. Other-scope tags and a tag variable named card never bind to that discovered tag; legitimate tag-variable navigation still reaches its own declaration. Missing definition and a planted wrong-scope target each fail."
+      },
       "tsgoOperations": [
         "textDocument/definition",
         "textDocument/references"
@@ -424,6 +436,12 @@
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
       "receivingAcceptance": "MRK5-AC3",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["native-tag-completion", "native-attribute-completion", "attribute-tag-completion"],
+        "test": "cargo nextest run -p verter_lsp -E 'test(/marko_carrier_features/)'",
+        "controls": "Native tag and native HTML attribute completion work on native markup; <@ inside <card> lists MRK3 attribute-tag slots. Native carrier completion is absent inside placeholders while tsgo completion remains available. Missing native attributes and planted carrier-completion leakage into a placeholder each fail."
+      },
       "tsgoOperations": [],
       "tsgoLimitation": null
     },

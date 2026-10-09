@@ -190,6 +190,11 @@ Each cell names one producer node and one ratified receiving acceptance id
 of that producer requiring proof of the operation. Null receivers and
 pending-receiver notes are invalid. A ratified receiver records an obligation;
 it does not claim that the feature is implemented or qualified.
+Cells `C28`–`C30` also record `receivingProof`: the required operations,
+proof command and discriminating controls of their amended receivers. Its
+`obligation-only` status is not an executed proof or an MRK9 pass. MRK1G's
+lock spec must reject removal of completion, custom-tag definition or native
+attribute completion from these requirements while the cell still claims it.
 Every cell records `tsgoOperations` and `tsgoLimitation` explicitly; an
 empty list and `null` mean none. On a kernel cell (`C20`–`C22`) the tsgo
 operations are checker queries the producer consumes as type-authority
@@ -263,17 +268,41 @@ route's disposition and owning acceptances; the two must agree row for row.
   CI-inert in `scripts/ci-impact.mjs`, because nothing in `ci.yml` reads it
   until MRK1G lands the lock spec. MRK1G moves it to the lane that runs the
   spec.
-- **F-MRK0-05 (MRK5).** Cells `C28`–`C30` name `MRK5-AC1`–`MRK5-AC3`,
-  whose proof obligations must cover every operation those cells route:
-  `MRK5-AC1` also requires TS-region completion answered exactly once by
-  tsgo (a planted Verter-computed completion fails); `MRK5-AC2` also requires
-  custom-tag definition on `<card>` to land in the discovered
-  `tags/card.marko` through `ProviderPositionMapper`, excluding a same-spelled
-  tag from another `tags/` scope and a tag variable named `card`; `MRK5-AC3`
-  also requires native HTML attribute completion on native tags, absent
-  inside a placeholder. Proof filters are unchanged. This amendment awaits
-  ratification; until it is ratified those three cells have no proving
-  receiver and cannot be promoted. MRK5 delivers the proof after MRK0.
+- **F-MRK0-05 (MRK5).** Cells `C28`–`C30` name the ratified amended
+  receivers `MRK5-AC1`–`MRK5-AC3` below. MRK5 delivers their implementation
+  and proof after MRK0; receiver ratification supplies no conformance pass.
+
+### Navigation receiving requirements
+
+`MRK5-AC1` requires hover, definition, references **and completion** from
+tsgo exactly once at fixture positions with known results in statements,
+attributes, placeholders, parameters and tag variables. Missing completion
+and a planted Verter-computed completion each fail; generated-only spans
+remain suppressed. Proof:
+`cargo nextest run -p verter_lsp -E 'test(/marko_tsgo_navigation/)'`.
+
+`MRK5-AC2` requires **definition and references** for the discovered `card`
+tag through tsgo over the projected invocation. Definition maps through
+`ProviderPositionMapper` to the canonical `tags/card.marko` that MRK2
+selects. References still include open/close tags, the `marko.json` entry
+and explicit imports. MRK2-AC1/AC2 owns discovery, nearest-scope precedence
+and shadowing; MRK5 consumes those identities without another discovery
+path. Other-scope tags and a tag variable named `card` never bind to that
+discovered tag. This exclusion preserves legitimate tag-variable navigation
+to its own declaration. Missing definition and a planted wrong-scope target
+each fail. Proof:
+`cargo nextest run -p verter_lsp -E 'test(/marko_tsgo_references/)'`.
+
+`MRK5-AC3` requires native tag **and native HTML attribute** completion on
+native markup, plus `<@` completion of MRK3 attribute-tag slots inside
+`<card>`. Native carrier completion is absent in placeholders; tsgo
+completion remains available there. Missing native attributes and planted
+carrier-completion leakage into a placeholder each fail. Proof:
+`cargo nextest run -p verter_lsp -E 'test(/marko_carrier_features/)'`.
+
+The three proof filters are unchanged. MRK1G implements the corresponding
+contract mutations listed in `cases.md`; MRK9 qualifies each included
+operation and MRK10 still requires a pass or ratified exclusion per cell.
 
 ## Acceptance evidence
 
