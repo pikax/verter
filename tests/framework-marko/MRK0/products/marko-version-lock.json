@@ -1,0 +1,118 @@
+{
+  "id": "marko-version-lock.v1",
+  "schema": 1,
+  "contractNode": "MRK0",
+  "family": "marko",
+  "observedAt": "2026-10-09",
+  "observedFrom": "the public npm registry (registry.npmjs.org) dist-tags, versions, dependencies and dist.integrity of each package below",
+  "law": [
+    "Every admitted release is one exact version in its own release manifest (VID0 R04, R05). A range, a versions array, an implied patch or minor, or a floating tag (latest, next, canary, nightly, beta) never decodes into a release (VID0 R07).",
+    "Activation reads the resolved installed version of the `marko` package and admits it only when it equals an admitted exact release (VID0 R06, R08; FWA1). Any other installed version is unsupported-version with the reason recorded below, never coerced.",
+    "The oracles are test-only devDependencies of the conformance harness. They are never product evidence, never parser or type authority, and never shipped."
+  ],
+  "admittedReleases": [
+    {
+      "releaseManifest": "marko@6.4.3",
+      "package": "marko",
+      "exact": "6.4.3",
+      "api": "tags",
+      "profile": "marko-6-tags@6.4.3",
+      "status": "admitted",
+      "published": "2026-10-06",
+      "license": "MIT",
+      "integrity": "sha512-kNGMOX2NyRclRr92nEeV73MP1aBMvKUYDXgU67dz9KZdtaOBsZGTiIEyxBJJSjARqE54bBER1Uo6PdoJzhsImA==",
+      "officialSources": [
+        "https://www.npmjs.com/package/marko/v/6.4.3",
+        "https://github.com/marko-js/marko",
+        "https://markojs.com/docs/"
+      ],
+      "declaredCompilerRange": "^5.42.10",
+      "oracleCompatibility": "the declared @marko/compiler range admits the oracle pin 5.42.10",
+      "whyThisPatch": "6.4.3 is the newest published 6.4.x whose declared @marko/compiler range (^5.42.10) admits the LMK1-locked oracle @marko/compiler 5.42.10. 6.4.4 and 6.4.5 declare ^5.42.11, which excludes that oracle, so admitting them would diverge the product release from its oracle set."
+    }
+  ],
+  "excludedReleases": [
+    {
+      "id": "XR01",
+      "selector": "marko 6.4.4, 6.4.5 and any later 6.4.x patch",
+      "state": "unsupported-version",
+      "reason": "oracle-divergence: these patches declare @marko/compiler ^5.42.11, which excludes the locked oracle 5.42.10. Admitting one is a new release manifest ratified together with a coordinated oracle re-pin of this lock and the LMK1 profile."
+    },
+    {
+      "id": "XR02",
+      "selector": "the next 6.x (any 6.5 or later minor)",
+      "state": "unsupported-version",
+      "reason": "not-ratified: no later 6.x minor is published at ratification, so there is no exact version to pin. The npm `next` dist-tag resolves to 6.1.8, older than the admitted release, and a floating tag never decodes into a release (VID0 R07). A later 6.x is admitted only by a new release manifest naming its exact version, ratified here as a second admitted profile."
+    },
+    {
+      "id": "XR03",
+      "selector": "marko 5.x and earlier (Class API)",
+      "state": "unsupported-version",
+      "reason": "class-api-excluded: Marko 5 Class API components (`class {}` blocks, `this.state`, `this.input` on a component instance, `<include>`, sibling `component.js` / `component-browser.js` files) are a truthful exclusion. A Class API construct inside an admitted 6.4.3 package is a typed SyntaxReject (MRK1-AC4), never a silent Tags-API parse; mixing is reported by LMK3."
+    },
+    {
+      "id": "XR04",
+      "selector": "6.4.3 followed by a pre-release suffix, or any canary, nightly or beta build",
+      "state": "unsupported-version",
+      "reason": "floating-or-prerelease: only the exact stable release decodes (framework-common versions; VID0 R07)."
+    }
+  ],
+  "oracles": [
+    {
+      "package": "@marko/compiler",
+      "exact": "5.42.10",
+      "role": "conformance oracle for grammar and tag semantics; never parser authority",
+      "license": "MIT",
+      "integrity": "sha512-E/TWzirWpTNKdYurzsTsE0GFnyOBW7TRshiv1XhZ4vWAyYvp4/ZhjuJO8kJ6itfgUNs/woCCEOhmgG/cejTqIw==",
+      "officialSources": [
+        "https://www.npmjs.com/package/@marko/compiler/v/5.42.10",
+        "https://github.com/marko-js/marko"
+      ],
+      "note": "Its own parser (htmljs-parser, a declared dependency) is reached only through this oracle and is never pinned or cited separately."
+    },
+    {
+      "package": "@marko/language-tools",
+      "exact": "2.7.0",
+      "role": "conformance oracle for the reference TS extraction shape; never product evidence",
+      "license": "MIT",
+      "integrity": "sha512-1W/9yu3lmm1Fo/67huE89h6LX6QjLkUTFxluK4AackuWU21PgiY0RpLZ9QmhrYjXqiSprlyRofKmwRtXfXfpMg==",
+      "officialSources": [
+        "https://www.npmjs.com/package/@marko/language-tools/v/2.7.0",
+        "https://github.com/marko-js/language-server"
+      ]
+    },
+    {
+      "package": "@marko/type-check",
+      "exact": "3.2.1",
+      "role": "conformance oracle for facet and TS-region diagnostics agreement (MRK9-AC2); never product evidence",
+      "license": "MIT",
+      "integrity": "sha512-WXzwfTPg0Ig8HYPFow+nOzMmY1rVyBsOZC4g8hfgLas4XOoKWFH1LONtpltDE8JDWrCuLqLIrLQgmSPyNf0tRQ==",
+      "officialSources": [
+        "https://www.npmjs.com/package/@marko/type-check/v/3.2.1",
+        "https://github.com/marko-js/language-server"
+      ]
+    }
+  ],
+  "oracleSetSharedWith": "LMK1 profile lock: the same three exact oracle versions. LMK1 states its marko line as \"6.4.x latest stable\"; that line resolves to this lock's admitted exact release, not to the registry latest tag (see XR01).",
+  "wireTag": {
+    "name": "FRAMEWORK_TAG_MARKO",
+    "value": 12,
+    "landsWith": "MRK1 adapter descriptor (MRK1-AC6)",
+    "allocationSource": "framework-common wire-tag table: REACT 3, SOLID 4, PREACT 6, QWIK 7, STENCIL 8, LIT 9, ASTRO 10, ANGULAR 11, MARKO 12, EMBER_GLIMMER 13, MDX 14",
+    "baselineEnum": {
+      "FRAMEWORK_TAG_NONE": 0,
+      "FRAMEWORK_TAG_VUE": 1,
+      "FRAMEWORK_TAG_SVELTE": 2,
+      "FRAMEWORK_TAG_REACT": 3,
+      "FRAMEWORK_TAG_SOLID": 4,
+      "FRAMEWORK_TAG_OPEN_CANONICAL": 5
+    },
+    "classAReserved": [6, 7, 8, 9],
+    "rejected": [
+      "FRAMEWORK_TAG_OPEN_CANONICAL (5): a structural non-tag; tag_disposition returns None for it, so it never identifies an adapter",
+      "any value already in the baseline enum (0-5)",
+      "any class-A value (6-9)",
+      "any value allocated to another family (3, 4, 6-11, 13, 14)"
+    ]
+  }
+}
