@@ -1389,6 +1389,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(chain)
     }
 
+    /// The source and target of the relation check whose chain starts at
+    /// the frame `base`: the subjects its TS2859 names.
+    fn relation_check_subjects(&self, base: usize) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        let txn = self.dispatch_txn.borrow();
+        match &txn.reentry().frame(base)?.identity {
+            ObligationIdentity::Relate { key, .. } => Some((key.source, key.target)),
+            _ => None,
+        }
+    }
+
     /// A structured relation of an overflowed chain, or one that would
     /// open past [`CHECKER_RELATION_DEPTH_LIMIT`]: the checker answers
     /// false and flags the whole relation. The flag is set on the chain's
@@ -1472,11 +1482,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .find(|(base, _)| *base == chain.base)
                 .and_then(|(_, comparisons)| comparisons.record().err())
         };
-        if refused.is_some() {
+        if let Some(refusal) = refused {
+            verter_debug_assert::verter_debug_assert!(
+                refusal.diagnostic().code
+                    == crate::semantic_query::CheckerDiagnosticCode::RelationTooComplex,
+                "a relation check is refused only for its comparisons"
+            );
+            let subjects = self.relation_check_subjects(chain.base);
             self.overflow_relation_chain(&chain);
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
             );
+            if let Some((source, target)) = subjects {
+                self.deposit_operation_refusals([
+                    &super::walk::ShallowDiagnostic::RelationTooComplex { source, target },
+                ]);
+            }
             return Some(RelationResult::NotAssignable);
         }
         self.connected_demand.accrue_comparison();
@@ -11655,8 +11676,14 @@ enum RelateWork {
         positional: SemanticNodeId,
         target: SemanticNodeId,
     },
-    /// Pop `n` prior results, AND them, push one combined result.
-    ReduceAnd(u32),
+    /// Relate `items` in order, every one of which must hold, as the
+    /// checker's `eachTypeRelatedToType` / `typeRelatedToEachType` do: the
+    /// first item that is decidedly not related ends the sequence false
+    /// without relating the rest. `next` items have run; their combined
+    /// result sits on the result stack below the latest item's. Outside an
+    /// inference session only — a session relates every item, so each
+    /// deposits its candidates.
+    AllOf { items: Arc<[RelateWork]>, next: u32 },
     /// Relate a pair the checker relates with an `isRelatedTo` of its own
     /// — an element pair, a union source's member against a target that is
     /// no union, an intersection target's arm — as the item `kind` would:
@@ -11679,28 +11706,6 @@ enum DescendKind {
     Eval,
     Arm,
     TargetArm,
-}
-
-fn reduce_and_from_results(results: &mut Vec<RelationResult>, n: u32) -> RelationResult {
-    let mut combined = RelationResult::Assignable {
-        bindings: Arc::from(Vec::new().into_boxed_slice()),
-    };
-    // bounded-loop: drains `n` per-pair results owned by this reducer — fan-out of the originating distribution; total work bounded by `decide_relation` budget (graph-size × 10).
-    for _ in 0..n {
-        let r = results
-            .pop()
-            .expect("RelateWork::ReduceAnd: result-stack underflow");
-        combined = result_and(combined, r);
-    }
-    combined
-}
-
-/// Build a forward-ordered sequence of `RelateWork` items such that after
-/// `push_forward_work`, the first item pops first.
-fn push_forward_work(work: &mut Vec<RelateWork>, forward: Vec<RelateWork>) {
-    for item in forward.into_iter().rev() {
-        work.push(item);
-    }
 }
 
 /// The checker's element flag of one array or tuple position.
@@ -12072,18 +12077,31 @@ fn distribute_positionally(
         });
         return;
     }
-    let mut forward: Vec<RelateWork> = Vec::with_capacity(members.len() + 1);
-    for (index, member) in members.iter().enumerate() {
-        forward.push(RelateWork::PositionalArm {
-            source: *member,
-            positional: positions[index % positions.len()],
-            target,
-        });
+    push_all_of(
+        work,
+        members
+            .iter()
+            .enumerate()
+            .map(|(index, member)| RelateWork::PositionalArm {
+                source: *member,
+                positional: positions[index % positions.len()],
+                target,
+            })
+            .collect(),
+    );
+}
+
+/// Push `items`, every one of which must hold, as one
+/// [`RelateWork::AllOf`] sequence; a single item is pushed as itself.
+fn push_all_of(work: &mut Vec<RelateWork>, mut items: Vec<RelateWork>) {
+    if items.len() == 1 {
+        work.extend(items.pop());
+        return;
     }
-    if members.len() > 1 {
-        forward.push(RelateWork::ReduceAnd(members.len() as u32));
-    }
-    push_forward_work(work, forward);
+    work.push(RelateWork::AllOf {
+        items: Arc::from(items.into_boxed_slice()),
+        next: 0,
+    });
 }
 
 fn distribute_and<F>(
@@ -12102,15 +12120,16 @@ fn distribute_and<F>(
         });
         return;
     }
-    let mut forward: Vec<RelateWork> = Vec::with_capacity(n + 1);
-    for m in members.iter() {
-        let (s, t) = pairer(m);
-        forward.push(arm(s, t));
-    }
-    if n > 1 {
-        forward.push(RelateWork::ReduceAnd(n as u32));
-    }
-    push_forward_work(work, forward);
+    push_all_of(
+        work,
+        members
+            .iter()
+            .map(|m| {
+                let (s, t) = pairer(m);
+                arm(s, t)
+            })
+            .collect(),
+    );
 }
 
 /// Concrete root-kind tags for the overlap oracle. Mixed tags that cannot
@@ -13488,10 +13507,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                         DescendKind::Eval,
                     ));
                 }
-                if pairs.len() > 1 {
-                    forward.push(RelateWork::ReduceAnd(pairs.len() as u32));
-                }
-                push_forward_work(work, forward);
+                push_all_of(work, forward);
                 return true;
             }
             // Tuple ≤ Array: the tuple's number index — the union of its
@@ -13537,10 +13553,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     let index = self.intern_normalized_union_or_intersection(&positions, true);
                     forward.push(RelateWork::Descend(index, t_el, DescendKind::Eval));
                 }
-                if forward.len() > 1 {
-                    forward.push(RelateWork::ReduceAnd(forward.len() as u32));
-                }
-                push_forward_work(work, forward);
+                push_all_of(work, forward);
                 return true;
             }
             // Array ≤ Tuple: the array is one rest position, paired up by
@@ -13584,10 +13597,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                         DescendKind::Eval,
                     ));
                 }
-                if pairs.len() > 1 {
-                    forward.push(RelateWork::ReduceAnd(pairs.len() as u32));
-                }
-                push_forward_work(work, forward);
+                push_all_of(work, forward);
                 return true;
             }
             _ => {}
@@ -13624,10 +13634,39 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         let mut results: Vec<RelationResult> = Vec::new();
         work.push(RelateWork::Expand(source, target, intersection_target_arm));
         while let Some(item) = work.pop() {
-            if !self.charge_relation_work(1) {
+            // A sequence is charged once, however many items it relates.
+            let charged = !matches!(item, RelateWork::AllOf { next, .. } if next > 0);
+            if charged && !self.charge_relation_work(1) {
                 return RelationResult::Unknown;
             }
             match item {
+                RelateWork::AllOf { items, next } => {
+                    let index = next as usize;
+                    let combined = if index == 0 {
+                        assignable(&[])
+                    } else {
+                        let latest = results
+                            .pop()
+                            .expect("RelateWork::AllOf: result-stack underflow");
+                        let combined = results
+                            .pop()
+                            .expect("RelateWork::AllOf: result-stack underflow");
+                        // A later item's binding of a parameter takes
+                        // precedence over an earlier one's.
+                        result_and(latest, combined)
+                    };
+                    let decided = matches!(combined, RelationResult::NotAssignable)
+                        && !self.relation_session_active();
+                    results.push(combined);
+                    if decided || index == items.len() {
+                        continue;
+                    }
+                    work.push(RelateWork::AllOf {
+                        items: Arc::clone(&items),
+                        next: next + 1,
+                    });
+                    work.push(items[index].clone());
+                }
                 RelateWork::Expand(s, t, intersection_target_arm) => {
                     self.expand_pair(
                         s,
@@ -13670,10 +13709,6 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                             work.push(RelateWork::Arm(s, t));
                         }
                     }
-                }
-                RelateWork::ReduceAnd(n) => {
-                    let combined = reduce_and_from_results(&mut results, n);
-                    results.push(combined);
                 }
                 RelateWork::Descend(s, t, kind) => {
                     self.relate_nested_pair(s, t, kind, bindings, &mut work, &mut results);
