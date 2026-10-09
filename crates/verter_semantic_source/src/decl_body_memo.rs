@@ -1277,8 +1277,9 @@ impl DeclBodyMemo {
     }
 
     /// The function program index this memo has already built, without
-    /// building it: `None` until a demand has. Retention observability
-    /// reads what the memo holds through it.
+    /// building it: `None` until a demand has (test-support: a test holds
+    /// it as a reader past the file's release).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn retained_function_program_index(
         &self,
     ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
