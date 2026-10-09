@@ -220,3 +220,76 @@ fn a_relation_past_its_byte_allowance_stops_on_the_memory_rail() {
         );
     });
 }
+
+/// `object_unions` whose target arms hold `string` instead of `number`:
+/// every arm of `S` misses the arm at its own position, so the unions do
+/// not relate.
+fn false_object_unions(count: usize) -> String {
+    let source: Vec<String> = (0..count).map(|i| format!("{{ p{i}: {i} }}")).collect();
+    let target: Vec<String> = (0..count).map(|i| format!("{{ p{i}: string }}")).collect();
+    format!(
+        "type S = {};\ntype T = {};\n",
+        source.join(" | "),
+        target.join(" | ")
+    )
+}
+
+/// The connected work relating `S` to `T` of `source` takes, and whether
+/// the relation holds.
+fn relation_work(source: &str) -> (usize, bool) {
+    with_probe(source, "[S, T]", |dispatch, node| {
+        let (s, t) = pair(dispatch, node);
+        let related = match dispatch.execute_relate(dispatch.relate_key_for(s, t)) {
+            RelationStep::Assignable { .. } => true,
+            RelationStep::NotAssignable => false,
+            other => panic!("the aligned unions decide, got {other:?}"),
+        };
+        (dispatch.connected_demand().work_used_for_tests(), related)
+    })
+}
+
+/// A union source fails at its first arm that relates to no target arm
+/// (`eachTypeRelatedToType`): aligned unions whose every target property
+/// is a `string` are false at the first arm, so the relation is decided —
+/// complete, never a partial — at any size, and its work grows with the
+/// unions, as the true case's does, rather than with every arm scanning
+/// the whole target.
+///
+/// Measured on TypeScript 7.0.2: `[S] extends [T] ? 1 : 2` is `2`, with no
+/// diagnostic, over 200 such arms each.
+#[test]
+fn false_aligned_object_unions_decide_at_the_first_arm() {
+    for count in [200, 1800, 3200] {
+        let failures = mismatches(
+            &false_object_unions(count),
+            &[("[S] extends [T] ? 1 : 2", "2")],
+        );
+        assert!(failures.is_empty(), "{count} arms: {}", failures.join("\n"));
+    }
+    let sizes = [200, 400, 800];
+    let false_work = sizes.map(|count| {
+        let (work, related) = relation_work(&false_object_unions(count));
+        assert!(!related, "{count} arms: no arm relates");
+        work
+    });
+    let true_work = sizes.map(|count| {
+        let (work, related) = relation_work(&object_unions(count));
+        assert!(related, "{count} arms: every arm relates");
+        work
+    });
+    for step in 0..2 {
+        assert!(
+            false_work[step + 1] * 10 <= false_work[step] * 22,
+            "doubling the arms at most about doubles the false relation's work: {false_work:?}"
+        );
+    }
+    for (index, count) in sizes.iter().enumerate() {
+        assert!(
+            false_work[index] <= true_work[index],
+            "{count} arms: the false relation costs no more than the true one \
+             ({} against {})",
+            false_work[index],
+            true_work[index]
+        );
+    }
+}
