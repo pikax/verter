@@ -229,7 +229,9 @@ to a passing fixture (`MRK9-AC1`), and MRK10 promotes only a full matrix
 | `M-D06` | The VS Code extension contributes no `.marko` language or grammar | contribute through REG0's generated fragment | MRK1G (`MRK1G-AC4`) |
 | `M-D07` | The TS plugin's carrier routing is carrier-generic | keep it generic; no Marko-specific code | MRK6 (`MRK6-AC6`) |
 
-MRK10 closes each row with its owner's acceptance (`MRK10-AC4`).
+MRK10 closes each row with its owner's acceptance (`MRK10-AC4`). The same
+inventory is the capability matrix's `displacedRoutes` product (M), with each
+route's disposition and owning acceptances; the two must agree row for row.
 
 ## Findings recorded for the receiving owners
 
@@ -245,7 +247,8 @@ MRK10 closes each row with its owner's acceptance (`MRK10-AC4`).
   controls that fail on planted boundary violations. MRK2-AC1 owns the
   discovery input; MRK5 consumes it without a second discovery path.
   MRK5 delivers this implementation and proof after MRK0. `MRK5-AC3` still
-  covers native/attribute-tag completion only. Ratifying `MRK5-AC6` does not
+  covers native-tag and attribute-tag completion, plus native-attribute
+  completion under F-MRK0-05. Ratifying `MRK5-AC6` does not
   supply an MRK9 pass: full-matrix promotion (`MRK10-AC1`) still needs a pass
   or a ratified exclusion for every cell.
 - **F-MRK0-02 (LMK1).** LMK1 states its marko line as "6.4.x latest stable".
@@ -260,6 +263,17 @@ MRK10 closes each row with its owner's acceptance (`MRK10-AC4`).
   CI-inert in `scripts/ci-impact.mjs`, because nothing in `ci.yml` reads it
   until MRK1G lands the lock spec. MRK1G moves it to the lane that runs the
   spec.
+- **F-MRK0-05 (MRK5).** Cells `C28`–`C30` name `MRK5-AC1`–`MRK5-AC3`,
+  whose proof obligations must cover every operation those cells route:
+  `MRK5-AC1` also requires TS-region completion answered exactly once by
+  tsgo (a planted Verter-computed completion fails); `MRK5-AC2` also requires
+  custom-tag definition on `<card>` to land in the discovered
+  `tags/card.marko` through `ProviderPositionMapper`, excluding a same-spelled
+  tag from another `tags/` scope and a tag variable named `card`; `MRK5-AC3`
+  also requires native HTML attribute completion on native tags, absent
+  inside a placeholder. Proof filters are unchanged. This amendment awaits
+  ratification; until it is ratified those three cells have no proving
+  receiver and cannot be promoted. MRK5 delivers the proof after MRK0.
 
 ## Acceptance evidence
 
@@ -269,7 +283,7 @@ executable "planted … fails" proof moves unchanged to MRK1G (`MRK1G-ACV`).
 | Acceptance | Met by |
 | ---------- | ------ |
 | `MRK0-AC1` pinned release | L `admittedReleases`, `excludedReleases`, `oracles`; cases `floating-range` … `oracle-floating` |
-| `MRK0-AC2` owned matrix | M `cells`, `exclusions`, `cellLaw`; cases `unowned-cell` … `unqualified-cell-promoted` |
+| `MRK0-AC2` owned matrix | M `cells`, `exclusions`, `cellLaw`, `displacedRoutes`; cases `unowned-cell` … `unqualified-cell-promoted` |
 | `MRK0-AC3` activation and host policy | A `activationRow`, `zeroWorkWhenInactive`, `hostPolicy`, `parserAuthority`; cases `extension-only-activation` … `lk6-activation` |
 | `MRK0-AC4` oracle is not support | M `cellLaw`, cell `C55` `supportClaim: none`, L oracle roles; cases `language-tools-evidence` … `syntax-highlighting-evidence` |
 | `MRK0-AC5` wire tag ratified | L `wireTag`; cases `open-canonical-tag` … `missing-tag` |

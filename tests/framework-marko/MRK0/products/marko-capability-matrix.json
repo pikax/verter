@@ -827,6 +827,54 @@
       "Sequence: MRK1 registers the descriptor with FRAMEWORK_TAG_MARKO = 12 and an empty supported_surfaces, so every kind is UNSUPPORTED (MRK1-AC6, M-D03); MRK3 fills supported_surfaces with exactly supportedSurfaces (MRK3-AC1, MRK3-AC3) and keeps excludedSurfaces UNSUPPORTED (MRK3-AC4) without another wire change."
     ]
   },
+  "displacedRoutes": {
+    "closedBy": "MRK10-AC4",
+    "rule": "MRK10 closes each route by its deletion or rejection with every listed owner's acceptance; this list and the Displaced routes table in docs/arch/framework-marko.md are the same inventory.",
+    "routes": [
+      {
+        "id": "M-D01",
+        "route": "A .marko file has no language row and falls through to unclassified handling",
+        "disposition": "replace with a gated LanguageRow behind the FWA1 capability bit",
+        "owners": [{ "owner": "MRK1", "acceptance": "MRK1-AC6" }, { "owner": "MRK1M", "acceptance": "MRK1M-AC5" }]
+      },
+      {
+        "id": "M-D02",
+        "route": "CarrierGrammarConfig is a closed Vue/Svelte enum",
+        "disposition": "add the Marko grammar configuration through REG0's family module",
+        "owners": [{ "owner": "MRK1", "acceptance": "MRK1-AC1" }]
+      },
+      {
+        "id": "M-D03",
+        "route": "FrameworkTag and tag_disposition have no Marko value or arm",
+        "disposition": "add MARKO = 12, Registered with every surface kind UNSUPPORTED until MRK3",
+        "owners": [{ "owner": "MRK1", "acceptance": "MRK1-AC6" }, { "owner": "MRK3", "acceptance": "MRK3-AC4" }]
+      },
+      {
+        "id": "M-D04",
+        "route": "Framework release admission by string prefix (VID0 V-D05) is the existing version-admission route",
+        "disposition": "never copied for Marko; activation reads the FWA1 record",
+        "owners": [{ "owner": "FWA1", "acceptance": "FWA1-AC1" }, { "owner": "MRK1M", "acceptance": "MRK1M-AC5" }]
+      },
+      {
+        "id": "M-D05",
+        "route": "The client manifest and virtual-file-naming mirrors have no Marko row",
+        "disposition": "render the rows from the descriptor",
+        "owners": [{ "owner": "MRK6", "acceptance": "MRK6-AC4" }]
+      },
+      {
+        "id": "M-D06",
+        "route": "The VS Code extension contributes no .marko language or grammar",
+        "disposition": "contribute through REG0's generated fragment",
+        "owners": [{ "owner": "MRK1G", "acceptance": "MRK1G-AC4" }]
+      },
+      {
+        "id": "M-D07",
+        "route": "The TS plugin's carrier routing is carrier-generic",
+        "disposition": "keep it generic; no Marko-specific code",
+        "owners": [{ "owner": "MRK6", "acceptance": "MRK6-AC6" }]
+      }
+    ]
+  },
   "qualification": {
     "coverage": "MRK9-AC1",
     "oracleAgreement": "MRK9-AC2",
