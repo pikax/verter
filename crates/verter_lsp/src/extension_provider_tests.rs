@@ -2145,3 +2145,143 @@ async fn a_resync_reopen_settles_the_bytes_it_delivers() {
     assert_eq!(service.held(file).as_deref(), Some("export const b = 2;\n"));
     assert_certifies_held(&provider, &service, file, "after a resync re-open");
 }
+
+// ── query coordinates bind to acknowledged receipts ──
+
+impl HeldQuery {
+    fn answer(self, body: Value) {
+        let _ = self.reply.send(Ok(body));
+    }
+}
+
+/// A definition from `origin` at `offset`, answered by the held extension
+/// with one location at line 2, offset 7 of `target`; `under_answer` runs
+/// while the request is held.
+async fn definition_answered_into<F, Fut>(
+    provider: &Arc<ExtensionTypeProvider<HeldTsQueryTransport>>,
+    transport: &HeldTsQueryTransport,
+    origin: &str,
+    target: &str,
+    under_answer: F,
+) -> Result<Vec<TypeLocation>, TypeProviderError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let defining = {
+        let provider = Arc::clone(provider);
+        let origin = origin.to_string();
+        tokio::spawn(async move {
+            provider
+                .get_definition(
+                    &crate::type_provider::traits::ProviderQuery::at_engine_surface(&origin),
+                    1,
+                )
+                .await
+        })
+    };
+    let held = transport.next_arrival().await;
+    assert_eq!(held.command, "definition");
+    under_answer().await;
+    held.answer(json!([{
+        "file": target,
+        "start": { "line": 2, "offset": 7 },
+        "end": { "line": 2, "offset": 11 },
+    }]));
+    defining.await.expect("the definition task completes")
+}
+
+const TARGET_A: &str = "const alpha = 1;\nconst beta = 2;\n";
+const TARGET_B: &str = "// moves every line\nconst alpha = 1;\nconst beta = 2;\n";
+
+#[tokio::test]
+async fn a_location_decodes_through_the_receipt_the_query_was_sent_under() {
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let (origin, target) = ("/ws/src/main.ts", "/ws/src/b.ts");
+    open_acknowledged(&provider, &transport, target, TARGET_A).await;
+    open_acknowledged(&provider, &transport, origin, "beta;\n").await;
+    let locations = definition_answered_into(&provider, &transport, origin, target, || async {})
+        .await
+        .expect("both files' receipts are unchanged");
+    assert_eq!(
+        locations.first().map(|location| location.start),
+        TARGET_A.find("beta").map(|offset| offset as u32)
+    );
+}
+
+#[tokio::test]
+async fn a_delivery_issued_under_an_answer_is_a_typed_conflict() {
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let (origin, target) = ("/ws/src/main.ts", "/ws/src/b.ts");
+    open_acknowledged(&provider, &transport, target, TARGET_A).await;
+    open_acknowledged(&provider, &transport, origin, "beta;\n").await;
+    // B reaches the service while the definition is evaluated: its answer may
+    // name either document's lines.
+    let error = definition_answered_into(&provider, &transport, origin, target, || async {
+        let (updating, held) = update_in_flight(&provider, &transport, target, TARGET_B).await;
+        held.acknowledge();
+        updating
+            .await
+            .expect("the update task completes")
+            .expect("acknowledged");
+    })
+    .await
+    .expect_err("A's coordinates must not decode through B");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+}
+
+#[tokio::test]
+async fn a_location_in_a_file_the_service_was_never_handed_is_a_typed_conflict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("b.ts");
+    std::fs::write(&target, TARGET_A).expect("write target");
+    let target = verter_span::path::canonicalize_path(&target.to_string_lossy());
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let origin = "/ws/src/main.ts";
+    open_acknowledged(&provider, &transport, origin, "beta;\n").await;
+    // The local cache and the disk both hold A, but the service reads the
+    // file itself: neither is the bytes it evaluated.
+    provider
+        .load_file(&target, TARGET_A)
+        .await
+        .expect("cache-only load");
+    let error = definition_answered_into(&provider, &transport, origin, &target, || async {})
+        .await
+        .expect_err("a file the service reads itself never decodes");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+}
+
+#[tokio::test]
+async fn a_query_on_a_cache_only_load_sends_nothing() {
+    let transport = HeldTsQueryTransport::default();
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/ws");
+    let file = "/ws/src/loaded.ts";
+    provider
+        .load_file(file, TARGET_A)
+        .await
+        .expect("cache-only load");
+    let error = provider
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            6,
+        )
+        .await
+        .expect_err("a cache-only load is not a delivery");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+    assert!(
+        transport.arrivals.lock().unwrap().is_empty(),
+        "no position converted against undelivered bytes reaches the service"
+    );
+}
