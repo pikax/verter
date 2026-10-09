@@ -21,7 +21,7 @@ The reviewed contract data lives in `tests/kernel/PAR0/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `parser-inventory.v1.json` | Decision kinds `DK1`–`DK5`, contracts `PD01`–`PD09`, current parser routes `G01`–`G13`, the grammar classification `CL01`–`CL38`, parser homes `H01`–`H09`, outcomes `PAR-O..`, consumers `PAR-C..`, plan consumers `PAR-P..`, the displaced route `PAR-D01`, referenced routes, category coverage, empty populations, findings `PAR-F..` and transferred obligations |
+| `parser-inventory.v1.json` | Decision kinds `DK1`–`DK5`, contracts `PD01`–`PD09`, current parser routes `G01`–`G13`, the grammar classification `CL01`–`CL38` plus SQL dialect rows `CL34P`, `CL34L` and `CL34M`, parser homes `H01`–`H09`, outcomes `PAR-O..`, consumers `PAR-C..`, plan consumers `PAR-P..`, the displaced routes `PAR-D01` and `PAR-D02`, referenced routes, category coverage, empty populations, findings `PAR-F..` and transferred obligations |
 | `parser-case-table.v1.json` | Negative cases `PN01`–`PN12`, which UAI0 runs, positive cases `PP01`–`PP05` and work counters `WC01`–`WC03` |
 
 Every `successorPath` starts at PAR0 and follows predecessor edges in the
@@ -79,8 +79,12 @@ refines or references them by id.
   `{canonical, whole_hash, parse_env_hash}`. The `SourceType` rides beside the
   key and is read only on a cold parse (`G09`, `PAR-F01`).
 - **Two text formats are read with ad-hoc tooling.**
-  - TOML: only `verter_validation_probe` uses the `toml` crate in production
-    (`G11`, `PAR-D01`).
+  - TOML: `verter_validation_probe` and the `xtask` workspace member both
+    depend on the `toml` crate as a normal dependency (`G11`, `PAR-D01`,
+    `PAR-D02`). Four other workspace manifests declare it as a
+    dev-dependency. `extensions/lapce` and `extensions/zed` are outside the
+    workspace members list and dev-depend on `toml` 0.8 (`PAR-C10`,
+    `PAR-C11`).
   - JSON/JSONC: four in-house comment strippers feed `serde_json` (`G12`,
     `PAR-F05`).
 - **Nothing else.** There is no parser for HTML, Pug, Astro, Angular, Marko,
@@ -152,7 +156,11 @@ VIM1 compiler) and is rendered onto the CAT0 `T01` carrier row.
 - **No semantic profile in the key.** Syntax artifacts never key on a
   semantic profile (VID0 `R15`).
 - **Exact invalidation.** A change of epoch, dialect or option misses exactly
-  the affected carrier's artifacts.
+  the affected carrier's syntax artifacts. A semantic result that observed
+  that parse misses too: an unchanged `FrameworkProfileId` does not keep a
+  result derived from the obsolete parse, and after the change the warm
+  result equals a fresh result. An entry that did not observe the changed
+  parse stays, as does every other carrier.
 - **No degraded warm entries.** A cancelled, stale or partial parse is never
   admitted as complete and never warms a cache.
 
@@ -243,8 +251,12 @@ A parser crate may depend only on:
 
 - `verter_language`, for the neutral parse-artifact DTOs;
 - `verter_span`;
-- the neutral owners its `DK1` rows name;
-- the OXC choke point.
+- the neutral owners its `DK1` Reuse rows name;
+- the parser owner an owner-declared `DK2` dialect edge names
+  (`CL15`: `verter_mdx_syntax` depends on `verter_markdown_syntax` for the
+  Markdown extension hook);
+- the OXC choke point, where a delegation names an OXC extent (`H03`
+  ESM/JSX).
 
 It never depends on a semantic profile or a compiler backend.
 
@@ -284,7 +296,9 @@ It never depends on a semantic profile or a compiler backend.
 | `CL27`, `CL28` | TOML 1.1, XML 1.0 + NS | document languages | NewParser | `verter_toml_syntax`, `verter_xml_syntax` | TOML1, XML1 |
 | `CL29`, `CL30` | JSON/JSONC, JSON5 | document languages | NewParser; JSON5 Dialect | `verter_json_syntax` | DATA1, J5-1 |
 | `CL31`, `CL32` | YAML, Markdown | document languages | NewParser | `verter_yaml_syntax`, `verter_markdown_syntax` | DATA3, DATA5 |
-| `CL33`–`CL36` | GraphQL, SQL, Cypher 25, DynamoDB | DSLs | NewParser (SQL dialect hooks) | `verter_graphql_syntax`, `verter_sql_syntax`, `verter_cypher_syntax`, `verter_dynamodb_syntax` | GQL1, SQL1, NEO1, DDB1 |
+| `CL33`, `CL35`, `CL36` | GraphQL, Cypher 25, DynamoDB | DSLs | NewParser | `verter_graphql_syntax`, `verter_cypher_syntax`, `verter_dynamodb_syntax` | GQL1, NEO1, DDB1 |
+| `CL34` | SQL core | DSL | NewParser with dialect hooks | `verter_sql_syntax` | SQL1 |
+| `CL34P`, `CL34L`, `CL34M` | PostgreSQL, SQLite, MySQL dialect cells | dialect of the SQL core | Dialect | `verter_sql_syntax` | SQLDP, SQLDL, SQLDM |
 | `CL37` | ECMAScript regex | DSL | NewParser | `verter_regex` | RGX1 |
 | `CL38` | JSDoc tag types | comment syntax | Reuse (OXC) + tag scanner | `G06` | retained (UAI0) |
 
@@ -316,14 +330,15 @@ glob makes them members.
 
 | Route | Category | Unit | Owner |
 | ----- | -------- | ---- | ----- |
-| `PAR-D01` | parser admission | `toml` as a production dependency of `verter_validation_probe` | TOMLX (`TOMLX-AC1`) |
+| `PAR-D01` | parser admission | `toml` as a normal dependency of `verter_validation_probe` | TOMLX (`TOMLX-AC1`) |
+| `PAR-D02` | parser admission | `toml` as a normal dependency of the `xtask` workspace member | TOMLX (`TOMLX-AC1`) |
 
 | Category | Recorded here | Referenced |
 | -------- | ------------- | ---------- |
 | central framework switch | — | `D01`, `D04`, `D07` (CPF1); `K03` (FWC1); `F-D01` (CPF1) |
 | untagged coordinate/public identity | — | `D08` (CPF1) |
 | duplicate component information authority | — | `F-D06` (CPF1); `D12` (TIF1) |
-| parser admission | `PAR-D01` | — |
+| parser admission | `PAR-D01`, `PAR-D02` | — |
 
 Each central grammar match at this head already has an owner. PAR0 adds the
 rule (`PD02`) and the negatives that keep a new one out (`PN03`, `PN06`,
@@ -347,8 +362,13 @@ rule (`PD02`) and the negatives that keep a new one out (`PN03`, `PN06`,
 | `PAR-C06` | Compiler request and stage identities consume the admitted parse | CMP1 (`CMP1-AC2`) |
 | `PAR-C07` | Neutral HTML fact authority | HWC1 (`HWC1-AC1`) |
 | `PAR-C08` | Regex literal hand-off from OXC | RGX1 (`RGX1-AC1`) |
+| `PAR-C09` | `xtask` cutover-state TOML reader | TOMLX (`TOMLX-AC1`) |
+| `PAR-C10` | Lapce extension `toml` 0.8 dev-dependency (not a workspace member) | TOMLX (`TOMLX-AC1`) |
+| `PAR-C11` | Zed extension `toml` 0.8 dev-dependency (not a workspace member) | TOMLX (`TOMLX-AC1`) |
 
 The plan consumers `PAR-P01`–`PAR-P15` list which successor reads which rows.
+A row names one node, or a `bindings` list with one entry per node. Each
+binding has that node's successor path and its own receiving acceptance.
 
 ## Findings recorded for the receiving owners
 
@@ -376,9 +396,13 @@ The plan consumers `PAR-P01`–`PAR-P15` list which successor reads which rows.
   - LIQ1 and ERB1 add central `CarrierGrammarConfig` arms and a private CST in
     `verter_language`. Both move to owner-local rows (CAT0 `CAT-F03`) and to
     their homes.
-- **TOMLX misses one manifest** (`PAR-F08`). TOMLX names four `toml`
-  manifests, but there are five: `verter_source_policy_gate` declares it as a
-  dev-dependency, and `cargo tree` counts dev edges.
+- **TOMLX's manifest census** (`PAR-F08`). The workspace has six `toml`
+  manifests: normal dependencies in `verter_validation_probe` and `xtask`,
+  and dev-dependencies in `verter_session`, `verter_lsp`,
+  `verter_source_policy_gate` and `verter-editor-client`. `cargo tree`
+  includes the `xtask` member and the dev edges. `extensions/lapce` and
+  `extensions/zed` are outside the workspace members list and dev-depend on
+  `toml` 0.8; the same TOMLX change removes them.
 - **HWC1 and DIAL1 name the wrong homes** (`PAR-F09`). HWC1 names
   `verter_language/src` for the HTML parser, and DIAL1's conflict domain names
   `verter_parser` for Pug. `PD08` places them in `H08` and `H09`.
@@ -417,7 +441,9 @@ inspection are the right evidence. The diff adds no test.
 - **AC3 — incremental equivalence: not applicable.** No cache, cancellation,
   stale-publication or partial-result authority is touched, and no production
   byte changes. `PD03` and `PN01` bind "content-only reuse is rejected" to
-  UAI0, and `PP05` binds exact grammar-epoch invalidation to PER0.
+  UAI0. `PP05` binds grammar-epoch invalidation to PER0: the changed
+  carrier's syntax artifacts miss, a semantic result that observed that
+  parse equals a fresh result, and an entry that did not observe it stays.
 - **AC4 — bounded work: not applicable.** No hot path changes. `WC01`–`WC03`
   name the existing parse-once and lowering readers that the receiving owners
   report.
