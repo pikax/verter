@@ -29,6 +29,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use crate::retention::resident::{resident, ResidentCharge, ResidentKind, RESIDENT_SLOTS};
+
 use super::{
     FlowBindingIdentity, FunctionCapturedRead, FunctionProgramDiscovery, FunctionProgramKey,
     FunctionReferenceBinding, FunctionWriteTarget,
@@ -87,6 +89,9 @@ struct FrameSummary {
 /// entries; released with the last of them.
 #[derive(Debug, Default)]
 pub(super) struct CaptureSummaries {
+    /// What this summary contributes to the process's resident capture
+    /// storage, from its build until the last handle on it drops.
+    resident: ResidentCharge,
     /// By entry ordinal.
     frames: Box<[FrameSummary]>,
     children: Box<[u32]>,
@@ -358,13 +363,17 @@ impl CaptureSummaries {
                 })
             })
             .collect();
-        Self {
+        let mut summary = Self {
+            resident: ResidentCharge::default(),
             frames,
             children: children.into_boxed_slice(),
             bindings: bindings.into_boxed_slice(),
             captures: captures.into_boxed_slice(),
             reads: reads.into_boxed_slice(),
-        }
+        };
+        summary.resident =
+            ResidentCharge::admit(ResidentKind::CaptureSummary, summary.occupancy().slots());
+        summary
     }
 
     /// The records this summary holds right now — one per frame,
@@ -412,6 +421,37 @@ pub struct CaptureSummaryCounts {
 }
 
 impl CaptureSummaryCounts {
+    fn slots(&self) -> [usize; RESIDENT_SLOTS] {
+        [
+            self.frames,
+            self.nested_links,
+            self.bindings,
+            self.captures,
+            self.reads,
+            self.backing_bytes,
+        ]
+    }
+
+    /// What every capture summary alive in the process holds — whether a
+    /// cache entry, a retired artifact version or only a reader still holds
+    /// it — each summary counted once, and how many summaries are alive.
+    #[must_use]
+    pub fn resident() -> (Self, usize) {
+        let ([frames, nested_links, bindings, captures, reads, backing_bytes], summaries) =
+            resident(ResidentKind::CaptureSummary);
+        (
+            Self {
+                frames,
+                nested_links,
+                bindings,
+                captures,
+                reads,
+                backing_bytes,
+            },
+            summaries,
+        )
+    }
+
     /// Every record, summed.
     #[must_use]
     pub fn total(&self) -> usize {
@@ -465,6 +505,7 @@ impl FrameCaptureHandle {
 
     /// The shared summary's allocation address: equal for two handles on
     /// the same summary while either is alive.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) fn summary_ptr(&self) -> *const () {
         Arc::as_ptr(&self.summary).cast()
     }
