@@ -76,6 +76,17 @@ import { createMacroReturn } from "./index";
 // Loops
 import type { extractLoops, ExtractLoopsResult } from "./index";
 
+// Flow (template condition narrowing and v-for frames)
+import type {
+  FlowExcluded,
+  flowNarrow,
+  flowExcluded,
+  flowBranch,
+  flowEach1,
+  flowEach2,
+  flowEach3,
+} from "./index";
+
 // Name
 import type {
   CanCapitalize,
@@ -134,6 +145,13 @@ describe("Package exports", () => {
     // Loops types
     type TestExtractLoops = ReturnType<typeof extractLoops<string[]>>;
     type TestExtractLoopsResult = ExtractLoopsResult<string[]>;
+
+    // Flow types
+    type TestFlowExcluded = FlowExcluded<"a" | "b", "a">;
+    type TestFlowNarrow = typeof flowNarrow;
+    type TestFlowExcludedFn = typeof flowExcluded;
+    type TestFlowBranch = typeof flowBranch;
+    type TestFlowEach = [typeof flowEach1, typeof flowEach2, typeof flowEach3];
 
     // Setup types
     type TestReturnMacros = ReturnMacros;

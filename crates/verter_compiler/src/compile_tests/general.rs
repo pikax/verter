@@ -1955,7 +1955,7 @@ const handler = () => {}
 const items = [1]
 </script>
 <template><div v-for="item in items">{{ item + items.length }}</div></template>"#,
-            &["items).map((item) => { return (", "{ item + items.length }"],
+            &["items); { const item", "{ item + items.length }"],
             &["_ctx."],
         ),
         (

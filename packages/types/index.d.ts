@@ -172,6 +172,39 @@ export declare function checkRequiredSlots<T>(
   slots: T,
   provided: { [K in keyof T as undefined extends T[K] ? never : K]: true },
 ): void;
+export type FlowSame<A, B> =
+  (<G>() => G extends A ? 1 : 2) extends <G>() => G extends B ? 1 : 2 ? true : false;
+export type FlowKept<R, S> = S extends unknown
+  ? FlowSame<R, S> extends true
+    ? true
+    : never
+  : never;
+export type FlowExcluded<R, S> = R extends unknown
+  ? [FlowKept<R, S>] extends [never]
+    ? R
+    : never
+  : never;
+export declare function flowNarrow<S>(reference: unknown, snapshot: S): reference is S;
+export declare function flowExcluded<S>(
+  snapshot: S,
+): <R>(reference: R) => reference is FlowExcluded<R, S>;
+export declare const flowBranch: boolean;
+export declare function flowEach1<V>(source: readonly V[] | null | undefined): V;
+export declare function flowEach1<V>(source: Iterable<V> | null | undefined): V;
+export declare function flowEach1(source: number | null | undefined): number;
+export declare function flowEach1<S extends object>(source: S | null | undefined): S[keyof S];
+export declare function flowEach2<V>(source: readonly V[] | null | undefined): [V, number];
+export declare function flowEach2<V>(source: Iterable<V> | null | undefined): [V, number];
+export declare function flowEach2(source: number | null | undefined): [number, number];
+export declare function flowEach2<S extends object>(
+  source: S | null | undefined,
+): [S[keyof S], keyof S];
+export declare function flowEach3<V>(source: readonly V[] | null | undefined): [V, number, number];
+export declare function flowEach3<V>(source: Iterable<V> | null | undefined): [V, number, number];
+export declare function flowEach3(source: number | null | undefined): [number, number, number];
+export declare function flowEach3<S extends object>(
+  source: S | null | undefined,
+): [S[keyof S], keyof S, number];
 
 declare module "vue" {
   // Guarantee the augmentable GlobalComponents surface exists on EVERY Vue

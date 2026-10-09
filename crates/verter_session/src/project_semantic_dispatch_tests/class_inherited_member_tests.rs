@@ -215,45 +215,69 @@ fn an_inherited_read_follows_edits_to_the_member_it_reads() {
 /// selective read follows the demanded name through every class of the chain.
 #[test]
 fn a_deep_extends_chain_answers_the_inherited_read() {
-    let depth = 250;
-    let mut source = String::from("class C0 { a = 'deep' as const }\n");
-    for i in 1..=depth {
-        source.push_str(&format!("class C{i} extends C{} {{}}\n", i - 1));
-    }
-    source.push_str(&format!("function r(x: C{depth}) {{ return x.a }}\n"));
-    let failures = mismatches(&source, &[("ReturnType<typeof r>", "\"deep\"")]);
+    let failures = mismatches(
+        &deep_chain(250, ""),
+        &[("ReturnType<typeof r>", "\"deep\"")],
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A chain deeper than the selective read follows
-/// (`MAX_CLASS_MEMBER_INHERITANCE_DEPTH`) still answers, through the
-/// whole-surface read of the class where the walk stopped.
-#[test]
-fn an_extends_chain_past_the_follow_bound_still_answers() {
-    let depth = 257;
-    let mut source = String::from(
-        "class C0 { a = 'deep' as const }
-",
-    );
+/// A chain of `depth` classes read at its far end. `C0` declares `a`;
+/// `C1`, which the walk passes through before reaching `C0`, declares
+/// `base_extra`.
+fn deep_chain(depth: usize, base_extra: &str) -> String {
+    let mut source = String::from("class C0 { a = 'deep' as const }\n");
     for i in 1..=depth {
-        source.push_str(&format!(
-            "class C{i} extends C{} {{}}
-",
-            i - 1
-        ));
+        let body = if i == 1 { base_extra } else { "" };
+        source.push_str(&format!("class C{i} extends C{} {{\n{body}}}\n", i - 1));
     }
-    source.push_str(&format!(
-        "function r(x: C{depth}) {{ return x.a }}
-"
-    ));
-    let failures = mismatches(&source, &[("ReturnType<typeof r>", "\"deep\"")]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
+    source.push_str(&format!("function r(x: C{depth}) {{ return x.a }}\n"));
+    source
+}
+
+/// However deep the `extends` chain, the inherited read follows only the
+/// demanded name to the declaring base: past three hundred classes the read
+/// still answers, and forty unrelated members on a class the walk passes through add no work —
+/// the chain is never escaped through a whole-class read. At an ordinary
+/// depth the same holds.
+#[test]
+fn a_chain_past_three_hundred_classes_lowers_no_unrelated_base_member() {
+    let unrelated: String = (0..40).map(|i| format!("  u{i} = {i};\n")).collect();
+    for depth in [8, 300] {
+        let failures = mismatches(
+            &deep_chain(depth, &unrelated),
+            &[("ReturnType<typeof r>", "\"deep\"")],
+        );
+        assert!(
+            failures.is_empty(),
+            "depth {depth}: {}",
+            failures.join("\n")
+        );
+        assert_eq!(
+            nodes_interned_by(&deep_chain(depth, ""), "ReturnType<typeof r>"),
+            nodes_interned_by(&deep_chain(depth, &unrelated), "ReturnType<typeof r>"),
+            "depth {depth}: forty unrelated base members add no work"
+        );
+    }
+}
+
+/// A read through a circular `extends` chain lowers no unrelated member of
+/// the cycle's classes: forty more members on each add no work.
+#[test]
+fn a_circular_extends_chain_lowers_no_unrelated_member() {
+    let unrelated: String = (0..40).map(|i| format!("  u{i} = {i};\n")).collect();
+    let cycle = |extra: &str| {
+        format!(
+            "class A extends B {{ a = 1 as const;\n{extra}}}\n\
+             class B extends A {{ b = 2 as const;\n{extra}}}\n\
+             class C extends A {{ }}\n\
+             function h(c: C) {{ return c.b; }}\n"
         )
+    };
+    assert_eq!(
+        nodes_interned_by(&cycle(""), "ReturnType<typeof h>"),
+        nodes_interned_by(&cycle(&unrelated), "ReturnType<typeof h>"),
+        "forty unrelated members on each class of the cycle add no work"
     );
 }
 
@@ -266,7 +290,7 @@ fn a_circular_extends_chain_terminates_and_answers_declared_members() {
         "class A extends B { a = 1 as const; }\nclass B extends A { b = 2 as const; }\nclass C extends A { }\nfunction f(c: C) { return c.a; }\nfunction h(c: C) { return c.b; }\n",
         &[
             ("ReturnType<typeof f>", "1"),
-                        ("ReturnType<typeof h>", "2"),
+            ("ReturnType<typeof h>", "2"),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
