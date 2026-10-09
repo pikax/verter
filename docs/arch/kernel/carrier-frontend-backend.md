@@ -342,3 +342,4 @@ UAI0's later obligation under `UAI0-AC-R1`; it is not passing evidence here.
   byte changes. `PC06` binds "a partial result is never promoted warm" to CPF1.
 - **AC4 — bounded work: not applicable.** No hot path changes. `WC01`–`WC06`
   bind the parse-once and no-hidden-work evidence to CPF1.
+

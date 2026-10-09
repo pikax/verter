@@ -161,3 +161,4 @@
     {"obligation": "Executable schema/validator that rejects missing inventory members, unknown or pathless owners and conflicting assignments over this data, and re-validates frontend/backend separation", "receiver": "UAI0", "receivingAcceptance": "UAI0-AC-R1"}
   ]
 }
+
