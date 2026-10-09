@@ -175,14 +175,14 @@ is the TS-host projection only.
 ## Matrix
 
 `marko-capability-matrix.json` holds 56 cells over the one admitted profile.
-Each cell names one producer node and one receiving acceptance id of that
-producer that proves the operation, or is a pending-receiver cell (below).
+Each cell names one producer node and one ratified receiving acceptance id
+of that producer requiring proof of the operation. Null receivers and
+pending-receiver notes are invalid. A ratified receiver records an obligation;
+it does not claim that the feature is implemented or qualified.
 Every cell records `tsgoOperations` and `tsgoLimitation` explicitly; an
 empty list and `null` mean none. On a kernel cell (`C20`–`C22`) the tsgo
 operations are checker queries the producer consumes as type-authority
 input; tsgo answers only tsgo-hosted cells.
-
-
 
 | Producer | Cells | Hosts |
 | -------- | ----- | ----- |
@@ -222,15 +222,21 @@ MRK10 closes each row with its owner's acceptance (`MRK10-AC4`).
 
 ## Findings recorded for the receiving owners
 
-- **F-MRK0-01 (MRK5).** MRK5's charter lists HTML-mode auto-close and
-  custom-tag name completion as its carrier-only operations, but no MRK5
-  acceptance proves either: `MRK5-AC3` covers attribute-tag and native-tag
-  completion only. Cells `C32` (auto-close) and `C56` (custom-tag name
-  completion) are therefore pending-receiver cells: `receivingAcceptance` is
-  `null` and `pendingReceiver` names the owed proof. They borrow no
-  acceptance id. The receiving MRK5 acceptance is an open controller question
-  (`mrk5-carrier-acceptance`); until it is ratified the matrix is incomplete
-  and full-matrix promotion (`MRK10-AC1`) fails.
+- **F-MRK0-01 (MRK5).** Cells `C32` (auto-close) and `C56` (custom-tag name
+  completion) name the ratified **MRK5-AC6 — carrier mode and discovery
+  boundaries**. Through the Marko carrier feature provider, auto-close fires
+  in HTML markup and is absent in concise mode and TS regions. Custom-tag
+  name completion lists the canonical tags MRK2 discovers for the file's
+  scope, respects nearest `tags/` scope precedence, and excludes names
+  visible only in another package's `tags/` scope. The proof is
+  `cargo nextest run -p verter_lsp -E 'test(/marko_carrier_features/)'`, with
+  positive HTML/visible-tag controls and negative concise/TS/sibling-package
+  controls that fail on planted boundary violations. MRK2-AC1 owns the
+  discovery input; MRK5 consumes it without a second discovery path.
+  MRK5 delivers this implementation and proof after MRK0. `MRK5-AC3` still
+  covers native/attribute-tag completion only. Ratifying `MRK5-AC6` does not
+  supply an MRK9 pass: full-matrix promotion (`MRK10-AC1`) still needs a pass
+  or a ratified exclusion for every cell.
 - **F-MRK0-02 (LMK1).** LMK1 states its marko line as "6.4.x latest stable".
   The registry's latest 6.4.x (6.4.5) excludes the shared compiler oracle, so
   that line resolves to this lock's exact 6.4.3.
@@ -252,7 +258,7 @@ executable "planted … fails" proof moves unchanged to MRK1G (`MRK1G-ACV`).
 | Acceptance | Met by |
 | ---------- | ------ |
 | `MRK0-AC1` pinned release | L `admittedReleases`, `excludedReleases`, `oracles`; cases `floating-range` … `oracle-floating` |
-| `MRK0-AC2` owned matrix | M `cells`, `exclusions`, `cellLaw`; cases `unowned-cell` … `pending-cell-promoted` |
+| `MRK0-AC2` owned matrix | M `cells`, `exclusions`, `cellLaw`; cases `unowned-cell` … `unqualified-cell-promoted` |
 | `MRK0-AC3` activation and host policy | A `activationRow`, `zeroWorkWhenInactive`, `hostPolicy`, `parserAuthority`; cases `extension-only-activation` … `lk6-activation` |
 | `MRK0-AC4` oracle is not support | M `cellLaw`, cell `C55` `supportClaim: none`, L oracle roles; cases `language-tools-evidence` … `syntax-highlighting-evidence` |
 | `MRK0-AC5` wire tag ratified | L `wireTag`; cases `open-canonical-tag` … `missing-tag` |

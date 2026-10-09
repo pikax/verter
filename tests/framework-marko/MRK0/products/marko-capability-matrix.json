@@ -64,7 +64,7 @@
     "No cell is a build, bundler or runtime cell; those are exclusions.",
     "No cell cites @marko/language-tools, @marko/type-check, @marko/compiler, an installed parser or syntax highlighting as product evidence.",
     "Every cell records tsgoOperations and tsgoLimitation explicitly: an empty list and null mean the cell needs no tsgo operation and has no known tsgo limitation, never 'not recorded'. On a cell not hosted by tsgo, tsgoOperations lists the checker queries its producer consumes as type-authority input; tsgo does not answer that cell, and cellLaw[2] governs only tsgo-hosted cells.",
-    "A cell whose producer owns the operation but has no acceptance that proves it is a pending-receiver cell: receivingAcceptance is null and pendingReceiver names the producer, the proof it owes and the open controller question. It never borrows an acceptance id that does not prove the operation. While any pending-receiver cell remains the matrix is incomplete, and full-matrix promotion (MRK10-AC1) fails."
+    "Every included cell has a ratified receiving acceptance that requires proof of its operation. A null receivingAcceptance or pendingReceiver is invalid, and a cell never borrows an acceptance id that does not prove the operation. Ratifying the receiver does not qualify the feature: full-matrix promotion (MRK10-AC1) still requires an MRK9 pass or ratified exclusion for every cell."
   ],
   "parserDecisions": [
     {
@@ -433,14 +433,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
-      "receivingAcceptance": null,
+      "receivingAcceptance": "MRK5-AC6",
       "tsgoOperations": [],
-      "tsgoLimitation": null,
-      "pendingReceiver": {
-        "producer": "MRK5",
-        "owedProof": "custom-tag name completion lists the tags MRK2 discovers for the file's scope and excludes tags from another tags/ scope",
-        "question": "mrk5-carrier-acceptance"
-      }
+      "tsgoLimitation": null
     },
     {
       "id": "C31",
@@ -458,14 +453,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
-      "receivingAcceptance": null,
+      "receivingAcceptance": "MRK5-AC6",
       "tsgoOperations": [],
-      "tsgoLimitation": null,
-      "pendingReceiver": {
-        "producer": "MRK5",
-        "owedProof": "auto-close fires in HTML mode and is absent in concise mode and inside TS regions",
-        "question": "mrk5-carrier-acceptance"
-      }
+      "tsgoLimitation": null
     },
     {
       "id": "C33",
