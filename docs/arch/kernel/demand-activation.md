@@ -83,9 +83,12 @@ consume the plan.
   host supplies through the user layer (CFG0 `CR05`, `CR22`).
 - **DR05.** The selection-input identity is the canonical tagged encoding
   (VID0 `R12`, `R13`) of each member's identity in a fixed member order. It
-  carries no path string, no backend or process identity (VID0 `R14`) and not
-  the whole effective configuration: only the `frameworks` value fingerprint
-  and the catalog rows the decode consulted.
+  carries no path string and no backend or process identity (VID0 `R14`).
+  The configuration member is the `frameworks` value fingerprint only, not
+  the whole effective configuration and not CFG0 `CR14`'s consulted-row
+  query key. The catalog member is the whole `CatalogSnapshot` identity
+  (VID0 `I09`): a catalog re-version mints a new identity even when the
+  rows a decode consulted are unchanged.
 
 ### Pre-projection `SourceActivationPlan` (subblock 2)
 
@@ -189,7 +192,9 @@ consume the plan.
   per-file narrowing and no declared `T06` relation is `Ambiguous { claims }`
   (CAT0 `CR14`). Registration, load, discovery and completion order never
   decide. An ambiguous region serves no profile-specific result for that
-  region and reports the ambiguity once per epoch.
+  region and reports the ambiguity once per activation epoch. A
+  participation-only change mints a demand epoch (`DR21`) and does not
+  report that ambiguity again.
 - **DR23.** A declared `T06` relation decides deterministically: `exclusive`
   keeps the ambiguity, `coexisting` selects both claims on disjoint
   capabilities, `nested` selects the outer claim for the region and the inner

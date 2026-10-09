@@ -40,7 +40,7 @@
       "id": "DC03",
       "name": "ambiguous region",
       "input": "A test catalog with two semantic profiles that both claim the TSX carrier, both active for one package, with no @jsxImportSource pragma and no declared T06 relation. The catalog is built twice with the two profiles registered in opposite orders.",
-      "required": "Every region of the file is Ambiguous { claims } naming both AttachmentIds, identically under both registration orders. Profile work: 0 framework projection, 0 script-fact capture, 0 TypeInfo operations for either profile. Audit: one ActivationPlanned for that source unit's stage-one plan, with ambiguous equal to that file's region count. The ambiguity diagnostic is reported once per epoch (DR22). Adding the pragma for one profile selects that profile for that file only.",
+      "required": "Every region of the file is Ambiguous { claims } naming both AttachmentIds, identically under both registration orders. Profile work: 0 framework projection, 0 script-fact capture, 0 TypeInfo operations for either profile. Audit: one ActivationPlanned for that source unit's stage-one plan, with ambiguous equal to that file's region count. The ambiguity diagnostic is reported once per activation epoch (DR22); a participation-only change that mints a demand epoch does not report it again. Adding the pragma for one profile selects that profile for that file only.",
       "forbidden": "First-registered, first-loaded or fastest profile wins; a merge of both profiles' results; a warm cache entry for the ambiguous outcome",
       "rules": ["DR22", "DR26", "DR28", "DR30"],
       "existingEvidence": ["register_all_rejects_two_rows_that_share_one_carrier_language"],
@@ -121,9 +121,9 @@
       "forbidden": "The pragma narrowing other files; React and Solid both selected on widget.tsx",
       "rules": ["DR06", "DR07", "DR22"],
       "existingEvidence": [],
-      "executableOwner": "FWA1",
-      "successorPath": ["DEM0", "IDX0D", "PM0", "PM1", "PM3", "FWA1"],
-      "receivingAcceptance": "FWA1-AC2"
+      "executableOwner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
     },
     {
       "id": "DC10",
