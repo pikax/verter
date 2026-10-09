@@ -28,7 +28,7 @@ The reviewed contract data lives in `docs/arch/compiler-request/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `compile-request-inventory.v1.json` | Rules `RQ01`–`RQ10`, `DC01`–`DC06`, `SK01`–`SK10`, `OB01`–`OB05`, `NB01`–`NB06`, `MG01`–`MG09`; outcomes `CMP-O01`–`CMP-O18`; consumers `CMP-C01`–`CMP-C14`; displaced routes `CMP-D01`–`CMP-D17`; referenced routes, category coverage, empty populations, findings `CMP-F01`–`CMP-F16`, the authorised receiving-charter amendment `RA02`, the proposed amendment `RA03`, plan consumers and transferred obligations `CMP-T01`–`CMP-T05` |
+| `compile-request-inventory.v1.json` | Rules `RQ01`–`RQ10`, `DC01`–`DC06`, `SK01`–`SK10`, `OB01`–`OB05`, `NB01`–`NB06`, `MG01`–`MG09`; outcomes `CMP-O01`–`CMP-O18`; consumers `CMP-C01`–`CMP-C14`; displaced routes `CMP-D01`–`CMP-D17`; referenced routes, category coverage, empty populations, findings `CMP-F01`–`CMP-F16`, the authorised receiving-charter amendments `RA02` and `RA03`, plan consumers and transferred obligations `CMP-T01`–`CMP-T05` |
 | `option-impact-classification.v1.json` | The seven option-impact classes, rules `OI01`–`OI06`, and one row per caller-settable request field (`OC-T..`, `OC-P..`, `OC-V..`, `OC-S..`) plus the host-resolved execution inputs (`OC-H..`), each with its class and its routing status at the described head |
 | `compile-request-case-table.v1.json` | Negative cases `CN01`–`CN13`, positive cases `CP01`–`CP05` and work counters `WC01`–`WC04` |
 
@@ -340,12 +340,17 @@ populations in the inventory).
   this cutover. The migration preserves host fact validation,
   stale-publication fences, complete-only cache admission and
   incremental/fresh equivalence. Production work stays after this contract.
-- **VCP6, SCP6 and CMP4 surfaces** do not name every path on `CMP-D01`–
-  `CMP-D11` (`CMP-F13`). Those nodes stay the deletion owners. Amendment
-  `RA03` is proposed through question
-  `cmp0-ra03-out-of-surface-deletion-scope`, asking the controller to extend
-  each node's write scope to the paths already listed. Until that ruling the
-  bindings stand on the recorded owners.
+- **VCP6, SCP6 and CMP4 deletion scope is authorised** (`CMP-F13`, `RA03`).
+  The operator ruling on `cmp0-ra03-out-of-surface-deletion-scope`
+  (2026-10-09) keeps VCP6 for `CMP-D01`, `CMP-D03`, `CMP-D04`, `CMP-D07`,
+  `CMP-D08` and `CMP-D10` under `VCP6-AC1`; SCP6 for `CMP-D02`, `CMP-D06`
+  and `CMP-D09` under `SCP6-AC1`; and CMP4 for `CMP-D05` and `CMP-D11` under
+  `CMP4-AC1`. Each owner's write scope and conflict domains cover the paths
+  listed on those rows. The F09 module-only restriction is superseded only
+  for those migrations and deletions. CMP4's production surface already
+  includes `assembly/publish.rs` and `assembly/fragment.rs`. Shared files
+  do not transfer sibling responsibilities. Production work stays after
+  this contract.
 - **TSC0's projections are not stage classes** (`CMP-F14`).
 - Two identities outside CMP0's graph are recorded, not bound: a `Debug`
   rendering in `CarrierInventory::artifact_identity_token` (`CMP-F15`, CPF1)
