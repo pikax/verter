@@ -71,6 +71,20 @@ export function allScenarios() {
       ),
     );
   }
+  // The same aligned unions with every target property a `string`: no arm
+  // relates, so the relation is false at the first arm it relates.
+  for (const m of [200, 600, 1800, 3200]) {
+    out.push(
+      scenario(
+        `relation-aligned-false-${m}`,
+        "relations",
+        `[S] extends [T] over two ${m}-member object unions, target in source order, no arm related`,
+        `type S = ${union(range(m).map((i) => `{ p${i}: ${i} }`))};\n` +
+          `type T = ${union(range(m).map((i) => `{ p${i}: string }`))};\n`,
+        "[S] extends [T] ? 1 : 2",
+      ),
+    );
+  }
   for (const m of [200, 600, 1800, 2100, 3200]) {
     out.push(
       scenario(
@@ -462,6 +476,7 @@ export const UNCOVERED = [
 export const SCENARIO_TIERS = {
   "baseline-empty": "quick",
   "relation-aligned-200": "quick",
+  "relation-aligned-false-200": "quick",
   "relation-reversed-200": "quick",
   "template-4-spans": "quick",
   "template-nested": "quick",
@@ -484,6 +499,9 @@ export const SCENARIO_TIERS = {
   "relation-aligned-600": "standard",
   "relation-aligned-1800": "standard",
   "relation-aligned-3200": "standard",
+  "relation-aligned-false-600": "standard",
+  "relation-aligned-false-1800": "standard",
+  "relation-aligned-false-3200": "standard",
   "relation-reversed-600": "standard",
   "relation-reversed-2100": "standard",
   "spread-400x250": "standard",
