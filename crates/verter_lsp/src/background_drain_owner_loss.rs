@@ -173,7 +173,8 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
                 // `RetractFailed` additionally means the cross-process store may still
                 // advertise it, so it is never treated as a settled disposition.
                 crate::external_ts::SettleClass::Pending
-                | crate::external_ts::SettleClass::RetractFailed => CarrierApplyOutcome::Pending,
+                | crate::external_ts::SettleClass::RetractFailed
+                | crate::external_ts::SettleClass::Superseded => CarrierApplyOutcome::Pending,
             }
         }
         // The authoritative resolver resolved an OWNER (disagreeing with the cheap
