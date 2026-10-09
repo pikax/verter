@@ -66,6 +66,13 @@ pub struct ResultEvidence {
     aggregated: Arc<[CompactionDomain]>,
     /// Whether a reachable fact is resolution evidence.
     resolution_evidence: bool,
+    /// Whether this evidence is a page or holds one, at any depth: a
+    /// retaining admission walks only evidence that can reach a page.
+    reaches_pages: bool,
+    /// Set once a retaining admission has claimed every page reachable from
+    /// here. A claimed page never returns to a pin, so a later admission
+    /// need not walk this evidence again.
+    pages_claimed: std::sync::atomic::AtomicBool,
     /// A page's reservation against the retention account, held for
     /// exactly as long as the page lives (every signature, candidate and
     /// refusal summary sharing it shares this one charge): pinned until a
@@ -290,9 +297,11 @@ impl ResultReceipt {
         let mut own: Vec<&str> = Vec::new();
         let mut aggregated: Vec<CompactionDomain> = Vec::new();
         let mut resolution_evidence = false;
+        let mut reaches_pages = kind == EvidenceKind::Page;
         for fact in &facts {
             match fact {
                 FactVersionRef::Receipt(child) => {
+                    reaches_pages |= child.0.reaches_pages;
                     consumed.push(&child.0.canonicals);
                     for domain in child.0.aggregated.iter() {
                         if !aggregated.contains(domain) {
@@ -340,6 +349,8 @@ impl ResultReceipt {
             canonicals,
             aggregated: aggregated.into(),
             resolution_evidence,
+            reaches_pages,
+            pages_claimed: std::sync::atomic::AtomicBool::new(false),
             retention,
         }))
     }
@@ -489,8 +500,9 @@ impl ReceiptWalk {
 }
 
 /// Reserve a cache candidate's retained bytes against `account`: its own
-/// `own_bytes` together with every evidence page `signatures` hold (pages of
-/// pages included) that no earlier admission claimed, as ONE refusable
+/// `own_bytes` together with every evidence page `signatures` reach — pages
+/// of pages, and pages a consumed result's receipt holds, included — that no
+/// earlier admission claimed, as ONE refusable
 /// [`ChargeClass::Retained`] reservation — so a wide candidate is refused,
 /// as oversized or under pressure, for everything it would newly retain.
 ///
@@ -506,24 +518,34 @@ pub fn reserve_retained_with_evidence(
     own_bytes: usize,
     signatures: &[&[FactVersionRef]],
 ) -> RetentionAdmission {
+    use std::sync::atomic::Ordering;
     let mut seen: rustc_hash::FxHashSet<*const ResultEvidence> = rustc_hash::FxHashSet::default();
+    let mut walked: Vec<&ResultEvidence> = Vec::new();
     let mut claim: Vec<(&parking_lot::Mutex<RetentionCharge>, usize)> = Vec::new();
     let mut stack: Vec<&[FactVersionRef]> = signatures.to_vec();
+    // Every distinct evidence that can reach a page is walked once, whatever
+    // its kind: a consumed result's receipt owns no charge of its own but may
+    // hold pages (a result recorded over a wide warm-hit signature), and the
+    // candidate retains those pages through it just as it retains its own.
     while let Some(level) = stack.pop() {
         for fact in level {
-            let FactVersionRef::Receipt(page) = fact else {
+            let FactVersionRef::Receipt(receipt) = fact else {
                 continue;
             };
-            if !page.is_page() || !seen.insert(Arc::as_ptr(&page.0)) {
+            if !receipt.0.reaches_pages
+                || receipt.0.pages_claimed.load(Ordering::Acquire)
+                || !seen.insert(Arc::as_ptr(&receipt.0))
+            {
                 continue;
             }
-            if let Some(cell) = page.0.retention.as_ref() {
+            walked.push(&receipt.0);
+            if let Some(cell) = receipt.0.retention.as_ref() {
                 let charge = cell.lock();
                 if charge.class() != ChargeClass::Retained {
                     claim.push((cell, charge.bytes()));
                 }
             }
-            stack.push(&page.0.facts);
+            stack.push(&receipt.0.facts);
         }
     }
     let evidence_bytes: usize = claim.iter().map(|(_, bytes)| bytes).sum();
@@ -541,6 +563,11 @@ pub fn reserve_retained_with_evidence(
         };
         drop(held);
         drop(released);
+    }
+    // Every page reachable from a walked evidence is retained now, by this
+    // admission or by the one that claimed it first.
+    for evidence in walked {
+        evidence.pages_claimed.store(true, Ordering::Release);
     }
     RetentionAdmission::Admitted(charge)
 }

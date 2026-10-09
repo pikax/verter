@@ -955,7 +955,12 @@ admission retaining a signature that holds it claims it through
 unclaimed page's bytes are ONE refusable `Retained` reservation (so a wide
 candidate is refused as `Oversized`/under pressure for what it would newly
 retain, and its complete value is delivered uncached), and each claimed page's
-pin is exchanged for its split-off share. A later candidate sharing a claimed
+pin is exchanged for its split-off share. The claim walks every receipt that
+can reach a page — a consumed result's receipt included, since a candidate
+retains the pages behind it — skipping evidence that reaches none or whose
+pages are already claimed. `ValidatedFactCache` (route, imported-root,
+resolved-import, fallthrough, component-meta runtime) claims the pages its own
+sealing mints at admission; a refused claim admits nothing. A later candidate sharing a claimed
 page is not charged for it again; the page's charge drains when its last holder
 drops. Candidate footprints therefore count a page entry once, not its contents.
 Self-root discrimination reads through pages: a disagreeing traced

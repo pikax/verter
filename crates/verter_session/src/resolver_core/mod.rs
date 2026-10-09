@@ -774,14 +774,24 @@ where
 /// **Signature width**: never a refusal. A candidate's
 /// `fact_dep_signature` wider than one evidence page
 /// ([`verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH`]) is
-/// sealed into immutable, retention-charged evidence pages and admitted
-/// whole; every fact it holds is validated on every warm read.
+/// sealed into immutable evidence pages and admitted whole; every fact it
+/// holds is validated on every warm read.
+///
+/// **Evidence retention**: a candidate retains every evidence page its
+/// signature reaches, so its admission claims each page no earlier
+/// admission claimed into one refusable `Retained` reservation on the
+/// process retention account
+/// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]),
+/// held by the candidate for its life. A refused reservation admits
+/// nothing: the caller keeps its complete value, uncached.
 #[derive(Debug)]
 pub struct ValidatedFactCache<K, V>
 where
     K: Eq + Hash,
 {
     entries: DashMap<K, Arc<CacheEntry<V>>>,
+    /// The account a candidate's evidence pages are claimed into.
+    retention_account: verter_session_query::retention::StoreAccount,
     /// R20 instrumentation counter: increments on each admission
     /// refused by the fact-completeness guard. Read via
     /// [`ValidatedFactCache::admission_refused_count`].
@@ -816,6 +826,7 @@ where
     fn default() -> Self {
         Self {
             entries: DashMap::new(),
+            retention_account: verter_session_query::retention::StoreAccount::default(),
             admission_refused: AtomicU64::new(0),
             arcswap_stores: AtomicU64::new(0),
             validations_attempted: AtomicU64::new(0),
@@ -861,6 +872,10 @@ pub struct Candidate<V> {
     pub signature_fingerprint: [u8; 16],
     pub value: Arc<V>,
     pub fact_dep_signature: Arc<[FactVersionRef]>,
+    /// This candidate's share of the evidence pages its signature claimed,
+    /// released when the candidate's last holder drops; `None` for a
+    /// signature that holds no receipt, so reaches no page.
+    _evidence_retention: Option<verter_session_query::retention::RetentionCharge>,
 }
 
 /// Call-owned identity of one exact [`ValidatedFactCache`] candidate.
@@ -1135,16 +1150,19 @@ where
         None
     }
 
-    pub fn insert(&self, key: K, value: V, facts: Vec<FactVersionRef>) {
-        self.insert_arc(key, Arc::new(value), facts);
+    /// Admit `value` under `key`; `false` when the retention account refused
+    /// the evidence it would retain, so nothing was admitted.
+    pub fn insert(&self, key: K, value: V, facts: Vec<FactVersionRef>) -> bool {
+        self.insert_arc(key, Arc::new(value), facts)
     }
 
-    pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) {
+    /// [`Self::insert`] for a shared value.
+    pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) -> bool {
         // Loose admission. The fact-completeness empty-signature
         // guard is opt-in via `insert_arc_with_kind`; stable-miss
         // producers (e.g. `route_db`, `imported_root_db`) admit
         // through this path.
-        self.insert_arc_inner(key, value, facts, None);
+        self.insert_arc_inner(key, value, facts, None).is_some()
     }
 
     /// Admit with the fact-completeness guard ENABLED. R20 strict
@@ -1184,11 +1202,13 @@ where
             }
         }
         let fact_arc = seal_admitted_signature(facts);
+        let evidence_retention = self.claim_evidence(&fact_arc).ok()?;
         let fingerprint = compute_signature_fingerprint(&fact_arc);
         let candidate = Arc::new(Candidate {
             signature_fingerprint: fingerprint,
             value,
             fact_dep_signature: fact_arc,
+            _evidence_retention: evidence_retention,
         });
 
         // Insert-or-update via DashMap. `entry().or_insert_with` is
@@ -1217,6 +1237,44 @@ where
         Some(ValidatedFactAdmission { candidate })
     }
 
+    /// A cache whose candidates claim their evidence pages into `account`.
+    #[cfg(test)]
+    fn with_retention_account(account: verter_session_query::retention::StoreAccount) -> Self {
+        Self {
+            retention_account: account,
+            ..Self::default()
+        }
+    }
+
+    /// Claim the evidence pages a sealed candidate signature reaches into a
+    /// refusable reservation, held by the candidate: `Ok(None)` when it
+    /// holds no receipt, so reaches no page; the refusal when the account
+    /// refuses the reservation.
+    fn claim_evidence(
+        &self,
+        signature: &[FactVersionRef],
+    ) -> Result<
+        Option<verter_session_query::retention::RetentionCharge>,
+        verter_session_query::retention::RetentionRefusal,
+    > {
+        if !signature
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::Receipt(_)))
+        {
+            return Ok(None);
+        }
+        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            self.retention_account.get(),
+            0,
+            &[signature],
+        ) {
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
+                Ok(Some(charge))
+            }
+            verter_session_query::retention::RetentionAdmission::Refused(refusal) => Err(refusal),
+        }
+    }
+
     /// Re-sign only the exact candidate named by `admission` under `key`.
     /// If the candidate was displaced or the slot was cleared, this is a
     /// no-op; the method never creates a candidate from a stale proof.
@@ -1241,10 +1299,14 @@ where
         }
 
         let fact_arc = seal_admitted_signature(facts);
+        let Ok(evidence_retention) = self.claim_evidence(&fact_arc) else {
+            return false;
+        };
         let replacement = Arc::new(Candidate {
             signature_fingerprint: compute_signature_fingerprint(&fact_arc),
             value,
             fact_dep_signature: fact_arc,
+            _evidence_retention: evidence_retention,
         });
         let Some(entry) = self.entries.get(key) else {
             return false;
@@ -5109,6 +5171,64 @@ mod receipt_validation_tests {
             !view.validates_fact_signature_with_self_roots(&signature, &["/self.ts"]),
             "as a self-root it is validated strictly, inside the receipt too"
         );
+    }
+
+    fn wide_facts() -> Vec<FactVersionRef> {
+        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+            .map(|index| whole_hash(&format!("/wide/{index:05}.ts"), 1))
+            .collect()
+    }
+
+    /// A wide candidate's admission claims the pages its sealing minted into
+    /// the cache's refusable reservation, and evicting it drains them; an
+    /// account that refuses that footprint admits nothing.
+    #[test]
+    fn a_wide_candidate_claims_its_pages_and_is_refused_for_them() {
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let cache: ValidatedFactCache<&'static str, u32> =
+            ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+        assert!(cache.insert("wide", 7, wide_facts()));
+        let (_, signature) = cache
+            .get_if_valid_with_facts(&"wide", &CountingView::default())
+            .expect("the admitted candidate validates");
+        let pages: Vec<_> = signature
+            .iter()
+            .filter_map(|fact| match fact {
+                FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!pages.is_empty(), "premise: the signature is paged");
+        assert!(pages
+            .iter()
+            .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
+        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+        assert_eq!(account.snapshot().retained_bytes, page_bytes);
+        drop((pages, signature));
+        cache.clear();
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            0,
+            "evicting the candidate drains its pages"
+        );
+
+        let tight = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: 1,
+            ..RetentionLimits::defaults()
+        });
+        let cache: ValidatedFactCache<&'static str, u32> =
+            ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&tight)));
+        assert!(
+            !cache.insert("wide", 7, wide_facts()),
+            "a refused evidence claim admits nothing"
+        );
+        assert!(cache
+            .get_if_valid(&"wide", &CountingView::default())
+            .is_none());
+        assert_eq!(tight.snapshot().retained_bytes, 0);
     }
 }
 

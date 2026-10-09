@@ -1676,3 +1676,61 @@ fn a_wide_candidate_is_refused_for_its_pages_and_the_refusal_changes_nothing() {
         .iter()
         .all(|class| *class == Some(ChargeClass::Pinned)));
 }
+
+/// Pages a consumed result's receipt holds are retained by the candidate
+/// holding that receipt, so the admission claims them like its own: an
+/// over-limit footprint is refused whatever receipt wraps it, and an
+/// admitted one leaves every reachable page retained, charged once, until
+/// the last holder drops.
+#[test]
+fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
+    use crate::retention::{ChargeClass, RetentionAdmission, RetentionLimits, RetentionRefusal};
+    let probe = isolated_account();
+    let probe_pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &probe);
+    let page_bytes = probe.snapshot().pinned_bytes;
+    drop(probe_pages);
+    let wrapped = |pages: &[FactVersionRef]| {
+        let inner = crate::facts::fact_cache::ResultReceipt::new(pages.to_vec());
+        vec![FactVersionRef::Receipt(
+            crate::facts::fact_cache::ResultReceipt::new(vec![FactVersionRef::Receipt(inner)]),
+        )]
+    };
+
+    let tight = crate::retention::SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: page_bytes,
+        ..RetentionLimits::defaults()
+    });
+    let pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &tight);
+    let signature = wrapped(&pages);
+    match crate::facts::receipt::reserve_retained_with_evidence(&tight, 1, &[&signature]) {
+        RetentionAdmission::Refused(RetentionRefusal::Oversized { requested, .. }) => {
+            assert_eq!(requested, 1 + page_bytes);
+        }
+        other => panic!("a result-wrapped over-limit footprint is refused: {other:?}"),
+    }
+    assert!(page_classes(&pages)
+        .iter()
+        .all(|class| *class == Some(ChargeClass::Pinned)));
+
+    let account = isolated_account();
+    let pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &account);
+    let signature = wrapped(&pages);
+    let charge =
+        crate::facts::receipt::reserve_retained_with_evidence(&account, 100, &[&signature])
+            .admitted()
+            .expect("admitted");
+    let claimed = account.snapshot();
+    assert_eq!(
+        (claimed.retained_bytes, claimed.pinned_bytes),
+        (100 + page_bytes, 0),
+        "every page behind the receipt is claimed, once"
+    );
+    assert!(page_classes(&pages)
+        .iter()
+        .all(|class| *class == Some(ChargeClass::Retained)));
+    drop(charge);
+    drop(signature);
+    drop(pages);
+    let drained = account.snapshot();
+    assert_eq!((drained.retained_bytes, drained.pinned_bytes), (0, 0));
+}

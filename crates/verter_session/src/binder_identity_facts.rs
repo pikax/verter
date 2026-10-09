@@ -275,8 +275,11 @@ pub struct BinderIdentityFactsEntry {
     pub facts: Arc<BinderIdentityFacts>,
     /// Path-precise fact carrier — the sole cache-validity oracle
     /// (validated via `validate_with_self_roots` with the keyed
-    /// canonical as the self-root set).
-    pub read_set_signature: ReadSetSignature,
+    /// canonical as the self-root set). `None` when the compute's read set
+    /// was refused as mutation-unstable: such an entry is returned, never
+    /// admitted, and carries no validity evidence at all — never an empty
+    /// signature that would validate vacuously.
+    pub read_set_signature: Option<ReadSetSignature>,
 }
 
 /// The family-A `BinderIdentityFacts` artifact store.
@@ -726,10 +729,9 @@ pub(crate) fn produce_binder_identity_facts(
         parse_env_hash: indexed.parse_env_hash,
     };
     if let Some(entry) = store.get(&key) {
-        if entry
-            .read_set_signature
-            .validate_with_self_roots(ctx, std::slice::from_ref(&key.canonical))
-        {
+        if let Some(signature) = entry.read_set_signature.as_ref().filter(|signature| {
+            signature.validate_with_self_roots(ctx, std::slice::from_ref(&key.canonical))
+        }) {
             // A warm hit must BUBBLE the entry's read-set into any
             // active outer tracer: an enclosing traced computation
             // admits its own value with THESE binder facts observed, so
@@ -737,7 +739,7 @@ pub(crate) fn produce_binder_identity_facts(
             // `AppConfigNoOverrideProofDb::peek` pattern).
             verter_type_engine::fact_signature_helpers::bubble_fact_signature(
                 ctx,
-                &entry.read_set_signature.facts,
+                &signature.facts,
             );
             return Some(entry);
         }
@@ -880,7 +882,7 @@ pub(crate) fn produce_binder_identity_facts(
         {
             let entry = Arc::new(BinderIdentityFactsEntry {
                 facts,
-                read_set_signature: ReadSetSignature::new(fact_dep_signature),
+                read_set_signature: Some(ReadSetSignature::new(fact_dep_signature)),
             });
             store.insert(key, Arc::clone(&entry));
             Some(entry)
@@ -888,7 +890,7 @@ pub(crate) fn produce_binder_identity_facts(
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(fact_dep_signature) => {
             Some(Arc::new(BinderIdentityFactsEntry {
                 facts,
-                read_set_signature: ReadSetSignature::new(fact_dep_signature),
+                read_set_signature: Some(ReadSetSignature::new(fact_dep_signature)),
             }))
         }
         // Returned, never admitted: the entry's signature is never
@@ -897,12 +899,14 @@ pub(crate) fn produce_binder_identity_facts(
             fact_dep_signature,
         ) => Some(Arc::new(BinderIdentityFactsEntry {
             facts,
-            read_set_signature: ReadSetSignature::new(fact_dep_signature),
+            read_set_signature: Some(ReadSetSignature::new(fact_dep_signature)),
         })),
+        // Refused: no observation set survives, so the entry carries no
+        // signature rather than one claiming it depends on nothing.
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             Some(Arc::new(BinderIdentityFactsEntry {
                 facts,
-                read_set_signature: ReadSetSignature::empty(),
+                read_set_signature: None,
             }))
         }
     }
