@@ -4015,16 +4015,7 @@ fn apply_svelte_rune_initializer_inference(
             variable.kind,
             VariableDeclarationKind::Let | VariableDeclarationKind::Var
         ) {
-            match widen_literal_type(inferred) {
-                Ok(inferred) => inferred,
-                Err(reason) => {
-                    if !parts.annotation_is_authored {
-                        parts.type_annotation = None;
-                        parts.inference_unavailable = Some(reason);
-                    }
-                    continue;
-                }
-            }
+            shallow::widen_literal_type(inferred)
         } else {
             inferred
         };
@@ -4040,11 +4031,7 @@ fn svelte_rune_value_argument_contains_call(expr: &Expression<'_>, source: &str)
     let Expression::CallExpression(call) = unwrap_expression_wrappers(expr) else {
         return false;
     };
-    let mut budget = InferenceBudget::default();
-    if !matches!(
-        classify_svelte_rune_initializer(&call.callee, &mut budget),
-        Ok(Some(_))
-    ) {
+    if classify_svelte_rune_initializer(&call.callee).is_none() {
         return false;
     }
     call.arguments
@@ -4057,10 +4044,9 @@ fn inline_svelte_derived_by_callback_point(expr: &Expression<'_>) -> Option<u32>
     let Expression::CallExpression(call) = unwrap_expression_wrappers(expr) else {
         return None;
     };
-    let mut budget = InferenceBudget::default();
     if !matches!(
-        classify_svelte_rune_initializer(&call.callee, &mut budget),
-        Ok(Some(SvelteRuneInitializer::DerivedBy))
+        classify_svelte_rune_initializer(&call.callee),
+        Some(SvelteRuneInitializer::DerivedBy)
     ) {
         return None;
     }
@@ -4076,21 +4062,20 @@ fn infer_svelte_rune_initializer(
     expr: &Expression<'_>,
     source: &str,
 ) -> InferenceResult<Option<TypeExpr>> {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     infer_svelte_rune_initializer_with_budget(expr, source, &mut budget)
 }
 
 fn infer_svelte_rune_initializer_with_budget(
     expr: &Expression<'_>,
     source: &str,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
 ) -> InferenceResult<Option<TypeExpr>> {
-    budget.visit()?;
-    let expr = unwrap_expression_wrappers_with_budget(expr, budget)?;
+    let expr = unwrap_expression_wrappers(expr);
     let Expression::CallExpression(call) = expr else {
         return Ok(None);
     };
-    let Some(kind) = classify_svelte_rune_initializer(&call.callee, budget)? else {
+    let Some(kind) = classify_svelte_rune_initializer(&call.callee) else {
         return Ok(None);
     };
 
@@ -4136,25 +4121,20 @@ fn infer_svelte_rune_initializer_with_budget(
     }
 }
 
-fn classify_svelte_rune_initializer(
-    callee: &Expression<'_>,
-    budget: &mut InferenceBudget,
-) -> InferenceResult<Option<SvelteRuneInitializer>> {
-    match unwrap_expression_wrappers_with_budget(callee, budget)? {
-        Expression::Identifier(identifier) => Ok(match identifier.name.as_str() {
+fn classify_svelte_rune_initializer(callee: &Expression<'_>) -> Option<SvelteRuneInitializer> {
+    match unwrap_expression_wrappers(callee) {
+        Expression::Identifier(identifier) => match identifier.name.as_str() {
             "$state" => Some(SvelteRuneInitializer::State {
                 allows_omitted_initial: true,
             }),
             "$derived" => Some(SvelteRuneInitializer::Derived),
             _ => None,
-        }),
+        },
         Expression::StaticMemberExpression(member) => {
-            let Expression::Identifier(root) =
-                unwrap_expression_wrappers_with_budget(&member.object, budget)?
-            else {
-                return Ok(None);
+            let Expression::Identifier(root) = unwrap_expression_wrappers(&member.object) else {
+                return None;
             };
-            Ok(match (root.name.as_str(), member.property.name.as_str()) {
+            match (root.name.as_str(), member.property.name.as_str()) {
                 ("$state", "raw") => Some(SvelteRuneInitializer::State {
                     allows_omitted_initial: true,
                 }),
@@ -4163,25 +4143,9 @@ fn classify_svelte_rune_initializer(
                 }),
                 ("$derived", "by") => Some(SvelteRuneInitializer::DerivedBy),
                 _ => None,
-            })
+            }
         }
-        _ => Ok(None),
-    }
-}
-
-fn unwrap_expression_wrappers_with_budget<'a>(
-    mut expr: &'a Expression<'a>,
-    budget: &mut InferenceBudget,
-) -> InferenceResult<&'a Expression<'a>> {
-    loop {
-        budget.visit()?;
-        expr = match expr {
-            Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
-            Expression::TSAsExpression(assertion) => &assertion.expression,
-            Expression::TSSatisfiesExpression(satisfies) => &satisfies.expression,
-            Expression::TSNonNullExpression(non_null) => &non_null.expression,
-            _ => return Ok(expr),
-        };
+        _ => None,
     }
 }
 
@@ -4435,7 +4399,7 @@ fn lower_destructured_variable_parts(
                             source,
                             TopLevelLiteralPolicy::Preserve,
                         )
-                        .and_then(widen_literal_type)
+                        .map(shallow::widen_literal_type)
                         .map(|ty| TupleElement {
                             label: None,
                             ty,
@@ -4734,11 +4698,11 @@ fn lower_identifier_variable_parts(
         } else if type_annotation.is_none() {
             let inferred =
                 infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Preserve)
-                    .and_then(|inferred| {
+                    .map(|inferred| {
                         if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                            widen_literal_type(inferred)
+                            shallow::widen_literal_type(inferred)
                         } else {
-                            Ok(inferred)
+                            inferred
                         }
                     });
             let mut inferred = match inferred {
@@ -5078,7 +5042,7 @@ fn extract_initializer_object_shape(
     source: &str,
     policy: MemberLiteralPolicy,
 ) -> InferenceResult<Option<ObjectExpr>> {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     extract_initializer_object_shape_with_budget(expr, source, policy, &mut budget)
 }
 
@@ -5092,13 +5056,12 @@ fn extract_initializer_object_shape_with_budget(
     mut expr: &Expression<'_>,
     source: &str,
     mut policy: MemberLiteralPolicy,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
 ) -> InferenceResult<Option<ObjectExpr>> {
     loop {
-        budget.visit()?;
         match expr {
             Expression::ObjectExpression(object) => {
-                let frame = shallow::ObjectFrame::new(object, policy, false, budget)?;
+                let frame = shallow::ObjectFrame::new(object, policy, false);
                 return shallow::run(shallow::Task::Object(frame), source, budget, None)
                     .map(|value| Some(value.into_object()));
             }
@@ -5125,7 +5088,7 @@ fn extract_initializer_object_shape_with_budget(
 // ---------------------------------------------------------------------------
 
 fn extract_function_signature(func: &Function<'_>, source: &str) -> LoweredSignatureParts {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     match extract_function_signature_with_budget(func, source, &mut budget) {
         Ok(signature) => signature,
         Err(_reason) => unavailable_function_signature(
@@ -5146,9 +5109,9 @@ fn extract_function_signature(func: &Function<'_>, source: &str) -> LoweredSigna
 fn extract_function_signature_with_budget(
     func: &Function<'_>,
     source: &str,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
 ) -> InferenceResult<LoweredSignatureParts> {
-    let frame = shallow::FunctionFrame::new(func, budget)?;
+    let frame = shallow::FunctionFrame::new(func);
     shallow::run(shallow::Task::Function(frame), source, budget, None)
         .map(shallow::Value::into_signature)
 }
@@ -5157,7 +5120,7 @@ fn extract_arrow_signature(
     arrow: &ArrowFunctionExpression<'_>,
     source: &str,
 ) -> LoweredSignatureParts {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     match extract_arrow_signature_with_budget(arrow, source, &mut budget) {
         Ok(signature) => signature,
         Err(_reason) => unavailable_function_signature(
@@ -5179,9 +5142,9 @@ fn extract_arrow_signature(
 fn extract_arrow_signature_with_budget(
     arrow: &ArrowFunctionExpression<'_>,
     source: &str,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
 ) -> InferenceResult<LoweredSignatureParts> {
-    let frame = shallow::ArrowFrame::new(arrow, false, budget)?;
+    let frame = shallow::ArrowFrame::new(arrow, false);
     shallow::run(shallow::Task::Arrow(frame), source, budget, None)
         .map(shallow::Value::into_signature)
 }
@@ -5251,13 +5214,14 @@ impl MemberLiteralPolicy {
     }
 }
 
-pub(crate) const MAX_SEMANTIC_INFERENCE_WORK: usize = 4096;
-
 type InferenceResult<T> = Result<T, InferenceUnavailableReason>;
 
+/// The state one value inference carries across the expressions it visits.
+/// The inference runs from explicit stacks, so nesting costs it no native
+/// level, and a finite expression is always inferred whole: there is no
+/// work cap.
 #[derive(Debug)]
-struct InferenceBudget {
-    remaining_work: usize,
+struct InferenceState {
     used_unmodeled_fallback: bool,
     /// How a bare nullish value nested in an object- or array-literal
     /// position is typed for this whole inference (see
@@ -5265,10 +5229,9 @@ struct InferenceBudget {
     nested_nullish: NestedNullishLiterals,
 }
 
-impl Default for InferenceBudget {
+impl Default for InferenceState {
     fn default() -> Self {
         Self {
-            remaining_work: MAX_SEMANTIC_INFERENCE_WORK,
             used_unmodeled_fallback: false,
             nested_nullish: NestedNullishLiterals::Keep,
         }
@@ -5353,19 +5316,6 @@ pub fn expr_is_widening_nullish(expression: &Expression<'_>) -> bool {
     }
 }
 
-impl InferenceBudget {
-    /// Charge one visited expression, member or parameter. The inference
-    /// runs from explicit stacks, so nesting costs it no native level: its
-    /// work is its only bound.
-    fn visit(&mut self) -> InferenceResult<()> {
-        let Some(remaining_work) = self.remaining_work.checked_sub(1) else {
-            return Err(InferenceUnavailableReason::WorkBudgetExceeded);
-        };
-        self.remaining_work = remaining_work;
-        Ok(())
-    }
-}
-
 /// How the TOP-LEVEL fresh literal of a declaration-position expression is
 /// treated. This axis governs ONLY the standalone literal at the
 /// expression's own top level.
@@ -5443,7 +5393,7 @@ pub fn infer_call_argument_expression_type(
     expr: &Expression<'_>,
     source: &str,
 ) -> InferenceResult<TypeExpr> {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Argument, &mut budget)
 }
 
@@ -5458,7 +5408,7 @@ pub fn infer_declaration_expression_type(
     source: &str,
     policy: TopLevelLiteralPolicy,
 ) -> InferenceResult<TypeExpr> {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)
 }
 
@@ -5496,9 +5446,9 @@ pub fn infer_declaration_expression_type_with_nested_nullish(
     policy: TopLevelLiteralPolicy,
     nested_nullish: NestedNullishLiterals,
 ) -> Result<DeclarationExpressionInference, InferenceUnavailableReason> {
-    let mut budget = InferenceBudget {
+    let mut budget = InferenceState {
         nested_nullish,
-        ..InferenceBudget::default()
+        ..InferenceState::default()
     };
     let ty = infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)?;
     Ok(DeclarationExpressionInference {
@@ -5521,7 +5471,7 @@ fn infer_declaration_expression_type_with_budget(
     expr: &Expression<'_>,
     source: &str,
     policy: TopLevelLiteralPolicy,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
 ) -> InferenceResult<TypeExpr> {
     shallow::run(
         shallow::Task::Declaration(expr, policy),
@@ -5586,7 +5536,7 @@ fn infer_expression_type_ctx(
     expr: &Expression<'_>,
     source: &str,
     policy: MemberLiteralPolicy,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
 ) -> InferenceResult<TypeExpr> {
     shallow::run(shallow::Task::Value(expr, policy), source, budget, None)
         .map(shallow::Value::into_type)
@@ -5599,7 +5549,7 @@ fn infer_expression_type_ctx_with_read_root(
     expr: &Expression<'_>,
     source: &str,
     policy: MemberLiteralPolicy,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
     read_root: Option<&mut IndexedValueReadRoot>,
 ) -> InferenceResult<TypeExpr> {
     shallow::run(
@@ -5632,7 +5582,7 @@ fn binary_operator_is_comparison(operator: BinaryOperator) -> bool {
 
 /// `boolean` when every operand is exactly `boolean`; otherwise the
 /// unmodeled fallback.
-fn boolean_or_unmodeled(operands: &[TypeExpr], budget: &mut InferenceBudget) -> TypeExpr {
+fn boolean_or_unmodeled(operands: &[TypeExpr], budget: &mut InferenceState) -> TypeExpr {
     if operands
         .iter()
         .all(|operand| matches!(operand, TypeExpr::Primitive(PrimitiveName::Boolean)))
@@ -5670,35 +5620,6 @@ fn collect_static_member_path(
     path.extend(properties);
 }
 
-fn collect_static_member_path_with_budget(
-    member: &oxc_ast::ast::StaticMemberExpression<'_>,
-    path: &mut Vec<String>,
-    budget: &mut InferenceBudget,
-) -> InferenceResult<()> {
-    let mut properties = Vec::new();
-    let mut current = member;
-    loop {
-        budget.visit()?;
-        properties.push(current.property.name.as_str().to_string());
-        match &current.object {
-            Expression::Identifier(identifier) => {
-                path.push(identifier.name.as_str().to_string());
-                break;
-            }
-            Expression::StaticMemberExpression(parent) => {
-                current = parent;
-            }
-            _ => {
-                path.clear();
-                return Ok(());
-            }
-        }
-    }
-    properties.reverse();
-    path.extend(properties);
-    Ok(())
-}
-
 fn collect_array_element_types_from_type(ty: &TypeExpr) -> Option<Vec<TypeExpr>> {
     match ty {
         TypeExpr::Array { element, .. } => {
@@ -5733,11 +5654,6 @@ fn append_union_members(into: &mut Vec<TypeExpr>, ty: TypeExpr) {
     } else {
         into.push(ty);
     }
-}
-
-fn widen_literal_type(expr: TypeExpr) -> InferenceResult<TypeExpr> {
-    let mut budget = InferenceBudget::default();
-    shallow::widen_literal_type(expr, &mut budget)
 }
 
 fn dedupe_type_exprs(types: Vec<TypeExpr>) -> Vec<TypeExpr> {
@@ -5951,7 +5867,7 @@ fn lower_function_params(
     this_param: Option<&TSThisParameter<'_>>,
     source: &str,
 ) -> Vec<FunctionParam> {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     lower_function_params_with_budget(params, this_param, source, &mut budget).unwrap_or_else(
         |_| lower_function_params_without_initializer_inference(params, this_param, source),
     )
@@ -5962,9 +5878,9 @@ fn lower_function_params_with_budget(
     params: &FormalParameters<'_>,
     this_param: Option<&TSThisParameter<'_>>,
     source: &str,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
 ) -> InferenceResult<Vec<FunctionParam>> {
-    let frame = shallow::ParamsFrame::new(params, this_param, source, budget)?;
+    let frame = shallow::ParamsFrame::new(params, this_param, source);
     shallow::run(shallow::Task::Params(frame), source, budget, None)
         .map(shallow::Value::into_params)
 }
@@ -6705,7 +6621,7 @@ fn lower_value_expression_with_read_root(
     policy: MemberLiteralPolicy,
     read_root: Option<&mut IndexedValueReadRoot>,
 ) -> InferenceResult<TypeExpr> {
-    let mut budget = InferenceBudget::default();
+    let mut budget = InferenceState::default();
     infer_expression_type_ctx_with_read_root(expr, source, policy, &mut budget, read_root)
 }
 
@@ -7058,11 +6974,11 @@ fn indexed_value_step<'a>(
     })
 }
 
-/// A value expression's lowering, or — when value inference exhausted its
-/// work or depth fuse — the typed refusal of an expression outside the
-/// indexed domain. An exhausted fuse is unfinished inference, never an
-/// `any` the expression has: a fabricated `any` argument would complete
-/// its call's inference with no candidate.
+/// A value expression's lowering, or — when value inference failed typed —
+/// the typed refusal of an expression outside the indexed domain. A typed
+/// failure is unfinished inference, never an `any` the expression has: a
+/// fabricated `any` argument would complete its call's inference with no
+/// candidate.
 fn lowered_or_unsupported(
     lowered: InferenceResult<TypeExpr>,
     expr: &Expression<'_>,

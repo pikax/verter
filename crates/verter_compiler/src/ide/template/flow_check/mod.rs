@@ -1,12 +1,15 @@
-//! Flow-transparent callback checking: an exact, uncapped, linear-size
-//! representation of template condition narrowing for callback bodies.
+//! Reference generator of the flow-transparent callback check: an exact,
+//! uncapped, linear-size representation of template condition narrowing for
+//! callback bodies, generated from a typed plan.
 //!
-//! The current IDE emitter re-emits the full condition path (every enclosing
-//! positive and every predecessor negation) inside each nested chain and each
-//! callback, which is quadratic in chain length. This module is the executable
-//! replacement representation. It is compiled only for tests and the
-//! `test-support` feature: no production path calls it, and production
-//! activation belongs to the current-emitter integration.
+//! The production IDE emitter integrates this representation directly into
+//! its JSX output (see [`super::flow`]): chains and `v-for` frames are
+//! immediately invoked blocks, and callbacks are re-narrowed from snapshots of
+//! the outer references they read. This module keeps the representation's
+//! executable reference — compiled only for tests and the `test-support`
+//! feature — together with the contract fixtures both are held to: the
+//! reference generator's own fixtures ([`fixtures`]) and the same cases as
+//! complete SFCs for the production route ([`ide_fixtures`]).
 //!
 //! # Seam
 //!
@@ -20,20 +23,12 @@
 //!   writes through one `CodeTransform`; it names no parser, scope, resolver
 //!   or projection type (its private `deps` module is its entire import surface), which the
 //!   compile boundary in `tests/cases/flow_check_boundary.rs` enforces.
+//!   [`generator::GuardStrategy::ReplayPath`] reproduces condition-path
+//!   replay, the negative control of every growth check.
 //! - [`builder::build_plan`] builds a plan from a real parsed template:
 //!   the parser's conditional chains, `OxcParsedAst::scopes` handles, the
-//!   shared binding resolver's accessor prefixes and the OXC expression ASTs.
-//!   It is how the tests reach the generator from source-backed fixtures.
-//!
-//! # Production call site
-//!
-//! The IDE template walk (`ide::template::walk_element`) already resolves
-//! each condition, knows each chain's members, each element's scope handles
-//! and each callback's contextual type. Integration replaces the per-element
-//! guard construction (`ide::condition::generate_condition_text` and its
-//! block/ternary guard callers) by collecting a `CheckPlan` during that walk
-//! and calling `generate` once per template; the walk's JSX output keeps its
-//! role for element and component typing.
+//!   shared binding resolver's accessor prefixes, and the production
+//!   outer-reference analysis ([`super::flow::outer_refs`]).
 
 mod deps {
     pub(super) use crate::code_transform::CodeTransform;
@@ -43,6 +38,7 @@ mod deps {
 pub mod builder;
 pub mod fixtures;
 pub mod generator;
+pub mod ide_fixtures;
 pub mod oracle;
 pub mod seam;
 
