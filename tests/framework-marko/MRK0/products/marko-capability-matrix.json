@@ -762,6 +762,8 @@
   "facets": [
     {
       "facet": "props",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_PROPS",
+      "inSupportedSurfaces": true,
       "source": "Input",
       "provenance": "native",
       "producer": "MRK3",
@@ -769,6 +771,8 @@
     },
     {
       "facet": "events",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_EMITS",
+      "inSupportedSurfaces": true,
       "source": "function-typed on* inputs",
       "provenance": "derived(callback-input)",
       "producer": "MRK3",
@@ -776,6 +780,8 @@
     },
     {
       "facet": "slots",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_SLOTS",
+      "inSupportedSurfaces": true,
       "source": "content plus attribute tags <@x>",
       "provenance": "derived(attribute-tag)",
       "producer": "MRK3",
@@ -783,6 +789,8 @@
     },
     {
       "facet": "expose",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_EXPOSE",
+      "inSupportedSurfaces": true,
       "source": "the <return> value; Approximate inside a conditional",
       "provenance": "derived(return-tag)",
       "producer": "MRK3",
@@ -790,6 +798,8 @@
     },
     {
       "facet": "options",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_OPTIONS",
+      "inSupportedSurfaces": false,
       "source": null,
       "provenance": "UNSUPPORTED",
       "producer": "MRK3",
@@ -797,12 +807,26 @@
     },
     {
       "facet": "model",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_MODEL",
+      "inSupportedSurfaces": false,
       "source": null,
       "provenance": "UNSUPPORTED",
       "producer": "MRK3",
       "receivingAcceptance": "MRK3-AC4"
     }
   ],
+  "facetWireMapping": {
+    "wireEnum": "verter.v1.FrameworkSurfaceKind (TIF1)",
+    "descriptorColumn": "FrameworkAdapterDescriptor.supported_surfaces",
+    "supportedSurfaces": ["FRAMEWORK_SURFACE_KIND_PROPS", "FRAMEWORK_SURFACE_KIND_EMITS", "FRAMEWORK_SURFACE_KIND_SLOTS", "FRAMEWORK_SURFACE_KIND_EXPOSE"],
+    "excludedSurfaces": ["FRAMEWORK_SURFACE_KIND_OPTIONS", "FRAMEWORK_SURFACE_KIND_MODEL"],
+    "rules": [
+      "The Marko events facet maps to the existing FRAMEWORK_SURFACE_KIND_EMITS; no Marko-specific wire kind is added.",
+      "options, model and any FrameworkSurfaceKind with no Marko facet are absent from supported_surfaces, so the executor fills them structurally as UNSUPPORTED, never as a supported-empty kind.",
+      "Every record produced for a mapped kind carries the facet provenance above.",
+      "Sequence: MRK1 registers the descriptor with FRAMEWORK_TAG_MARKO = 12 and an empty supported_surfaces, so every kind is UNSUPPORTED (MRK1-AC6, M-D03); MRK3 fills supported_surfaces with exactly supportedSurfaces (MRK3-AC1, MRK3-AC3) and keeps excludedSurfaces UNSUPPORTED (MRK3-AC4) without another wire change."
+    ]
+  },
   "qualification": {
     "coverage": "MRK9-AC1",
     "oracleAgreement": "MRK9-AC2",

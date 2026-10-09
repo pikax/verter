@@ -48,6 +48,7 @@ Abbreviations: **L** = `products/marko-version-lock.json`, **M** =
 | `borrowed-acceptance` | M cell `C32` or `C56` `receivingAcceptance = "MRK5-AC3"` | `feature-fabricated`: `MRK5-AC3` proves native/attribute-tag completion, not auto-close or custom-tag name completion; both require `MRK5-AC6` |
 | `pending-without-proof` | M cell `C56` `receivingAcceptance = null`, with or without `pendingReceiver` | `cell-unowned`: every included cell requires a ratified receiving acceptance; an owed-proof note or open question cannot replace it |
 | `tsgo-fields-unrecorded` | M cell `C11` loses `tsgoOperations` | `tsgo-unrecorded`: every cell records its tsgo operations, empty when none |
+| `tsgo-limitation-unrecorded` | M cell `C11` keeps `tsgoOperations` but loses `tsgoLimitation` | `tsgo-unrecorded`: every cell records its tsgo limitation, `null` when none |
 | `pending-cell-promoted` | M cell `C32` `receivingAcceptance = null` when evaluating `qualification.promotion` | `matrix-incomplete`: a cell with no ratified receiving acceptance cannot be promoted |
 | `unqualified-cell-promoted` | M cell `C32` keeps `MRK5-AC6` but has neither an MRK9 pass nor a ratified exclusion when evaluating `qualification.promotion` | `matrix-incomplete`: a ratified receiving acceptance is not implementation or conformance evidence |
 
@@ -69,6 +70,7 @@ Abbreviations: **L** = `products/marko-version-lock.json`, **M** =
 | ---- | ----------- | ----------------------- |
 | `language-tools-evidence` | M cell `C38` gains `evidence: "@marko/language-tools hover"` | `oracle-as-evidence` |
 | `type-check-evidence` | M cell `C20` gains `evidence: "@marko/type-check output"` | `oracle-as-evidence` |
+| `compiler-evidence` | M cell `C01` gains `evidence: "@marko/compiler parses and compiles the corpus"` | `oracle-as-evidence`: `@marko/compiler` output is an oracle, never product support |
 | `installed-parser-evidence` | M cell `C01` gains `evidence: "htmljs-parser parses the corpus"` | `oracle-as-evidence`: an installed parser is not product support |
 | `syntax-highlighting-evidence` | M cell `C55` `supportClaim = "product"` | `highlighting-as-evidence`: a grammar never satisfies a product claim |
 

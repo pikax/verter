@@ -150,13 +150,24 @@ client transport is needed, so the rescope trigger does not fire.
 
 ### 5. Facets (ruling 3)
 
-| Facet | Source | Provenance | Receiving acceptance |
-| ----- | ------ | ---------- | -------------------- |
-| props | `Input` | native | `MRK3-AC1` |
-| events | function-typed `on*` inputs | `derived(callback-input)` | `MRK3-AC3` |
-| slots | `content` plus attribute tags `<@x>` | `derived(attribute-tag)` | `MRK3-AC3` |
-| expose | the `<return>` value (Approximate inside a conditional) | `derived(return-tag)` | `MRK3-AC3` |
-| options, model | — | UNSUPPORTED | `MRK3-AC4` |
+| Facet | Source | Provenance | `FrameworkSurfaceKind` | In `supported_surfaces` | Receiving acceptance |
+| ----- | ------ | ---------- | ---------------------- | ------------------------ | -------------------- |
+| props | `Input` | native | `PROPS` | yes | `MRK3-AC1` |
+| events | function-typed `on*` inputs | `derived(callback-input)` | `EMITS` | yes | `MRK3-AC3` |
+| slots | `content` plus attribute tags `<@x>` | `derived(attribute-tag)` | `SLOTS` | yes | `MRK3-AC3` |
+| expose | the `<return>` value (Approximate inside a conditional) | `derived(return-tag)` | `EXPOSE` | yes | `MRK3-AC3` |
+| options, model | — | UNSUPPORTED | `OPTIONS`, `MODEL` | no | `MRK3-AC4` |
+
+Facets map onto the existing TIF1 wire enum `FrameworkSurfaceKind` through
+`FrameworkAdapterDescriptor.supported_surfaces`; the Marko events facet is
+the existing `EMITS` kind, and no Marko-specific kind is added. A kind
+absent from `supported_surfaces` — options, model and any kind with no Marko
+facet — is filled structurally as `UNSUPPORTED` by the executor, never as a
+supported-empty kind, and every record of a mapped kind carries its
+provenance. MRK1 registers the descriptor with an empty `supported_surfaces`
+(every kind `UNSUPPORTED`, `MRK1-AC6`); MRK3 then sets it to exactly
+`PROPS`, `EMITS`, `SLOTS`, `EXPOSE` without another wire change. The
+matrix records this as `facetWireMapping`.
 
 ### 6. Wire tag
 
