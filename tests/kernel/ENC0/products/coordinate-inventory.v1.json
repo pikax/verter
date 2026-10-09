@@ -1,0 +1,94 @@
+{
+  "id": "coordinate-inventory.v1",
+  "schema": 1,
+  "contractNode": "ENC0",
+  "finalOwner": "expansion.kernel: typed immutable universal catalog and demand-selected kernel services",
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "describesHead": {
+    "landingTitle": "fix(ci): retry marketplace extension installs in the VS Code E2E (#798)",
+    "date": "2026-10-09"
+  },
+  "companionFiles": ["boundary-route-ledger.v1.json", "case-table.v1.json"],
+  "inherits": {
+    "nodes": ["UAK0", "UAK1"],
+    "files": [
+      "tests/kernel/UAK0/products/owner-consumer-inventory.v1.json",
+      "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "tests/kernel/UAK1/products/constitution-inventory.v1.json",
+      "tests/kernel/UAK1/products/firewall-route-ledger.v1.json"
+    ],
+    "rule": "UAK0 outcomes O05-O07, consumers C13-C14, seam S12, cell Z05 and routes D16-D17 stay authoritative with their owners. ENC0 refines them: every outcome below names its UAK0 parent, and every boundary row in the ledger names D16 or D17 as parent when it splits one. No UAK0 or UAK1 row gains a second owner."
+  },
+  "law": [
+    { "id": "R01", "rule": "Every position a Rust core fact stores, caches, keys or compares is a UTF-8 byte offset or half-open byte range in one named coordinate domain. A value whose domain or unit cannot be named is a defect; there is no 'UTF-8 unless evidence suggests otherwise'." },
+    { "id": "R02", "rule": "Domains are disjoint. No arithmetic, comparison or assignment crosses domains; a crossing goes through the owner of the map between them." },
+    { "id": "R03", "rule": "UTF-16, UTF-32 and line/column forms exist only inside the adapter that speaks them. Each crossing converts exactly once, in the adapter, against the exact content snapshot the position indexes." },
+    { "id": "R04", "rule": "Every wire position names its encoding and line/column base, as a tag on the value or as a fixed, versioned property of the wire contract. A doc comment alone is not a contract." },
+    { "id": "R05", "rule": "No layer retains a document's coordinates re-expressed in a requester encoding. A boundary index built for one content snapshot and dropped with it, holding byte line starts and computing requester columns on demand, is not a mirror. The TypeScript provider's own UTF-16 line table (LI2) is the provider wire's index, not a mirror of the internal domain." },
+    { "id": "R06", "rule": "A position off a valid boundary of its domain (inside a UTF-8 sequence or surrogate pair, past the end, inverted, overflowing) is a typed failure. Nothing clamps, saturates or snaps to a character or token. Only a rule the wire itself defines (LSP 3.17 character past line length) is applied by its adapter, for read-only queries; edits and secondary links refuse." },
+    { "id": "R07", "rule": "Generated sources are not ASCII. An ASCII fast path must equal the general path; it is never an assumption that swaps byte and UTF-16 units." },
+    { "id": "R08", "rule": "A requester encoding never enters a prepared-artifact key, semantic-flight key, cache key or stored fact." },
+    { "id": "R09", "rule": "A mapped position is valid only against the exact content and map revision it was computed on (ContentId, MapRevision, the certified engine query's content_hash/map_hash). A changed basis rejects the position; it is never re-mapped approximately. PER0D consumes this for invalidation." },
+    { "id": "R10", "rule": "A line/column form's terminator set belongs to its wire: LSP 3.17 breaks at \\n, \\r\\n and lone \\r; TypeScript also at U+2028/U+2029; the V3 source-map split is the emitted \\n. Two line/column forms convert into each other only through byte offsets of one content snapshot." }
+  ],
+  "domains": [
+    { "id": "CD1", "name": "source", "unit": "UTF-8 bytes from the start of an authored file", "typesAtHead": ["verter_span::Span (serde, authored positions)", "verter_span::SourceByteOffset", "verter_span::SourceByteRange", "verter_language::SourceSpan (tagged with SourceSpaceId, SourceEncoding::Utf8)"], "successorTypes": ["SourceByteOffset", "SourceByteRange"], "mapOwner": "carrier parser geometry; TCM1 mapping products" },
+    { "id": "CD2", "name": "source-relative", "unit": "UTF-8 bytes from a declared base inside one authored file", "typesAtHead": ["verter_span::RelativeSpan", "OXC spans before adjust_program_spans", "verter_session_query::flow::FrameSpan"], "successorTypes": ["RelativeSpan (unchanged)"], "mapOwner": "owning parser/scanner; to_absolute(base) is the only exit" },
+    { "id": "CD3", "name": "generated", "unit": "UTF-8 bytes from the start of one generated surface (IDE TSX, compiled output, companion)", "typesAtHead": ["verter_span::GeneratedByteOffset", "verter_span::GeneratedByteRange", "verter_span::GeneratedByteLen", "verter_compiler::code_transform::MappingSpan", "GeneratedSourceRange", "verter_span::PartialGeneratedSpan"], "successorTypes": ["GeneratedByteOffset", "GeneratedByteRange"], "mapOwner": "CodeTransform mapping products (TCM1)" },
+    { "id": "CD4", "name": "embedded", "unit": "UTF-8 bytes into the cooked or derived text of an embedded region whose bytes are not the authored bytes", "typesAtHead": ["none for cooked literals", "verter_language SourceSpaceIdentity::DerivedTransformOutput spaces carry derived-text offsets as SourceSpan with a distinct SourceSpaceId"], "successorTypes": ["EmbeddedByteOffset", "EmbeddedByteRange"], "mapOwner": "EMB0 codec map chain, implemented by EMB0I" },
+    { "id": "CD5", "name": "boundary line/column", "unit": "(line, character) in a wire's encoding and base", "typesAtHead": ["verter_span::LspPosition", "verter_span::TsPosition", "verter_span::LineCol", "verter_type_runtime::codec::LineColumn", "tower-lsp Position"], "successorTypes": [], "mapOwner": "the boundary owner of the wire (LI1-LI7)" },
+    { "id": "CD6", "name": "boundary offset", "unit": "UTF-16 or UTF-32 offset from file start", "typesAtHead": ["verter_span::SourceUtf16Offset", "verter_span::GeneratedUtf16Offset", "raw u32 on NAPI/WASM/FFI"], "successorTypes": [], "mapOwner": "the boundary owner of the wire" }
+  ],
+  "domainRulings": [
+    "ENC0T reuses the existing verter_span names SourceByteOffset, SourceByteRange, GeneratedByteOffset and GeneratedByteRange: it moves their definitions into coord/, re-exports them at their current paths, adds EmbeddedByteOffset and EmbeddedByteRange and the checked API. No second type with an existing name.",
+    "Construction from a raw integer is explicit and named. No From, Into, Deref or Add<u32> between a domain type and an integer; no cross-domain arithmetic. Range constructors reject end < start instead of relying on saturating_sub in len().",
+    "CD2 stays RelativeSpan. The embedded types are only for cooked or derived text, where an offset is not a byte of the authored file.",
+    "Span stays the serialised authored-source span. PartialGeneratedSpan and GeneratedSpan have no production consumer outside verter_span and the verter_parser re-export; recorded as P31, not migrated."
+  ],
+  "lineIndexOwnership": [
+    { "id": "LI1", "index": "verter_type_runtime::codec::{SourceIndex, LineIndex} (one private core); verter_lsp::documents::line_index::LineIndex is a type adapter over it", "wire": "LSP client positions in the negotiated encoding; tsgo LSP-wire responses", "terminatorsAtHead": "\\n only", "ruling": "canonical", "owner": "ENCL0", "receivingAcceptance": "ENCL0-AC2", "successorPath": ["ENC0", "ENCL0"] },
+    { "id": "LI2", "index": "verter_span::Utf16LineIndex and verter_span::tsgo_offset (re-used by verter_tsgo_api::offset, verter_tsc, diag_source::SourceFile)", "wire": "TypeScript positions: UTF-16 offsets, 1-based line/column", "terminatorsAtHead": "TypeScript getLineStarts: \\n, \\r\\n, lone \\r, U+2028, U+2029", "ruling": "canonical; accepted (UAK0 seam S12); not the client-LSP owner", "owner": "verter_span (retained seam)", "verifier": "ENCT0", "receivingAcceptance": "ENCT0-AC1", "successorPath": ["ENC0", "ENCT0"] },
+    { "id": "LI3", "index": "verter_compiler::code_transform::{source_map, chain} with verter_parser::cursor::PositionResolver", "wire": "V3 source maps: 0-based lines, UTF-16 columns", "terminatorsAtHead": "\\n", "ruling": "canonical; accepted TCM1 owner; not migrated", "owner": "verter_compiler (TCM1)", "verifier": "ENCT0", "receivingAcceptance": "ENCT0-AC1", "successorPath": ["ENC0", "ENCT0"] },
+    { "id": "LI4", "index": "verter_ffi::convert::{OffsetIndex, byte_offset_to_utf16, utf16_to_byte_offset, utf8_to_utf16_offset, utf8_to_utf32_offset}", "wire": "NAPI/WASM/FFI offsets in UTF-16/UTF-32, no lines", "terminatorsAtHead": "none", "ruling": "canonical non-editor offset converter", "owner": "ENCF0", "receivingAcceptance": "ENCF0-AC2", "successorPath": ["ENC0", "ENCF0"] },
+    { "id": "LI5", "index": "compiler-internal V3 map decoders and byte-to-UTF-16 helpers: assembly/svelte_module::{generated_line_starts, utf16_offset_to_bytes} (shared by standalone.rs, vue_module.rs), framework_common/generated_chunk::byte_position and its copy in assembly/compose.rs, assembly/map_input::classify_column, verter_session::block_content::position_within_utf16_content", "wire": "decoding or validating V3 source maps produced by the compiler or a preprocessor", "terminatorsAtHead": "\\n", "ruling": "retained in their crates; exact (refuse inside a pair); recorded as duplicates of LI3 for the compiler owner", "owner": "verter_compiler / verter_session (retained)", "verifier": "ENC1", "receivingAcceptance": "ENC1-AC1", "successorPath": ["ENC0", "ENCL0", "ENC1"] },
+    { "id": "LI6", "index": "packages/language-shared/src/carrier/{mapper,remap}.ts; packages/typescript-plugin/src line tables and cursorGeometry.ts utf8RangesToUtf16", "wire": "TypeScript-side carrier mapping in UTF-16", "terminatorsAtHead": "\\n", "ruling": "Rev11 surfaces (CarrierMapper is a TCM4 displaced route); verified, not assigned", "owner": "Rev11 (TCM1/TCM4)", "verifier": "ENCT0", "receivingAcceptance": "ENCT0-AC1", "successorPath": ["ENC0", "ENCT0"] },
+    { "id": "LI7", "index": "packages/vue-vscode/src/utils.ts utf16OffsetToPosition; packages/vue-vscode/src/css/styleStructure.ts utf8OffsetToUtf16/lineCol", "wire": "VS Code client decorations from analysis spans", "terminatorsAtHead": "\\n", "ruling": "client conversion of server-converted spans; moves with the negotiated-encoding cutover", "owner": "ENCL0", "receivingAcceptance": "ENCL0-AC1", "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"], "parentRoute": "D17" }
+  ],
+  "lineIndexRule": "One index per wire contract. A request builds at most one index per (content snapshot, wire) and converts every endpoint through it. A new line/column form needs a row here, not a private table. Test-only and tooling copies (compiler tsc/ide/ssr tests, verter_bench examples, verter_dx_baseline::materialize) are outside the production population.",
+  "acceptedRev11": [
+    { "id": "T01", "owner": "TCM1", "unit": "Compact mapping products in CodeTransform", "paths": ["crates/verter_compiler/src/code_transform/mapping_product.rs", "crates/verter_compiler/src/code_transform/source_map.rs", "crates/verter_compiler/src/code_transform/chain.rs", "crates/verter_compiler/src/code_transform/segmented.rs"], "pinnedBy": ["mapping_product_tests.rs", "source_map_tests.rs", "segmented_tests.rs", "chain_tests.rs"], "state": "present; no migration" },
+    { "id": "T02", "owner": "TCM2", "unit": "Content-mapper projection plane", "paths": ["crates/verter_session/src/content_mapper.rs", "crates/verter_identity/src/mapping.rs"], "pinnedBy": ["crates/verter_session/tests/cases/content_mapper_projection.rs"], "state": "present; dormant (no production route reaches it)" },
+    { "id": "T03", "owner": "TCM3", "unit": "Semantic capability closure and certified engine query", "paths": ["crates/verter_session/src/semantic_capability.rs", "crates/verter_session/src/external_ts/engine.rs"], "pinnedBy": ["crates/verter_session/tests/g_extts/semantic_capability_closure.rs", "crates/verter_session/tests/g_extts/certified_engine_seam.rs", "crates/verter_session/tests/cases/compile-fail/uncertified_engine_answer_is_unrepresentable.rs"], "state": "present; Query.carrier_offset is a CD1 byte offset (produced by LineIndex::position_to_offset) fenced by content_hash, map_hash and required_version" },
+    { "id": "T04", "owner": "H2", "unit": "Core UTF-8 to direct-provider-wire conversion", "paths": ["crates/verter_span/src/tsgo_offset.rs", "crates/verter_span/src/utf16_line_index.rs", "crates/verter_tsgo_api/src/offset.rs", "crates/verter_type_runtime/src/tsgo/ipc.rs", "crates/verter_type_runtime/src/tsgo/owned.rs", "crates/verter_type_runtime/src/tsserver/ipc.rs", "crates/verter_type_runtime/src/contents_snapshot.rs", "crates/verter_type_runtime/src/semantic_tokens.rs"], "pinnedBy": ["crates/verter_span/src/utf16_line_index_tests.rs", "the tsgo and tsserver ipc unit tests"], "state": "present; no migration. The tsgo LSP-wire client sends no positionEncodings, so tsgo answers in UTF-16 (build_client_capabilities)." },
+    { "id": "T05", "owner": "TCM4", "unit": "Displaced position routes named by TCM4", "paths": ["crates/verter_lsp/src/documents/provider_projection.rs", "crates/verter_lsp/src/documents/position_map.rs", "packages/language-shared/src/carrier/mapper.ts", "packages/typescript-plugin/src/helpers/carrierStore.ts"], "pinnedBy": ["crates/verter_lsp/tests/cases/position_mapper_strict.rs"], "state": "still live; residual. ENCT0 verifies it and, under its charter, residue reopens the Rev11 owner. ENC0 assigns it to no successor." },
+    { "id": "T06", "owner": "none (outside TCM)", "unit": "Client-LSP conversion", "paths": ["crates/verter_type_runtime/src/codec.rs", "crates/verter_lsp/src/documents/line_index.rs"], "pinnedBy": ["codec.rs unit tests"], "state": "owned by ENCL0 through LI1" }
+  ],
+  "receiptMethod": "Each accepted owner is re-derived from the current tree with the in-tree evidence that pins it. No digest, commit identity or receipt file is recorded.",
+  "outcomes": [
+    { "id": "E-O1", "outcome": "Ratified coordinate domain set (CD1-CD4) as distinct newtypes; domain mixing does not compile", "parentOutcome": "O05", "owner": "ENC0T", "successorPath": ["ENC0", "ENC0T"], "receivingAcceptance": "ENC0T-AC1" },
+    { "id": "E-O2", "outcome": "Checked arithmetic and typed InvalidBoundary/Overflow/NotCharBoundary errors over the K01-K28 case table", "parentOutcome": "O05", "owner": "ENC0T", "successorPath": ["ENC0", "ENC0T"], "receivingAcceptance": "ENC0T-AC2" },
+    { "id": "E-O3", "outcome": "LSP negotiated encoding converted once at the editor boundary through LI1 with the LSP 3.17 terminator set; mapper inputs converted to the source-map column unit, never passed through", "parentOutcome": "O06", "owner": "ENCL0", "successorPath": ["ENC0", "ENCL0"], "receivingAcceptance": "ENCL0-AC2" },
+    { "id": "E-O4", "outcome": "Every NAPI/WASM/FFI/MCP/CLI/proto position carries a versioned encoding tag or a versioned fixed-encoding contract, converted once through LI4", "parentOutcome": "O07", "owner": "ENCF0", "successorPath": ["ENC0", "ENCF0"], "receivingAcceptance": "ENCF0-AC2" },
+    { "id": "E-O5", "outcome": "Accepted TCM1/TCM2/TCM3/H2 coordinate boundaries verified with no residual implicit adapter; T05 residue returned to its Rev11 owner", "owner": "ENCT0", "successorPath": ["ENC0", "ENCT0"], "receivingAcceptance": "ENCT0-AC1" },
+    { "id": "E-O6", "outcome": "Embedded and derived text (CD4) maps exactly to authored UTF-8 bytes through the codec map chain", "owner": "EMB0I", "successorPath": ["ENC0", "EMB0", "EMB0I"], "receivingAcceptance": "EMB0I-AC3" },
+    { "id": "E-O7", "outcome": "Zero unknown or duplicate conversion owners across all boundaries (P01-P31, LI1-LI7)", "owner": "ENC1", "successorPath": ["ENC0", "ENCL0", "ENC1"], "receivingAcceptance": "ENC1-AC1" }
+  ],
+  "consumers": [
+    { "id": "E-C01", "consumer": "TypeInfo/ComponentInfo product positions (TIF1)", "consumesOutcomes": ["E-O1", "E-O4"], "owner": "TIF1", "successorPath": ["ENC0", "ENCF0", "TIF1"], "receivingAcceptance": "TIF1-AC2" },
+    { "id": "E-C02", "consumer": "Workspace index positions (IDX0)", "consumesOutcomes": ["E-O1"], "owner": "IDX0", "successorPath": ["ENC0", "ENC0T", "IDX0"], "receivingAcceptance": "IDX0-AC2" },
+    { "id": "E-C03", "consumer": "Embedded codec implementation (EMB0I)", "consumesOutcomes": ["E-O1", "E-O2"], "owner": "EMB0I", "successorPath": ["ENC0", "ENC0T", "EMB0I"], "receivingAcceptance": "EMB0I-AC2" },
+    { "id": "E-C04", "consumer": "Cache, flight and invalidation law (map-revision basis R08/R09)", "consumesOutcomes": [], "consumesLaw": ["R08", "R09"], "owner": "PER0D", "successorPath": ["ENC0", "PER0D"], "receivingAcceptance": "PER0D-AC2" },
+    { "id": "E-C05", "consumer": "LSP feature handlers, provider merge and custom protocol (verter_lsp)", "consumesOutcomes": ["E-O3"], "parentConsumer": "C14", "owner": "ENCL0", "successorPath": ["ENC0", "ENCL0"], "receivingAcceptance": "ENCL0-AC2" },
+    { "id": "E-C06", "consumer": "NAPI/WASM/FFI/MCP/CLI adapters and TS bindings", "consumesOutcomes": ["E-O4"], "parentConsumer": "C13", "owner": "ENCF0", "successorPath": ["ENC0", "ENCF0"], "receivingAcceptance": "ENCF0-AC2" }
+  ],
+  "emptyPopulations": [
+    { "category": "central-framework-switch", "evidence": "No line index or offset converter (LI1-LI7) branches on a framework. Projection-kind variants of the provider mapper (ProviderPositionMapper) belong to the TCM4 residue (T05), not to this population.", "consequence": "UAK0 D01-D11 keep their owners; ENC0 adds none." },
+    { "category": "duplicate-component-information-authority", "evidence": "No coordinate route carries or recomputes component information.", "consequence": "UAK0 D12-D15 and D18 keep their owners; ENC0 adds none." },
+    { "category": "cooked-embedded-offsets", "evidence": "No production path decodes an embedded literal into cooked text and positions inside it at the described head.", "consequence": "CD4 has no migration population; EMB0I introduces it under ENC0T's embedded types." }
+  ],
+  "transferredObligations": [
+    { "obligation": "Successor offset/range newtypes (subblock 2), the subblock-6 tests and the clause 'compiler/type checks make successor coordinate-domain mixing impossible'", "receiver": "ENC0T" },
+    { "obligation": "Executable inventory/ownership validator over these products", "receiver": "UAI0" },
+    { "obligation": "Correct the position-encoding skill's statement that generated TSX is always ASCII", "receiver": "ENCL0" }
+  ]
+}

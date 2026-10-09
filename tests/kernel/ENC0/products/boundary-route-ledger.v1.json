@@ -1,0 +1,983 @@
+{
+  "id": "boundary-route-ledger.v1",
+  "schema": 1,
+  "contractNode": "ENC0",
+  "describesHead": {
+    "landingTitle": "fix(ci): retry marketplace extension installs in the VS Code E2E (#798)",
+    "date": "2026-10-09"
+  },
+  "categories": [
+    "untagged-coordinate-or-public-identity"
+  ],
+  "rules": {
+    "oneOwnerPerRoute": "Every row names exactly one production-capable deletion owner (ENCL0 or ENCF0), or names no deletion owner because it is an accepted Rev11 surface that ENCT0 verifies, or a recorded retained/unused item.",
+    "inheritedRoutes": "parentRoute names the UAK0 route a row splits (D16 for non-editor public positions, D17 for editor contracts). The parent keeps its owner; the row only narrows it. parentRoute null marks a route UAK0 did not list.",
+    "productionCapable": "ENCT0, ENC1 and UAI0 delete nothing and are never deletion owners here.",
+    "identifiable": "identifiable=false marks a wire whose encoding a consumer cannot determine from the wire, its type or its fixed contract. Each such row has abortEvidence=true: it triggers the charter clause 'abort if a current wire cannot identify its encoding'.",
+    "excluded": "Test-only conversions, tooling crates outside the production closure (verter_bench examples, verter_dx_baseline, lsp-test-client) and JS-internal string indices that never cross a Rust boundary (unplugin ssr-transforms) are outside the population."
+  },
+  "routes": [
+    {
+      "id": "P01",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": "D17",
+      "direction": "ingress+egress",
+      "unit": "Negotiated LSP Position passed untranslated into the UTF-16 source-map mapper",
+      "encodingAtHead": "negotiated (UTF-8 preferred, then UTF-32, then UTF-16) on the carrier side; UTF-16 source-map columns inside PositionMapper/ProviderPositionMapper",
+      "identifiable": true,
+      "tagged": "negotiated per session",
+      "paths": [
+        "crates/verter_lsp/src/type_provider/merge/position.rs",
+        "crates/verter_lsp/src/documents/position_map.rs",
+        "crates/verter_lsp/src/server/sync_orchestration.rs",
+        "crates/verter_lsp/src/sync_coordinator.rs",
+        "crates/verter_lsp/src/server/nav_features_completion_resolve.rs",
+        "crates/verter_lsp/src/server/provider_state.rs"
+      ],
+      "symbols": [
+        "carrier_position_to_tsx_offset",
+        "carrier_position_to_tsx_offset_validated",
+        "PositionMapper::carrier_to_tsx",
+        "LspPosition (doc says negotiated, mapper assumes UTF-16)",
+        "provider_projection_context",
+        "prepare_carrier_provider_imports"
+      ],
+      "defect": "A UTF-8 or UTF-32 session maps any position after a non-ASCII character on the same line to the wrong generated column. VS Code offers only UTF-16, so it does not observe it.",
+      "successor": "the carrier position converts once to a CD1 byte offset at the LSP boundary; the mapper is addressed in bytes or in its own UTF-16 unit through an explicit conversion"
+    },
+    {
+      "id": "P02",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": "D17",
+      "direction": "internal-to-provider",
+      "unit": "Editor encoding enum used to name the provider wire's UTF-16 and hard-coded UTF-16 literals in provider projection preparation",
+      "encodingAtHead": "UTF-16 (provider), expressed as tower-lsp PositionEncodingKind::UTF16",
+      "identifiable": true,
+      "tagged": "no; literal",
+      "paths": [
+        "crates/verter_lsp/src/type_provider/project_sync/virtual_types.rs",
+        "crates/verter_lsp/src/provider_surface_store/mod.rs",
+        "crates/verter_lsp/src/provider_surface_store/producers.rs",
+        "crates/verter_lsp/src/extension_provider.rs",
+        "crates/verter_lsp/src/server/rename_plan.rs",
+        "crates/verter_lsp/src/features/diagnostics_bridge.rs",
+        "crates/verter_lsp/src/type_provider/merge/position.rs"
+      ],
+      "symbols": [
+        "prepare_tsx_surface_inner",
+        "provider_utf16_line_index",
+        "carrier_utf16_line_index",
+        "ts_position_utf16_to_byte_offset",
+        "carrier_completion_member_boundary_offset"
+      ],
+      "successor": "provider-wire encoding is named by the provider adapter's own type; the editor enum names only the editor wire"
+    },
+    {
+      "id": "P03",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": "D17",
+      "direction": "internal",
+      "unit": "Third code-unit counter beside LI1 and LI4",
+      "encodingAtHead": "per argument (UTF-8/16/32)",
+      "identifiable": true,
+      "tagged": "argument",
+      "paths": [
+        "crates/verter_lsp/src/documents/provider_projection.rs"
+      ],
+      "symbols": [
+        "encoded_len",
+        "SelfFileProviderMapper::new",
+        "TransformedBufferMap::from_transform_geometry"
+      ],
+      "successor": "widths come from LI1"
+    },
+    {
+      "id": "P04",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC2",
+      "parentRoute": null,
+      "direction": "ingress+egress",
+      "unit": "LI1 line starts break only at \\n",
+      "encodingAtHead": "negotiated columns; lines split on \\n only",
+      "identifiable": true,
+      "tagged": "negotiated",
+      "paths": [
+        "crates/verter_type_runtime/src/codec.rs",
+        "crates/verter_lsp/src/documents/line_index.rs"
+      ],
+      "symbols": [
+        "scan_line_starts",
+        "IndexRef::line_end"
+      ],
+      "defect": "LSP 3.17 also ends a line at a lone \\r; a lone-\\r file gets wrong line numbers on every LSP surface and on tsgo LSP-wire responses (K15).",
+      "successor": "LI1 implements the LSP 3.17 terminator set"
+    },
+    {
+      "id": "P05",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": "D17",
+      "direction": "ingress",
+      "unit": "Unknown negotiated encoding kind silently becomes UTF-16",
+      "encodingAtHead": "UTF-16 fallback",
+      "identifiable": true,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_lsp/src/documents/line_index.rs"
+      ],
+      "symbols": [
+        "to_runtime_encoding"
+      ],
+      "successor": "a closed encoding type; an unknown kind is unrepresentable after negotiation"
+    },
+    {
+      "id": "P06",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": "D17",
+      "direction": "ingress",
+      "unit": "Encoding before initialize and when the client advertises none",
+      "encodingAtHead": "UTF-16 (the LSP 3.17 default when no positionEncodings are advertised)",
+      "identifiable": true,
+      "tagged": "wire-defined default",
+      "paths": [
+        "crates/verter_lsp/src/server/lifecycle.rs",
+        "crates/verter_lsp/src/documents/mod.rs",
+        "crates/verter_lsp/src/server/mod.rs"
+      ],
+      "symbols": [
+        "negotiate_position_encoding (lifecycle.rs:58-74)",
+        "DocumentRegistry encoding RwLock initial value",
+        "server position_encoding initial value"
+      ],
+      "successor": "the default is the wire's rule, applied once at negotiation; no document is converted before negotiation"
+    },
+    {
+      "id": "P07",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": "D17",
+      "direction": "egress",
+      "unit": "Custom-protocol analysis spans converted through the non-editor FFI index",
+      "encodingAtHead": "negotiated, converted with verter_ffi::convert::OffsetIndex/OffsetEncoding",
+      "identifiable": true,
+      "tagged": "negotiated",
+      "paths": [
+        "crates/verter_lsp/src/documents/analysis.rs",
+        "crates/verter_lsp/src/documents/mod.rs"
+      ],
+      "symbols": [
+        "convert_analysis_spans_json",
+        "get_analysis_json"
+      ],
+      "successor": "editor conversions go through LI1 only"
+    },
+    {
+      "id": "P08",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": null,
+      "direction": "egress",
+      "unit": "Audit LSP position records",
+      "encodingAtHead": "raw negotiated LSP character; the session's encoding is not recorded",
+      "identifiable": false,
+      "abortEvidence": true,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_audit/src/payloads/lsp.rs",
+        "crates/verter_lsp/src/audit_harness.rs",
+        "packages/types/audit.generated.ts"
+      ],
+      "symbols": [
+        "PositionInfo.line",
+        "PositionInfo.character"
+      ],
+      "note": "The value is identifiable inside the session but the record does not carry the encoding, so a reader of the audit record cannot identify it.",
+      "successor": "the record carries the negotiated encoding or a CD1 byte offset"
+    },
+    {
+      "id": "P09",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCL0"
+      ],
+      "receivingAcceptance": "ENCL0-AC1",
+      "parentRoute": "D17",
+      "direction": "client",
+      "unit": "VS Code client conversions of server-converted spans",
+      "encodingAtHead": "UTF-16 assumed (the client advertises only utf-16); styleStructure converts UTF-8 bytes itself",
+      "identifiable": true,
+      "tagged": "no",
+      "paths": [
+        "packages/vue-vscode/src/utils.ts",
+        "packages/vue-vscode/src/BindingColorDecorationProvider.ts",
+        "packages/vue-vscode/src/PropConstnessDecorationProvider.ts",
+        "packages/vue-vscode/src/VueApiDecorationProvider.ts",
+        "packages/vue-vscode/src/AnalysisTreeProvider.ts",
+        "packages/vue-vscode/src/css/styleStructure.ts"
+      ],
+      "symbols": [
+        "utf16OffsetToPosition",
+        "utf8OffsetToUtf16",
+        "lineCol"
+      ],
+      "successor": "the client consumes server ranges already in the negotiated encoding"
+    },
+    {
+      "id": "P10",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "ingress",
+      "unit": "Code-action cursor offset",
+      "encodingAtHead": "UTF-16 code units",
+      "identifiable": true,
+      "tagged": "doc comment only",
+      "paths": [
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "packages/native/index.ts",
+        "packages/wasm/src/index.ts"
+      ],
+      "symbols": [
+        "getCodeActions(offset)",
+        "utf16_to_byte_offset"
+      ],
+      "successor": "versioned encoding-tagged offset converted once at the adapter"
+    },
+    {
+      "id": "P11",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Host diagnostic spans",
+      "encodingAtHead": "UTF-16 when the adapter can fetch the source, otherwise raw UTF-8 bytes; compileMany entries are always bytes",
+      "identifiable": false,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_ffi/src/convert/offset.rs",
+        "crates/verter_ffi/src/convert/output.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_napi/src/compile_request_response.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "crates/verter_wasm/src/compile_request_response.rs",
+        "crates/verter_protocol/src/types.rs",
+        "packages/native/host-types.ts",
+        "packages/native/index.ts"
+      ],
+      "symbols": [
+        "mandatory_utf16_offset",
+        "mandatory_utf16_offset_with",
+        "host_diagnostic_to_ffi",
+        "host_diagnostics_to_ffi",
+        "napi_diagnostic_from_host (passes None)",
+        "FfiDiagnostic.span_start/end",
+        "NapiDiagnostic.spanStart/spanEnd",
+        "HostDiagnostic.spanStart/spanEnd",
+        "CompileBatchEntry.diagnostics"
+      ],
+      "abortEvidence": true,
+      "defect": "The same field and TS type carry UTF-16 or UTF-8 bytes depending on runtime source availability and on which API produced them; nothing on the wire says which.",
+      "successor": "versioned encoding-tagged spans; a span that cannot be converted is a typed failure, never a silent byte pass-through"
+    },
+    {
+      "id": "P12",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Lint diagnostic spans",
+      "encodingAtHead": "NAPI/WASM: UTF-16 when a source exists, else bytes; MCP: bytes. The Rust Span documented as bytes is rewritten in place with UTF-16 values",
+      "identifiable": false,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_ffi/src/convert/lint.rs",
+        "crates/verter_diagnostics/src/diagnostic.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "crates/verter_mcp/src/server.rs"
+      ],
+      "symbols": [
+        "lint_diagnostics_to_utf16",
+        "LintDiagnostic.span (spanStart/spanEnd)",
+        "NapiLintDiagnostic.spanStart/spanEnd",
+        "EvidenceSnippet.highlight_start/end"
+      ],
+      "abortEvidence": true,
+      "defect": "Same JSON shape, different units per surface and per runtime source availability; a CD1 Span holds UTF-16 values.",
+      "successor": "the CD1 span stays bytes; the adapter emits a tagged wire span"
+    },
+    {
+      "id": "P13",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress+ingress",
+      "unit": "Module reference spans",
+      "encodingAtHead": "UTF-8 bytes, in the same response as UTF-16 diagnostics; WASM reads them back as bytes",
+      "identifiable": true,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_ffi/src/convert/output.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "packages/native/host-types.ts"
+      ],
+      "symbols": [
+        "FfiModuleReference.span_start/end/expr_span_*",
+        "NapiModuleReference",
+        "HostModuleReference",
+        "ffi_module_reference_to_analysis",
+        "collectResolvableModuleReferenceSpecifiers",
+        "resolveKnownModuleReferenceDependencies"
+      ],
+      "successor": "tagged spans; one response, one declared encoding per field"
+    },
+    {
+      "id": "P14",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Destructured binding and block metadata",
+      "encodingAtHead": "UTF-16; block bounds index the generated TSX (CD3), bindings the SFC (CD1). WASM converts against \"\" when the source is missing, which yields 0 for every offset",
+      "identifiable": true,
+      "tagged": "doc comment only",
+      "paths": [
+        "crates/verter_ffi/src/convert/offset.rs",
+        "crates/verter_napi/src/compile_request_response.rs",
+        "crates/verter_wasm/src/compile_request_response.rs",
+        "packages/wasm/src/compile-request-types.ts",
+        "packages/native/host-types.ts"
+      ],
+      "symbols": [
+        "convert_destructured_block_meta",
+        "FfiDestructuredBinding.source_start/end",
+        "FfiDestructuredBlockMeta.block_start/end",
+        "OffsetEncoding::Utf16 literal"
+      ],
+      "defect": "Missing source silently produces zero offsets.",
+      "successor": "tagged spans naming their domain (source or generated); missing source is a typed failure"
+    },
+    {
+      "id": "P15",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Text edits, document symbols, element and selector matches",
+      "encodingAtHead": "UTF-16",
+      "identifiable": true,
+      "tagged": "doc comment only",
+      "paths": [
+        "crates/verter_protocol/src/types.rs",
+        "crates/verter_ffi/src/convert/actions.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "packages/native/host-types.ts"
+      ],
+      "symbols": [
+        "FfiTextEdit",
+        "FfiDocumentSymbol",
+        "FfiSelectorMatchResult",
+        "FfiElementMatch",
+        "NapiTextEdit",
+        "NapiDocumentSymbol",
+        "NapiElementMatch",
+        "NapiSelectorMatchResult"
+      ],
+      "successor": "versioned encoding-tagged ranges"
+    },
+    {
+      "id": "P16",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Script-setup attribute source ranges",
+      "encodingAtHead": "UTF-8 bytes",
+      "identifiable": true,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_protocol/src/types.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_mcp/src/server.rs",
+        "packages/native/index.ts"
+      ],
+      "symbols": [
+        "PublicApiProjectionSubject::ScriptSetupAttrs.source_range",
+        "NapiSourceRange",
+        "HostTscScriptSetupAttrsFailureSubject.sourceRange"
+      ],
+      "successor": "tagged ranges"
+    },
+    {
+      "id": "P17",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Analysis, document-structure and symbol-list JSON",
+      "encodingAtHead": "UTF-8 bytes; unplugin converts structure ranges to UTF-16 itself",
+      "identifiable": true,
+      "tagged": "no (FfiStructureRange carries a source-space token, not a unit)",
+      "paths": [
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_napi/src/meta.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "crates/verter_ffi/src/convert/typeinfo.rs",
+        "crates/verter_protocol/src/typeinfo.rs",
+        "crates/verter_protocol/src/types.rs",
+        "packages/unplugin/src/index.ts"
+      ],
+      "symbols": [
+        "getAnalysis",
+        "getDocumentStructure",
+        "listSymbols",
+        "FfiStructureRange",
+        "FfiSymbolEntry.span_start/end",
+        "utf8OffsetToUtf16 (unplugin)"
+      ],
+      "successor": "tagged ranges; consumers stop converting locally"
+    },
+    {
+      "id": "P18",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "Component-meta protobuf spans",
+      "encodingAtHead": "UTF-8 bytes; CanonicalRange is tagged UTF8_BYTES but no consumer reads the tag; ResolvedTypeDeclaration/ResolvedNativeProp spans are untagged",
+      "identifiable": true,
+      "tagged": "partial",
+      "paths": [
+        "crates/verter_protocol/proto/verter/v1/component_meta.proto",
+        "crates/verter_protocol/src/component_meta.rs",
+        "packages/component-meta/src/native-component-meta.ts",
+        "packages/component-meta/src/type-graph-proto-decode.ts"
+      ],
+      "symbols": [
+        "ResolvedTypeDeclaration.span_start/end",
+        "ResolvedNativeProp.span_start/end",
+        "CanonicalRange.encoding"
+      ],
+      "successor": "every span uses the tagged range shape; consumers honour the tag"
+    },
+    {
+      "id": "P19",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "egress",
+      "unit": "TypeInfo protobuf spans",
+      "encodingAtHead": "SymbolEntryDto and FrameworkSurfaceMemberDeclaration: UTF-8 bytes; GraphDiagnostic: always zero with has_span=false; GraphSpanRef: no producer and no stated unit",
+      "identifiable": false,
+      "tagged": "comment only (GraphDiagnostic), none otherwise",
+      "paths": [
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "crates/verter_session/src/typeinfo/framework_surface/graph_export.rs"
+      ],
+      "symbols": [
+        "SymbolEntryDto.span_start/end",
+        "GraphDiagnostic.span_start/end",
+        "GraphSpanRef.start/end",
+        "FrameworkSurfaceMemberDeclaration.span_start/end"
+      ],
+      "abortEvidence": true,
+      "defect": "GraphSpanRef is a wire field whose unit is defined nowhere.",
+      "successor": "tagged spans under the typeinfo wire contract's schema-version rules"
+    },
+    {
+      "id": "P20",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "ingress",
+      "unit": "Preprocessor diagnostic line/column",
+      "encodingAtHead": "unknown: neither the line/column base nor the column unit is stated; values are passed through",
+      "identifiable": false,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_protocol/src/types.rs",
+        "crates/verter_ffi/src/convert/input.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_session/src/types.rs"
+      ],
+      "symbols": [
+        "FfiPreprocessorDiagnostic.line/column",
+        "NapiPreprocessorDiagnostic.line/column",
+        "PreprocessorDiagnostic.line/column"
+      ],
+      "abortEvidence": true,
+      "successor": "an ingress contract that fixes base and unit, validated at the adapter"
+    },
+    {
+      "id": "P21",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "ingress+egress",
+      "unit": "MCP tool positions",
+      "encodingAtHead": "UTF-8 bytes throughout",
+      "identifiable": true,
+      "tagged": "schema description for QuickFixParams.offset only",
+      "paths": [
+        "crates/verter_mcp/src/server.rs",
+        "crates/verter_mcp/src/tools/framework_surface.rs"
+      ],
+      "symbols": [
+        "QuickFixParams.offset",
+        "get_quick_fixes edits",
+        "lint_file",
+        "lint_project",
+        "get_rerender_triggers",
+        "get_side_effects",
+        "get_type_errors",
+        "analyze_file",
+        "get_framework_surface origin spans"
+      ],
+      "successor": "versioned encoding-tagged positions; same concept, same unit across MCP and NAPI/WASM"
+    },
+    {
+      "id": "P22",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": "D16",
+      "direction": "internal",
+      "unit": "Char-boundary clamping in the FFI converters",
+      "encodingAtHead": "an offset inside a UTF-8 sequence is clamped down to the previous boundary; an in-pair UTF-16 offset snaps to the pair start",
+      "identifiable": true,
+      "tagged": "n/a",
+      "paths": [
+        "crates/verter_ffi/src/convert/offset.rs"
+      ],
+      "symbols": [
+        "clamp_to_char_boundary",
+        "byte_offset_to_utf16",
+        "utf8_to_utf32_offset",
+        "utf16_to_byte_offset"
+      ],
+      "defect": "Clamp recovery forbidden by R06.",
+      "successor": "typed NotCharBoundary/InvalidBoundary (K10, K11, K20)"
+    },
+    {
+      "id": "P23",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": null,
+      "direction": "egress",
+      "unit": "verter-tsc diagnostic positions",
+      "encodingAtHead": "1-based line, 1-based UTF-16 column, rendered as file(line,col)",
+      "identifiable": true,
+      "tagged": "no (tsc convention)",
+      "paths": [
+        "crates/verter_tsc/src/reporter.rs",
+        "crates/verter_tsc/src/checker.rs",
+        "crates/verter_tsc/src/api_check.rs",
+        "crates/verter_tsc/src/error_map.rs"
+      ],
+      "symbols": [
+        "reporter::Diagnostic.line/col",
+        "one_indexed_position",
+        "line_col_via_cache"
+      ],
+      "successor": "the CLI locks one-based code-unit coordinates in an explicitly selected encoding (ENCF0 subblock 3)"
+    },
+    {
+      "id": "P24",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": [
+        "UAK0",
+        "UAK1",
+        "ENC0",
+        "ENCF0"
+      ],
+      "receivingAcceptance": "ENCF0-AC1",
+      "parentRoute": null,
+      "direction": "egress",
+      "unit": "Audit diagnostic spans in the generated TS bindings",
+      "encodingAtHead": "UTF-8 bytes (verter_span::Span)",
+      "identifiable": true,
+      "tagged": "doc comment only",
+      "paths": [
+        "crates/verter_audit/src/payloads/component_meta.rs",
+        "packages/types/audit.generated.ts"
+      ],
+      "symbols": [
+        "AuditDiagnosticEntry.span"
+      ],
+      "successor": "tagged span"
+    },
+    {
+      "id": "P25",
+      "deletionOwner": null,
+      "verifier": "ENCT0",
+      "productionCapable": false,
+      "successorPath": [
+        "ENC0",
+        "ENCT0"
+      ],
+      "receivingAcceptance": "ENCT0-AC1",
+      "direction": "egress",
+      "unit": "TCM1 V3 source maps and their extension members",
+      "encodingAtHead": "0-based lines, UTF-16 columns; x_verter_helper_preamble_end is UTF-16; x_verter_mapping_product.insertion_anchors are UTF-8 bytes marked only by schema_version",
+      "identifiable": true,
+      "tagged": "format-defined (ECMA-426 UTF-16 columns) plus schema_version",
+      "paths": [
+        "crates/verter_compiler/src/code_transform/source_map.rs",
+        "crates/verter_compiler/src/code_transform/mapping_product.rs",
+        "packages/typescript-plugin/src/index.ts",
+        "packages/typescript-plugin/src/cursorGeometry.ts"
+      ],
+      "symbols": [
+        "generate_map_json*",
+        "x_verter_helper_preamble_end",
+        "x_verter_mapping_product",
+        "strictUtf8PointToUtf16",
+        "utf8RangesToUtf16"
+      ],
+      "note": "Accepted TCM1 surface: not migrated. ENCT0 confirms the byte-valued member is converted exactly once by its consumer."
+    },
+    {
+      "id": "P26",
+      "deletionOwner": null,
+      "verifier": "ENCT0",
+      "productionCapable": false,
+      "successorPath": [
+        "ENC0",
+        "ENCT0"
+      ],
+      "receivingAcceptance": "ENCT0-AC1",
+      "direction": "internal",
+      "unit": "TCM2 content-mapper projection plane",
+      "encodingAtHead": "CD1/CD3 bytes (MappingSpan); typed Refusal, no clamping",
+      "identifiable": true,
+      "tagged": "typed in Rust",
+      "paths": [
+        "crates/verter_session/src/content_mapper.rs"
+      ],
+      "symbols": [
+        "ContentMapper",
+        "Refusal"
+      ],
+      "note": "Dormant at the head."
+    },
+    {
+      "id": "P27",
+      "deletionOwner": null,
+      "verifier": "ENCT0",
+      "productionCapable": false,
+      "successorPath": [
+        "ENC0",
+        "ENCT0"
+      ],
+      "receivingAcceptance": "ENCT0-AC1",
+      "direction": "internal-to-provider",
+      "unit": "TCM3 certified engine query offset",
+      "encodingAtHead": "CD1 byte offset (from LineIndex::position_to_offset), fenced by content_hash, map_hash and required_version; the field's doc comment does not state the unit",
+      "identifiable": true,
+      "tagged": "by construction",
+      "paths": [
+        "crates/verter_session/src/external_ts/engine.rs",
+        "crates/verter_lsp/src/external_ts_sync.rs"
+      ],
+      "symbols": [
+        "Query.carrier_offset"
+      ]
+    },
+    {
+      "id": "P28",
+      "deletionOwner": null,
+      "verifier": "ENCT0",
+      "productionCapable": false,
+      "successorPath": [
+        "ENC0",
+        "ENCT0"
+      ],
+      "receivingAcceptance": "ENCT0-AC1",
+      "direction": "provider wire",
+      "unit": "H2 core UTF-8 to provider UTF-16 conversion",
+      "encodingAtHead": "UTF-16 provider wire; tsgo LSP client advertises no positionEncodings; tsserver 1-based UTF-16; Utf16LineIndex retained per diagnostic source in diag_source::SourceFile",
+      "identifiable": true,
+      "tagged": "provider-defined",
+      "paths": [
+        "crates/verter_span/src/tsgo_offset.rs",
+        "crates/verter_span/src/utf16_line_index.rs",
+        "crates/verter_span/src/diag_source.rs",
+        "crates/verter_tsgo_api/src/offset.rs",
+        "crates/verter_type_runtime/src/tsgo/ipc.rs",
+        "crates/verter_type_runtime/src/tsgo/owned.rs",
+        "crates/verter_type_runtime/src/tsserver/ipc.rs",
+        "crates/verter_type_runtime/src/contents_snapshot.rs",
+        "crates/verter_type_runtime/src/semantic_tokens.rs"
+      ],
+      "symbols": [
+        "utf16_offset_to_byte",
+        "Utf16LineIndex",
+        "build_client_capabilities",
+        "parse_range_to_offsets[_strict]",
+        "tsserver_pos_to_byte_offset_checked"
+      ],
+      "note": "ENCT0 verifies the K16 terminator behaviour of the tsgo LSP wire against LI1, and the retention scope of LI2 under R05."
+    },
+    {
+      "id": "P29",
+      "deletionOwner": null,
+      "verifier": "ENCT0",
+      "productionCapable": false,
+      "successorPath": [
+        "ENC0",
+        "ENCT0"
+      ],
+      "receivingAcceptance": "ENCT0-AC1",
+      "direction": "internal",
+      "unit": "TCM4 displaced position routes",
+      "encodingAtHead": "(line, UTF-16 column) source-map mapping; CarrierMapper in UTF-16 offsets",
+      "identifiable": true,
+      "tagged": "no",
+      "paths": [
+        "crates/verter_lsp/src/documents/provider_projection.rs",
+        "crates/verter_lsp/src/documents/position_map.rs",
+        "packages/language-shared/src/carrier/mapper.ts",
+        "packages/language-shared/src/carrier/remap.ts",
+        "packages/typescript-plugin/src/helpers/carrierStore.ts"
+      ],
+      "symbols": [
+        "ProviderPositionMapper",
+        "PositionMapper",
+        "CarrierMapper"
+      ],
+      "note": "Residual: TCM4's charter names these as displaced and they are still the live position authority. Under ENCT0's charter the residue reopens the Rev11 owner; ENC0 assigns no successor."
+    },
+    {
+      "id": "P30",
+      "deletionOwner": null,
+      "retainedBy": "verter_compiler / verter_session",
+      "verifier": "ENC1",
+      "productionCapable": false,
+      "successorPath": [
+        "ENC0",
+        "ENCL0",
+        "ENC1"
+      ],
+      "receivingAcceptance": "ENC1-AC1",
+      "direction": "internal",
+      "unit": "Compiler-internal V3 map decoders and UTF-16 column helpers beside LI3",
+      "encodingAtHead": "UTF-16 columns, \\n lines; exact (None inside a pair)",
+      "identifiable": true,
+      "tagged": "format-defined",
+      "paths": [
+        "crates/verter_compiler/src/assembly/svelte_module.rs",
+        "crates/verter_compiler/src/assembly/vue_module.rs",
+        "crates/verter_compiler/src/standalone.rs",
+        "crates/verter_compiler/src/framework_common/generated_chunk.rs",
+        "crates/verter_compiler/src/assembly/compose.rs",
+        "crates/verter_compiler/src/assembly/map_input.rs",
+        "crates/verter_session/src/block_content.rs"
+      ],
+      "symbols": [
+        "generated_line_starts",
+        "utf16_offset_to_bytes",
+        "byte_position",
+        "classify_column",
+        "position_within_utf16_content"
+      ],
+      "note": "Recorded duplicate of LI3. Not a public boundary; ENC1 confirms whether it remains a duplicate conversion owner."
+    },
+    {
+      "id": "P31",
+      "deletionOwner": null,
+      "retainedBy": "verter_span",
+      "productionCapable": false,
+      "direction": "none",
+      "unit": "Coordinate types with no production consumer",
+      "encodingAtHead": "CD3 / CD6",
+      "identifiable": true,
+      "tagged": "typed",
+      "paths": [
+        "crates/verter_span/src/lib.rs",
+        "crates/verter_parser/src/common/span.rs"
+      ],
+      "symbols": [
+        "PartialGeneratedSpan",
+        "GeneratedSpan",
+        "SourceUtf16Offset",
+        "GeneratedUtf16Offset"
+      ],
+      "note": "Recorded only. GeneratedSpan overloads Span for generated positions. ENC0T decides their fate inside coord/; deleting them is not ENC0T acceptance."
+    }
+  ],
+  "alreadyTagged": [
+    {
+      "unit": "Carrier-geometry ranges",
+      "symbols": [
+        "CanonicalRange (component_meta.proto)"
+      ],
+      "encodingAtHead": "PositionEncoding enum + source_space_token; always UTF8_BYTES offsets",
+      "note": "No migration of the shape; P18 covers the consumers that ignore the tag."
+    }
+  ]
+}
