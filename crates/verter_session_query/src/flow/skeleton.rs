@@ -10,6 +10,8 @@ use crate::function_program::FunctionProgramEntry;
 use std::sync::Arc;
 use verter_no_typeexpr::NoTypeExpr;
 
+use crate::retention::resident::{resident, ResidentCharge, ResidentKind, RESIDENT_SLOTS};
+
 /// Interned identifier / property-key name within one skeleton.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub struct FlowNameId(pub u32);
@@ -677,13 +679,73 @@ pub struct FunctionBodySkeleton {
 /// resolves by lookup rather than by a scan of the name or binding table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, NoTypeExpr)]
 pub struct SkeletonNameIndex {
-    ids: Arc<rustc_hash::FxHashMap<Arc<str>, FlowNameId>>,
-    /// The bindings of each name, in declaration order: those of name `n`
-    /// are `bindings[offsets[n]..offsets[n + 1]]`. A name interned after
-    /// the index was built declares none.
-    offsets: Arc<[u32]>,
-    bindings: Arc<[SkeletonBindingId]>,
+    ids: Arc<NameIds>,
+    tables: Arc<NameTables>,
 }
+
+/// The name map of a [`SkeletonNameIndex`], one allocation shared by the
+/// index's clones until one of them interns a name.
+#[derive(Debug, Default, NoTypeExpr)]
+struct NameIds {
+    map: rustc_hash::FxHashMap<Arc<str>, FlowNameId>,
+    resident: ResidentCharge,
+}
+
+impl NameIds {
+    fn new(map: rustc_hash::FxHashMap<Arc<str>, FlowNameId>) -> Self {
+        let mut ids = Self {
+            map,
+            resident: ResidentCharge::default(),
+        };
+        ids.recharge();
+        ids
+    }
+
+    /// Count what the map holds now.
+    fn recharge(&mut self) {
+        let occupancy = SkeletonNameIndexOccupancy {
+            names: self.map.len(),
+            bindings: 0,
+            backing_bytes: self.map.capacity() * std::mem::size_of::<(Arc<str>, FlowNameId)>(),
+        };
+        self.resident
+            .recharge(ResidentKind::SkeletonNameIndex, occupancy.slots());
+    }
+}
+
+/// A copy is a second allocation, counted on its own.
+impl Clone for NameIds {
+    fn clone(&self) -> Self {
+        Self::new(self.map.clone())
+    }
+}
+
+impl PartialEq for NameIds {
+    fn eq(&self, other: &Self) -> bool {
+        self.map == other.map
+    }
+}
+
+impl Eq for NameIds {}
+
+/// The bindings of each name, in declaration order: those of name `n` are
+/// `bindings[offsets[n]..offsets[n + 1]]`. A name interned after the index
+/// was built declares none.
+#[derive(Debug, Default, NoTypeExpr)]
+struct NameTables {
+    offsets: Box<[u32]>,
+    bindings: Box<[SkeletonBindingId]>,
+    /// Released when the tables drop.
+    _resident: ResidentCharge,
+}
+
+impl PartialEq for NameTables {
+    fn eq(&self, other: &Self) -> bool {
+        self.offsets == other.offsets && self.bindings == other.bindings
+    }
+}
+
+impl Eq for NameTables {}
 
 impl SkeletonNameIndex {
     /// Index `names` and the bindings declaring each.
@@ -711,27 +773,37 @@ impl SkeletonNameIndex {
                 *at += 1;
             }
         }
+        let offsets: Box<[u32]> = offsets.into();
+        let bindings: Box<[SkeletonBindingId]> = by_name.into();
+        let tables = SkeletonNameIndexOccupancy {
+            names: 0,
+            bindings: bindings.len(),
+            backing_bytes: std::mem::size_of_val(&*offsets) + std::mem::size_of_val(&*bindings),
+        };
         Self {
-            ids: Arc::new(ids),
-            offsets: offsets.into(),
-            bindings: by_name.into(),
+            ids: Arc::new(NameIds::new(ids)),
+            tables: Arc::new(NameTables {
+                offsets,
+                bindings,
+                _resident: ResidentCharge::admit(ResidentKind::SkeletonNameIndex, tables.slots()),
+            }),
         }
     }
 
     /// The id of `text`, when interned.
     #[must_use]
     pub fn id(&self, text: &str) -> Option<FlowNameId> {
-        self.ids.get(text).copied()
+        self.ids.map.get(text).copied()
     }
 
     /// The bindings declaring `name`, in declaration order.
     #[must_use]
     pub fn bindings_of(&self, name: FlowNameId) -> &[SkeletonBindingId] {
         match (
-            self.offsets.get(name.index()),
-            self.offsets.get(name.index() + 1),
+            self.tables.offsets.get(name.index()),
+            self.tables.offsets.get(name.index() + 1),
         ) {
-            (Some(start), Some(end)) => &self.bindings[*start as usize..*end as usize],
+            (Some(start), Some(end)) => &self.tables.bindings[*start as usize..*end as usize],
             _ => &[],
         }
     }
@@ -743,25 +815,19 @@ impl SkeletonNameIndex {
     #[must_use]
     pub fn occupancy(&self) -> SkeletonNameIndexOccupancy {
         SkeletonNameIndexOccupancy {
-            names: self.ids.len(),
-            bindings: self.bindings.len(),
-            backing_bytes: self.ids.capacity() * std::mem::size_of::<(Arc<str>, FlowNameId)>()
-                + std::mem::size_of_val(&*self.offsets)
-                + std::mem::size_of_val(&*self.bindings),
+            names: self.ids.map.len(),
+            bindings: self.tables.bindings.len(),
+            backing_bytes: self.ids.map.capacity() * std::mem::size_of::<(Arc<str>, FlowNameId)>()
+                + std::mem::size_of_val(&*self.tables.offsets)
+                + std::mem::size_of_val(&*self.tables.bindings),
         }
-    }
-
-    /// An identity of the index's storage, equal for two clones sharing it
-    /// while either is alive, so a reader summing the indexes it retains
-    /// counts each once.
-    #[must_use]
-    pub fn storage_identity(&self) -> usize {
-        Arc::as_ptr(&self.ids).cast::<()>() as usize
     }
 
     /// Record a name interned after the index was built.
     fn insert(&mut self, text: Arc<str>, id: FlowNameId) {
-        Arc::make_mut(&mut self.ids).insert(text, id);
+        let ids = Arc::make_mut(&mut self.ids);
+        ids.map.insert(text, id);
+        ids.recharge();
     }
 }
 
@@ -779,6 +845,23 @@ pub struct SkeletonNameIndexOccupancy {
 }
 
 impl SkeletonNameIndexOccupancy {
+    fn slots(&self) -> [usize; RESIDENT_SLOTS] {
+        [self.names, self.bindings, self.backing_bytes, 0, 0, 0]
+    }
+
+    /// What every skeleton name index alive in the process holds — whether
+    /// a cache entry or only a reader still holds it — each backing
+    /// allocation counted once.
+    #[must_use]
+    pub fn resident() -> Self {
+        let ([names, bindings, backing_bytes, ..], _) = resident(ResidentKind::SkeletonNameIndex);
+        Self {
+            names,
+            bindings,
+            backing_bytes,
+        }
+    }
+
     /// Add `other`'s counts to these: the occupancy of two distinct
     /// indexes.
     pub fn accumulate(&mut self, other: &Self) {

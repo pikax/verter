@@ -70,6 +70,7 @@
 //! decides whether the process may retain the entry at all, so an
 //! imprecise estimate costs hit rate, never correctness.
 
+pub(crate) mod resident;
 pub mod resolution_charge;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
