@@ -62,7 +62,9 @@
     "No two cells claim the same (operation, host, profile).",
     "A tsgo-hosted cell is answered by tsgo only; a Verter-computed answer to a TS-region operation is a duplicate.",
     "No cell is a build, bundler or runtime cell; those are exclusions.",
-    "No cell cites @marko/language-tools, @marko/type-check, @marko/compiler, an installed parser or syntax highlighting as product evidence."
+    "No cell cites @marko/language-tools, @marko/type-check, @marko/compiler, an installed parser or syntax highlighting as product evidence.",
+    "Every cell records tsgoOperations and tsgoLimitation explicitly: an empty list and null mean the cell needs no tsgo operation and has no known tsgo limitation, never 'not recorded'. On a cell not hosted by tsgo, tsgoOperations lists the checker queries its producer consumes as type-authority input; tsgo does not answer that cell, and cellLaw[2] governs only tsgo-hosted cells.",
+    "A cell whose producer owns the operation but has no acceptance that proves it is a pending-receiver cell: receivingAcceptance is null and pendingReceiver names the producer, the proof it owes and the open controller question. It never borrows an acceptance id that does not prove the operation. While any pending-receiver cell remains the matrix is incomplete, and full-matrix promotion (MRK10-AC1) fails."
   ],
   "parserDecisions": [
     {
@@ -115,7 +117,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1",
-      "receivingAcceptance": "MRK1-AC1"
+      "receivingAcceptance": "MRK1-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C02",
@@ -123,7 +127,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1",
-      "receivingAcceptance": "MRK1-AC2"
+      "receivingAcceptance": "MRK1-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C03",
@@ -131,7 +137,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1",
-      "receivingAcceptance": "MRK1-AC4"
+      "receivingAcceptance": "MRK1-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C04",
@@ -139,7 +147,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1",
-      "receivingAcceptance": "MRK1-AC5"
+      "receivingAcceptance": "MRK1-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C05",
@@ -147,7 +157,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1",
-      "receivingAcceptance": "MRK1-AC6"
+      "receivingAcceptance": "MRK1-AC6",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C06",
@@ -155,7 +167,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1M",
-      "receivingAcceptance": "MRK1M-AC1"
+      "receivingAcceptance": "MRK1M-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C07",
@@ -163,7 +177,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1M",
-      "receivingAcceptance": "MRK1M-AC2"
+      "receivingAcceptance": "MRK1M-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C08",
@@ -171,7 +187,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1M",
-      "receivingAcceptance": "MRK1M-AC3"
+      "receivingAcceptance": "MRK1M-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C09",
@@ -179,7 +197,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1M",
-      "receivingAcceptance": "MRK1M-AC4"
+      "receivingAcceptance": "MRK1M-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C10",
@@ -187,7 +207,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1M",
-      "receivingAcceptance": "MRK1M-AC5"
+      "receivingAcceptance": "MRK1M-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C11",
@@ -195,7 +217,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1S",
-      "receivingAcceptance": "MRK1S-AC1"
+      "receivingAcceptance": "MRK1S-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C12",
@@ -203,7 +227,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1S",
-      "receivingAcceptance": "MRK1S-AC2"
+      "receivingAcceptance": "MRK1S-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C13",
@@ -211,7 +237,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1S",
-      "receivingAcceptance": "MRK1S-AC3"
+      "receivingAcceptance": "MRK1S-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C14",
@@ -219,7 +247,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1S",
-      "receivingAcceptance": "MRK1S-AC4"
+      "receivingAcceptance": "MRK1S-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C15",
@@ -227,7 +257,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1S",
-      "receivingAcceptance": "MRK1S-AC5"
+      "receivingAcceptance": "MRK1S-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C16",
@@ -235,7 +267,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK2",
-      "receivingAcceptance": "MRK2-AC1"
+      "receivingAcceptance": "MRK2-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C17",
@@ -243,7 +277,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK2",
-      "receivingAcceptance": "MRK2-AC2"
+      "receivingAcceptance": "MRK2-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C18",
@@ -251,7 +287,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK2",
-      "receivingAcceptance": "MRK2-AC3"
+      "receivingAcceptance": "MRK2-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C19",
@@ -259,7 +297,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK2",
-      "receivingAcceptance": "MRK2-AC4"
+      "receivingAcceptance": "MRK2-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C20",
@@ -305,7 +345,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK3",
-      "receivingAcceptance": "MRK3-AC4"
+      "receivingAcceptance": "MRK3-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C24",
@@ -313,7 +355,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK4",
-      "receivingAcceptance": "MRK4-AC1"
+      "receivingAcceptance": "MRK4-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C25",
@@ -321,7 +365,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK4",
-      "receivingAcceptance": "MRK4-AC2"
+      "receivingAcceptance": "MRK4-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C26",
@@ -329,7 +375,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK4",
-      "receivingAcceptance": "MRK4-AC3"
+      "receivingAcceptance": "MRK4-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C27",
@@ -337,7 +385,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK4",
-      "receivingAcceptance": "MRK4-AC4"
+      "receivingAcceptance": "MRK4-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C28",
@@ -369,11 +419,28 @@
     },
     {
       "id": "C30",
-      "operation": "native HTML tag/attribute, attribute-tag and custom-tag name completion",
+      "operation": "native HTML tag/attribute and attribute-tag name completion",
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
-      "receivingAcceptance": "MRK5-AC3"
+      "receivingAcceptance": "MRK5-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C56",
+      "operation": "custom-tag name completion from MRK2 discovery",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5",
+      "receivingAcceptance": null,
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "pendingReceiver": {
+        "producer": "MRK5",
+        "owedProof": "custom-tag name completion lists the tags MRK2 discovers for the file's scope and excludes tags from another tags/ scope",
+        "question": "mrk5-carrier-acceptance"
+      }
     },
     {
       "id": "C31",
@@ -381,7 +448,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
-      "receivingAcceptance": "MRK5-AC4"
+      "receivingAcceptance": "MRK5-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C32",
@@ -389,8 +458,14 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5",
-      "receivingAcceptance": "MRK5-AC3",
-      "note": "MRK5-AC3 names completion only; see finding F-MRK0-01"
+      "receivingAcceptance": null,
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "pendingReceiver": {
+        "producer": "MRK5",
+        "owedProof": "auto-close fires in HTML mode and is absent in concise mode and inside TS regions",
+        "question": "mrk5-carrier-acceptance"
+      }
     },
     {
       "id": "C33",
@@ -398,7 +473,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5R",
-      "receivingAcceptance": "MRK5R-AC1"
+      "receivingAcceptance": "MRK5R-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C34",
@@ -430,7 +507,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5R",
-      "receivingAcceptance": "MRK5R-AC4"
+      "receivingAcceptance": "MRK5R-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C37",
@@ -438,7 +517,9 @@
       "host": "verter-lsp",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5R",
-      "receivingAcceptance": "MRK5R-AC5"
+      "receivingAcceptance": "MRK5R-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C38",
@@ -485,7 +566,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK6",
-      "receivingAcceptance": "MRK6-AC4"
+      "receivingAcceptance": "MRK6-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C42",
@@ -506,6 +589,8 @@
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK6",
       "receivingAcceptance": "MRK6-AC6",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
       "note": "compatibility only; not a feature host"
     },
     {
@@ -514,7 +599,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK7",
-      "receivingAcceptance": "MRK7-AC1"
+      "receivingAcceptance": "MRK7-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C45",
@@ -522,7 +609,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK7",
-      "receivingAcceptance": "MRK7-AC2"
+      "receivingAcceptance": "MRK7-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C46",
@@ -530,7 +619,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK7",
-      "receivingAcceptance": "MRK7-AC3"
+      "receivingAcceptance": "MRK7-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C47",
@@ -538,7 +629,9 @@
       "host": "verter-kernel",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK7",
-      "receivingAcceptance": "MRK7-AC4"
+      "receivingAcceptance": "MRK7-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C48",
@@ -546,7 +639,9 @@
       "host": "lint-host",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK8",
-      "receivingAcceptance": "MRK8-AC1"
+      "receivingAcceptance": "MRK8-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C49",
@@ -554,7 +649,9 @@
       "host": "lint-host",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK8",
-      "receivingAcceptance": "MRK8-AC2"
+      "receivingAcceptance": "MRK8-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C50",
@@ -562,7 +659,9 @@
       "host": "lint-host",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK8",
-      "receivingAcceptance": "MRK8-AC3"
+      "receivingAcceptance": "MRK8-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C51",
@@ -570,7 +669,9 @@
       "host": "format-host",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK8F",
-      "receivingAcceptance": "MRK8F-AC1"
+      "receivingAcceptance": "MRK8F-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C52",
@@ -578,7 +679,9 @@
       "host": "format-host",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK8F",
-      "receivingAcceptance": "MRK8F-AC2"
+      "receivingAcceptance": "MRK8F-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C53",
@@ -586,7 +689,9 @@
       "host": "format-host",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK8F",
-      "receivingAcceptance": "MRK8F-AC3"
+      "receivingAcceptance": "MRK8F-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C54",
@@ -594,7 +699,9 @@
       "host": "format-host",
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK8F",
-      "receivingAcceptance": "MRK8F-AC4"
+      "receivingAcceptance": "MRK8F-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
     },
     {
       "id": "C55",
@@ -603,6 +710,8 @@
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK1G",
       "receivingAcceptance": "MRK1G-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
       "supportClaim": "none",
       "note": "syntax highlighting is never product evidence (MRK1G-AC6)"
     }

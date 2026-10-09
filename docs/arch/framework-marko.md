@@ -25,7 +25,7 @@ The reviewed contract data lives in `tests/framework-marko/MRK0/`:
 | `manifest.json` | The products, their readers, the acceptance cases and the validator handover to MRK1G |
 | `products/marko-version-lock.json` | The admitted release, the excluded releases `XR01`–`XR04`, the test-only oracles and the wire tag |
 | `products/marko-activation-policy.json` | The FWA1 activation row, the zero-work rule and the host policy |
-| `products/marko-capability-matrix.json` | Profiles, hosts, parser decisions, cells `C01`–`C55`, exclusions `X01`–`X07` and facets |
+| `products/marko-capability-matrix.json` | Profiles, hosts, parser decisions, cells `C01`–`C56`, exclusions `X01`–`X07` and facets |
 | `cases.md` | Every planted row and the reason it must fail, per acceptance id |
 
 REG0, FWA1 and FCH1 read the products as data. Nothing checks them until
@@ -174,9 +174,15 @@ is the TS-host projection only.
 
 ## Matrix
 
-`marko-capability-matrix.json` holds 55 cells over the one admitted profile.
+`marko-capability-matrix.json` holds 56 cells over the one admitted profile.
 Each cell names one producer node and one receiving acceptance id of that
-producer:
+producer that proves the operation, or is a pending-receiver cell (below).
+Every cell records `tsgoOperations` and `tsgoLimitation` explicitly; an
+empty list and `null` mean none. On a kernel cell (`C20`–`C22`) the tsgo
+operations are checker queries the producer consumes as type-authority
+input; tsgo answers only tsgo-hosted cells.
+
+
 
 | Producer | Cells | Hosts |
 | -------- | ----- | ----- |
@@ -186,7 +192,7 @@ producer:
 | MRK2 | `C16`–`C19` | verter-kernel |
 | MRK3 | `C20`–`C23` | verter-kernel |
 | MRK4 | `C24`–`C27` | verter-kernel |
-| MRK5 | `C28`–`C32` | tsgo, verter-lsp |
+| MRK5 | `C28`–`C32`, `C56` | tsgo, verter-lsp |
 | MRK5R | `C33`–`C37` | tsgo, verter-kernel, verter-lsp |
 | MRK6 | `C38`–`C43` | tsgo, verter-kernel, ts-plugin |
 | MRK7 | `C44`–`C47` | verter-kernel |
@@ -216,9 +222,15 @@ MRK10 closes each row with its owner's acceptance (`MRK10-AC4`).
 
 ## Findings recorded for the receiving owners
 
-- **F-MRK0-01 (MRK5).** MRK5's surfaces include HTML-mode auto-close, but no
-  MRK5 acceptance names it; cell `C32` points at `MRK5-AC3` (carrier-only
-  features) until MRK5 adds an auto-close leg to it.
+- **F-MRK0-01 (MRK5).** MRK5's charter lists HTML-mode auto-close and
+  custom-tag name completion as its carrier-only operations, but no MRK5
+  acceptance proves either: `MRK5-AC3` covers attribute-tag and native-tag
+  completion only. Cells `C32` (auto-close) and `C56` (custom-tag name
+  completion) are therefore pending-receiver cells: `receivingAcceptance` is
+  `null` and `pendingReceiver` names the owed proof. They borrow no
+  acceptance id. The receiving MRK5 acceptance is an open controller question
+  (`mrk5-carrier-acceptance`); until it is ratified the matrix is incomplete
+  and full-matrix promotion (`MRK10-AC1`) fails.
 - **F-MRK0-02 (LMK1).** LMK1 states its marko line as "6.4.x latest stable".
   The registry's latest 6.4.x (6.4.5) excludes the shared compiler oracle, so
   that line resolves to this lock's exact 6.4.3.
@@ -240,7 +252,7 @@ executable "planted … fails" proof moves unchanged to MRK1G (`MRK1G-ACV`).
 | Acceptance | Met by |
 | ---------- | ------ |
 | `MRK0-AC1` pinned release | L `admittedReleases`, `excludedReleases`, `oracles`; cases `floating-range` … `oracle-floating` |
-| `MRK0-AC2` owned matrix | M `cells`, `exclusions`, `cellLaw`; cases `unowned-cell` … `exclusion-without-reason` |
+| `MRK0-AC2` owned matrix | M `cells`, `exclusions`, `cellLaw`; cases `unowned-cell` … `pending-cell-promoted` |
 | `MRK0-AC3` activation and host policy | A `activationRow`, `zeroWorkWhenInactive`, `hostPolicy`, `parserAuthority`; cases `extension-only-activation` … `lk6-activation` |
 | `MRK0-AC4` oracle is not support | M `cellLaw`, cell `C55` `supportClaim: none`, L oracle roles; cases `language-tools-evidence` … `syntax-highlighting-evidence` |
 | `MRK0-AC5` wire tag ratified | L `wireTag`; cases `open-canonical-tag` … `missing-tag` |
