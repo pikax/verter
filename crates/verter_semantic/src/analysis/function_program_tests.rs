@@ -2311,3 +2311,167 @@ fn capture_summary_records_grow_with_authored_captures_not_nesting() {
         assert_eq!(nesting, 4);
     }
 }
+
+/// Every function-valued call argument of `host`, with the callback
+/// expression record its linked return source names.
+fn linked_callbacks<'a>(
+    index: &'a FunctionProgramIndex,
+    host: &str,
+) -> Vec<(u32, Option<&'a ProgramExpressionRecord>)> {
+    entry_of(index, host)
+        .call_sites()
+        .iter()
+        .flat_map(|site| site.args.iter())
+        .filter(|argument| argument.is_function_value)
+        .map(|argument| {
+            let record = argument.function_return_source.as_ref().map(|source| {
+                index
+                    .expression(&ProgramExpressionIdentity {
+                        canonical_id: Arc::from("/test.ts"),
+                        offset: argument.point,
+                    })
+                    .filter(|record| {
+                        matches!(&record.source, ProgramExpressionSource::FunctionReturn(linked) if linked == source)
+                    })
+                    .expect("a linked argument names its own callback record")
+            });
+            (argument.point, record)
+        })
+        .collect()
+}
+
+#[test]
+fn callback_linking_work_is_linear_and_skips_ordinary_arguments() {
+    let mut probes = Vec::new();
+    let mut lookups = Vec::new();
+    for count in [128usize, 256, 512, 1024] {
+        let mut source = String::from("function host() {");
+        for ordinal in 0..count {
+            source.push_str(&format!(
+                "run{ordinal}((x: number) => x + {ordinal}, {ordinal}, \"s\", [{ordinal}]);"
+            ));
+        }
+        source.push_str("return 0;}");
+        take_callback_link_probes();
+        let index = index_of(&source);
+        let linking = take_callback_link_probes();
+        // Only the function-valued argument of each call is looked up;
+        // the three ordinary arguments examine no callback.
+        assert!(
+            (count..=count * 2).contains(&linking),
+            "about one callback position compared per function argument at {count}: {linking}"
+        );
+
+        verter_session_query::function_program::PROGRAM_EXPRESSION_LOOKUP_VISITS
+            .with(|visits| visits.set(0));
+        let linked = linked_callbacks(&index, "host");
+        let visits = verter_session_query::function_program::PROGRAM_EXPRESSION_LOOKUP_VISITS
+            .with(std::cell::Cell::get);
+        assert_eq!(linked.len(), count);
+        assert!(linked.iter().all(|(_, record)| record.is_some()));
+        assert!(
+            (count..=count * 2).contains(&visits),
+            "about one expression point compared per lookup at {count}: {visits}"
+        );
+        probes.push(linking);
+        lookups.push(visits);
+    }
+    for pair in probes.windows(2).chain(lookups.windows(2)) {
+        assert!(
+            pair[1] * 2 <= pair[0] * 5,
+            "doubling the callbacks grows the lookup work at most 2.5x (a population scan quadruples it): {pair:?}"
+        );
+    }
+
+    let mut ordinary = String::from("function host() {");
+    for ordinal in 0..256 {
+        ordinary.push_str(&format!("run{ordinal}({ordinal}, \"s\", value{ordinal});"));
+    }
+    ordinary.push_str("return () => 0;}");
+    take_callback_link_probes();
+    let _ = index_of(&ordinary);
+    assert_eq!(
+        take_callback_link_probes(),
+        0,
+        "ordinary arguments probe no callback population"
+    );
+}
+
+#[test]
+fn callback_linking_keeps_nested_duplicate_and_lexical_owner_identities() {
+    let source = r#"
+function host() {
+  outer(() => inner(() => 1));
+  same(() => 2);
+  same(() => 2);
+  return (() => 3)();
+}
+function other() {
+  same(() => 2);
+}
+const derived = wrap(() => 4);
+"#;
+    let index = index_of(source);
+    let host = linked_callbacks(&index, "host");
+    let other = linked_callbacks(&index, "other");
+    let start = |needle: &str, nth: usize| {
+        u32::try_from(
+            source
+                .match_indices(needle)
+                .nth(nth)
+                .expect("fixture needle")
+                .0,
+        )
+        .unwrap()
+    };
+    // The outer callback and the callback nested inside it link to their
+    // own records; identical callbacks at distinct positions stay distinct.
+    let host_points: Vec<_> = host.iter().map(|(point, _)| *point).collect();
+    assert!(host_points.contains(&start("() => inner", 0)));
+    assert!(host_points.contains(&start("() => 2", 0)));
+    assert!(host_points.contains(&start("() => 2", 1)));
+    assert!(host.iter().all(|(_, record)| record.is_some()));
+    let host_sources: std::collections::HashSet<_> = host
+        .iter()
+        .map(|(_, record)| format!("{:?}", record.unwrap().source))
+        .collect();
+    assert_eq!(
+        host_sources.len(),
+        host.len(),
+        "every callback keeps its own identity"
+    );
+    let inner_linked = index.entries_for_test().iter().any(|entry| {
+        entry.call_sites().iter().any(|site| {
+            site.args.iter().any(|argument| {
+                argument.point == start("() => 1", 0) && argument.function_return_source.is_some()
+            })
+        })
+    });
+    assert!(inner_linked, "the nested callback's call links it too");
+
+    // A textually identical callback under another lexical owner links to
+    // that owner's own position, never to the host's.
+    assert_eq!(other.len(), 1);
+    let (point, record) = other[0];
+    assert_eq!(point, start("() => 2", 2));
+    let record = record.expect("other's callback is linked");
+    assert!(!host_sources.contains(&format!("{:?}", record.source)));
+    let ProgramExpressionSource::FunctionReturn(FunctionReturnSource::Flow(identity)) =
+        &record.source
+    else {
+        panic!("a callback record carries its flow return identity");
+    };
+    assert_eq!(identity.anchor.symbol.as_ref(), "other");
+
+    // The top-level initializer's call record links its callback as well.
+    let derived = index
+        .expression(&ProgramExpressionIdentity {
+            canonical_id: Arc::from("/test.ts"),
+            offset: start("wrap(", 0),
+        })
+        .expect("initializer record");
+    let ProgramExpressionSource::SemanticCall { site, .. } = &derived.source else {
+        panic!("the initializer is a semantic call");
+    };
+    assert!(site.args[0].function_return_source.is_some());
+}
