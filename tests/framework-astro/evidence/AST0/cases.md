@@ -14,8 +14,8 @@ into `tests/framework-astro/AST0/products/astro-displaced-routes.json`.
 
 Grounding per acceptance item:
 
-- **AC1:** `products/astro-version-lock.json` pins `astro` 7.3.8 and the three
-  charter oracles with registry, repository, licence and integrity, excludes
+- **AC1:** `products/astro-version-lock.json` pins `astro` 7.3.8 and the four
+  tooling oracles with registry, repository, licence and integrity, excludes
   7.4.0-beta.1 with its reason, and records the WDX1 `astro@5.0.0` row as a
   diverged pin. The registry facts were read from npm on 2026-10-09.
 - **AC2:** `products/astro-capability-matrix.json` gives every cell exactly
@@ -34,9 +34,11 @@ Grounding per acceptance item:
 Incremental equivalence and bounded work are not applicable: no cache, query,
 cancellation or hot path is touched.
 
-Open question: `ast0-grammar-oracle` (the admitted Astro 7.3.8 ships
-`@astrojs/compiler-rs`, not the charter's `@astrojs/compiler` oracle). Until
-it is ruled, the lock keeps the charter's oracle set and records the observed
-packages without making them oracles.
+The grammar oracle is `@astrojs/compiler-rs` 0.5.1 and the projection oracle
+is `@astrojs/astro2tsx` 0.1.2. Their exact pins and integrity are separate from
+the upstream manifests' declared dependency ranges. Neither package becomes
+a production parser or projection source. AST1G implements the amended
+rejection cases; AST9 owns hermetic oracle agreement, and LAS1 owns alignment
+of the lint profile's locked set.
 
 This file does not claim that any case executed.

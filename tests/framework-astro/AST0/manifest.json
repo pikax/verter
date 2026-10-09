@@ -35,6 +35,9 @@
         "legacy-major-profile",
         "wdx1-astro-5-0-0-diverged-pin",
         "oracle-pin-floating",
+        "obsolete-grammar-oracle",
+        "missing-projection-oracle",
+        "missing-oracle-integrity",
         "oracle-as-product-dependency"
       ]
     },
@@ -65,6 +68,8 @@
         "verter-native-ts-region-cell",
         "tsserver-specific-cell",
         "astro-compiler-parser-authority",
+        "astro-compiler-rs-parser-authority",
+        "astro2tsx-projection-authority",
         "new-client-transport"
       ]
     },

@@ -60,7 +60,7 @@
         "sourceOwner": "none (new parser; no in-repository source is copied)",
         "upstreamSpecification": "Astro syntax reference for astro 7.3.8 (docs.astro.build: Astro syntax, Components, Template expressions reference, Directives reference)",
         "adaptedUpstreamMaterial": "none",
-        "oracle": "@astrojs/compiler 4.0.0 (charter pin; see the version lock's observedDivergence), test-only",
+        "oracle": "@astrojs/compiler-rs 0.5.1, test-only grammar oracle; @astrojs/astro2tsx 0.1.2 is the separate test-only projection oracle. Exact pins and upstream dependency ranges are recorded separately in the version lock.",
         "corpus": {
           "name": "AST0 Astro grammar corpus",
           "path": "tests/framework-astro/AST0/corpus",

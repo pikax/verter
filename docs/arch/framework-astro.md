@@ -68,24 +68,30 @@ Astro 8 prerelease may become a second profile only by a ratified amendment.
 ### Tooling oracles
 
 Test-only, each a single npm devDependency of the conformance harness, never
-a product parser, resolver or type owner. They are the same set LAS1 locks.
+a product parser, resolver, type owner or projection source. They are the
+same set LAS1 locks. AST9 pins their transitive and platform package closure
+hermetically; these top-level pins do not claim that an installation ran.
 
 | Package | Version | Role |
 | ------- | ------- | ---- |
-| `@astrojs/compiler` | 4.0.0 | grammar and transform oracle |
+| `@astrojs/compiler-rs` | 0.5.1 | grammar oracle |
+| `@astrojs/astro2tsx` | 0.1.2 | projection oracle |
 | `@astrojs/language-server` | 2.17.1 | editor-behaviour oracle |
 | `@astrojs/check` | 0.9.10 | diagnostics oracle (`AST9-AC2`, `LAS2-AC1`) |
 
-**Observed divergence (open question `ast0-grammar-oracle`).** Astro 7 no
-longer uses `@astrojs/compiler`. Every astro 7 release observed, 7.0.0 through
-7.3.8, depends on `@astrojs/compiler-rs` (7.3.8 resolves `^0.5.1`, latest
-0.5.1). `@astrojs/language-server` 2.17.0 and later, including 2.17.1, depend
-on `@astrojs/astro2tsx` (`^0.1.0`, latest 0.1.2) instead. Astro 6 used
-`@astrojs/compiler` 3.x. The lock keeps the charter's oracle set and records
-both packages as observed, not as oracles, until the question is ruled. A
-grammar disagreement between an oracle and the admitted release is decided by
-AST1 against the Astro 7.3.8 syntax reference, never by adopting an
-implementation as parser authority.
+The [Astro 7.3.8 manifest](https://registry.npmjs.org/astro/7.3.8) declares
+`@astrojs/compiler-rs` at `^0.5.1`, and the
+[language-server 2.17.1 manifest](https://registry.npmjs.org/@astrojs/language-server/2.17.1)
+declares `@astrojs/astro2tsx` at `^0.1.0`. The lock selects exact versions
+from those ranges and records the published package integrity, licence and
+source separately from the ranges. `@astrojs/compiler` 4.0.0 is excluded
+from the oracle set because it is not the admitted release's parser.
+
+Package provenance does not prove grammar, diagnostic or projection
+compatibility. AST1 proves the dedicated frontend's grammar and recovery;
+AST9 compares the oracles structurally in its hermetic harness. The AST6
+projection is Verter-generated: upstream TSX, including `astro2tsx` output,
+is comparison data only. No build or dev output is consumed.
 
 ## Activation
 

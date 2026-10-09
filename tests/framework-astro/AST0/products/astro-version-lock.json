@@ -74,20 +74,47 @@
     }
   ],
   "toolingOracles": {
-    "rule": "Test-only oracles, each a single npm devDependency of the conformance harness (framework-common Evidence). Never a product parser, resolver or type owner. Compared structurally (AST9-AC2).",
+    "rule": "Test-only oracles, each a single npm devDependency of the conformance harness (framework-common Evidence). Never a product parser, resolver, type owner or projection source. Compared structurally (AST9-AC2); AST6 generates its own projection. The harness pins the transitive and platform package closure hermetically; published dependency ranges below are provenance, not pins or proof of an installed resolution.",
     "lockedWith": "LAS1",
     "pins": [
       {
-        "package": "@astrojs/compiler",
-        "version": "4.0.0",
-        "role": "grammar and transform oracle (charter pin)",
-        "publishedOn": "2026-04-27",
+        "package": "@astrojs/compiler-rs",
+        "version": "0.5.1",
+        "role": "grammar oracle (test-only)",
+        "publishedOn": "2026-09-25",
         "license": "MIT",
         "source": {
           "registry": "npm",
-          "repository": "withastro/compiler"
+          "repository": "withastro/compiler-rs",
+          "manifest": "https://registry.npmjs.org/@astrojs/compiler-rs/0.5.1"
         },
-        "integrity": "sha512-eouss7G8ygdZqHuke033VMcVw5HTZUu+PXd/h06DGDUg/jt5btPYPqh66ENWw/mU78rBrf/oeC4oqoBwMtDMNA=="
+        "integrity": "sha512-1k1acnX7DepIiea9U9/Y+d1hdAFfylu1ZQQkkYgRSwBOBAsXInolyZuh/2tax+83vu/A+hOYP6P3+265RvMTvw==",
+        "upstreamDependency": {
+          "package": "astro",
+          "version": "7.3.8",
+          "declaredRange": "^0.5.1",
+          "source": "https://registry.npmjs.org/astro/7.3.8"
+        }
+      },
+      {
+        "package": "@astrojs/astro2tsx",
+        "version": "0.1.2",
+        "role": "projection oracle (test-only)",
+        "publishedOn": "2026-09-25",
+        "license": "MIT",
+        "source": {
+          "registry": "npm",
+          "repository": "withastro/compiler-rs",
+          "directory": "crates/astro2tsx",
+          "manifest": "https://registry.npmjs.org/@astrojs/astro2tsx/0.1.2"
+        },
+        "integrity": "sha512-Uj/M9zbrhu5cIZEvWAGTbQJRKSxXWJ/E59BZwt7F+chrKhbfttW+9rkS/l+1QxoJP1KU3UnpM62M7yszfAI0WA==",
+        "upstreamDependency": {
+          "package": "@astrojs/language-server",
+          "version": "2.17.1",
+          "declaredRange": "^0.1.0",
+          "source": "https://registry.npmjs.org/@astrojs/language-server/2.17.1"
+        }
       },
       {
         "package": "@astrojs/language-server",
@@ -116,22 +143,10 @@
         "integrity": "sha512-zgx/UQMozdjOa3bOxjgeCFdtpE3c9rRX6xHwa+2QXvy8z8Akifu2AtubHyv/zzC2znO8dl8fFWL4K+Ba9kS8HQ=="
       }
     ],
-    "observedDivergence": {
-      "status": "open: operator question ast0-grammar-oracle",
-      "finding": "The admitted astro 7.3.8 does not depend on @astrojs/compiler. It resolves @astrojs/compiler-rs ^0.5.1 (latest 0.5.1, MIT, withastro/compiler-rs). @astrojs/language-server 2.17.0 and later, including the pinned 2.17.1, depend on @astrojs/astro2tsx ^0.1.0 (latest 0.1.2, MIT, withastro/compiler-rs crates/astro2tsx) instead of @astrojs/compiler. astro 6.x depended on @astrojs/compiler ^3.0.0; every astro 7 release observed (7.0.0 through 7.3.8) depends on @astrojs/compiler-rs.",
-      "recordedNotOracles": [
-        {
-          "package": "@astrojs/compiler-rs",
-          "version": "0.5.1",
-          "resolvedBy": "astro@7.3.8 dependency ^0.5.1"
-        },
-        {
-          "package": "@astrojs/astro2tsx",
-          "version": "0.1.2",
-          "resolvedBy": "@astrojs/language-server@2.17.1 dependency ^0.1.0"
-        }
-      ],
-      "consequence": "Until ruled, the charter oracle set stands. A grammar disagreement between @astrojs/compiler 4.0.0 and the admitted release's own parser is adjudicated by AST1 against the official Astro syntax reference for 7.3.8, never by adopting either implementation as parser authority."
+    "selection": {
+      "basis": "astro 7.3.8 declares @astrojs/compiler-rs ^0.5.1; @astrojs/language-server 2.17.1 declares @astrojs/astro2tsx ^0.1.0. The selected exact oracle versions are 0.5.1 and 0.1.2, respectively. @astrojs/compiler 4.0.0 is not in the admitted release's declared dependencies and is excluded from this oracle set.",
+      "authority": "The dedicated Verter frontend remains the parser authority (PAR0 CL11/PD04); AST6 remains the projection owner. Neither upstream output feeds a production path.",
+      "evidenceLimit": "Published metadata establishes package provenance, not grammar, diagnostic or projection compatibility. AST1 proves lossless grammar and recovery; AST9-AC2 compares the pinned oracles structurally in the hermetic harness."
     }
   },
   "wireTag": {
