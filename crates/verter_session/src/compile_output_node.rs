@@ -439,6 +439,8 @@ impl ArtifactNode for CompileOutputNodePureContent {
 /// cheaper own-content / override-hash predicates.
 pub(crate) struct CompileOutputNodeFactValidatedSession {
     inflight: InflightTable<QueryFlightKey<CompileOutputSessionKey>>,
+    /// The account a published slot's evidence pages are claimed into.
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl CompileOutputNodeFactValidatedSession {
@@ -449,6 +451,19 @@ impl CompileOutputNodeFactValidatedSession {
     pub(crate) fn new() -> Self {
         Self {
             inflight: InflightTable::new(),
+            retention_account: verter_session_query::retention::StoreAccount::default(),
+        }
+    }
+
+    /// A node whose published slots claim their evidence pages into
+    /// `account`.
+    #[cfg(test)]
+    pub(crate) fn with_retention_account(
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        Self {
+            inflight: InflightTable::new(),
+            retention_account: account,
         }
     }
 
@@ -533,6 +548,11 @@ impl CompileOutputNodeFactValidatedSession {
     /// in compile_slots ⇒ admitted cacheable entry` holds across
     /// re-computes.
     ///
+    /// A slot retains its signature's evidence pages, so a `Cacheable`
+    /// publish first claims them into a refusable reservation; a refused
+    /// claim publishes nothing, removes the prior slot like any other
+    /// refusal, and leaves the compiled value with its caller.
+    ///
     /// Returns `SessionPublishOutcome::Admitted` when the slot was
     /// published, or `SessionPublishOutcome::Refused(reason)` when
     /// admission was refused.
@@ -546,6 +566,13 @@ impl CompileOutputNodeFactValidatedSession {
     ) -> SessionPublishOutcome {
         match admission {
             SignatureAdmission::Cacheable(signature) => {
+                if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
+                    self.retention_account.get(),
+                    &signature.facts,
+                ) {
+                    profile_state.compile_slot_remove_for_node(profile_hash);
+                    return SessionPublishOutcome::Refused(refusal.non_admission_reason());
+                }
                 let slot = CompileSlot {
                     semantic_hash: value.semantic_hash,
                     content_override_hash: value.content_override_hash,

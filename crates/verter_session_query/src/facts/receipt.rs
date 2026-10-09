@@ -26,7 +26,8 @@
 //! as the page lives, once, however many signatures share it. It is born a
 //! [`ChargeClass::Pinned`] obligation of the live signature that sealed it.
 //! The first cache admission that retains a signature holding the page
-//! claims it ([`reserve_retained_with_evidence`]): the page's bytes join that
+//! claims it ([`reserve_retained_with_evidence`], or [`claim_evidence_pages`]
+//! for a store that charges no bytes of its own): the page's bytes join that
 //! admission's refusable [`ChargeClass::Retained`] reservation — so a wide
 //! candidate is refused for its whole footprint like any other entry — and
 //! the page's pin is exchanged for its share of the granted reservation.
@@ -36,7 +37,7 @@ use std::sync::Arc;
 
 use super::version::{CompactionDomain, FactAttribution, FactVersionRef};
 use crate::retention::{
-    ChargeClass, RetentionAdmission, RetentionCharge, SemanticRetentionAccount,
+    ChargeClass, RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount,
 };
 
 /// What one shared evidence holds.
@@ -570,6 +571,35 @@ pub fn reserve_retained_with_evidence(
         evidence.pages_claimed.store(true, Ordering::Release);
     }
     RetentionAdmission::Admitted(charge)
+}
+
+/// Claim every evidence page `signature` reaches that no earlier admission
+/// claimed, for a cache admission that retains the signature but charges
+/// none of its own bytes against `account`: the reservation
+/// [`reserve_retained_with_evidence`] takes with no own bytes, so the
+/// claimed pages are refused, as oversized or under pressure, exactly as a
+/// participant's are.
+///
+/// A signature reaching no unclaimed page reserves nothing and is always
+/// admitted. On refusal the caller must not retain the signature: it
+/// delivers its value uncached, and every page stays pinned by the live
+/// signatures holding it until their last holder drops.
+pub fn claim_evidence_pages(
+    account: &Arc<SemanticRetentionAccount>,
+    signature: &[FactVersionRef],
+) -> Result<(), RetentionRefusal> {
+    let unclaimed = signature.iter().any(|fact| {
+        matches!(fact, FactVersionRef::Receipt(receipt)
+            if receipt.0.reaches_pages
+                && !receipt.0.pages_claimed.load(std::sync::atomic::Ordering::Acquire))
+    });
+    if !unclaimed {
+        return Ok(());
+    }
+    match reserve_retained_with_evidence(account, 0, &[signature]) {
+        RetentionAdmission::Admitted(_) => Ok(()),
+        RetentionAdmission::Refused(refusal) => Err(refusal),
+    }
 }
 
 /// Drop from `facts` every receipt another receipt in `facts` directly

@@ -180,12 +180,24 @@ impl AppConfigNoOverrideProofDb {
     /// derivation is no longer performed at publish time — the
     /// producer is the single authority for the entry's
     /// validation contract.
+    ///
+    /// The entry retains the signature's evidence pages, so publication
+    /// first claims them into a refusable reservation; a refused claim
+    /// publishes nothing.
     #[cfg(any(test, feature = "test-support"))]
     pub fn publish(
         &self,
         key: AppConfigNoOverrideProofKey,
         fact_dep_signature: Arc<[FactVersionRef]>,
     ) {
+        if verter_session_query::facts::receipt::claim_evidence_pages(
+            &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+            &fact_dep_signature,
+        )
+        .is_err()
+        {
+            return;
+        }
         let entry = Arc::new(AppConfigNoOverrideProofEntry { fact_dep_signature });
         if self.entries.insert(key, entry).is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);

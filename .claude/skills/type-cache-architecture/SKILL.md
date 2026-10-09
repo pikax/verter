@@ -960,7 +960,15 @@ can reach a page — a consumed result's receipt included, since a candidate
 retains the pages behind it — skipping evidence that reaches none or whose
 pages are already claimed. `ValidatedFactCache` (route, imported-root,
 resolved-import, fallthrough, component-meta runtime) claims the pages its own
-sealing mints at admission; a refused claim admits nothing. A later candidate sharing a claimed
+sealing mints at admission; a refused claim admits nothing. A retaining store
+that charges none of its own bytes claims through
+`receipt::claim_evidence_pages` (the same reservation with no own bytes; a
+signature reaching no unclaimed page reserves nothing): the generic
+`cache_runtime` artifact and query-candidate publish paths (a refused claim
+bubbles the signature and returns the value `ReturnOnly`), compile slots,
+binder-identity facts, owner import surfaces, framework surface and resolved
+script-fact stores, and the app-config proof seed. A refused claim stores
+nothing and the complete value is delivered uncached. A later candidate sharing a claimed
 page is not charged for it again; the page's charge drains when its last holder
 drops. Candidate footprints therefore count a page entry once, not its contents.
 Self-root discrimination reads through pages: a disagreeing traced

@@ -234,6 +234,93 @@ fn cacheable_admission_warms_exactly_one_entry() {
     assert_eq!(store.len(), 1, "a Cacheable admission warms one entry");
 }
 
+/// A cacheable signature wider than one page, sealed into pages none of
+/// which a cache admission has claimed yet.
+fn wide_cacheable_admission() -> SignatureAdmission {
+    let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        .map(|index| FactVersionRef::FileWholeHash {
+            canonical_id: format!("/wide/{index:05}.ts"),
+            hash: [1u8; 16],
+        })
+        .collect();
+    SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+    ))
+}
+
+fn signature_pages(
+    signature: &ReadSetSignature,
+) -> Vec<verter_session_query::facts::receipt::ResultReceipt> {
+    signature
+        .facts
+        .iter()
+        .filter_map(|fact| match fact {
+            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A cached wide entry owns its pages as refusable retained bytes; an
+/// account that refuses that footprint leaves the store empty while the
+/// caller still receives the complete payload, and the last holder's drop
+/// drains the pages.
+#[test]
+fn a_wide_cacheable_admission_claims_its_pages_and_is_refused_for_them() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store =
+        FrameworkScriptFactStore::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+    let stored = store.publish_if_cacheable(
+        resolved_fact_key("/a.ts"),
+        ExactScriptFacts::new(fixture_payload()),
+        &wide_cacheable_admission(),
+        5,
+    );
+    assert_eq!(store.len(), 1);
+    let pages = signature_pages(&stored.read_set_signature);
+    assert!(!pages.is_empty(), "premise: the signature is paged");
+    assert!(pages
+        .iter()
+        .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
+    let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+    assert_eq!(account.snapshot().retained_bytes, page_bytes);
+    drop((pages, stored, store));
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        0,
+        "evicting the entry drains its pages"
+    );
+
+    let tight = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let store =
+        FrameworkScriptFactStore::with_retention_account(StoreAccount::new(Arc::clone(&tight)));
+    let stored = store.publish_if_cacheable(
+        resolved_fact_key("/a.ts"),
+        ExactScriptFacts::new(fixture_payload()),
+        &wide_cacheable_admission(),
+        5,
+    );
+    assert!(store.is_empty(), "a refused claim admits nothing");
+    assert!(stored
+        .payload
+        .facts()
+        .as_any()
+        .downcast_ref::<fixtures::FixtureFactPayload>()
+        .is_some());
+    let pages = signature_pages(&stored.read_set_signature);
+    assert!(!pages.is_empty(), "the delivered signature stays complete");
+    assert!(pages
+        .iter()
+        .all(|page| page.retained_charge_class() == Some(ChargeClass::Pinned)));
+    assert_eq!(tight.snapshot().retained_bytes, 0);
+}
+
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_language::FileLanguage;
 

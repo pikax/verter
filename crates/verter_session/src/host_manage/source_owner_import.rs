@@ -167,8 +167,14 @@ impl<'a> OwnerImportRequestDriver<'a> {
                     );
                     return None;
                 }
-                self.db
-                    .insert_owned(Arc::clone(&surface.owner_canonical), Arc::clone(&surface));
+                if let Err(refusal) = self
+                    .db
+                    .insert_owned(Arc::clone(&surface.owner_canonical), Arc::clone(&surface))
+                {
+                    verter_type_engine::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                }
                 Some(surface)
             }
             (

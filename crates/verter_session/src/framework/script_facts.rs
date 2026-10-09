@@ -554,6 +554,8 @@ pub struct StoredResolvedFact {
 #[derive(Default)]
 pub struct FrameworkScriptFactStore {
     entries: DashMap<ResolvedFactKey, Arc<StoredResolvedFact>>,
+    /// The account an admitted entry's evidence pages are claimed into.
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl std::fmt::Debug for FrameworkScriptFactStore {
@@ -571,6 +573,15 @@ impl FrameworkScriptFactStore {
         Self::default()
     }
 
+    /// A store whose admissions claim their evidence pages into `account`.
+    #[cfg(test)]
+    fn with_retention_account(account: verter_session_query::retention::StoreAccount) -> Self {
+        Self {
+            retention_account: account,
+            ..Self::default()
+        }
+    }
+
     /// Clone the cached resolved fact for request-owned validation.
     #[must_use]
     pub fn candidate(&self, key: &ResolvedFactKey) -> Option<Arc<StoredResolvedFact>> {
@@ -585,6 +596,10 @@ impl FrameworkScriptFactStore {
     /// computed value is returned to the caller alone (the no-poison invariant).
     /// The returned `Arc` lets a non-admitting caller still hand back the
     /// computed payload without a store entry.
+    ///
+    /// A cacheable entry retains its signature's evidence pages, so its
+    /// admission claims them into a refusable reservation; a refused claim
+    /// returns the complete payload, with its signature, uncached.
     pub(crate) fn publish_if_cacheable(
         &self,
         key: ResolvedFactKey,
@@ -601,7 +616,19 @@ impl FrameworkScriptFactStore {
             validated_at_generation: generation,
         });
         if admission.cacheable().is_some() {
-            self.entries.insert(key, Arc::clone(&stored));
+            match verter_session_query::facts::receipt::claim_evidence_pages(
+                self.retention_account.get(),
+                &stored.read_set_signature.facts,
+            ) {
+                Ok(()) => {
+                    self.entries.insert(key, Arc::clone(&stored));
+                }
+                Err(refusal) => {
+                    verter_type_engine::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                }
+            }
         }
         stored
     }
