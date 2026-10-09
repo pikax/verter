@@ -18,7 +18,7 @@
 //! test takes that deadline for each setting.
 
 use super::differential_harness_tests::{
-    Matrix, Read, LOOSE, LOOSE_IMPLICIT, STRICT, STRICT_IMPLICIT,
+    Matrix, Read, Setting, LOOSE, LOOSE_IMPLICIT, STRICT, STRICT_IMPLICIT,
 };
 
 /// A 40-deep generic application, a 100-member literal union, a recursive tuple
@@ -1327,49 +1327,35 @@ export function last(x: K) {
 }
 "##;
 
-/// `type K = "k0" | … | "k<width-1>"` and `last`, which guards every
-/// member but the last with `if (x === "k<i>") throw 0;` before returning
-/// `x`: [`NARROW_CHAIN_800`]'s shape at any width.
-fn narrowing_chain(width: usize) -> String {
-    let members: Vec<String> = (0..width).map(|i| format!("\"k{i}\"")).collect();
-    let mut source = format!(
-        "type K = {};\nexport function last(x: K) {{\n",
-        members.join(" | ")
-    );
-    for i in 0..width - 1 {
-        source.push_str(&format!("  if (x === \"k{i}\") throw 0;\n"));
-    }
-    source.push_str("  return x;\n}\n");
-    source
+/// 799 `if (x === "k<i>") throw 0;` guards narrow the 800-member union to
+/// `"k799"` in `setting`. Every guard filters the arms left, as the
+/// checker's `filterType` does, so the chain's work is its length times
+/// the union's width; each setting is a test of its own.
+fn an_800_guard_narrowing_chain_answers_in(setting: Setting) {
+    let failures = Matrix::new(NARROW_CHAIN_800)
+        .settings(&[setting])
+        .returns(&[("last", "\"k799\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// 799 `if (x === "k<i>") throw 0;` guards narrow the 800-member union to
-/// `"k799"`. Every guard filters the arms left, as the checker's
-/// `filterType` does, so the chain's work is its length times the union's
-/// width: the measured 800-member chain is read once, in the strict
-/// setting, and the three other settings read the same shape 200 wide —
-/// the same filter under each null algebra, at a sixteenth of the work.
-///
-/// TypeScript 7.0.2 answers `"k799"` under every setting over
-/// [`NARROW_CHAIN_800`]; over the 200-member chain the same rule answers
-/// `"k199"`.
 #[test]
-fn an_800_guard_narrowing_chain_answers_in_every_setting() {
-    assert_eq!(
-        narrowing_chain(800),
-        NARROW_CHAIN_800,
-        "the generated chain is the measured fixture's shape"
-    );
-    let mut failures = Matrix::new(NARROW_CHAIN_800)
-        .settings(&[STRICT])
-        .returns(&[("last", "\"k799\"")]);
-    let shorter = narrowing_chain(200);
-    failures.extend(
-        Matrix::new(&shorter)
-            .settings(&[LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT])
-            .returns(&[("last", "\"k199\"")]),
-    );
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+fn an_800_guard_narrowing_chain_answers_strict() {
+    an_800_guard_narrowing_chain_answers_in(STRICT);
+}
+
+#[test]
+fn an_800_guard_narrowing_chain_answers_without_strict_null_checks() {
+    an_800_guard_narrowing_chain_answers_in(LOOSE);
+}
+
+#[test]
+fn an_800_guard_narrowing_chain_answers_without_no_implicit_any() {
+    an_800_guard_narrowing_chain_answers_in(STRICT_IMPLICIT);
+}
+
+#[test]
+fn an_800_guard_narrowing_chain_answers_with_both_off() {
+    an_800_guard_narrowing_chain_answers_in(LOOSE_IMPLICIT);
 }
 
 /// 800 returning guards.

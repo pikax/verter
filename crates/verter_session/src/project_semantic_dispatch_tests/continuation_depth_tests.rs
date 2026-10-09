@@ -13,7 +13,9 @@
 //! Every checker answer quoted is TypeScript 7.0.2's, measured through the
 //! capped `tsc` with `--ignoreConfig`.
 
-use super::checker_probe_lane_tests::{evaluated_mismatches, with_probe_in, ProbeProject};
+use super::checker_probe_lane_tests::{
+    evaluated_mismatches, in_a_fresh_process, test_path, with_probe_in, ProbeProject,
+};
 use verter_type_engine::semantic_query::{CheckerDiagnosticCode, QueryError, SemanticNodeData};
 
 /// A chain of `length` aliases down to `T | undefined`, a generic function
@@ -42,11 +44,13 @@ fn conditional_argument_chain(length: usize) -> String {
     source
 }
 
-/// `f` over the evaluated rows, read on a thread three quarters the size
-/// of the 1 MiB a host asks for at least
-/// ([`super::deep_input_tests::SMALL_STACK`]), a quarter MiB of it left
-/// past a probe's fixed work: a chain evaluated one native level per link
-/// overflows it within a fraction of the chains below.
+/// `f` over the evaluated rows, read on a thread of
+/// [`super::deep_input_tests::SMALL_STACK`] — 640 KiB, where a probe's
+/// fixed work takes about 416 to 480 KiB unoptimized — so a chain
+/// evaluated one native level per link has at most 224 KiB to overflow
+/// within: under half a KiB a link at 500 links. The tests that read on it
+/// run in a fresh process ([`in_a_fresh_process`]), so the thread has
+/// exactly that stack and an overflow fails the one test.
 fn on_a_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .stack_size(super::deep_input_tests::SMALL_STACK)
@@ -54,6 +58,12 @@ fn on_a_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -
         .expect("spawn the probing thread")
         .join()
         .expect("the probe answers")
+}
+
+/// `f` on the calling thread: the tests whose claim is a budget or the
+/// memo, not the stack, read where the runner put them.
+fn on_this_thread<T>(f: impl FnOnce() -> T) -> T {
+    f()
 }
 
 const ALIAS_CHAIN_ROWS: &[(&str, &str)] = &[
@@ -72,14 +82,17 @@ const ALIAS_CHAIN_ROWS: &[(&str, &str)] = &[
 /// `typeof c` is `"ok" | undefined` and `gj` returns `"ok" | undefined`.
 #[test]
 fn alias_chains_up_to_500_long_answer_cold_on_a_small_stack() {
-    for (length, rows) in [(200, ALIAS_CHAIN_ROWS), (500, &ALIAS_CHAIN_ROWS[..1])] {
-        let mismatches = on_a_small_stack(move || evaluated_mismatches(&alias_chain(length), rows));
-        assert_eq!(
-            mismatches,
-            Vec::<String>::new(),
-            "a chain of {length} aliases"
-        );
-    }
+    in_a_fresh_process(test_path!(), || {
+        for (length, rows) in [(200, ALIAS_CHAIN_ROWS), (500, &ALIAS_CHAIN_ROWS[..1])] {
+            let mismatches =
+                on_a_small_stack(move || evaluated_mismatches(&alias_chain(length), rows));
+            assert_eq!(
+                mismatches,
+                Vec::<String>::new(),
+                "a chain of {length} aliases"
+            );
+        }
+    });
 }
 
 /// The call's return through 500 aliases, and a chain of 1,000 aliases,
@@ -109,43 +122,40 @@ const SETTINGS: [&str; 4] = [
     r#"{ "strictNullChecks": false, "noImplicitAny": false }"#,
 ];
 
-/// `probe` over `source`, checked under `options` on a 1 MiB thread —
+/// `probe` over `source`, checked under `options` on the calling thread —
 /// under an instantiation budget of `budget` when set — read by `read`
-/// with the probe's evaluated node.
-fn evaluated_in<R: Send + 'static>(
+/// with the probe's evaluated node. A test whose claim is the stack calls
+/// it from [`on_a_small_stack`].
+fn evaluated_in<R>(
     budget: Option<u32>,
     options: &'static str,
     source: String,
     probe: String,
     read: impl FnOnce(
-            &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-            verter_type_engine::semantic_query::SemanticNodeId,
-        ) -> R
-        + Send
-        + 'static,
+        &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        verter_type_engine::semantic_query::SemanticNodeId,
+    ) -> R,
 ) -> R {
     use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
-    on_a_small_stack(move || {
-        let _budget = budget.map(super::connected_demand::InstantiationBudgetForTests::install);
-        with_probe_in(
-            ProbeProject {
-                compiler_options: Some(options),
-                ..Default::default()
-            },
-            &source,
-            &probe,
-            |dispatch, node| {
-                let value = dispatch
-                    .normalize_node_for_structural_fact_demand(
-                        node,
-                        ProjectionReductionContext::published(ProjectionMode::Expanded),
-                    )
-                    .into_usable_node()
-                    .expect("the probe answers");
-                read(dispatch, value)
-            },
-        )
-    })
+    let _budget = budget.map(super::connected_demand::InstantiationBudgetForTests::install);
+    with_probe_in(
+        ProbeProject {
+            compiler_options: Some(options),
+            ..Default::default()
+        },
+        &source,
+        &probe,
+        |dispatch, node| {
+            let value = dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                )
+                .into_usable_node()
+                .expect("the probe answers");
+            read(dispatch, value)
+        },
+    )
 }
 
 /// `probe`'s evaluated type as displayed, `Ok` when it is `checker`.
@@ -222,7 +232,9 @@ fn check_conditional_argument_chains_answer(lengths: &[usize], settings: &[&'sta
 /// settings: `E97<"ok">` is `"ok"`; `E98<"ok">` is TS2589.
 #[test]
 fn conditional_arguments_nested_97_deep_answer_on_a_small_stack() {
-    check_conditional_argument_chains_answer(&[97], &SETTINGS);
+    in_a_fresh_process(test_path!(), || {
+        on_a_small_stack(|| check_conditional_argument_chains_answer(&[97], &SETTINGS));
+    });
 }
 
 /// Past the checker's instantiation depth Verter keeps evaluating: the
@@ -239,14 +251,17 @@ fn conditional_arguments_nested_past_the_checker_depth_answer() {
 /// Five hundred levels deep, the same full answer, on the small stack —
 /// well inside Verter's instantiation budget, and far past the depth at
 /// which an instantiation opened one native level per alias would have
-/// overflowed it. The settings do not change what the frames hold, so the
-/// strict one stands for the four.
+/// overflowed it (224 KiB past a probe's fixed work: under half a KiB a
+/// level). The settings do not change what the frames hold, so the strict
+/// one stands for the four.
 ///
 /// TypeScript 7.0.2, all four settings: `E500<"ok">` is TS2589; Verter's
 /// full answer is `"ok"`.
 #[test]
 fn conditional_arguments_nested_500_deep_answer_on_a_small_stack() {
-    check_conditional_argument_chains_answer(&[500], &SETTINGS[..1]);
+    in_a_fresh_process(test_path!(), || {
+        on_a_small_stack(|| check_conditional_argument_chains_answer(&[500], &SETTINGS[..1]));
+    });
 }
 
 /// Verter's instantiation budget, pinned at three points on one chain:
@@ -420,7 +435,7 @@ fn an_edit_below_a_chain_of_frames_reaches_every_instantiation_above_it() {
 #[test]
 fn printing_an_alias_chain_reads_each_alias_a_bounded_number_of_times() {
     const LENGTH: usize = 200;
-    let lowerings = on_a_small_stack(|| {
+    let lowerings = on_this_thread(|| {
         let _trace = super::raise::enable_dispatch_trace_for_test();
         let host = super::checker_probe_lane_tests::default_probe_host();
         super::checker_probe_lane_tests::with_probe_outcome_on_host(
@@ -444,61 +459,37 @@ fn printing_an_alias_chain_reads_each_alias_a_bounded_number_of_times() {
     );
 }
 
-/// Set in the child process
-/// [`a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread`]
-/// starts.
-const SMALL_STACK_CHILD: &str = "VERTER_CONTINUATION_SMALL_STACK_CHILD";
-
 /// In a process of its own — nothing evaluated before it, on any stack —
-/// small-stack threads evaluate a 200-alias chain, conditional arguments
-/// nested 97 deep and 500 deep, display an answer, and drop every host and
-/// dispatcher they built there. An overflow aborts the child and fails
-/// this test instead of the whole run.
+/// one small-stack thread evaluates a 200-alias chain, then conditional
+/// arguments nested 97 deep and 500 deep, displays each answer, and drops
+/// every host and dispatcher it built there: the three chains one after
+/// another on the thread the earlier ones left behind.
 ///
 /// TypeScript 7.0.2, `strict`: `typeof c` and `ReturnType<typeof gj>` over
 /// the 200-alias chain are `"ok" | undefined`; `E97<"ok">` is `"ok"`;
 /// `E500<"ok">` is TS2589, where Verter's full answer is `"ok"`.
 #[test]
-fn a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread() {
-    if std::env::var_os(SMALL_STACK_CHILD).is_some() {
-        let mismatches =
-            on_a_small_stack(|| evaluated_mismatches(&alias_chain(200), ALIAS_CHAIN_ROWS));
-        assert_eq!(mismatches, Vec::<String>::new(), "a chain of 200 aliases");
-        for length in [97, 500] {
-            let shown = displayed_in(
-                None,
-                SETTINGS[0],
-                conditional_argument_chain(length),
-                &format!("E{length}<\"ok\">"),
-                "\"ok\"",
-            )
-            .unwrap_or_else(|shown| panic!("E{length}<\"ok\"> displays as {shown}"));
-            assert!(
-                shown.contains("ok"),
-                "E{length}<\"ok\"> displays as {shown}"
-            );
-        }
-        println!("{SMALL_STACK_CHILD}: every chain answered");
-        return;
-    }
-    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
-        .args([
-            "--exact",
-            "project_semantic_dispatch_tests::continuation_depth_tests::a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(SMALL_STACK_CHILD, "1")
-        .output()
-        .expect("run the evaluation in a child process");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success()
-            && stdout.contains(&format!("{SMALL_STACK_CHILD}: every chain answered")),
-        "the child evaluating on small-stack threads failed (status {:?}):\n{stdout}\n{stderr}",
-        output.status
-    );
+fn a_process_of_its_own_evaluates_deep_chains_on_one_small_stack_thread() {
+    in_a_fresh_process(test_path!(), || {
+        on_a_small_stack(|| {
+            let mismatches = evaluated_mismatches(&alias_chain(200), ALIAS_CHAIN_ROWS);
+            assert_eq!(mismatches, Vec::<String>::new(), "a chain of 200 aliases");
+            for length in [97, 500] {
+                let shown = displayed_in(
+                    None,
+                    SETTINGS[0],
+                    conditional_argument_chain(length),
+                    &format!("E{length}<\"ok\">"),
+                    "\"ok\"",
+                )
+                .unwrap_or_else(|shown| panic!("E{length}<\"ok\"> displays as {shown}"));
+                assert!(
+                    shown.contains("ok"),
+                    "E{length}<\"ok\"> displays as {shown}"
+                );
+            }
+        });
+    });
 }
 
 /// Whether Verter's instantiation budget is reached depends on the chain
@@ -511,7 +502,7 @@ fn a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread() {
 #[test]
 fn a_budget_recovery_is_never_kept_in_the_memo() {
     use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
-    let recovered_then_answered = on_a_small_stack(|| {
+    let recovered_then_answered = on_this_thread(|| {
         let host = super::checker_probe_lane_tests::default_probe_host();
         let source = conditional_argument_chain(151);
         let evaluate = || {
@@ -559,7 +550,7 @@ fn a_budget_recovery_is_never_kept_in_the_memo() {
 #[test]
 fn a_kept_answer_never_passes_a_smaller_instantiation_budget() {
     use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
-    let answered_then_recovered = on_a_small_stack(|| {
+    let answered_then_recovered = on_this_thread(|| {
         let host = super::checker_probe_lane_tests::default_probe_host();
         let source = conditional_argument_chain(151);
         let evaluate = || {
@@ -733,7 +724,7 @@ fn diagnostic_of_g_string(
     tail: Option<u32>,
 ) -> Option<u32> {
     use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
-    on_a_small_stack(move || {
+    on_this_thread(move || {
         let _tail = tail.map(super::connected_demand::TailBudgetForTests::install);
         with_probe_in(
             ProbeProject {

@@ -43,11 +43,12 @@ const MEMBER_SRC: &str =
 /// Host sizes the O(1) claim is measured across. Every count asserted below
 /// is required to be exactly zero, so a surviving per-owner term shows up as
 /// `N` at the smallest size already; the second point, a 12x span, pins that
-/// the zero is flat rather than a small-host coincidence. Every fixture file
-/// is virtual: its canonical ID names an in-memory `MemoryWorkspace` overlay
-/// and its source is supplied directly through `UpsertRequest`; this suite
-/// performs no fixture filesystem I/O.
-const HOST_SIZES: [usize; 2] = [8, 96];
+/// the zero is flat rather than a small-host coincidence, and the third sits
+/// past the 128- and 256-owner marks a growth policy might step at. Every
+/// fixture file is virtual: its canonical ID names an in-memory
+/// `MemoryWorkspace` overlay and its source is supplied directly through
+/// `UpsertRequest`; this suite performs no fixture filesystem I/O.
+const HOST_SIZES: [usize; 3] = [8, 96, 256];
 
 fn ts_request(id: impl Into<String>, source: &str) -> UpsertRequest {
     UpsertRequest {

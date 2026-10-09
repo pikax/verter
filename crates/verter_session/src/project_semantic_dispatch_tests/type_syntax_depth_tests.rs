@@ -137,46 +137,50 @@ fn union_alias_chain(links: usize) -> String {
     source
 }
 
-/// A union alias that names the previous one, chained 300 deep, reads on
-/// a thread three quarters the size of the 1 MiB a host asks for at least
-/// ([`super::deep_input_tests::SMALL_STACK`]), a quarter MiB of it left
-/// past a probe's fixed work, completely: a union's reduction reads each
-/// named arm's own demand, and each named arm is the next alias of the
-/// chain, so those demands nest once per link — under a KiB a link — and
-/// the walk over a named union's members reads the names the arm's own
-/// demand already read (reading them again at each link made the chain
-/// quadratic).
+/// The stack the union alias chain reads on: 576 KiB, where the probe's
+/// fixed work takes 416 KiB unoptimized (measured at 3, 300, 600 and 1,000
+/// links alike), so 500 links have 160 KiB to nest within — under a third
+/// of a KiB a link, against the 0.6 KiB a link 1,000 links on 1 MiB
+/// allowed.
+const UNION_CHAIN_STACK: usize = 576 << 10;
+
+/// The links the union alias chain is read through.
+const UNION_CHAIN_LINKS: usize = 500;
+
+/// A union alias that names the previous one, chained 500 deep, reads on
+/// a 576 KiB thread ([`UNION_CHAIN_STACK`]), in a fresh process,
+/// completely: a union's reduction reads each named arm's own demand, and
+/// each named arm is the next alias of the chain, so those demands nest
+/// once per link — within a third of a KiB a link — and the walk over a
+/// named union's members reads the names the arm's own demand already read
+/// (reading them again at each link made the chain quadratic).
 ///
 /// Measured on TypeScript 7.0.2 (all four settings): the checker prints
 /// `U1000` over the 1,000-link chain as `U1000` (and `U3` over three
 /// links as `U3`); `U1000` and `0 | 1 | … | 1001` are mutually
 /// assignable, as are `U3000` and `0 | 1 | … | 3001` over 3,000 links.
 #[test]
-fn a_300_deep_union_alias_chain_reads_on_a_small_stack() {
-    let run = |links: usize| {
-        let source = union_alias_chain(links);
-        std::thread::Builder::new()
-            .stack_size(super::deep_input_tests::SMALL_STACK)
-            .spawn(move || {
-                let probe = format!("U{links}");
-                super::checker_probe_lane_tests::mismatches(
-                    &source,
-                    &[(probe.as_str(), probe.as_str())],
-                )
-            })
-            .expect("spawn the small-stack thread")
-            .join()
-            .expect("the chain reads without exhausting the stack")
-    };
-    let failures: Vec<String> = run(3).into_iter().chain(run(300)).collect();
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+fn a_500_deep_union_alias_chain_reads_on_a_small_stack() {
+    use super::checker_probe_lane_tests::{in_a_fresh_process, test_path};
+    in_a_fresh_process(test_path!(), || {
+        let run = |links: usize| {
+            let source = union_alias_chain(links);
+            std::thread::Builder::new()
+                .stack_size(UNION_CHAIN_STACK)
+                .spawn(move || {
+                    let probe = format!("U{links}");
+                    super::checker_probe_lane_tests::mismatches(
+                        &source,
+                        &[(probe.as_str(), probe.as_str())],
+                    )
+                })
+                .expect("spawn the small-stack thread")
+                .join()
+                .expect("the chain reads without exhausting the stack")
+        };
+        let failures: Vec<String> = run(3).into_iter().chain(run(UNION_CHAIN_LINKS)).collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
 }
 
 /// A union alias whose arm names another union alias evaluates to the

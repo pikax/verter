@@ -238,11 +238,23 @@ fn snapshot_build_only_deltas(n: usize) -> AdmitDeltas {
 /// coincidence (a term paid only past some threshold).
 const HOST_SIZES: [usize; 2] = [8, 96];
 
+/// A host past the 128- and 256-owner marks a growth policy might step at,
+/// read by the gate alone (the other windows are the same builder's).
+const LARGE_HOST: usize = 256;
+
 fn measure_across_host_sizes(
     label: &str,
     measure: fn(usize) -> AdmitDeltas,
 ) -> Vec<(usize, AdmitDeltas)> {
-    let measured: Vec<(usize, AdmitDeltas)> = HOST_SIZES.iter().map(|&n| (n, measure(n))).collect();
+    measure_across(label, measure, &HOST_SIZES)
+}
+
+fn measure_across(
+    label: &str,
+    measure: fn(usize) -> AdmitDeltas,
+    sizes: &[usize],
+) -> Vec<(usize, AdmitDeltas)> {
+    let measured: Vec<(usize, AdmitDeltas)> = sizes.iter().map(|&n| (n, measure(n))).collect();
     // Printed so the scaling table is reproducible evidence under
     // `--nocapture`, not just a pass/fail bit.
     eprintln!("{label}: {measured:?}");
@@ -250,7 +262,8 @@ fn measure_across_host_sizes(
 }
 
 fn assert_builder_reopens_nothing(label: &str, measure: fn(usize) -> AdmitDeltas) {
-    let measured = measure_across_host_sizes(label, measure);
+    let sizes = [HOST_SIZES[0], HOST_SIZES[1], LARGE_HOST];
+    let measured = measure_across(label, measure, &sizes);
     for &(n, deltas) in &measured {
         assert_eq!(
             deltas, NO_WORK,
@@ -362,7 +375,7 @@ fn the_owner_visit_counter_moves_only_inside_a_build_scope() {
 /// cost the store-view BUILD nothing that scales with N — nothing at all,
 /// in fact: zero owner visits through the captured roots, zero
 /// `IndexedReady` materialisations, zero import-resolution misses, at
-/// N = 250 / 1,000 / 3,000.
+/// N = 8 / 96 / 256.
 ///
 /// The measurement window deliberately EXCLUDES the admission itself because
 /// parse work is not store-view build work. The routing counters for that
