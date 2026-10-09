@@ -33,10 +33,10 @@ anything they, the [authority inventory](authority-inventory.md) or the
 
 The reviewed contract data lives in `tests/kernel/EAK0/products/`:
 
-| File | Holds |
-| ---- | ----- |
-| `export-activation-inventory.v1.json` | Subblocks, role-registry row kinds, contract rules `ER01`–`ER30`, outcomes `EAK-O01`–`EAK-O10`, consumers `EAK-C01`–`EAK-C09`, displaced routes `EAK-D01`–`EAK-D14`, the DEM0, UAK0, VID0, CAT0 and PAR0 rows it references, charted consumers, boundaries that are not displaced routes, coverage of each deletion category, empty populations, findings and transferred obligations |
-| `export-activation-case-table.v1.json` | Cases `EC01`–`EC30`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable |
+| File                                   | Holds                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `export-activation-inventory.v1.json`  | Subblocks, role-registry row kinds, contract rules `ER01`–`ER30`, outcomes `EAK-O01`–`EAK-O10`, consumers `EAK-C01`–`EAK-C09`, displaced routes `EAK-D01`–`EAK-D14`, the DEM0, UAK0, VID0, CAT0 and PAR0 rows it references, charted consumers, boundaries that are not displaced routes, coverage of each deletion category, empty populations, findings and transferred obligations |
+| `export-activation-case-table.v1.json` | Cases `EC01`–`EC30`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable                                                                                                                                                                                                                             |
 
 Every `successorPath` starts at EAK0 and follows successor edges in the
 controller-owned plan. TIF1, COX0 and CPF1 are not successors of EAK0, so
@@ -44,14 +44,14 @@ their rows are referenced, never assigned here.
 
 ## Vocabulary
 
-| Term | Meaning |
-| ---- | ------- |
-| `RoleId` | A role, qualified by its profile: `(FrameworkProfileId, RoleKey)`, or `(ProjectProfileId, RoleKey)` for a project-profile role. `RoleKey` is a closed per-profile vocabulary. |
-| `CanonicalExport` | `(PackageName, ExportSubpath, ExportName, Space)`, where `Space` is `Value` or `Type`. The package name comes from the resolved package manifest, never from specifier bytes. |
-| `ProfileIntrinsic` | A name the exact release's compiler reserves inside one region role, such as Vue `<script setup>` macros or Svelte runes. It is not a package export. |
-| role site | A call or reference whose head is an identifier or a static member path, inside a unit a demand reaches. |
-| link | One step of the chain from a role site to its terminal: a local binding, a namespace member, a destructured property, a `const` alias, a module re-export hop or a project-profile contribution. |
-| `RoleEvidence` | The closed outcome for one role site: `Proven`, `NotRole`, `Unproven`, `Ambiguous` or a degraded stop. |
+| Term               | Meaning                                                                                                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `RoleId`           | A role, qualified by its profile: `(FrameworkProfileId, RoleKey)`, or `(ProjectProfileId, RoleKey)` for a project-profile role. `RoleKey` is a closed per-profile vocabulary.                    |
+| `CanonicalExport`  | `(PackageName, ExportSubpath, ExportName, Space)`, where `Space` is `Value` or `Type`. The package name comes from the resolved package manifest, never from specifier bytes.                    |
+| `ProfileIntrinsic` | A name the exact release's compiler reserves inside one region role, such as Vue `<script setup>` macros or Svelte runes. It is not a package export.                                            |
+| role site          | A call or reference whose head is an identifier or a static member path, inside a unit a demand reaches.                                                                                         |
+| link               | One step of the chain from a role site to its terminal: a local binding, a namespace member, a destructured property, a `const` alias, a module re-export hop or a project-profile contribution. |
+| `RoleEvidence`     | The closed outcome for one role site: `Proven`, `NotRole`, `Unproven`, `Ambiguous` or a degraded stop.                                                                                           |
 
 ## Contract rules
 
@@ -59,7 +59,12 @@ their rows are referenced, never assigned here.
 
 - **ER01.** Role rows are catalog data. Each `T03` semantic-profile row
   (CAT0) carries its role rows, and each `T04` project-profile row carries
-  its project roles. Adding a role is a data change (CAT0 `CR13`). Rows are
+  its project roles. EAK1 owns the shared role vocabulary and `T03` role
+  data; PPR0T remains the sole owner of `T04` publication through its typed
+  project-profile contribution interface (`PPR0T-AC1`, `PPR0T-AC4`). NUX0
+  supplies Nuxt-specific captured contributions through that interface; it
+  neither owns the row family nor writes a parallel registry. Adding a role
+  is a data change (CAT0 `CR13`). Rows are
   ordered by the canonical encoding of `RoleId` (CAT0 `CR05`) and are part of
   the `CatalogSnapshot` identity (VID0 `I09`). There is no role table beside
   the snapshot.
@@ -114,11 +119,18 @@ their rows are referenced, never assigned here.
 - **ER07.** A type-only link (`import type`, `import { type X }`,
   `export type`) carries only `Type`-space roles. A `Value`-space role
   reached through a type-only link is `NotRole { TypeOnlyLink }`.
-- **ER08.** Chains are followed one module hop at a time. Each hop reads
-  two things only: the module-resolution answer for the hop's specifier (the
-  shared import-route authority today, the PM resolution proof once it
-  exists) and the hop module's parse-domain export inventory (the
-  `IndexedReady` export table, PAR0's parse once per identity). A hop never
+- **ER08.** Chains are followed one module hop at a time through a captured
+  `RoleResolutionSnapshot`: a projection-safe view of the existing module
+  resolution owner's answers, negative probes, package-manifest facts and
+  installed releases, plus the parse owner's export inventories. EAK1
+  implements the capture/view boundary as part of its evidence producer;
+  it creates no second resolver or manifest authority and does not wait for
+  a new PM implementation. Each hop reads the captured resolution answer
+  and the hop's `(SourceUnitId, ContentId)` export inventory (the
+  `IndexedReady` export table, PAR0's parse once per identity). All reads
+  belong to one coherent captured basis; missing facts produce `Unproven`
+  and require a new capture before retry. Stage one performs no live file,
+  manifest or resolver reads. A hop never
   reads TypeScript, the shared type resolver
   (`ProjectSemanticDispatch`), TypeInfo or a package's declaration bodies.
   It also never rescans raw source.
@@ -172,7 +184,9 @@ their rows are referenced, never assigned here.
 ### Package-resolution and read-set provenance (subblock 4)
 
 - **ER18.** `RoleEvidence::Proven` carries:
-  - `site`: `(SourceUnitId, SourceRevision, authored range)`;
+  - `site`: `(SourceUnitId, ContentId, authored range)`;
+  - a separate current `SourceRevision` publication stamp, excluded from
+    evidence identity;
   - `role`: the `RoleId`;
   - `chain`: hops in authored-to-terminal order;
   - `terminal`: the `CanonicalExport`;
@@ -183,23 +197,34 @@ their rows are referenced, never assigned here.
   Hop kinds are `LocalImport`, `NamespaceMember`, `Destructure`,
   `ConstAlias`, `ReExport { module, specifier bytes, export name }` and
   `ProjectContribution { ProjectProfileId, contribution identity }`.
+
 - **ER19.** The read set lists, in canonical encoding order:
-  - the site unit's parse-domain facts identity;
+  - the site unit's content-addressed parse-domain facts identity;
   - every hop module's `(SourceUnitId, ContentId)` export inventory;
-  - every module-resolution answer consulted, including negative probes;
+  - the content identity of every captured module-resolution answer
+    consulted, including negative probes;
   - the manifest identity of each package touched (name and export-map
     digest) and its installed release;
   - the role row's identity inside `CatalogSnapshot`;
   - any project-profile contribution identity.
 
   Evidence identity is the canonical tagged encoding of `(site, role,
-  outcome, read-set identity)` (VID0 `R12`, `R13`). It carries no path
-  string and no backend or process identity (VID0 `R14`).
+outcome, read-set identity)` (VID0 `R12`, `R13`). It carries no path
+  string and no backend or process identity (VID0 `R14`). Read-set identity
+  uses canonical fact values, never host revision tokens or snapshot
+  generations. Capture generations and publication stamps remain validity
+  fences; they are revalidated even when the fact values are unchanged.
+
 - **ER20.** Invalidation follows the read set exactly. An edit to a member
   invalidates exactly the evidence that read it, and an edit to a
-  non-member invalidates nothing. Edit-then-revert yields the same evidence
-  identity, and incremental evidence equals fresh evidence. A changed
-  evidence identity reaches DEM0 stage one only as a new stage-one plan,
+  non-member invalidates nothing. Restoring all consulted content values
+  yields the same evidence identity, and incremental evidence equals fresh
+  evidence for that basis. The current publication stamp may differ and
+  must be renewed; old work cannot publish merely because content reverted.
+  DEM0 `DR09` includes the ordered role-evidence identities in the stage-one
+  plan identity. A change to a consulted captured fact, including a PM
+  resolution or manifest fact, requires revalidation and reaches stage one
+  only as a new stage-one plan when its evidence identity changes,
   never as an in-place edit of the current generation (DEM0 `DR12`,
   `DR13`).
 - **ER21.** Query keys stay content-free, following the repository's
@@ -250,24 +275,31 @@ their rows are referenced, never assigned here.
 
 ## Outcomes and owners
 
-| Outcome | Owner | Receiving acceptance |
-| ------- | ----- | -------------------- |
-| `EAK-O01` role rows in `T03` and `T04`, with origin and phase (`ER01`–`ER04`) | EAK1 | `EAK1-AC2` |
-| `EAK-O02` link capture (`ER05`–`ER09`) | EAK1 | `EAK1-AC2` |
-| `EAK-O03` failure taxonomy and closed outcome set (`ER10`–`ER17`) | EAK1 | `EAK1-AC1` |
-| `EAK-O04` `RoleEvidence` record, read set and identity (`ER18`, `ER19`, `ER22`) | EAK1 | `EAK1-AC2` |
-| `EAK-O05` read-set invalidation, revert equality and no degraded warming (`ER20`, `ER21`) | EAK1 | `EAK1-AC3` |
-| `EAK-O06` evidence exposure to verticals, `Explain` and the request boundary (`ER23`, `ER24`, `ER26`, `ER28`) | EAK1 | `EAK1-AC2` |
-| `EAK-O07` no oracle and bounded, demand-scoped work (`ER25`, `ER27`) | EAK1 | `EAK1-AC4` |
-| `EAK-O08` positive and same-spelling negative corpus, built and run (`ER29`, `ER30`) | EAK1 | `EAK1-AC-R1` |
-| `EAK-O09` project-profile auto-import contributions as `ProjectContribution` links (`ER09`) | NUX0 | `NUX0-AC1` |
-| `EAK-O10` executable ownership validator and negative controls for this decision | UAO0 | `UAO0-AC-R1` |
+| Outcome                                                                                                                            | Owner | Receiving acceptance                                   |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------------------------ |
+| `EAK-O01` shared role vocabulary and `T03` role rows, with origin and phase (`ER01`–`ER04`); `T04` publication is referenced below | EAK1  | `EAK1-AC2`                                             |
+| `EAK-O02` link capture (`ER05`–`ER09`)                                                                                             | EAK1  | `EAK1-AC2`                                             |
+| `EAK-O03` failure taxonomy and closed outcome set (`ER10`–`ER17`)                                                                  | EAK1  | `EAK1-AC1`                                             |
+| `EAK-O04` `RoleEvidence` record, read set and identity (`ER18`, `ER19`, `ER22`)                                                    | EAK1  | `EAK1-AC2`                                             |
+| `EAK-O05` read-set invalidation, revert equality and no degraded warming (`ER20`, `ER21`)                                          | EAK1  | `EAK1-AC3`                                             |
+| `EAK-O06` evidence exposure to verticals, `Explain` and the request boundary (`ER23`, `ER24`, `ER26`, `ER28`)                      | EAK1  | `EAK1-AC2`                                             |
+| `EAK-O07` no oracle and bounded, demand-scoped work (`ER25`, `ER27`)                                                               | EAK1  | `EAK1-AC4`                                             |
+| `EAK-O08` positive and same-spelling negative corpus, built and run (`ER29`, `ER30`)                                               | EAK1  | `EAK1-AC-R1`                                           |
+| `EAK-O09` Nuxt auto-import contributions as `ProjectContribution` links (`ER09`), submitted through PPR0T's typed interface        | NUX0  | `NUX0-AC1`; accepting surface `PPR0T-AC1`, `PPR0T-AC4` |
+| `EAK-O10` executable ownership validator and negative controls for this decision                                                   | UAO0  | `UAO0-AC-R1`                                           |
 
 EAK1 reaches EAK0 through EMB0. It is the first production node behind
-EAK0 that implements role evidence, and its charter already deletes the
-three named categories (`EAK1-AC1`). DEM0's `DEM-O09` names EAK1 as the
+EAK0 that implements role evidence. Its cutover is the Vue embedded-template
+canary, not every existing recognizer. DEM0's `DEM-O09` names EAK1 as the
 producer of the role evidence `P2` and `P3` read; `EAK-O01`–`EAK-O07`
 specify that outcome.
+
+PPR0T owns the `T04` row family and generic ingestion/publication under CAT0
+`T04`; EAK0 references that ownership rather than assigning it again. NUX0
+already waits for PPR0T. `EAK-O09` and `EAK-C08` own only Nuxt contribution
+production/integration, with PPR0T's snapshot as their accepting counterpart.
+EAK1's generic evidence service can be tested with typed captured contribution
+fixtures; production Nuxt capture is not its prerequisite.
 
 ## Displaced routes recorded here
 
@@ -276,63 +308,75 @@ recognizers that the reconciled contract deletes after consumers migrate.
 Each has one production-capable deletion owner. The inventory lists the
 exact symbols and paths of each route.
 
-| Route | Unit | Disposition | Deletion owner |
-| ----- | ---- | ----------- | -------------- |
-| `EAK-D01` | Shared Vue API classification by specifier spelling: `is_vue_source`, `classify_vue_api` and the `AnalyzedImportBinding.vue_api` it fills, in `verter_semantic` | replace with `PackageExport` evidence; consumers keep reading a typed classification minted from evidence | EAK1 (`EAK1-AC1`) |
-| `EAK-D02` | `detect_vue_api_call` in `verter_parser`'s Vue script usage walk: bare callee bytes, feeding the provide/inject, lifecycle and watcher usage facts of `verter_semantic` `file_usage` | replace with evidence | EAK1 (`EAK1-AC1`) |
-| `EAK-D03` | The macro-usage visitor's `vue_value_imports`, built from `imp.source == "vue"` in `build_script_analysis` | replace with evidence | EAK1 (`EAK1-AC1`) |
-| `EAK-D04` | Four copies of a `"vue"` import-alias collector in the IDE projection: `options_api` and `binding_views` `vue_runtime_imports`, `script_setup` `vue_runtime_macro_imports` (local name only), `type_constructs` `proven_vue_async_component_bindings` | replace with one evidence read | EAK1 (`EAK1-AC1`) |
-| `EAK-D05` | Free-name acceptance in the IDE projection: `is_vue_wrapper` and `factory_export` treat an unbound `defineComponent`, `ref` and similar names as Vue's | reject: `NotRole { Unbound }` (`ER06`) | EAK1 (`EAK1-AC1`) |
-| `EAK-D06` | Bare-callee Vue API recognizers in the IDE script path (`detect_use_attrs_calls`, `detect_gci_in_expr`, `record_ref_variable_call`, `maybe_record_use_template_ref_call`), and the extract-bare-text action's `find_or_extend_vue_import`, which finds an existing `computed`/`unref` import by local name | replace with evidence | EAK1 (`EAK1-AC1`) |
-| `EAK-D07` | `.tsc` stub `defineComponent` import decision by local name and `"vue"` source (`generate_options_api_stub`), and `useAttrs` detection by bare name (`detect_use_attrs_type_arg_tsc`) | replace with evidence | EAK1 (`EAK1-AC1`) |
-| `EAK-D08` | Duplicated intrinsic-macro vocabularies in Verter-owned analysis and IDE paths: `classify_macro`, `COMPILER_MACRO_NAMES`, `MACRO_NAMES` in `script_setup` and `script_recover` (raw-token match), `ScriptPropFacts::note_value`'s bare `call_name` | replace with the `ProfileIntrinsic` rows (`ER04`); the scope law is row data | EAK1 (`EAK1-AC1`) |
-| `EAK-D09` | Type-engine role gate by spelling: `wrapper_candidate_for_route` compares `terminal_import_source` with `"vue"` and mints `package: "vue"`, and `wrapper_role_for_vue_export` holds a private vocabulary | replace the spelling gate with the role row and manifest package identity; keep the exact-route authority | EAK1 (`EAK1-AC1`) |
-| `EAK-D10` | Svelte package identity from specifier bytes: `resolved_package_for_import` and `bare_specifier_package_name` in `framework/script_facts.rs`, plus the `Snippet` and `createEventDispatcher` imported-name capture they validate | replace with `ER09` manifest identity and Svelte role rows | EAK1 (`EAK1-AC1`) |
-| `EAK-D11` | Rule-local Vue role spelling in markup and deprecation rules: `no_deprecated_delete_set` (local `set`/`delete` from `"vue"`) and `prefer_script_attrs` (text search for `useAttrs`, with its action twin) | replace with evidence when the rule moves to the lint service | LVU1 (`LVU1-AC1`) |
-| `EAK-D12` | Rule-local Vue role spelling in SFC rules: `no_import_compiler_macros` (`source == "vue"`), `no_reserved_component_names` (`is_allowed_source` prefix allow-list) | replace with evidence | LVU2-SFC (`LVU2-SFC-AC1`) |
-| `EAK-D13` | Store-role spelling: `classify_store_api`, `is_store_composable_call` (`use*Store` plus a `/store` path substring), `no_unused_store_import` `is_store_source` | replace with `PackageExport` rows for the store packages | LVU2-STORES (`LVU2-STORES-AC1`) |
-| `EAK-D14` | Built-in Vue component spelling in `no_undef_components` (`BUILTIN_COMPONENTS`), separate from the reserved-name list | replace with role rows for the release's built-in components | LVU1-BINDINGS (`LVU1-BINDINGS-AC1`) |
+| Route     | Unit                                                                                                                                                                                                                                                                                                                      | Disposition                                                                                               | Deletion owner                      |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `EAK-D01` | Shared Vue API classification by specifier spelling: `is_vue_source`, `classify_vue_api` and the `AnalyzedImportBinding.vue_api` it fills, in `verter_semantic`                                                                                                                                                           | replace with `PackageExport` evidence; consumers keep reading a typed classification minted from evidence | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D02` | `detect_vue_api_call` in `verter_parser`'s Vue script usage walk: bare callee bytes, feeding the provide/inject, lifecycle and watcher usage facts of `verter_semantic` `file_usage`                                                                                                                                      | replace with evidence                                                                                     | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D03` | The macro-usage visitor's `vue_value_imports`, built from `imp.source == "vue"` in `build_script_analysis`                                                                                                                                                                                                                | replace with evidence                                                                                     | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D04` | Four copies of a `"vue"` import-alias collector in the IDE projection: `options_api` and `binding_views` `vue_runtime_imports`, `script_setup` `vue_runtime_macro_imports` (local name only), `type_constructs` `proven_vue_async_component_bindings`                                                                     | replace with one evidence read                                                                            | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D05` | Free-name acceptance in the IDE projection: `is_vue_wrapper` and `factory_export` treat an unbound `defineComponent`, `ref` and similar names as Vue's                                                                                                                                                                    | reject: `NotRole { Unbound }` (`ER06`)                                                                    | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D06` | Bare-callee Vue API recognizers in the IDE script path (`detect_use_attrs_calls`, `detect_gci_in_expr`, `record_ref_variable_call`, `maybe_record_use_template_ref_call`), and the extract-bare-text action's `find_or_extend_vue_import`, which finds an existing `computed`/`unref` import by local name                | replace with evidence                                                                                     | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D07` | `.tsc` stub `defineComponent` import decision by local name and `"vue"` source (`generate_options_api_stub`), and `useAttrs` detection by bare name (`detect_use_attrs_type_arg_tsc`)                                                                                                                                     | replace with evidence                                                                                     | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D08` | Duplicated intrinsic-macro vocabularies in Verter-owned analysis and IDE paths: `classify_macro`, `COMPILER_MACRO_NAMES`, `MACRO_NAMES` in `script_setup` and `script_recover` (raw-token match), `ScriptPropFacts::note_value`'s bare `call_name`, plus Svelte analysis rune helpers and IDE `$props`/`$host` prefilters | replace with the `ProfileIntrinsic` rows (`ER04`); the scope law is row data                              | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D09` | Type-engine role gate by spelling: `wrapper_candidate_for_route` compares `terminal_import_source` with `"vue"` and mints `package: "vue"`, and `wrapper_role_for_vue_export` holds a private vocabulary                                                                                                                  | replace the spelling gate with the role row and manifest package identity; keep the exact-route authority | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D10` | Svelte package identity from specifier bytes: `resolved_package_for_import` and `bare_specifier_package_name` in `framework/script_facts.rs`, plus the `Snippet` and `createEventDispatcher` imported-name capture they validate                                                                                          | replace with `ER09` manifest identity and Svelte role rows                                                | EAK2 (`EAK2-AC1`)                   |
+| `EAK-D11` | Rule-local Vue role spelling in markup and deprecation rules: `no_deprecated_delete_set` (local `set`/`delete` from `"vue"`) and `prefer_script_attrs` (text search for `useAttrs`, with its action twin)                                                                                                                 | replace with evidence when the rule moves to the lint service                                             | LVU1 (`LVU1-AC1`)                   |
+| `EAK-D12` | Rule-local Vue role spelling in SFC rules: `no_import_compiler_macros` (`source == "vue"`), `no_reserved_component_names` (`is_allowed_source` prefix allow-list)                                                                                                                                                         | replace with evidence                                                                                     | LVU2-SFC (`LVU2-SFC-AC1`)           |
+| `EAK-D13` | Store-role spelling: `classify_store_api`, `is_store_composable_call` (`use*Store` plus a `/store` path substring), `no_unused_store_import` `is_store_source`                                                                                                                                                            | replace with `PackageExport` rows for the store packages                                                  | LVU2-STORES (`LVU2-STORES-AC1`)     |
+| `EAK-D14` | Built-in Vue component spelling in `no_undef_components` (`BUILTIN_COMPONENTS`), separate from the reserved-name list                                                                                                                                                                                                     | replace with role rows for the release's built-in components                                              | LVU1-BINDINGS (`LVU1-BINDINGS-AC1`) |
 
 The LVU groups' charters already forbid "activation by identifier spelling
 when binding identity exists". Each deletes its rule-local route when that
-rule moves onto the lint service. Ownership of `EAK-D01`–`EAK-D10` is the
-default of open operator question `eak0-recognizer-deletion-owner`. A
-ruling that adds a dedicated migration node moves those rows only.
+rule moves onto the lint service. EAK2 owns `EAK-D01`–`EAK-D10`, consumers
+`EAK-C01`, `EAK-C03`–`EAK-C05`, and findings `EAK-F01`–`EAK-F05` under
+`EAK2-AC1`. Its path is EAK0 → EMB0 → EAK1 → EAK2, and UAO0 waits for EAK2.
+EAK1 retains the shared evidence producer, Vue canary (`EAK-C02`) and
+executable corpus (`EAK1-AC-R1`). EAK2 consumes that producer and removes
+the remaining recognizers; it creates no parallel evidence service.
+The architect ratification of `eak0-recognizer-deletion-owner` also transfers
+DEM0's non-canary `DEM-D04` to EAK2, with its owning decision and inventory
+updated together. EAK0 remains docs-only and does not wait for EAK2.
 
 EAK0 references these routes owned elsewhere:
 
-| Route | Owner | Concern |
-| ----- | ----- | ------- |
-| DEM0 `DEM-D04` | EAK1 | `should_ignore_external_macro_type` compares `import_source == "vue"`; it stays DEM0's row |
-| DEM0 `DEM-D05` | NUX0 | Nuxt server/client detection by file-name suffix |
-| UAK0 `D07`, `D08` | CPF1 | One framework per file by extension, and the conflated `FileLanguage` |
-| UAK0 `D10`, `D11` | COX0 | Per-framework LSP branches and MCP `is_vue()` gates |
-| UAK0 `D12` | TIF1 | Component-meta resolver authority, including the `.vue` path-suffix carrier check (DEM0 `DEM-F03`) |
-| VID0 `V-D02` | TIF1 | The open `framework_adapter_id` string |
-| CAT0 `CAT-D06` | COX0 | `ActiveProviderIndex` and its import-specifier gate (DEM0 `DEM-F02`) |
+| Route             | Owner             | Concern                                                                                            |
+| ----------------- | ----------------- | -------------------------------------------------------------------------------------------------- |
+| DEM0 `DEM-D04`    | EAK2 (`EAK2-AC1`) | `should_ignore_external_macro_type` compares `import_source == "vue"`; it stays DEM0's row         |
+| DEM0 `DEM-D05`    | NUX0              | Nuxt server/client detection by file-name suffix                                                   |
+| UAK0 `D07`, `D08` | CPF1              | One framework per file by extension, and the conflated `FileLanguage`                              |
+| UAK0 `D10`, `D11` | COX0              | Per-framework LSP branches and MCP `is_vue()` gates                                                |
+| UAK0 `D12`        | TIF1              | Component-meta resolver authority, including the `.vue` path-suffix carrier check (DEM0 `DEM-F03`) |
+| VID0 `V-D02`      | TIF1              | The open `framework_adapter_id` string                                                             |
+| CAT0 `CAT-D06`    | COX0              | `ActiveProviderIndex` and its import-specifier gate (DEM0 `DEM-F02`)                               |
 
 Deletion-category coverage:
 
-| Category | Recorded here | Referenced |
-| -------- | ------------- | ---------- |
-| central framework switch | `EAK-D01`–`EAK-D14` | `DEM-D04`, `D07`, `D10`, `D11`, `CAT-D06` |
-| untagged coordinate/public identity | none: role evidence adds no public identity route, and every evidence identity is tagged (`ER19`) | `D08`, `V-D02` |
-| duplicate component information authority | none: the recognizers above feed existing authorities and are not authorities themselves | `D12`, `DEM-D05` |
-| duplicated macro/import recognizer (this decision's own population) | the same `EAK-D01`–`EAK-D14`: each route has one category, central framework switch, as DEM0 categorised `DEM-D04` | `DEM-D04` |
+| Category                                  | Recorded here                                                                                     | Referenced                                |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| central framework switch                  | `EAK-D01`, `EAK-D03`, `EAK-D04`, `EAK-D07`, `EAK-D09`–`EAK-D12`                                   | `DEM-D04`, `D07`, `D10`, `D11`, `CAT-D06` |
+| untagged coordinate/public identity       | none: role evidence adds no public identity route, and every evidence identity is tagged (`ER19`) | `D08`, `V-D02`                            |
+| duplicate component information authority | none: the recognizers above feed existing authorities and are not authorities themselves          | `D12`, `DEM-D05`                          |
+| name-shape role recognizer                | `EAK-D02`, `EAK-D05`, `EAK-D06`, `EAK-D13`, `EAK-D14`                                             | none                                      |
+| duplicated intrinsic vocabulary           | `EAK-D08`                                                                                         | none                                      |
+
+Each route has one primary category in the inventory. The common migration
+population is duplicated macro/import recognition; it includes package gates,
+bare-callee recognition, intrinsic vocabularies, store-composable name shapes
+and built-in component lists without claiming these are all framework switches.
 
 ## Consumers
 
-| Consumer | Reads | Owner |
-| -------- | ----- | ----- |
-| `EAK-C01` Vue IDE projection: options API, binding views, script setup, props facts | `Projection` evidence, `ProfileIntrinsic` rows | EAK1 (`EAK1-AC2`) |
-| `EAK-C02` Vue embedded-template region activation from a proven `defineComponent` call | `Projection` evidence, `ER24` | EAK1 (`EAK1-AC2`) |
-| `EAK-C03` Shared script analysis consumers of the typed Vue API classification: MCP tools, LSP hover/completion/organize-imports/document symbols, file-usage provide/inject facts | evidence-minted classification | EAK1 (`EAK1-AC2`) |
-| `EAK-C04` Template-class and binding-return wrapper facts | `PostSnapshot` evidence | EAK1 (`EAK1-AC2`) |
-| `EAK-C05` Svelte script-fact resolved validation (`Snippet`, dispatcher) | `Projection` and `PostSnapshot` evidence | EAK1 (`EAK1-AC2`) |
-| `EAK-C06` Vue Custom Element producer/consumer retrofit | `Projection` evidence | VCE0 (`VCE0-AC2`) |
-| `EAK-C07` Vue lint rules on the lint service | evidence by `RoleId` | LVU1 (`LVU1-AC1`) |
-| `EAK-C08` Nuxt auto-import contributions | `ProjectContribution` links | NUX0 (`NUX0-AC1`) |
-| `EAK-C09` Embedded-region activation by binding-resolved tags and sinks | evidence by `RoleId` | INT5 (`INT5-AC5`) |
+| Consumer                                                                                                                                                                           | Reads                                          | Owner             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------- |
+| `EAK-C01` Vue IDE projection: options API, binding views, script setup, props facts                                                                                                | `Projection` evidence, `ProfileIntrinsic` rows | EAK2 (`EAK2-AC1`) |
+| `EAK-C02` Vue embedded-template region activation from a proven `defineComponent` call                                                                                             | `Projection` evidence, `ER24`                  | EAK1 (`EAK1-AC2`) |
+| `EAK-C03` Shared script analysis consumers of the typed Vue API classification: MCP tools, LSP hover/completion/organize-imports/document symbols, file-usage provide/inject facts | evidence-minted classification                 | EAK2 (`EAK2-AC1`) |
+| `EAK-C04` Template-class and binding-return wrapper facts                                                                                                                          | `PostSnapshot` evidence                        | EAK2 (`EAK2-AC1`) |
+| `EAK-C05` Svelte script-fact resolved validation (`Snippet`, dispatcher)                                                                                                           | `Projection` and `PostSnapshot` evidence       | EAK2 (`EAK2-AC1`) |
+| `EAK-C06` Vue Custom Element producer/consumer retrofit                                                                                                                            | `Projection` evidence                          | VCE0 (`VCE0-AC2`) |
+| `EAK-C07` Vue lint rules on the lint service                                                                                                                                       | evidence by `RoleId`                           | LVU1 (`LVU1-AC1`) |
+| `EAK-C08` Nuxt auto-import contributions                                                                                                                                           | `ProjectContribution` links                    | NUX0 (`NUX0-AC1`) |
+| `EAK-C09` Embedded-region activation by binding-resolved tags and sinks                                                                                                            | evidence by `RoleId`                           | INT5 (`INT5-AC5`) |
 
 DEM0 already owns the stage consumers: `P2` and `P3` read evidence
 (`DEM-O09`, `DR07`, `DR11`, owner COX0). The audit runtime receives the plan
@@ -371,25 +415,25 @@ obligation, so EAK0 assigns them nothing.
 
 ## Findings recorded for the receiving owners
 
-- **Unbound names count as Vue's** (`EAK-F01`, EAK1). `is_vue_wrapper` and
+- **Unbound names count as Vue's** (`EAK-F01`, EAK2). `is_vue_wrapper` and
   `factory_export` accept a free `defineComponent` or `ref`. `ER06` makes
   that `NotRole { Unbound }`. This is `EAK-D05`.
-- **Alias semantics disagree across copies** (`EAK-F02`, EAK1).
+- **Alias semantics disagree across copies** (`EAK-F02`, EAK2).
   `vue_runtime_macro_imports` keys on the local name, so
   `import { defineProps as dp }` is not followed. `generate_options_api_stub`
   keys on the local name too, so `import { x as defineComponent }` is
   accepted while an aliased real import still gets a duplicate inject. Three
   other collectors key on the imported name.
-- **Macro recognition does not check shadowing** (`EAK-F03`, EAK1).
+- **Macro recognition does not check shadowing** (`EAK-F03`, EAK2).
   `classify_macro` and `ScriptPropFacts::note_value` match the callee
   spelling without consulting a binding. `ER04` makes the scope law row
   data, checked against the release.
-- **The Svelte package name comes from specifier bytes** (`EAK-F04`, EAK1).
+- **The Svelte package name comes from specifier bytes** (`EAK-F04`, EAK2).
   `bare_specifier_package_name` takes the leading specifier segment once the
   resolved file is package-backed. A `paths` mapping of `svelte` onto
   another package's file would therefore claim `svelte`. `ER09` takes the
   name from the resolved manifest.
-- **Rune vocabularies are duplicated** (`EAK-F05`, EAK1). `$bindable`,
+- **Rune vocabularies are duplicated** (`EAK-F05`, EAK2). `$bindable`,
   `$inspect`, `$props` and the rune-name lists each have two to four
   spellings across the Svelte runtime and IDE paths. The Svelte IDE uses
   text prefilters (`contains("$props")`, `contains("$host")`). The IDE
@@ -426,9 +470,12 @@ Evidence selection: the change adds contract text and data only, so existing
 coverage and bounded inspection discriminate it. The diff adds no test.
 
 - **AC1 — ownership contract.** The inventory binds every rule, outcome,
-  consumer and displaced route to one existing plan node, a successor path
-  from EAK0 and a receiving acceptance ID. DEM0, UAK0, VID0 and CAT0 rows
-  are referenced, not re-owned. Each later family charter that already binds
+  consumer and displaced route to one plan node (including the ratified
+  EAK2), a successor path
+  from EAK0 and a receiving acceptance ID. The sole transfer of an inherited
+  route is DEM0 `DEM-D04` to EAK2; other DEM0, UAK0, VID0 and CAT0 rows
+  keep their owners. PPR0T owns the referenced `T04` accepting surface.
+  Each later family charter that already binds
   itself to EAK0 provenance is listed, not assigned. The executable validator
   is UAO0's (`UAO0-AC-R1`). The corpus is EAK1's (`EAK1-AC-R1`).
 - **AC2 — positive contract.** Existing coverage pins exact identity,
@@ -459,6 +506,7 @@ coverage and bounded inspection discriminate it. The diff adds no test.
   `verter_protocol` `tests/cases/` (`typeinfo_proto_roundtrip`,
   `typeinfo_proto_ts_contract`). New or extended tests belong to EAK1 and to
   the owners named per case.
+
 - **AC3 — incremental equivalence: not applicable.** No cache, cancellation,
   stale-publication or partial-result authority is touched, and no
   production byte changes. `ER17` and `ER20`–`ER22` bind the later proof to
