@@ -1,0 +1,141 @@
+{
+  "id": "liquid-version-lock.v1",
+  "schema": 1,
+  "contractNode": "LIQ0",
+  "family": "liquid",
+  "describes": "docs(arch): record the parser decision, ownership, reuse and lineage (#812), 2026-10-09",
+  "pinRule": "every reference pin is one exact version of one named package with its registry and integrity; ranges, dist-tags, prereleases, canary, nightly and legacy lines never appear as a pin",
+  "admissionRule": "FWA1 reads the resolved installed version of a profile's release package. A resolved version inside the profile's admittedLine is admitted as its own exact release (VID0 R04, R09); anything else is unsupported-version and is never coerced (VID0 R06). The referencePin is the exact release whose official tables populate the vocabulary; an admitted release other than the reference pin uses the reference tables, and a name outside them is Unavailable, never an error (LIQ4-AC2).",
+  "profiles": [
+    {
+      "id": "shopify",
+      "mode": "shopify",
+      "release": {
+        "package": "liquid",
+        "registry": "rubygems",
+        "referencePin": "5.14.0",
+        "admittedLine": "5",
+        "integrity": "sha256:e1020c2b2ee58c7a4d3bfdc7a331537bd27a783353748bff0bf27c6ac0c17065",
+        "license": "MIT",
+        "role": "Liquid engine of the Shopify platform; tag and filter tables of the engine core"
+      },
+      "pinnedData": [
+        {
+          "package": "@shopify/theme-check-docs-updater",
+          "registry": "npm",
+          "pin": "3.30.1",
+          "integrity": "sha512-9j9zWheLXPAf4fnZAC3ZdSg58dHzdXgGMNIHlbzRic1KDbVvDD+fqUYpjsAfyPtKOjE1SA2iMatdppMVfxAGhw==",
+          "license": "MIT",
+          "role": "Shopify's official theme reference data bundled in the published tarball: data/tags.json, data/filters.json, data/objects.json (catalogs) and the theme JSON schemas listed by data/manifest_theme.json",
+          "paths": [
+            "package/data/tags.json",
+            "package/data/filters.json",
+            "package/data/objects.json",
+            "package/data/manifest_theme.json",
+            "package/data/translations.json",
+            "package/data/theme_block.json",
+            "package/data/theme_settings.json",
+            "package/data/section.json",
+            "package/data/settings.json",
+            "package/data/setting.json",
+            "package/data/default_setting_values.json",
+            "package/data/app_block_entry.json",
+            "package/data/theme_block_entry.json",
+            "package/data/targetted_block_entry.json",
+            "package/data/preset_blocks.json",
+            "package/data/preset.json",
+            "package/data/local_block_entry.json"
+          ]
+        },
+        {
+          "package": "@shopify/liquid-html-parser",
+          "registry": "npm",
+          "pin": "2.10.2",
+          "integrity": "sha512-/qBtTT3tbzSFgFVMNTPhX2pPN14ShMSYTu9nzkCB1vorjNvm1G9mvgYW9jKod0mrki+TUVfMYi5d1H+QKrLnCA==",
+          "license": "MIT",
+          "role": "Shopify's official theme grammar; its RAW_TAGS list is the source of the `schema` tag, which the docs catalog does not list",
+          "paths": ["package/dist/grammar.js"]
+        }
+      ],
+      "notes": "A Shopify theme vendors no engine, so a theme-root activation carries no resolved version: it admits exactly this profile's reference release with provenance theme-root (activation policy AP-S1)."
+    },
+    {
+      "id": "jekyll",
+      "mode": "jekyll",
+      "release": {
+        "package": "jekyll",
+        "registry": "rubygems",
+        "referencePin": "4.4.1",
+        "admittedLine": "4.4",
+        "integrity": "sha256:4c1144d857a5b2b80d45b8cf5138289579a9f8136aadfa6dd684b31fe2bc18c1",
+        "license": "MIT",
+        "role": "Jekyll's tags, filters and site payload"
+      },
+      "engine": {
+        "package": "liquid",
+        "registry": "rubygems",
+        "pin": "4.0.4",
+        "integrity": "sha256:4fcfebb1a045e47918388dbb7a0925e7c3893e58d2bd6c3b3c73ec17a2d8fdb3",
+        "license": "MIT",
+        "requiredBy": "jekyll 4.4.1 runtime dependency `liquid ~> 4.0`",
+        "notes": "The engine is a dependency of the admitted Jekyll release, not an admitted `liquid` line of its own. It is why the jekyll dialect has no `render`, `echo`, `liquid`, `doc` or inline `#` tag."
+      }
+    },
+    {
+      "id": "liquidjs",
+      "mode": "liquidjs",
+      "release": {
+        "package": "liquidjs",
+        "registry": "npm",
+        "referencePin": "10.30.0",
+        "admittedLine": "10",
+        "integrity": "sha512-Fw4wA+8CZsJkaeLEIlPE3AoponfjEZhj7FQvYNcAEcg7jNRik7mEMoaco382FBdrYlykVf6w4vClPNctz2OYjg==",
+        "license": "MIT",
+        "role": "LiquidJS default engine: the tags and filters registered on a default `new Liquid()`"
+      }
+    },
+    {
+      "id": "eleventy",
+      "mode": "eleventy",
+      "release": {
+        "package": "@11ty/eleventy",
+        "registry": "npm",
+        "referencePin": "3.1.6",
+        "admittedLine": "3",
+        "integrity": "sha512-ZlSiR1PLdS2lv7TelBgWAhcvMiLNZkPBlLEb+lh7kGYZ+Mk0bo9qcYgVsewvw9W7Em0RH3wd01h5fAstNDh0zA==",
+        "license": "MIT",
+        "role": "Eleventy's default filters, data-cascade objects and Liquid engine options"
+      },
+      "engine": {
+        "package": "liquidjs",
+        "registry": "npm",
+        "pin": "10.30.0",
+        "requiredBy": "@11ty/eleventy 3.1.6 dependency `liquidjs ^10.27.0`",
+        "admittedLine": "10",
+        "notes": "Equal to the liquidjs profile's reference pin; a diverged engine pin between the two profiles is a lock failure (LIQ0-AC1 case P-AC1-07). Eleventy constructs the engine with strictFilters: true and extname .liquid (src/Engines/Liquid.js)."
+      }
+    }
+  ],
+  "nextLines": [
+    {
+      "profile": "liquidjs",
+      "line": "11",
+      "observed": "11.0.0-alpha.1 under the npm `next` dist-tag",
+      "disposition": "not-admitted",
+      "reason": "prerelease only; no stable 11 release is announced. It becomes a second profile only through a ratified amendment of this lock (charter: a prerelease next line becomes a second profile only once ratified here)."
+    },
+    {
+      "profile": "eleventy",
+      "line": "4",
+      "observed": "4.0.0-alpha.10 under the npm `canary` dist-tag",
+      "disposition": "not-admitted",
+      "reason": "canary line; canary is never admitted (framework-common Versions). It becomes a second profile only through a ratified amendment of this lock."
+    }
+  ],
+  "excludedLines": [
+    { "package": "liquid", "line": "4", "reason": "legacy major for the shopify profile; admitted only as the engine dependency of the jekyll release" },
+    { "package": "jekyll", "line": "<4.4", "reason": "legacy line; the charter admits Jekyll 4.4.x only" },
+    { "package": "liquidjs", "line": "<10", "reason": "legacy major" },
+    { "package": "@11ty/eleventy", "line": "<3", "reason": "legacy major" }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "id": "liquid-activation-policy.v1",
+  "schema": 1,
+  "contractNode": "LIQ0",
+  "family": "liquid",
+  "describes": "docs(arch): record the parser decision, ownership, reuse and lineage (#812), 2026-10-09",
+  "authority": "FWA1's FrameworkActivation record is the only activation source (framework-common Activation). This row is data FWA1 reads; it adds no second activation path.",
+  "record": {
+    "framework": "liquid",
+    "modeField": "mode",
+    "modes": ["shopify", "jekyll", "liquidjs", "eleventy"],
+    "modeRule": "The dialect is the record's mode. Each mode is exactly one profile of liquid-version-lock.json; the admitted release of a mode is that profile's release.",
+    "states": ["active", "inactive", "unsupported-version", "off"],
+    "needSelectionNote": "NeedSelection is a per-file outcome of the .liquid association below, not a fifth record state. FWA1 owns how it is carried; this lock fixes only that it is distinct from active, inactive and off and is never resolved by a guess."
+  },
+  "switch": {
+    "key": "frameworks.liquid",
+    "values": ["auto", "on", "off"],
+    "readThrough": "CFG0 declarative capture; no evaluation of user config",
+    "explicitOnShape": "frameworks.liquid = { state: on, release: <an exact admitted release of one profile> }. The release decodes to exactly one profile, so naming the release names the profile and sets the mode; a release that does not decode is Invalid at capture (CFG0 CR04), and a decoded release that is not admitted is unsupported-version (VID0 R06, FWA1-AC6)."
+  },
+  "sources": [
+    {
+      "id": "AP-S0",
+      "precedence": 0,
+      "evidence": "frameworks.liquid = off",
+      "outcome": "off for the whole vertical: no parse, no facts, no capability (LIQ3-AC5, LIQP0-AC4)",
+      "provenance": "explicit"
+    },
+    {
+      "id": "AP-S1",
+      "precedence": 1,
+      "mode": "shopify",
+      "evidence": "a directory that holds both layout/theme.liquid and config/settings_schema.json (the Shopify theme architecture's required files)",
+      "readAs": "file presence only; neither file is parsed for activation and nothing is executed",
+      "scope": "that directory and its descendants",
+      "admittedRelease": "the shopify profile's reference release; a theme vendors no engine, so there is no resolved version to read",
+      "provenance": "theme-root",
+      "fwa1Acceptance": "FWA1-AC7 (a theme root gives liquid active in mode shopify)"
+    },
+    {
+      "id": "AP-S2",
+      "precedence": 1,
+      "mode": "jekyll",
+      "evidence": "the gem jekyll resolved in the package's Gemfile.lock (a `jekyll (<exact version>)` spec under GEM specs)",
+      "readAs": "Gemfile.lock read as data; no Ruby or bundle process runs (FWA1-AC7 planted-process leg)",
+      "scope": "the directory holding Gemfile.lock and its descendants",
+      "admittedRelease": "the resolved exact version when it lies in the jekyll admittedLine; otherwise unsupported-version",
+      "provenance": "lockfile"
+    },
+    {
+      "id": "AP-S3",
+      "precedence": 1,
+      "mode": "eleventy",
+      "evidence": "@11ty/eleventy resolved for the package in the PM package graph (PM3 facts)",
+      "readAs": "resolved package facts; the Eleventy config is never executed",
+      "scope": "the package",
+      "admittedRelease": "the resolved exact @11ty/eleventy version when it lies in the eleventy admittedLine, and its resolved liquidjs inside the liquidjs admittedLine; otherwise unsupported-version",
+      "provenance": "manifest",
+      "subsumes": "liquidjs resolved in the same package, direct or transitive, is the Eleventy engine and is not a second claim"
+    },
+    {
+      "id": "AP-S4",
+      "precedence": 1,
+      "mode": "liquidjs",
+      "evidence": "liquidjs resolved as a direct dependency of a package that does not resolve @11ty/eleventy",
+      "readAs": "resolved package facts; user code calling the engine is never executed",
+      "scope": "the package",
+      "admittedRelease": "the resolved exact liquidjs version when it lies in the liquidjs admittedLine; otherwise unsupported-version",
+      "provenance": "manifest"
+    },
+    {
+      "id": "AP-S5",
+      "precedence": 1,
+      "evidence": "frameworks.liquid = { state: on, release: <exact admitted release> }",
+      "outcome": "active in the mode of the named release's profile, for every .liquid file in the configuration's scope; it also resolves NeedSelection for those files",
+      "provenance": "explicit"
+    },
+    {
+      "id": "AP-S6",
+      "precedence": 2,
+      "evidence": "none of AP-S1..AP-S5 (frameworks.liquid = auto or unset)",
+      "outcome": "inactive: a .liquid file classifies to its fallback and no Liquid parse runs (LIQ3-AC5)",
+      "provenance": "none"
+    }
+  ],
+  "neverActivates": [
+    { "id": "AP-N1", "evidence": "a .liquid file extension, alone or in any number", "reason": "an extension is presentation, never identity (VID0 R03); the charter forbids extension-only activation" },
+    { "id": "AP-N2", "evidence": "a <script src> naming a Liquid engine build (for example a CDN liquidjs bundle)", "reason": "no manifest entry; activation needs an explicit on (FWA1 Switch)" },
+    { "id": "AP-N3", "evidence": "directory evidence other than the two theme-root files together: snippets/, sections/, blocks/, templates/, locales/, _includes/, _layouts/, _posts/, _config.yml, eleventy.config.*, .eleventy.js, shopify.extension.toml, or only one of the two theme-root files", "reason": "the only directory evidence the charter admits is the theme root; any other layout is a name match" },
+    { "id": "AP-N4", "evidence": "the liquid gem resolved in Gemfile.lock without jekyll", "reason": "the charter's lockfile source is jekyll; a bare engine dependency names no dialect, so it needs an explicit on" },
+    { "id": "AP-N5", "evidence": "a dialect chosen from file contents, a tag spelling, a front-matter fence or a declared version range", "reason": "a dialect needs a resolved version or a named on profile (VID0 R08: activation reads the resolved installed version, never the declared range)" }
+  ],
+  "association": {
+    "extensions": [".liquid"],
+    "languageId": "liquid",
+    "owner": "LIQP0 owns document selectors and CLI globs (framework-template-carrier Surfaces); LIQ1G owns the client language contribution",
+    "rule": "A .liquid file takes the mode of the one active Liquid claim whose scope contains it. Claims are the scopes of AP-S1..AP-S4 that are active for the file's package or ancestors.",
+    "needSelection": "A file inside the scopes of two claims with different modes (for example a theme root inside a Jekyll site, or a Jekyll Gemfile.lock and an Eleventy package over one directory) is NeedSelection: no Liquid parse in either mode, no facts, and an explain output naming both claims. Only AP-S5 naming one profile resolves it. Registration order, nesting depth, load order or recency never decides (VID0 R10).",
+    "sameModeClaims": "Two claims with the same mode over one file are one claim; the nearest scope supplies the admitted release."
+  },
+  "explain": "Every outcome carries its provenance (explicit, theme-root, lockfile, manifest, none) for the FWA1 explain output (LIQP0-AC1)."
+}

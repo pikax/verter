@@ -1,0 +1,94 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "LIQ0",
+  "kind": "lock",
+  "family": "liquid",
+  "products": [
+    "products/liquid-version-lock.json",
+    "products/liquid-vocabulary.json",
+    "products/liquid-capability-matrix.json",
+    "products/liquid-activation-policy.json"
+  ],
+  "mandatoryCases": ["LIQ0-AC1", "LIQ0-AC2", "LIQ0-AC3", "LIQ0-AC4"],
+  "cases": [
+    {
+      "id": "LIQ0-AC1",
+      "title": "pinned profiles",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "floating-range-pin",
+        "dist-tag-pin",
+        "canary-line-pin",
+        "nightly-pin",
+        "legacy-major-pin",
+        "pin-without-source",
+        "diverged-engine-pin",
+        "shared-entry-without-own-source",
+        "unratified-next-line-admitted",
+        "two-releases-in-one-profile",
+        "table-source-outside-pinned-artifacts"
+      ]
+    },
+    {
+      "id": "LIQ0-AC2",
+      "title": "owned matrix",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "unowned-cell",
+        "cell-without-acceptance",
+        "acceptance-of-another-producer",
+        "render-output-cell",
+        "build-cell",
+        "ts-plugin-cell",
+        "tsgo-reprovide-cell",
+        "snippet-componentinfo-facet",
+        "framework-tag-present",
+        "exclusion-without-reason",
+        "grammar-colouring-cell",
+        "unknown-dialect-column"
+      ]
+    },
+    {
+      "id": "LIQ0-AC3",
+      "title": "activation row",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "extension-activation",
+        "cdn-script-activation",
+        "single-theme-root-file",
+        "other-directory-evidence",
+        "dialect-without-resolved-version",
+        "explicit-on-without-profile",
+        "bare-liquid-gem-activation",
+        "need-selection-by-guess"
+      ]
+    },
+    {
+      "id": "LIQ0-AC4",
+      "title": "coexistence cells",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "missing-coexistence-cell",
+        "coexistence-cell-without-competitor",
+        "capability-not-provided-by-competitor",
+        "i18n-ally-outside-translation-cells",
+        "dangling-matrix-cell-reference"
+      ]
+    }
+  ],
+  "validator": {
+    "present": false,
+    "owner": "LIQ1G",
+    "acceptance": "LIQ1G-ACV",
+    "files": ["tests/framework-liquid/LIQ0/contract.ts", "tests/framework-liquid/LIQ0/liquid-lock.spec.ts"],
+    "command": "node --test tests/framework-liquid/LIQ0/liquid-lock.spec.ts",
+    "discovery": "REG0's scripts/run-framework-locks.mjs (REG0-AC6); no root test:scripts edit"
+  },
+  "runtimeCorrectness": false,
+  "notes": "Docs-only stage-0 lock for the Liquid family. It holds reviewed data and cases only: no validator, spec, CI gate or schema enforcement lands with it. Every planted twin above is listed with its expected failure reason in cases.md; LIQ1G implements them against these products (LIQ1G-ACV). FWA1, FCH1 and REG0 read the products as data. Nothing here is support evidence."
+}
