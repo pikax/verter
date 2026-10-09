@@ -1,0 +1,107 @@
+{
+  "schema": "MdxActivationPolicy",
+  "version": 1,
+  "product": "MdxActivationPolicy",
+  "node": "MDX0",
+  "kind": "lock",
+  "framework": "mdx",
+  "activationAuthority": {
+    "record": "FrameworkActivation",
+    "owner": "FWA1",
+    "home": "crates/verter_session/src/framework/families/mdx.rs (REG0 family module, activation-rule slot written by FWA1)",
+    "consumer": "MDX1M",
+    "consumerAcceptance": "MDX1M-AC5",
+    "capabilityBit": "ProjectCapabilitySnapshot mdx bit (crates/verter_session/src/framework/project_capabilities.rs), gating the .mdx LanguageRow::gated row"
+  },
+  "fwa1Row": {
+    "framework": "mdx",
+    "profile": "mdx-react",
+    "admittedRelease": "tests/framework-mdx/MDX0/products/mdx-version-lock.json#release",
+    "requires": [
+      {
+        "id": "A1",
+        "fact": "FrameworkActivation(mdx) is active at an admitted MDX release",
+        "source": "PM-resolved installed @mdx-js/mdx in the package's dependency graph, compared with the MDX0 lock"
+      },
+      {
+        "id": "A2",
+        "fact": "FrameworkActivation(react) is active at RCT0's admitted React release",
+        "source": "RCT0's FWA1 React row (PM-resolved react role)"
+      },
+      {
+        "id": "A3",
+        "fact": "the MDX jsxImportSource resolves to react",
+        "source": "a per-file @jsxImportSource pragma when present (FWA1 per-file narrowing); otherwise a statically declared MDX option read as data; otherwise the @mdx-js/mdx 3 default jsxImportSource, which is react"
+      },
+      {
+        "id": "A4",
+        "fact": "the MDX providerImportSource resolves to @mdx-js/react",
+        "source": "a statically declared MDX option read as data, resolved through PM to the installed @mdx-js/react at the MDX0 pin"
+      }
+    ],
+    "rule": "active only when A1, A2, A3 and A4 all hold; otherwise the file is not MDX-with-React",
+    "switch": "frameworks.mdx = auto | on | off (CFG0). off disables the vertical; on never admits an unadmitted release",
+    "valueNeedingEvaluation": "unknown; an MDX option that is only known by executing a config (a bundler or framework config function) never satisfies A3 or A4",
+    "states": {
+      "active": "A1-A4 hold",
+      "inactive": "any of A1-A4 does not hold at an admitted release",
+      "unsupported-version": "an installed @mdx-js/mdx or React release outside its lock",
+      "off": "frameworks.mdx = off"
+    }
+  },
+  "neverActivates": [
+    {
+      "id": "N1",
+      "case": "a .mdx file extension alone",
+      "reason": "a file name is never an activation source; the extension only selects the carrier row, which stays ungated-fallback until FWA1 admits mdx"
+    },
+    {
+      "id": "N2",
+      "case": "a Preact jsxImportSource (preact)",
+      "reason": "A3 fails; the file is generic MDX under another JSX profile and attaches no React profile (MDX1M-AC4, MDX3-AC4)"
+    },
+    { "id": "N3", "case": "a Vue jsxImportSource (vue)", "reason": "A3 fails" },
+    {
+      "id": "N4",
+      "case": "a Markdown-only project (no @mdx-js/mdx resolved)",
+      "reason": "A1 fails"
+    },
+    {
+      "id": "N5",
+      "case": "React active but providerImportSource unset or another provider",
+      "reason": "A4 fails"
+    },
+    {
+      "id": "N6",
+      "case": "Vue/Svelte virtual carriers and generated files",
+      "reason": "never activated (FWA1 per-file rule)"
+    }
+  ],
+  "fileNameRule": false,
+  "hostPolicy": {
+    "ruling": "revised ruling 1: tsgo has replaced tsserver",
+    "tsRegions": {
+      "regions": ["esm", "jsx", "expression"],
+      "answerSource": "tsgo over the MDX6 TS projection",
+      "route": "crates/verter_lsp/src/tsgo/composite.rs TsgoCompositeProvider (shared tsgo first, then managed); companion sync crates/verter_lsp/src/tsgo/carrier_sync.rs and ProjectBinding",
+      "typeReads": "crates/verter_tsgo_api (TypeProviderKind::Tsgo)",
+      "verterRole": "remap only, through ProviderPositionMapper (crates/verter_lsp/src/documents/provider_projection.rs); generated-only spans suppressed",
+      "verterComputesTsAnswer": false
+    },
+    "tsxImporters": {
+      "route": "tsgo opens the .mdx companions directly through the carrier route crates/verter_lsp/src/background_drain.rs already uses",
+      "verterComputesTsAnswer": false
+    },
+    "verterLsp": {
+      "role": "MDX-only enhancements: carrier symbols and folding, provider-slot navigation, framework-only rename positions (LSO8 plans), Verter diagnostics",
+      "stepDown": "LSPX11 owns(capability, position): tsgo probe, then COXD2, then the user's per-capability setting; Unknown means Verter owns"
+    },
+    "typescriptPlugin": {
+      "role": "compatibility only",
+      "mdxWork": "none",
+      "behaviour": "the existing carrier-store reader resolves .mdx imports for tsserver users from the MDX6 carrier publication; no MDX decoration, no MDX code in packages/typescript-plugin"
+    },
+    "tsserverForwarding": false
+  },
+  "notes": "Decisions 2 and 3 of the MDX0 charter. Activation is record-based (FWA1); host routing follows framework-class-b. No cell answers a TS question with a Verter-computed result."
+}
