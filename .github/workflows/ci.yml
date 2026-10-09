@@ -23,16 +23,17 @@ jobs:
       pull-requests: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Every gate below is composed by `scripts/ci-impact.mjs` from TWO
-    # halves: the paths-filter outputs (which own every non-crate input) OR'd
-    # with the crate-graph impact lanes (which own `crates/**`). A consumer
-    # lane — the native binding, the wasm32 artifact, the debug and release
-    # LSP builds and everything behind them — therefore runs when a changed
-    # crate is in the transitive dependency closure of that lane's root
-    # crates, as `cargo metadata` reports it, rather than for any Rust change.
-    # Workspace manifests, the lockfile, the toolchain pin, scripts/, the
-    # workflows, the local actions, proc-macro crates and any path the
-    # classifier cannot place all force every impact-bearing gate on.
+    # Every gate below is composed by `scripts/ci-impact.mjs`, the one
+    # selection authority, from TWO halves: its path filters (which own every
+    # non-crate input) OR'd with the crate-graph impact lanes (which own
+    # `crates/**`). A consumer lane — the native binding, the wasm32 artifact,
+    # the debug and release LSP builds and everything behind them — therefore
+    # runs when a changed crate is in the transitive dependency closure of
+    # that lane's root crates, as `cargo metadata` reports it, rather than for
+    # any Rust change. Workspace manifests, the lockfile, the toolchain pin and
+    # proc-macro crates force every impact-bearing gate on; this workflow, the
+    # local actions, the classifier and any path it cannot place force every
+    # gate on. A change to CI-inert paths only (docs) runs no lane.
     outputs:
       rust: ${{ steps.gates.outputs.gate_rust }}
       proto: ${{ steps.gates.outputs.gate_proto }}
@@ -53,6 +54,7 @@ jobs:
       compiler_contracts: ${{ steps.gates.outputs.gate_compiler_contracts }}
       bf2: ${{ steps.gates.outputs.gate_bf2 }}
       svelte_conformance: ${{ steps.gates.outputs.gate_svelte_conformance }}
+      sfc_projection: ${{ steps.gates.outputs.gate_sfc_projection }}
       # Subsystem gates say a subsystem CHANGED and drive its suites; artifact
       # gates say an artifact is NEEDED and drive its producer, as the OR of
       # every consumer's gate, so a consumer is never scheduled behind a
@@ -77,302 +79,18 @@ jobs:
         env:
           PULL: ${{ github.event.pull_request.number }}
         run: echo "::notice title=ci-tested::pull=$PULL tree=$(git rev-parse 'HEAD^{tree}')"
+      # The changed-file list, and nothing else: which lanes a file feeds is
+      # decided by scripts/ci-impact.mjs, whose path filters are unit-tested.
+      # (Lane filters written here as paths-filter YAML were untested, and a
+      # negated pattern under its default `some` quantifier matched every file
+      # outside the excluded tree.)
       - uses: dorny/paths-filter@v4
         id: filter
         with:
-          # `any_files` feeds the crate-graph classifier below, and every other
-          # `<filter>_files` list tells it which non-crate files a filter owns.
           list-files: json
           filters: |
             any:
               - '**'
-            rust:
-              - 'crates/**'
-              # Read by Rust tests (`verter_source_policy_gate` validates the
-              # schemas; the style-IR corpora are read and `include_str!`-ed), so
-              # this lane owns them; nothing else does.
-              - 'schemas/**'
-              - 'test-corpora/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.cargo/**'
-              - '.config/nextest.toml'
-              - 'rust-toolchain.toml'
-              - 'scripts/check-integration-test-layout.mjs'
-              - 'scripts/integration-test-layout-allowlist.json'
-              - 'scripts/gate*.mjs'
-              # Dedicated BF2 lane authority. A driver/self-test-only change
-              # must run the lane it can weaken rather than passing through a
-              # skipped required job.
-              - 'scripts/bf2-authoritative.mjs'
-              - 'scripts/bf2-ci-lane-selftest.mjs'
-              - 'scripts/compiler-ci-lane-selftest.mjs'
-              # The compile-contract lane's own selection: this script is the
-              # only place the owner set it iterates is declared, so dropping an
-              # owner from it silently narrows what that lane runs.
-              - 'scripts/compile-contracts.mjs'
-              - 'scripts/provider-ci*.mjs'
-              - 'packages/framework-conformance-harness/**'
-              - 'packages/language-shared/**'
-              - 'packages/svelte-jsx/**'
-              # BF2's workspace-domain TypeScript observation resolves both
-              # @verter/svelte-jsx and @verter/types.
-              - 'packages/types/**'
-              - 'packages/typescript-plugin/**'
-              - '.npmrc'
-              - '.nvmrc'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            proto:
-              - 'crates/verter_protocol/proto/**'
-              - 'packages/proto/src/gen/**'
-              - 'buf.gen.yaml'
-              - 'scripts/check-proto-generated.mjs'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            js:
-              - 'packages/**'
-              - '!packages/playground/**'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig*.json'
-              - 'scripts/gen-svelte-goldens.mjs'
-              - 'scripts/sccache-env.mjs'
-              - 'scripts/sccache-env.test.mjs'
-              # Same-file pairing as sccache-env: the layout test guards its
-              # implementation and allowlist, so checker- or allowlist-only
-              # edits must still run test:scripts.
-              - 'scripts/check-integration-test-layout.mjs'
-              - 'scripts/integration-test-layout-allowlist.json'
-              - 'scripts/check-integration-test-layout.test.mjs'
-              - 'scripts/compiler-ci-lane-selftest.mjs'
-              - 'scripts/provider-ci*.mjs'
-              # The lane classifier and the crate-graph library it composes
-              # gates from: their unit tests run in test:scripts:ci.
-              - 'scripts/ci-impact*.mjs'
-              - 'scripts/lib/crate-graph*.mjs'
-              - 'scripts/svelte-golden-lib.mjs'
-              - 'scripts/browser-host-gate.mjs'
-              - 'scripts/browser-host-gate.test.mjs'
-              - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
-              # test:scripts validates the required BF2 dependencies in the
-              # release graph; release-only changes must execute that guard.
-              - '.github/workflows/release.yml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH4/ARH5/ARH7
-            # verifiers). Their products join the live Rust tree — hotspot
-            # sources, crate Cargo manifests and the cross-crate consumer
-            # population derived from EVERY crate — so a product/verifier-only
-            # edit under tests/architecture-health/ and any Rust dependency or
-            # surface change must both run the guard. ARH2 also reads
-            # performance-gates.toml and imports scripts/validate-performance-gates.mjs
-            # to bind runner class and measurement cells, so those methodology
-            # inputs must select this lane; they are not in the js filter.
-            # The js filter does not cover either input class, which is exactly
-            # how an ARH1 edit or a scheduler.rs change could skip the ratified
-            # contracts. ARH7 additionally joins packages/vue-vscode activation
-            # sources, so an extension-only edit must still schedule this lane.
-            # ARH4 joins its API migration notes to the audit API reference.
-            arch:
-              - 'tests/architecture-health/**'
-              # ARH5's public-example guard scans examples/reference for the
-              # displaced VueCarrierCompiler compile_ide/compile_bundle routes,
-              # so example-only edits must still schedule this lane.
-              - 'examples/reference/**'
-              - 'packages/vue-vscode/**'
-              - 'docs/audit-footprint/api-reference.md'
-              - 'crates/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'performance-gates.toml'
-              - 'scripts/validate-performance-gates.mjs'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Gates `wasm-build` ALONE, which both builds the browser artifact
-            # and verifies the committed carrier fixture against it. So this
-            # gate decides whether that fixture check runs at all, and it must
-            # cover everything the artifact is built from. The crate half is
-            # verter_wasm's dependency closure as `cargo metadata` reports it
-            # (`scripts/ci-impact.mjs`), which cannot go stale the way an
-            # enumerated list did; the paths below are the non-crate inputs.
-            # Manifests and the lockfile are listed here too (and are classifier
-            # escape hatches) because a dependency bump moves compiler output
-            # without touching a single crate path.
-            wasm:
-              - 'scripts/capture-wasm-carrier-fixtures.mjs'
-              - 'scripts/wasm-js-boundary-lane.mjs'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'packages/wasm/**'
-              - 'packages/browser-host/**'
-              - 'scripts/browser-host-gate.mjs'
-              - 'scripts/browser-host-gate.test.mjs'
-              - 'tests/browser-host/**'
-              - '.cargo/**'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            playground:
-              - 'packages/wasm/**'
-              - 'packages/playground/**'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            vscode:
-              - 'packages/vue-vscode/**'
-              - 'packages/language-shared/**'
-              - 'packages/typescript-plugin/**'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            dx:
-              - 'packages/dx-harness/**'
-              - 'packages/lsp-test-client/**'
-              # The tsserver carrier-membership plugin and the library it emits
-              # against. The raw-LSP spine smoke BUILDS both as load-bearing
-              # prerequisites and gets no carrier semantics without them, so a
-              # change that breaks the plugin must trip this filter — otherwise
-              # the job that would catch it is skipped for that very change.
-              - 'packages/typescript-plugin/**'
-              - 'packages/language-shared/**'
-              - 'scripts/dx/**'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Dependency closure for the editor-neutral raw-LSP contract. This is
-            # intentionally broader than either the VS Code or DX-only filters:
-            # the contract drives the real compiler/LSP, provider plugin, relay,
-            # and shared typed test substrate without an editor process.
-            editor_lsp:
-              - 'packages/dx-harness/**'
-              - 'packages/lsp-test-client/**'
-              - 'packages/language-shared/**'
-              - 'packages/native/**'
-              - 'packages/svelte-jsx/**'
-              - 'packages/typescript-plugin/**'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig*.json'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            svelte_oracle:
-              - 'scripts/gen-svelte-goldens.mjs'
-              - 'scripts/svelte-golden-lib.mjs'
-              - 'scripts/gen-svelte-name-parity-corpus.mjs'
-              - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
-              - 'crates/verter_compiler/tests/fixtures/svelte/name_parity_corpus.json'
-              - 'crates/verter_compiler/tests/fixtures/svelte/remove_typescript_nodes.5.56.10.js'
-              - 'crates/verter_compiler/tests/svelte_oracle_harness.rs'
-              - 'crates/verter_compiler/tests/svelte_goldens_in_sync.rs'
-              - 'crates/verter_compiler/src/svelte_oracle.rs'
-              - 'crates/verter_compiler/Cargo.toml'
-              - 'pnpm-lock.yaml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            svelte_client_smokes:
-              - 'crates/verter_compiler/src/svelte/**'
-              - 'packages/svelte-runtime-tests/**'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Editor-client integration surface (Helix / Lapce / Zed / Neovim).
-            # These lanes used to live in four standalone workflows that each
-            # built `verter-lsp --release` themselves — twelve uncached release
-            # builds of the server per Rust change. They now share the single
-            # `build-editor-lsp` artifact below, and the crate half of this
-            # gate is the verter_lsp + verter-editor-client dependency closure.
-            editors:
-              - 'editors/**'
-              - 'extensions/lapce/**'
-              - 'extensions/zed/**'
-              - 'scripts/editor-contracts/**'
-              - 'packages/lsp-test-client/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # JetBrains plugin lane (JBT1+): the pinned Gradle build resolves
-            # its own WebStorm SDK; only the plugin tree, its gate and the
-            # supported-IDE declaration feed it.
-            jetbrains:
-              - 'extensions/jetbrains/**'
-              - 'scripts/jetbrains-gate.mjs'
-              - 'scripts/jetbrains-gate.test.mjs'
-              - 'tests/jetbrains-product/**'
-              # The Node pin and the gradlew line-ending attribute are checkout
-              # and runtime inputs of this lane's Gradle wrapper run.
-              - '.nvmrc'
-              - '.gitattributes'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            svelte_perf:
-              - 'packages/benchmark/package.json'
-              - 'packages/benchmark/src/svelte-perf-*.ts'
-              - 'packages/benchmark/src/svelte-perf-manifest.json'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Non-crate inputs of the serial real-provider lane; its crate half
-            # is the verter_lsp / verter_type_runtime / verter_tsgo_api closure.
-            providers:
-              - 'packages/typescript-plugin/**'
-              - 'packages/language-shared/**'
-              - 'scripts/provider-ci*.mjs'
-              - '.npmrc'
-              - '.nvmrc'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Non-crate inputs of the native/WASM transport equivalence check;
-            # its crate half is either artifact's dependency closure.
-            transport:
-              - 'scripts/probe-transport-surface.mjs'
-              - 'packages/wasm/**'
-              - 'packages/native/**'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Non-crate inputs of the compile-contract lane (its runner and the
-            # lane self-test); its crate half is the runner crates plus every
-            # owner whose fixtures the runner compiles.
-            compiler_contracts:
-              - 'scripts/compile-contracts.mjs'
-              - 'scripts/compiler-ci-lane-selftest.mjs'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
-            # Non-crate inputs of the BF2 authoritative lane (its workspace-domain
-            # TypeScript observation resolves @verter/svelte-jsx and @verter/types);
-            # its crate half is verter_session's dependency closure.
-            bf2:
-              - 'packages/framework-conformance-harness/**'
-              - 'packages/language-shared/**'
-              - 'packages/svelte-jsx/**'
-              - 'packages/types/**'
-              - 'packages/typescript-plugin/**'
-              - 'scripts/bf2-authoritative.mjs'
-              - 'scripts/bf2-ci-lane-selftest.mjs'
-              - 'scripts/gate*.mjs'
-              - '.npmrc'
-              - '.nvmrc'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/**'
 
       # The Rust half of every gate. `cargo metadata` needs the toolchain and
       # the registry index (cached); the target directory is not needed.
@@ -385,16 +103,23 @@ jobs:
         with:
           node-version-file: .nvmrc
           package-manager-cache: false
-      # The filter outputs carry every `<filter>_files` list, so on a large
-      # diff they run to hundreds of KB. They must NOT reach the classifier
-      # through `env:` or argv: Linux caps one environment string at 128 KiB
-      # (MAX_ARG_STRLEN) and a whole exec at ARG_MAX, past which the runner
-      # cannot even start bash ("Argument list too long"). The expression is
-      # expanded into the script body instead — the runner writes that to a
-      # file — and a quoted heredoc copies it verbatim into $RUNNER_TEMP. That
-      # holds for any file name: a quoted heredoc expands nothing, and `toJSON`
-      # escapes newlines inside values, so no expanded line can equal the
-      # delimiter. `any_files`, the whole changed-file list, travels inside it.
+      # Every tracked path has a CI owner (a crate, a lane filter or the inert
+      # list) and every filter glob still matches a file. A change that adds
+      # an unclassified path, or moves a file a filter names, fails here in a
+      # minute, naming the path — not after the fallback ran every lane, and
+      # not in some later change that happens to run the classifier's tests.
+      - name: Audit the lane selection against the tree
+        run: node scripts/ci-impact.mjs --audit
+      # On a large diff the changed-file list runs to hundreds of KB. It must
+      # NOT reach the classifier through `env:` or argv: Linux caps one
+      # environment string at 128 KiB (MAX_ARG_STRLEN) and a whole exec at
+      # ARG_MAX, past which the runner cannot even start bash ("Argument list
+      # too long"). The expression is expanded into the script body instead —
+      # the runner writes that to a file — and a quoted heredoc copies it
+      # verbatim into $RUNNER_TEMP. That holds for any file name: a quoted
+      # heredoc expands nothing, and `any_files` is one line of JSON, which
+      # escapes newlines inside names, so no expanded line can equal the
+      # delimiter.
       # A push to main that is the merge of a pull request whose CI already
       # passed for this exact tree runs no lane again; CI Required still
       # reports, so main keeps its green tick. A force-push or a direct push
@@ -421,11 +146,11 @@ jobs:
             github.event_name == 'push' && steps.landed.outputs.landed == 'true' && 'landed' ||
             '' }}
         run: |
-          outputs="$RUNNER_TEMP/ci-impact-filter-outputs.json"
-          cat > "$outputs" <<'CI_IMPACT_FILTER_OUTPUTS_EOF'
-          ${{ toJSON(steps.filter.outputs) }}
-          CI_IMPACT_FILTER_OUTPUTS_EOF
-          node scripts/ci-impact.mjs --filter-outputs "$outputs" \
+          files="$RUNNER_TEMP/ci-impact-changed-files.json"
+          cat > "$files" <<'CI_IMPACT_CHANGED_FILES_EOF'
+          ${{ steps.filter.outputs.any_files }}
+          CI_IMPACT_CHANGED_FILES_EOF
+          node scripts/ci-impact.mjs --changed-files "$files" \
             --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
@@ -879,17 +604,12 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.js == 'true'
     runs-on: ubuntu-latest
-    # The sfc-projection node verifiers under test:scripts:ci compile
-    # verter_compiler and rebuild it once per applied dirty-twin source patch,
-    # so this lane's Rust work grows with every verified node.
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       # gen-svelte-goldens invokes the Rust semantic-comment extractor. Pin the
       # toolchain instead of relying on GitHub-hosted runner preinstalls.
       - uses: dtolnay/rust-toolchain@1.97.1
-      # Reuse the compiled dependency graph across runs; each dirty twin then
-      # rebuilds only the patched crate.
       - uses: Swatinem/rust-cache@v2
         with:
           key: js-build-test
@@ -949,15 +669,9 @@ jobs:
         # the carrier-routing guards step above. The CI variant omits the
         # tests another required lane already owns (the ARH dirty twins in
         # architecture-health, the lane self-tests in their lanes, the
-        # aggregate test in the step below); `test:scripts` keeps them for
-        # local runs.
-        #
-        # rust-cache exports CARGO_INCREMENTAL=0 for the job. The sfc-projection
-        # dirty twins re-edit one verter_compiler source file and rebuild the
-        # crate once per twin, so a non-incremental rebuild of the whole crate
-        # per twin (measured ~2.3x slower than incremental) dominates this
-        # lane; re-enable incremental for this step only.
-        run: CARGO_INCREMENTAL=1 pnpm run test:scripts:ci
+        # sfc-projection verifiers in sfc-projection, the aggregate test in
+        # the step below); `test:scripts` keeps them for local runs.
+        run: pnpm run test:scripts:ci
       - name: CI aggregate completeness
         # Every job in this workflow must be listed in the `CI Required`
         # aggregate; the checker fails this lane when one is missing.
@@ -980,6 +694,44 @@ jobs:
           fail-on-error: false
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
+
+  # The sfc-projection node verifiers (`pnpm run test:sfc-projection`). Each
+  # node's protocol runs `cargo test` in verter_compiler or verter_session
+  # (rebuilding verter_compiler once per applied dirty-twin source patch) and
+  # typechecks its probes on both TypeScript engines, so the gate is that
+  # crate closure plus the node trees, not any JavaScript change.
+  sfc-projection:
+    name: SFC projection verifiers
+    needs: detect-changes
+    if: needs.detect-changes.outputs.sfc_projection == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # Reuse the compiled dependency graph across runs; each dirty twin then
+      # rebuilds only the patched crate.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sfc-projection
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The verifiers ran after this build for as long as they lived in
+      # js-build-test; keep that precondition rather than discover which node
+      # silently depends on it.
+      - name: Build TS packages
+        run: pnpm run build:ts
+      # rust-cache exports CARGO_INCREMENTAL=0 for the job. The dirty twins
+      # re-edit one verter_compiler source file and rebuild the crate once per
+      # twin, so a non-incremental rebuild of the whole crate per twin
+      # (measured ~2.3x slower than incremental) dominates this lane;
+      # re-enable incremental for this step only.
+      - name: Verify the sfc-projection nodes
+        run: CARGO_INCREMENTAL=1 pnpm run test:sfc-projection
 
   # The ARH0/ARH1/ARH2/ARH4/ARH5/ARH7 verifiers join their products to the
   # live tree (hotspot sources, crate manifests, the cross-crate consumer
@@ -2393,6 +2145,7 @@ jobs:
       - compiler-contracts
       - bf2-authoritative
       - js-build-test
+      - sfc-projection
       - architecture-health
       - svelte-oracle
       - svelte-conformance

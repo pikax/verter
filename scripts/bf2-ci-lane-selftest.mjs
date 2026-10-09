@@ -18,6 +18,7 @@ import {
   decideBf2AuthoritativeInventoryMatch,
   scanBf2AuthoritativeSourceInventory,
 } from "./gate-internals.mjs";
+import { matchPathFilters } from "./ci-impact.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -27,15 +28,6 @@ function yamlJob(source, name) {
   assert.notEqual(start, -1, `workflow must define the ${name} job`);
   const next = source.slice(start + 1).search(/\n  [a-z0-9][a-z0-9-]*:\r?\n/);
   return next === -1 ? source.slice(start) : source.slice(start, start + 1 + next);
-}
-
-function yamlPathFilter(source, name) {
-  const startToken = `            ${name}:`;
-  const start = source.indexOf(startToken);
-  assert.notEqual(start, -1, `workflow must define the ${name} path filter`);
-  const tail = source.slice(start + startToken.length);
-  const next = tail.search(/\r?\n            [a-z][a-z0-9_]*:\r?\n/);
-  return next === -1 ? tail : tail.slice(0, next);
 }
 
 test("BF2 is absent from the core archive and has exact source-derived nextest coverage", () => {
@@ -126,8 +118,6 @@ test("BF2 is absent from the core archive and has exact source-derived nextest c
 
 test("ci.yml keeps BF2 parallel, required, pinned/offline, and off the Rust core path", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const rustFilter = yamlPathFilter(workflow, "rust");
-  const jsFilter = yamlPathFilter(workflow, "js");
   const rustBuildJob = yamlJob(workflow, "rust-test-build");
   const rustJob = yamlJob(workflow, "rust-test");
   const bf2Job = yamlJob(workflow, "bf2-authoritative");
@@ -143,15 +133,19 @@ test("ci.yml keeps BF2 parallel, required, pinned/offline, and off the Rust core
   for (const ownedPath of [
     "scripts/bf2-authoritative.mjs",
     "scripts/bf2-ci-lane-selftest.mjs",
-    "packages/types/**",
+    "packages/types/src/index.ts",
   ]) {
-    assert.match(
-      rustFilter,
-      new RegExp(ownedPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-      `the rust filter must route ${ownedPath} through BF2`,
+    const { hits } = matchPathFilters([ownedPath]);
+    assert.ok(
+      hits.rust && hits.bf2,
+      `the rust and bf2 filters must route ${ownedPath} through BF2`,
     );
   }
-  assert.match(jsFilter, /\.github\/workflows\/release\.yml/);
+  assert.equal(
+    matchPathFilters([".github/workflows/release.yml"]).hits.js,
+    true,
+    "a release-graph change must run the js lane's BF2 release-dependency guard",
+  );
 
   assert.doesNotMatch(
     rustJob,
