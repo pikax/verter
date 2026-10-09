@@ -75,8 +75,8 @@ struct ProjectEngineSpec {
     default_lib_count: usize,
 }
 
-/// A cached per-project engine resolution, fenced on the exact publication and
-/// workspace generations it was taken at.
+/// A cached per-project engine resolution, fenced on the project membership
+/// (publication and project generation) it was taken at.
 ///
 /// Resolution walks the filesystem (ancestor `node_modules` probes, a
 /// `canonicalize`, a `read_dir` of the install's `lib/`) and, on a total miss,
@@ -85,7 +85,8 @@ struct ProjectEngineSpec {
 /// basis fence releases the cache whenever the workspace project graph is
 /// republished (a tsconfig edit, a config-file change, a workspace-folder
 /// change), so a project-graph change re-resolves; a bare `node_modules`
-/// mutation that publishes no new snapshot still needs a server reload.
+/// mutation that publishes no new snapshot still needs a server reload. A
+/// document's content edit changes neither input, so it never re-resolves.
 #[derive(Clone)]
 struct CachedEngineSpec {
     basis: ResolvedPublication,
@@ -100,7 +101,9 @@ struct RegisteredRoute {
     project: String,
 }
 
-/// The hub witness stays with the query until its answer is settled.
+/// A read-only query's binding: the serving incarnation, the owning project
+/// and — for a generated unit — its membership admission. It stays with the
+/// query until its answer is settled.
 struct RequestRoute {
     hub: Arc<ProviderHub<dyn TypeProvider>>,
     witness: ProjectWitness,
@@ -108,44 +111,40 @@ struct RequestRoute {
     path: String,
 }
 
-/// Re-issues one query, or one generated-unit admission, may take when its
-/// basis drifts under it.
-const BASIS_DRIFT_REISSUES: usize = 2;
+/// Immediate re-issues one WRITE (or its generated-unit admission) takes when
+/// the basis drifts under it. Writes only: a write the hub refused on a drifted
+/// basis is left to its issuer, and nothing else re-drives a carrier the LSP
+/// believes the engine holds. Reads never re-issue — their admission binds the
+/// serving incarnation and project membership, which content drift leaves
+/// untouched.
+const WRITE_DRIFT_REISSUES: usize = 2;
 
 /// Backed-off retries for carrier writes still refused on a drifted basis
-/// after their immediate [`BASIS_DRIFT_REISSUES`] (see
+/// after their immediate [`WRITE_DRIFT_REISSUES`] (see
 /// [`settle_under_fresh_admission`] and
 /// [`ProjectTsserverProvider::rearm_admitted_state`]): long enough in total to
-/// outlast an edit burst.
-const SETTLEMENT_DRIFT_BACKOFF: [std::time::Duration; 3] = [
+/// outlast an edit burst. Writes only, for the same reason.
+const WRITE_DRIFT_BACKOFF: [std::time::Duration; 3] = [
     std::time::Duration::from_millis(250),
     std::time::Duration::from_secs(1),
     std::time::Duration::from_secs(4),
 ];
 
-/// Run one read-only query through its request route, settling it only under
-/// a CURRENT admission.
+/// Run one read-only query through its request route, settling it under the
+/// route's query admission: exactly one engine call per query.
 ///
-/// The bound basis includes the workspace content generation, so an unrelated
-/// document's edit landing while the engine answers expires the route: that
-/// answer is discarded (never delivered on a drifted basis), and the query is
-/// re-issued under a fresh binding and admission instead of surfacing a
-/// transient "semantics unavailable" the editor would show as an empty
-/// result. Bounded: a basis that keeps drifting returns the last refusal, and
-/// a re-admission that fails (ownership withdrawn, membership excluded)
-/// refuses before the engine is reached again.
+/// The route binds only what the query's answer depends on — the serving
+/// engine incarnation, the owning project's membership, and the requested
+/// generated unit's admission — never the workspace content generation. An
+/// unrelated document's edit landing while the engine answers therefore
+/// neither refuses nor re-issues the query; the answer's coordinates are bound
+/// by the engine adapter at the request's own wire position. A replaced
+/// engine, a moved membership or a withdrawn owner still refuses, each with
+/// its own reason.
 macro_rules! routed_query {
     ($router:expr, $path:expr, |$route:ident| $query:expr) => {{
-        let mut reissues = BASIS_DRIFT_REISSUES;
-        loop {
-            let $route = $router.request_route($path, &mut reissues).await?;
-            let settled = $route.run($query).await;
-            if settled.is_err() && reissues > 0 && $route.basis_drifted() {
-                reissues -= 1;
-                continue;
-            }
-            break settled;
-        }
+        let $route = $router.request_route($path).await?;
+        $route.run($query).await
     }};
 }
 
@@ -156,33 +155,20 @@ type AdmittedCarrierBatch = (
 
 impl RequestRoute {
     fn check(&self) -> Result<(), TypeProviderError> {
-        self.hub.check_project(&self.witness).map_err(|reason| {
+        self.hub.check_query(&self.witness).map_err(|reason| {
             project_refusal(&self.path, &format!("request binding expired: {reason:?}"))
         })?;
         if let Some(admission) = &self.admission {
-            self.hub.check_admission(admission).map_err(|reason| {
-                project_refusal(
-                    &self.path,
-                    &format!("generated admission expired: {reason:?}"),
-                )
-            })?;
+            self.hub
+                .check_query_admission(admission)
+                .map_err(|reason| {
+                    project_refusal(
+                        &self.path,
+                        &format!("generated admission expired: {reason:?}"),
+                    )
+                })?;
         }
         Ok(())
-    }
-
-    /// Whether this route's binding or admission expired on its BASIS (the
-    /// publication or a content/project generation moved) — the refusal a
-    /// fresh admission can answer, unlike a replaced provider or epoch.
-    fn basis_drifted(&self) -> bool {
-        matches!(
-            self.hub.check_project(&self.witness),
-            Err(AdmissionRefusal::StaleBasis)
-        ) || self.admission.as_ref().is_some_and(|admission| {
-            matches!(
-                self.hub.check_admission(admission),
-                Err(AdmissionRefusal::StaleBasis)
-            )
-        })
     }
 
     async fn run<T>(
@@ -255,7 +241,7 @@ impl From<WriteFailure> for TypeProviderError {
 /// document never reaches the engine. Each `write` call mints its own
 /// admission, so a re-issue binds the live basis. The first re-issues are
 /// immediate, like every other basis-drift re-issue; a basis still drifting
-/// after them is waited out with [`SETTLEMENT_DRIFT_BACKOFF`] so an edit burst
+/// after them is waited out with [`WRITE_DRIFT_BACKOFF`] so an edit burst
 /// cannot spend the budget while it lasts. Any other refusal is returned as is.
 async fn settle_under_fresh_admission<T, Fut>(
     mut write: impl FnMut() -> Fut,
@@ -263,8 +249,8 @@ async fn settle_under_fresh_admission<T, Fut>(
 where
     Fut: Future<Output = Result<T, WriteFailure>>,
 {
-    let mut reissues = BASIS_DRIFT_REISSUES;
-    let mut backoff = SETTLEMENT_DRIFT_BACKOFF.iter();
+    let mut reissues = WRITE_DRIFT_REISSUES;
+    let mut backoff = WRITE_DRIFT_BACKOFF.iter();
     loop {
         match write().await {
             Err(failure) if failure.basis_drifted() => {
@@ -376,7 +362,7 @@ impl ProjectTsserverProvider {
     pub async fn rearm_admitted_state(&self, dropped: &DroppedAdmittedState) {
         let mut drifting = Vec::new();
         for carrier in &dropped.carriers {
-            let mut reissues = BASIS_DRIFT_REISSUES;
+            let mut reissues = WRITE_DRIFT_REISSUES;
             loop {
                 match self.rearm_admitted_carrier(carrier).await {
                     Ok(()) => break,
@@ -392,7 +378,7 @@ impl ProjectTsserverProvider {
                 }
             }
         }
-        for delay in SETTLEMENT_DRIFT_BACKOFF {
+        for delay in WRITE_DRIFT_BACKOFF {
             if drifting.is_empty() {
                 return;
             }
@@ -492,15 +478,17 @@ impl ProjectTsserverProvider {
     fn binding_for_path_with_publication(
         &self,
         path: &str,
+        fence: PublicationFence,
     ) -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError> {
         let (source, registered_project) = self.source_for_path(path);
-        self.binding_for_source_with_expected(&source, registered_project.as_deref())
+        self.binding_for_source_with_expected(&source, registered_project.as_deref(), fence)
     }
 
     fn binding_for_source_with_expected(
         &self,
         source: &str,
         expected_project: Option<&str>,
+        fence: PublicationFence,
     ) -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError> {
         let Some((resolution, _, resolved)) = resolve_carrier_with_publication(
             self.host.as_ref(),
@@ -546,7 +534,9 @@ impl ProjectTsserverProvider {
                 ));
             }
         }
-        if ResolvedPublication::current(&self.host).as_ref() != Some(&resolved) {
+        if !ResolvedPublication::current(&self.host)
+            .is_some_and(|live| fence.admits(&live, &resolved))
+        {
             return Err(project_refusal(
                 source,
                 "project binding raced a workspace change",
@@ -568,7 +558,7 @@ impl ProjectTsserverProvider {
         let bound = ensure_bound(&self.witness_backend, binding)?;
         let project = Self::normalized(binding.tsconfig_uri());
         if let Some(cached) = self.engine_specs.get(&project) {
-            if cached.basis == *basis {
+            if PublicationFence::Membership.admits(&cached.basis, basis) {
                 return cached
                     .outcome
                     .clone()
@@ -689,7 +679,7 @@ impl ProjectTsserverProvider {
         unit: &str,
         resolve: impl Fn() -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError>,
     ) -> Result<(Arc<ProviderHub<dyn TypeProvider>>, AdmittedRequest), TypeProviderError> {
-        let mut reissues = BASIS_DRIFT_REISSUES;
+        let mut reissues = WRITE_DRIFT_REISSUES;
         loop {
             let before = ResolvedPublication::current(&self.host);
             let admitted = match resolve() {
@@ -761,7 +751,8 @@ impl ProjectTsserverProvider {
         &self,
         path: &str,
     ) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
-        let (binding, resolved) = self.binding_for_path_with_publication(path)?;
+        let (binding, resolved) =
+            self.binding_for_path_with_publication(path, PublicationFence::Exact)?;
         let provider = self.provider_for_binding(&binding, &resolved).await?;
         if ResolvedPublication::current(&self.host).as_ref() != Some(&resolved) {
             return Err(project_refusal(
@@ -772,40 +763,22 @@ impl ProjectTsserverProvider {
         Ok(provider)
     }
 
-    /// Route one query, re-routing (within the query's shared re-issue
-    /// budget) when the basis moved WHILE the route was being bound: the
-    /// publication read and the hub binding are separate steps, and an edit
-    /// landing between them refuses the binding on a basis that is already
-    /// history. Any refusal on an unmoved basis is returned as is.
-    async fn request_route(
-        &self,
-        path: &str,
-        reissues: &mut usize,
-    ) -> Result<RequestRoute, TypeProviderError> {
-        loop {
-            let before = ResolvedPublication::current(&self.host);
-            match self.provider_for_request_path(path).await {
-                Err(_) if *reissues > 0 && ResolvedPublication::current(&self.host) != before => {
-                    *reissues -= 1;
-                }
-                routed => return routed,
-            }
-        }
-    }
-
-    async fn provider_for_request_path(
-        &self,
-        path: &str,
-    ) -> Result<RequestRoute, TypeProviderError> {
+    /// Bind one read-only query: the owning project's engine, a query witness
+    /// on its serving incarnation and — for a generated companion — the
+    /// membership admission of exactly the requested unit. Every step fences
+    /// only the project membership, so an edit landing while the route is bound
+    /// cannot refuse it; any refusal is final for this query (it has not reached
+    /// the engine).
+    async fn request_route(&self, path: &str) -> Result<RequestRoute, TypeProviderError> {
+        let (source, _) = self.source_for_path(path);
+        let (binding, published) =
+            self.binding_for_path_with_publication(path, PublicationFence::Membership)?;
+        let hub = self.hub_for_binding(&binding, &published).await?;
+        let snapshot = Arc::clone(&published.published.snapshot);
+        let witness = hub
+            .bind_query(hub_binding_input(&self.host, &source, &binding, published))
+            .map_err(|reason| project_refusal(path, &format!("hub binding refused: {reason:?}")))?;
         if verter_session::framework::descriptor::classify_carrier_companion(path).is_none() {
-            let (source, _) = self.source_for_path(path);
-            let (binding, published) = self.binding_for_path_with_publication(path)?;
-            let hub = self.hub_for_binding(&binding, &published).await?;
-            let witness = hub
-                .bind_project(hub_binding_input(&self.host, &source, &binding, published))
-                .map_err(|reason| {
-                    project_refusal(path, &format!("hub binding refused: {reason:?}"))
-                })?;
             return Ok(RequestRoute {
                 hub,
                 witness,
@@ -813,14 +786,25 @@ impl ProjectTsserverProvider {
                 path: path.to_string(),
             });
         }
-        let (source, _) = self.source_for_path(path);
-        let (binding, published) = self.binding_for_path_with_publication(path)?;
-        let (hub, admission) = self
-            .admit_generated_write(&source, &binding, published, &[CanonicalPath::new(path)])
-            .await?;
+        let units = [CanonicalPath::new(path)];
+        let admission = hub
+            .admit_query(&witness, &units, || {
+                decide_generated_unit_admission_with_basis(
+                    snapshot.as_ref(),
+                    &CanonicalPath::new(binding.tsconfig_uri()),
+                    &units,
+                    crate::external_ts::carrier_membership_basis,
+                )
+            })
+            .map_err(|reason| {
+                project_refusal(
+                    path,
+                    &format!("hub generated-unit admission refused: {reason:?}"),
+                )
+            })?;
         Ok(RequestRoute {
             hub,
-            witness: admission.project_witness().clone(),
+            witness,
             admission: Some(admission),
             path: path.to_string(),
         })
@@ -870,7 +854,7 @@ impl ProjectTsserverProvider {
         settle_under_fresh_admission(move || async move {
             let (hub, admitted) = self
                 .admit_current_unit(source, path, || {
-                    self.binding_for_path_with_publication(path)
+                    self.binding_for_path_with_publication(path, PublicationFence::Exact)
                 })
                 .await
                 .map_err(WriteFailure::Admission)?;
@@ -904,7 +888,8 @@ impl ProjectTsserverProvider {
         companion: &str,
         project: &str,
     ) -> Result<(ProjectBinding, ResolvedPublication), TypeProviderError> {
-        let (binding, published) = self.binding_for_source_with_expected(source, None)?;
+        let (binding, published) =
+            self.binding_for_source_with_expected(source, None, PublicationFence::Exact)?;
         if Self::normalized(binding.tsconfig_uri()) != Self::normalized(project) {
             return Err(project_refusal(
                 source,
@@ -926,6 +911,31 @@ impl ProjectTsserverProvider {
             .iter()
             .map(|entry| Arc::clone(entry.value()) as Arc<dyn TypeProvider>)
             .collect()
+    }
+}
+
+/// How much of the live publication must still match the one an operation
+/// resolved its binding under.
+#[derive(Clone, Copy)]
+enum PublicationFence {
+    /// Writes: the exact publication and both its content and project
+    /// generations.
+    Exact,
+    /// Reads and engine resolution: only what decides project membership —
+    /// the publication identity and the project generation. A document's
+    /// content edit does not move it.
+    Membership,
+}
+
+impl PublicationFence {
+    fn admits(self, live: &ResolvedPublication, resolved: &ResolvedPublication) -> bool {
+        match self {
+            Self::Exact => live == resolved,
+            Self::Membership => {
+                Arc::ptr_eq(&live.published, &resolved.published)
+                    && live.project_generation == resolved.project_generation
+            }
+        }
     }
 }
 

@@ -256,6 +256,7 @@ fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
         liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        ledger: Default::default(),
     }
 }
 
@@ -274,6 +275,7 @@ fn test_transport_with_pending(
         liveness: Arc::new(EngineLiveness::default()),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
+        ledger: Default::default(),
     }
 }
 
@@ -295,6 +297,7 @@ fn test_transport_with_control(
             liveness: Arc::new(EngineLiveness::default()),
             crash_notify: None,
             teardown_intent: Arc::new(AtomicBool::new(false)),
+            ledger: Default::default(),
         },
         control_rx,
     )
@@ -377,7 +380,9 @@ async fn silence_watchdog_stays_disarmed_during_deliberate_teardown() {
 /// Decode the JSON body of a framed stdin message.
 fn frame_body(msg: &StdinMessage) -> serde_json::Value {
     let bytes = match msg {
-        StdinMessage::Frame(bytes) | StdinMessage::Document(bytes, _) => bytes,
+        StdinMessage::Frame(bytes)
+        | StdinMessage::Document(bytes, _)
+        | StdinMessage::Query(bytes, _) => bytes,
         StdinMessage::Shutdown => panic!("expected a framed message, got a control signal"),
     };
     let text = String::from_utf8(bytes.clone()).expect("frame is utf8");
@@ -3733,6 +3738,7 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
         None,
         Arc::new(AtomicBool::new(false)),
         std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+        Arc::new(DeliveryLedger::default()),
     ));
 
     let transport = Arc::new(test_transport_with_pending(
@@ -4455,9 +4461,17 @@ async fn spawn_label_details_only_responder(
     mut stdin_rx: mpsc::Receiver<StdinMessage>,
     pending: Arc<PendingRequestTable>,
 ) {
+    // This responder stands in for the stdin writer, so it binds query frames
+    // itself — against an empty surface, as nothing was delivered.
+    let ledger = DeliveryLedger::default();
     while let Some(msg) = stdin_rx.recv().await {
-        let StdinMessage::Frame(bytes) = msg else {
-            break;
+        let bytes = match msg {
+            StdinMessage::Frame(bytes) => bytes,
+            StdinMessage::Query(bytes, anchor) => {
+                anchor.place(&bytes, &mut Vec::new(), &ledger);
+                bytes
+            }
+            _ => break,
         };
         let text = String::from_utf8_lossy(&bytes);
         let Some(body_start) = text.find("\r\n\r\n") else {

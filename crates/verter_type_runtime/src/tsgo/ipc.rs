@@ -19,6 +19,9 @@ use crate::codec::{LineColumn, PositionEncoding, SourceIndex};
 use crate::contents_snapshot::{convert_per_target, with_target_index};
 use crate::pending::{watch_engine_silence, EngineLiveness, PendingRequestTable};
 use crate::protocol::*;
+use crate::provider_query::{
+    DeliveryLedger, ProviderQuery, ProviderQueryConflict, RequestedBytes, SurfaceEffect,
+};
 use crate::traits::{ProviderFuture, TypeProvider};
 #[cfg(test)]
 use crate::uri::percent_decode;
@@ -129,8 +132,64 @@ enum StdinMessage {
     Frame(Vec<u8>),
     /// Completion owns document ordering until the entire frame is flushed.
     Document(Vec<u8>, Box<DocumentDelivery>),
+    /// A positional query frame, bound to the delivered surface at the exact
+    /// position the writer places it — the writer alone orders the lanes.
+    Query(Vec<u8>, Box<QueryAnchor>),
     /// Shut down the writer task.
     Shutdown,
+}
+
+/// What a positional query was converted against, and where its capability
+/// goes once the writer reaches its frame.
+struct QueryAnchor {
+    path: String,
+    requested: RequestedBytes,
+    placed: oneshot::Sender<Result<ProviderQuery, ProviderQueryConflict>>,
+}
+
+impl QueryAnchor {
+    /// Place the query frame only if the requested file still carries the bytes
+    /// it was converted against: a document delivery the writer placed in
+    /// between would make the engine evaluate a position computed against bytes
+    /// it no longer holds. A refused frame never reaches the engine.
+    fn place(self, frame: &[u8], buffer: &mut Vec<u8>, ledger: &DeliveryLedger) {
+        if self.placed.is_closed() {
+            // The query was abandoned before its frame was reached.
+            return;
+        }
+        let bound = ledger.bind(&self.path, self.requested);
+        if bound.is_ok() {
+            buffer.extend_from_slice(frame);
+        }
+        let _ = self.placed.send(bound);
+    }
+}
+
+/// Place one lane message into the outgoing buffer, recording what a document
+/// delivery does to the delivered surface at its wire position. `true` on
+/// `Shutdown`.
+fn place_message(
+    message: StdinMessage,
+    buffer: &mut Vec<u8>,
+    deliveries: &mut Vec<DocumentDelivery>,
+    ledger: &DeliveryLedger,
+) -> bool {
+    match message {
+        StdinMessage::Frame(data) => buffer.extend_from_slice(&data),
+        StdinMessage::Document(data, delivery) => {
+            buffer.extend_from_slice(&data);
+            ledger.record_wire(match &delivery.value {
+                Some((_, content)) => {
+                    SurfaceEffect::deliver(delivery.key.clone(), Arc::clone(content))
+                }
+                None => SurfaceEffect::withdraw(delivery.key.clone()),
+            });
+            deliveries.push(*delivery);
+        }
+        StdinMessage::Query(data, anchor) => anchor.place(&data, buffer, ledger),
+        StdinMessage::Shutdown => return true,
+    }
+    false
 }
 
 /// The writer retains the document gate even if the caller is cancelled.
@@ -286,6 +345,7 @@ async fn stdin_writer_loop(
     crash_notify: Option<Arc<Notify>>,
     teardown_intent: Arc<AtomicBool>,
     writer_stall: std::time::Duration,
+    ledger: Arc<DeliveryLedger>,
 ) {
     let mut buffer = Vec::new();
     let mut deliveries: Vec<DocumentDelivery> = Vec::new();
@@ -295,18 +355,10 @@ async fn stdin_writer_loop(
     macro_rules! drain_full {
         ($rx:expr) => {{
             let mut shutdown = false;
-            loop {
-                match $rx.try_recv() {
-                    Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Ok(StdinMessage::Document(data, delivery)) => {
-                        buffer.extend_from_slice(&data);
-                        deliveries.push(*delivery);
-                    }
-                    Ok(StdinMessage::Shutdown) => {
-                        shutdown = true;
-                        break;
-                    }
-                    Err(_) => break,
+            while let Ok(message) = $rx.try_recv() {
+                if place_message(message, &mut buffer, &mut deliveries, &ledger) {
+                    shutdown = true;
+                    break;
                 }
             }
             shutdown
@@ -318,17 +370,12 @@ async fn stdin_writer_loop(
         ($rx:expr, $cap:expr) => {{
             let mut shutdown = false;
             for _ in 0..$cap {
-                match $rx.try_recv() {
-                    Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Ok(StdinMessage::Document(data, delivery)) => {
-                        buffer.extend_from_slice(&data);
-                        deliveries.push(*delivery);
-                    }
-                    Ok(StdinMessage::Shutdown) => {
-                        shutdown = true;
-                        break;
-                    }
-                    Err(_) => break,
+                let Ok(message) = $rx.try_recv() else {
+                    break;
+                };
+                if place_message(message, &mut buffer, &mut deliveries, &ledger) {
+                    shutdown = true;
+                    break;
                 }
             }
             shutdown
@@ -376,43 +423,35 @@ async fn stdin_writer_loop(
         tokio::select! {
             biased;
             msg = control_rx.recv() => {
-                match msg {
-                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Document(data, delivery)) => {
-                        buffer.extend_from_slice(&data);
-                        deliveries.push(*delivery);
-                    }
-                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
+                let Some(message) = msg else {
+                    flush_and_return!();
+                };
+                if place_message(message, &mut buffer, &mut deliveries, &ledger) {
+                    flush_and_return!();
                 }
             }
             msg = interactive_rx.recv() => {
-                match msg {
-                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Document(data, delivery)) => {
-                        buffer.extend_from_slice(&data);
-                        deliveries.push(*delivery);
-                    }
-                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
+                let Some(message) = msg else {
+                    flush_and_return!();
+                };
+                if place_message(message, &mut buffer, &mut deliveries, &ledger) {
+                    flush_and_return!();
                 }
             }
             msg = normal_rx.recv() => {
-                match msg {
-                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Document(data, delivery)) => {
-                        buffer.extend_from_slice(&data);
-                        deliveries.push(*delivery);
-                    }
-                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
+                let Some(message) = msg else {
+                    flush_and_return!();
+                };
+                if place_message(message, &mut buffer, &mut deliveries, &ledger) {
+                    flush_and_return!();
                 }
             }
             msg = background_rx.recv() => {
-                match msg {
-                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Document(data, delivery)) => {
-                        buffer.extend_from_slice(&data);
-                        deliveries.push(*delivery);
-                    }
-                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
+                let Some(message) = msg else {
+                    flush_and_return!();
+                };
+                if place_message(message, &mut buffer, &mut deliveries, &ledger) {
+                    flush_and_return!();
                 }
             }
         }
@@ -474,6 +513,7 @@ async fn stdin_writer_loop_single(
         None,
         Arc::new(AtomicBool::new(false)),
         std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+        Arc::new(DeliveryLedger::default()),
     )
     .await;
 }
@@ -510,6 +550,10 @@ struct LspTransport {
     /// "crashed. Restarting" notification and respawn an engine into a dying
     /// session).
     teardown_intent: Arc<AtomicBool>,
+    /// The bytes this engine incarnation holds, recorded by the stdin writer at
+    /// the position it places each document frame. Shared with that writer,
+    /// which binds every positional query at its own frame's position.
+    ledger: Arc<DeliveryLedger>,
 }
 
 /// List-level cap on completion-detail enrichment
@@ -894,6 +938,117 @@ impl LspTransport {
         .await
     }
 
+    /// Send one positional query on the document `path` (a [`contents_key`]).
+    ///
+    /// `params` converts the request against the bytes the engine holds for
+    /// `path` (else the file's disk content, which the engine reads itself;
+    /// `None` when there are neither — a request naming no position may still
+    /// be sent, a positional one declines).
+    /// The stdin writer — which alone orders the lanes — binds the query at the
+    /// exact position it places the frame: a delivery of `path` placed between
+    /// the conversion and that position refuses the frame with the typed
+    /// conflict instead of letting the engine evaluate a stale position. The
+    /// returned capability retains the requested bytes and the delivered
+    /// surface of every other file at that position for decoding the answer.
+    ///
+    /// `Ok(None)` when `params` declined to send a frame (a positional query
+    /// with no bytes to convert against — never a fabricated position).
+    async fn request_query(
+        &self,
+        method: &str,
+        path: &str,
+        params: impl FnOnce(Option<&str>) -> Option<serde_json::Value>,
+        priority: ProviderPriority,
+    ) -> Result<Option<(ProviderQuery, serde_json::Value)>, TypeProviderError> {
+        let fallback = if self.ledger.holds(path) {
+            None
+        } else {
+            read_disk_bytes(path)
+        };
+        let requested = self.ledger.requested(path, fallback);
+        let Some(params) = params(requested.bytes().map(|bytes| &**bytes)) else {
+            return Ok(None);
+        };
+        crate::type_runtime_trace_scope_async!(
+            "tsgo_transport_request",
+            format!(
+                "method={} priority={:?} {}",
+                method,
+                priority,
+                summarize_lsp_params(&params),
+            ),
+            async {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let message = jsonrpc_body(Some(id), method, &params);
+                let body = serde_json::to_string(&message)
+                    .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
+
+                let (tx, rx) = oneshot::channel();
+                if !self.pending.insert(id, tx) {
+                    return Err(TypeProviderError::new("tsgo process is not available"));
+                }
+                let mut registration = PendingRequest {
+                    id,
+                    pending: Arc::clone(&self.pending),
+                    control_tx: self.control_tx.clone(),
+                    armed: true,
+                };
+
+                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                let (placed, bound) = oneshot::channel();
+                let anchor = QueryAnchor {
+                    path: path.to_string(),
+                    requested,
+                    placed,
+                };
+                if self
+                    .tx_for_priority(priority)
+                    .send(StdinMessage::Query(frame.into_bytes(), Box::new(anchor)))
+                    .await
+                    .is_err()
+                {
+                    registration.disarm();
+                    self.pending.take(id);
+                    return Err(TypeProviderError::new("stdin writer closed"));
+                }
+                // The writer answers when it reaches the frame. A refused frame
+                // never reached the engine, so there is nothing to cancel.
+                let query = match bound.await {
+                    Ok(Ok(query)) => query,
+                    Ok(Err(conflict)) => {
+                        registration.disarm();
+                        self.pending.take(id);
+                        return Err(TypeProviderError::query_conflict(&conflict));
+                    }
+                    Err(_) => {
+                        registration.disarm();
+                        self.pending.take(id);
+                        return Err(TypeProviderError::new("stdin writer closed"));
+                    }
+                };
+
+                let value = match rx.await {
+                    Ok(value) => value,
+                    Err(_) => {
+                        registration.disarm();
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!(
+                                "method={} id={} message=response channel closed",
+                                method, id
+                            ),
+                        );
+                        return Err(TypeProviderError::new("response channel closed"));
+                    }
+                };
+                registration.disarm();
+                self.finish_response(method, id, value)
+                    .map(|body| Some((query, body)))
+            }
+        )
+        .await
+    }
+
     /// Enqueue an LSP notification onto `priority`'s lane WITHOUT awaiting.
     ///
     /// This enqueue has no delivery receipt; document mutations use
@@ -1202,6 +1357,9 @@ async fn deliver_document_close(
         forget_cached_diagnostics(diagnostics_cache, path).await;
         contents.remove(&document_key);
         forget_accepted(accepted, &document_key);
+        transport
+            .ledger
+            .record_out_of_band([SurfaceEffect::withdraw(document_key)]);
         return Ok(());
     }
 
@@ -1838,6 +1996,35 @@ fn lsp_wire_pos_to_byte_offset(
     let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
     let character = u32::try_from(pos.get("character")?.as_u64()?).ok()?;
     index.checked_position_to_offset(LineColumn { line, character })
+}
+
+/// Decode a location batch, each location against its own file's bytes as the
+/// query's request frame met them, after settling every out-of-band file the
+/// batch decodes through.
+fn decode_locations(
+    transport: &LspTransport,
+    query: &ProviderQuery,
+    locations: &[serde_json::Value],
+) -> Result<Vec<TypeLocation>, TypeProviderError> {
+    let targets: Vec<String> = locations
+        .iter()
+        .filter_map(|location| location.get("uri").and_then(|uri| uri.as_str()))
+        .map(|uri| contents_key(&uri_to_file_path(uri)))
+        .collect();
+    transport
+        .ledger
+        .settle(query, targets.iter().map(String::as_str))?;
+    Ok(parse_lsp_locations_per_target(locations, |target_path| {
+        query
+            .delivered(&contents_key(target_path))
+            .map(|text| text.as_ref())
+    }))
+}
+
+/// The disk bytes of a file the engine was never handed: it reads that file
+/// from disk itself, so a request on it converts against the same bytes.
+fn read_disk_bytes(path: &str) -> Option<Arc<str>> {
+    std::fs::read_to_string(path).ok().map(Arc::from)
 }
 
 /// A response target's content: the contents cache (`content_for`) first, then a disk read on a
@@ -2523,6 +2710,7 @@ impl TsgoTypeProvider {
         let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
 
         let teardown_intent = Arc::new(AtomicBool::new(false));
+        let ledger = Arc::new(DeliveryLedger::default());
         tokio::spawn(stdin_writer_loop(
             write,
             control_rx,
@@ -2532,6 +2720,7 @@ impl TsgoTypeProvider {
             crash_notify.as_ref().map(Arc::clone),
             Arc::clone(&teardown_intent),
             writer_stall,
+            Arc::clone(&ledger),
         ));
 
         let liveness = Arc::new(EngineLiveness::default());
@@ -2546,6 +2735,7 @@ impl TsgoTypeProvider {
             liveness: Arc::clone(&liveness),
             crash_notify: crash_notify.as_ref().map(Arc::clone),
             teardown_intent: Arc::clone(&teardown_intent),
+            ledger,
         });
         if let Some(notify) = crash_notify.as_ref() {
             tokio::spawn(watch_engine_silence(
@@ -2660,6 +2850,9 @@ impl TsgoTypeProvider {
         let document_key = contents_key(path);
         self.contents.lock().await.remove(&document_key);
         self.versions.lock().await.remove(&document_key);
+        self.transport
+            .ledger
+            .record_out_of_band([SurfaceEffect::withdraw(document_key)]);
     }
 
     /// Wait until the engine has processed every notification sent before this
@@ -3064,15 +3257,25 @@ impl TypeProvider for TsgoTypeProvider {
         let path_owned = path.to_string();
         let content_owned = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
+        let transport = Arc::clone(&self.transport);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsgo_load_file",
                 format!("path={} content_len={}", path_owned, content_owned.len()),
                 async {
+                    let key = contents_key(&path_owned);
+                    let content: Arc<str> = content_owned.into();
                     contents_cache
                         .lock()
                         .await
-                        .insert(contents_key(&path_owned), content_owned.into());
+                        .insert(key.clone(), Arc::clone(&content));
+                    // The engine receives these bytes out of band — a non-owning
+                    // attach's relay injects them, an owned engine reads the
+                    // file itself — so a query converts and decodes against
+                    // them and settles against their stamp.
+                    transport
+                        .ledger
+                        .record_out_of_band([SurfaceEffect::deliver(key, content)]);
                     crate::type_runtime_trace_event!(
                         "tsgo_load_file_result",
                         "cached_only=true".to_string()
@@ -3140,30 +3343,7 @@ impl TypeProvider for TsgoTypeProvider {
         let path_owned = path.to_string();
         let trigger_owned = trigger_character.map(|s| s.to_string());
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
-                    }
-                    None => {
-                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
-                        // position for the engine (see `get_hover`).
-                        tracing::warn!(
-                            "TSGO get_completions: no cached contents for {path_owned} — \
-                             failing closed instead of fabricating a position"
-                        );
-                        return Ok(CompletionResult {
-                            items: Vec::new(),
-                            is_incomplete: false,
-                        });
-                    }
-                }
-            };
-
             // Build context with trigger info so TSGO can optimize the response
             let context = if let Some(ref ch) = trigger_owned {
                 serde_json::json!({
@@ -3176,16 +3356,33 @@ impl TypeProvider for TsgoTypeProvider {
                 })
             };
 
-            let result = transport
-                .request(
+            let Some((query, result)) = transport
+                .request_query(
                     "textDocument/completion",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                        "context": context,
-                    }),
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let (line, character) = offset_to_position(requested?, offset);
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "position": { "line": line, "character": character },
+                            "context": context,
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // FAIL CLOSED: never fabricate a `(0, byte-offset)` position
+                // for the engine (see `get_hover`).
+                tracing::warn!(
+                    "TSGO get_completions: no delivered or disk content for {path_owned} — \
+                     failing closed instead of fabricating a position"
+                );
+                return Ok(CompletionResult {
+                    items: Vec::new(),
+                    is_incomplete: false,
+                });
+            };
 
             // Parse: result can be CompletionList { items: [], isIncomplete } or CompletionItem[]
             let (items_slice, is_incomplete) = if let Some(arr) = result.as_array() {
@@ -3203,13 +3400,17 @@ impl TypeProvider for TsgoTypeProvider {
                 });
             };
 
-            // One index for the whole list: every item's replace-range converts
-            // through it instead of rescanning the document per endpoint.
-            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
+            // One index for the whole list, over the bytes the request position
+            // was converted against: every item's replace-range converts through
+            // it instead of rescanning the document per endpoint.
+            let index = query
+                .requested()
+                .map(|content| SourceIndex::new_utf16(content));
             let items = items_slice
                 .iter()
                 .filter_map(|item| parse_completion_item(item, index.as_ref()))
                 .collect();
+            transport.ledger.settle(&query, [])?;
 
             Ok(CompletionResult {
                 items,
@@ -3380,41 +3581,37 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let witness = self.provider_wire_witness();
         Box::pin(async move {
-            let (line, character) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => offset_to_position(c, offset),
-                    None => {
-                        // FAIL CLOSED: without the synced content there is no
+            crate::type_runtime_trace_scope_async!(
+                "tsgo_get_hover",
+                format!("path={} uri={} offset={}", path_owned, uri, offset),
+                async {
+                    let Some((query, result)) = transport
+                        .request_query(
+                            "textDocument/hover",
+                            &contents_key(&path_owned),
+                            |requested| {
+                                let (line, character) = offset_to_position(requested?, offset);
+                                Some(serde_json::json!({
+                                    "textDocument": { "uri": uri },
+                                    "position": { "line": line, "character": character },
+                                }))
+                            },
+                            ProviderPriority::Interactive,
+                        )
+                        .await?
+                    else {
+                        // FAIL CLOSED: without the delivered content there is no
                         // valid position to convert to. A fabricated
                         // `(0, byte-offset)` coordinate is a malformed request
                         // the engine may not survive — never send one.
                         tracing::warn!(
-                            "TSGO get_hover: no cached contents for {path_owned} — \n                             failing closed instead of fabricating a position"
+                            "TSGO get_hover: no delivered or disk content for {path_owned} — \
+                             failing closed instead of fabricating a position"
                         );
                         return Ok(None);
-                    }
-                }
-            };
-            crate::type_runtime_trace_scope_async!(
-                "tsgo_get_hover",
-                format!(
-                    "path={} uri={} offset={} line={} character={} content_cache_hit=true",
-                    path_owned, uri, offset, line, character,
-                ),
-                async {
-                    let result = transport
-                        .request(
-                            "textDocument/hover",
-                            serde_json::json!({
-                                "textDocument": { "uri": uri },
-                                "position": { "line": line, "character": character },
-                            }),
-                        )
-                        .await?;
+                    };
 
                     if result.is_null() {
                         crate::type_runtime_trace_event!(
@@ -3494,28 +3691,20 @@ impl TypeProvider for TsgoTypeProvider {
                     let display_signature = display
                         .map(|display| DisplaySignature::from_provider_wire(witness, display));
 
-                    // The LSP response's `range` maps onto generated-file byte
-                    // offsets through the synced content snapshot; a missing
-                    // snapshot or malformed position fails closed to `None`.
-                    let (range_start, range_end) = {
-                        let cache = contents_cache.lock().await;
-                        match cache.get(&contents_key(&path_owned)) {
-                            Some(content) => {
-                                let index = SourceIndex::new_utf16(content);
-                                (
-                                    lsp_wire_pos_to_byte_offset(
-                                        &index,
-                                        result.pointer("/range/start"),
-                                    ),
-                                    lsp_wire_pos_to_byte_offset(
-                                        &index,
-                                        result.pointer("/range/end"),
-                                    ),
-                                )
-                            }
-                            None => (None, None),
+                    // The LSP response's `range` names lines and characters in
+                    // the bytes the request was converted against, which the
+                    // query retains; a malformed position fails closed to `None`.
+                    let (range_start, range_end) = match query.requested() {
+                        Some(content) => {
+                            let index = SourceIndex::new_utf16(content);
+                            (
+                                lsp_wire_pos_to_byte_offset(&index, result.pointer("/range/start")),
+                                lsp_wire_pos_to_byte_offset(&index, result.pointer("/range/end")),
+                            )
                         }
+                        None => (None, None),
                     };
+                    transport.ledger.settle(&query, [])?;
 
                     Ok(Some(HoverInfo {
                         contents,
@@ -3541,35 +3730,30 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch)
-                    }
-                    None => {
-                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
-                        // position for the engine (see `get_hover`).
-                        tracing::warn!(
-                            "TSGO get_definition: no cached contents for {path_owned} — \
-                             failing closed instead of fabricating a position"
-                        );
-                        return Ok(Vec::new());
-                    }
-                }
-            };
-            let result = transport
-                .request(
+            let Some((query, result)) = transport
+                .request_query(
                     "textDocument/definition",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                    }),
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let (line, character) = offset_to_position(requested?, offset);
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "position": { "line": line, "character": character },
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // FAIL CLOSED: never fabricate a `(0, byte-offset)` position for
+                // the engine (see `get_hover`).
+                tracing::warn!(
+                    "TSGO get_definition: no delivered or disk content for {path_owned} — \
+                     failing closed instead of fabricating a position"
+                );
+                return Ok(Vec::new());
+            };
 
             let locations = if result.is_array() {
                 result.as_array().cloned().unwrap_or_default()
@@ -3579,12 +3763,7 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(vec![]);
             };
 
-            let cache = contents_cache.lock().await;
-            Ok(parse_lsp_locations_per_target(&locations, |target_path| {
-                cache
-                    .get(&contents_key(target_path))
-                    .map(|text| text.as_ref())
-            }))
+            decode_locations(&transport, &query, &locations)
         })
     }
 
@@ -3597,35 +3776,30 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch)
-                    }
-                    None => {
-                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
-                        // position for the engine (see `get_hover`).
-                        tracing::warn!(
-                            "TSGO get_type_definition: no cached contents for {path_owned} — \
-                             failing closed instead of fabricating a position"
-                        );
-                        return Ok(Vec::new());
-                    }
-                }
-            };
-            let result = transport
-                .request(
+            let Some((query, result)) = transport
+                .request_query(
                     "textDocument/typeDefinition",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                    }),
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let (line, character) = offset_to_position(requested?, offset);
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "position": { "line": line, "character": character },
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // FAIL CLOSED: never fabricate a `(0, byte-offset)` position for
+                // the engine (see `get_hover`).
+                tracing::warn!(
+                    "TSGO get_type_definition: no delivered or disk content for {path_owned} — \
+                     failing closed instead of fabricating a position"
+                );
+                return Ok(Vec::new());
+            };
 
             let locations = if result.is_array() {
                 result.as_array().cloned().unwrap_or_default()
@@ -3635,12 +3809,7 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(vec![]);
             };
 
-            let cache = contents_cache.lock().await;
-            Ok(parse_lsp_locations_per_target(&locations, |target_path| {
-                cache
-                    .get(&contents_key(target_path))
-                    .map(|text| text.as_ref())
-            }))
+            decode_locations(&transport, &query, &locations)
         })
     }
 
@@ -3649,44 +3818,36 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => offset_to_position(c, offset),
-                    None => {
-                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
-                        // position for the engine (see `get_hover`).
-                        tracing::warn!(
-                            "TSGO get_references: no cached contents for {path_owned} — \
-                             failing closed instead of fabricating a position"
-                        );
-                        return Ok(Vec::new());
-                    }
-                }
-            };
-            let result = transport
-                .request(
+            let Some((query, result)) = transport
+                .request_query(
                     "textDocument/references",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                        "context": { "includeDeclaration": true }
-                    }),
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let (line, character) = offset_to_position(requested?, offset);
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "position": { "line": line, "character": character },
+                            "context": { "includeDeclaration": true }
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // FAIL CLOSED: never fabricate a `(0, byte-offset)` position for
+                // the engine (see `get_hover`).
+                tracing::warn!(
+                    "TSGO get_references: no delivered or disk content for {path_owned} — \
+                     failing closed instead of fabricating a position"
+                );
+                return Ok(Vec::new());
+            };
 
             let locations = result.as_array().cloned().unwrap_or_default();
-            // References are cross-file: each location's byte offsets must be computed against
-            // THAT location's own file, not the queried file. Look up each target's content (disk
-            // fallback inside `parse_lsp_locations_per_target`), exactly as `get_definition` does — reusing the
-            // queried file's single snapshot for every location packs cross-file offsets against
-            // the WRONG file.
-            let cache = contents_cache.lock().await;
-            Ok(parse_lsp_locations_per_target(&locations, |target_path| {
-                cache.get(target_path).map(|text| text.as_ref())
-            }))
+            // References are cross-file: each location's byte offsets are computed against
+            // THAT location's own file as the request met it, not the queried file.
+            decode_locations(&transport, &query, &locations)
         })
     }
 
@@ -3698,53 +3859,47 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => offset_to_position(c, offset),
-                    None => {
-                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
-                        // position for the engine (see `get_hover`).
-                        tracing::warn!(
-                            "TSGO get_rename_locations: no cached contents for {path_owned} — \
-                             failing closed instead of fabricating a position"
-                        );
-                        return Ok(Vec::new());
-                    }
-                }
-            };
-            let result = transport
-                .request(
+            let Some((query, result)) = transport
+                .request_query(
                     "textDocument/rename",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                        "newName": "__verter_rename_probe__",
-                    }),
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let (line, character) = offset_to_position(requested?, offset);
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "position": { "line": line, "character": character },
+                            "newName": "__verter_rename_probe__",
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // FAIL CLOSED: never fabricate a `(0, byte-offset)` position for
+                // the engine (see `get_hover`).
+                tracing::warn!(
+                    "TSGO get_rename_locations: no delivered or disk content for {path_owned} — \
+                     failing closed instead of fabricating a position"
+                );
+                return Ok(Vec::new());
+            };
 
             if result.is_null() {
                 return Ok(vec![]);
             }
 
-            // Cross-file rename: convert each edit's range against ITS OWN target file's content
-            // (disk fallback inside the parser), never the queried file's single snapshot — a
-            // line-0 edit in the wrong file CORRUPTS it. Snapshot ONLY this workspace edit's target
-            // files and RELEASE the async mutex before parsing, so the per-target blocking disk
-            // fallback never runs under the lock (a multi-file rename would otherwise stall the
-            // provider). Scanning the response bounds the snapshot to the touched files.
+            // Cross-file rename: convert each edit's range against ITS OWN target file's bytes as
+            // the request met them (disk fallback inside the parser), never the queried file's
+            // single snapshot — a line-0 edit in the wrong file CORRUPTS it.
             let target_paths = crate::contents_snapshot::lsp_workspace_edit_target_paths(&result);
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
-            };
+            transport
+                .ledger
+                .settle(&query, target_paths.iter().map(String::as_str))?;
             let mut locations = Vec::new();
             parse_workspace_edit_locations(
                 &result,
-                &|target_path| cache_snapshot.get(target_path).map(|text| text.as_ref()),
+                &|target_path| query.delivered(target_path).map(|text| text.as_ref()),
                 &mut locations,
             );
             Ok(locations)
@@ -3759,32 +3914,30 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => offset_to_position(c, offset),
-                    None => {
-                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
-                        // position for the engine (see `get_hover`).
-                        tracing::warn!(
-                            "TSGO get_signature_help: no cached contents for {path_owned} — \
-                             failing closed instead of fabricating a position"
-                        );
-                        return Ok(None);
-                    }
-                }
-            };
-            let result = transport
-                .request(
+            let Some((_query, result)) = transport
+                .request_query(
                     "textDocument/signatureHelp",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                    }),
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let (line, character) = offset_to_position(requested?, offset);
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "position": { "line": line, "character": character },
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // FAIL CLOSED: never fabricate a `(0, byte-offset)` position for
+                // the engine (see `get_hover`).
+                tracing::warn!(
+                    "TSGO get_signature_help: no delivered or disk content for {path_owned} — \
+                     failing closed instead of fabricating a position"
+                );
+                return Ok(None);
+            };
 
             if result.is_null() {
                 return Ok(None);
@@ -3804,7 +3957,6 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
             // TSGO's quickfix path requires a non-empty `context.diagnostics` whose
@@ -3813,13 +3965,9 @@ impl TypeProvider for TsgoTypeProvider {
             if diagnostics.is_empty() {
                 return Ok(vec![]);
             }
-            let (start_line, start_char, end_line, end_char, context_diagnostics) = {
-                let cache = contents_cache.lock().await;
-                let content = cache.get(&contents_key(&path_owned));
-                let to_pos = |off: u32| match content {
-                    Some(c) => offset_to_position(c, off),
-                    None => (0, off),
-                };
+            let params = |content: Option<&str>| {
+                let content = content?;
+                let to_pos = |off: u32| offset_to_position(content, off);
                 let (sl, sc) = to_pos(start_offset);
                 let (el, ec) = to_pos(end_offset);
                 // Synthesize the LSP `Diagnostic` array TSGO matches fixes against:
@@ -3843,16 +3991,11 @@ impl TypeProvider for TsgoTypeProvider {
                         })
                     })
                     .collect();
-                (sl, sc, el, ec, context_diagnostics)
-            };
-            let result = transport
-                .request(
-                    "textDocument/codeAction",
-                    serde_json::json!({
+                Some(serde_json::json!({
                         "textDocument": { "uri": uri },
                         "range": {
-                            "start": { "line": start_line, "character": start_char },
-                            "end": { "line": end_line, "character": end_char },
+                            "start": { "line": sl, "character": sc },
+                            "end": { "line": el, "character": ec },
                         },
                         "context": {
                             "diagnostics": context_diagnostics,
@@ -3864,30 +4007,38 @@ impl TypeProvider for TsgoTypeProvider {
                             // remove-unused codefix it returns under `quickfix`.)
                             "only": ["quickfix"],
                         },
-                    }),
+                }))
+            };
+            let Some((query, result)) = transport
+                .request_query(
+                    "textDocument/codeAction",
+                    &contents_key(&path_owned),
+                    params,
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // No bytes to place the range in: never a fabricated position.
+                return Ok(vec![]);
+            };
 
             let items = result.as_array().cloned().unwrap_or_default();
             // Cross-file code-action edits: resolve each edit's range against ITS OWN target file's
-            // content (disk fallback inside the parser), never the queried file's single snapshot.
-            // Snapshot ONLY the files these actions target and RELEASE the async mutex before
-            // parsing, so the per-target blocking disk fallback never runs under the lock (a fix-all
-            // could stall the provider). Scanning the responses bounds the snapshot to touched files.
+            // bytes as the request met them (disk fallback inside the parser), never the queried
+            // file's single snapshot.
             let mut target_paths: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             for item in &items {
                 target_paths.extend(crate::contents_snapshot::lsp_code_action_target_paths(item));
             }
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
-            };
+            transport
+                .ledger
+                .settle(&query, target_paths.iter().map(String::as_str))?;
             Ok(items
                 .iter()
                 .filter_map(|item| {
                     parse_code_action(item, &|target_path| {
-                        cache_snapshot.get(target_path).map(|text| text.as_ref())
+                        query.delivered(target_path).map(|text| text.as_ref())
                     })
                 })
                 .collect())
@@ -3898,7 +4049,6 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         // FAIL CLOSED without a retained server legend: tsgo token indices are
         // meaningless outside the legend its initialize result advertised, and
         // forwarding them raw paints every identifier a wrong-but-plausible
@@ -3912,18 +4062,24 @@ impl TypeProvider for TsgoTypeProvider {
                 );
                 return Ok(vec![]);
             };
-            let content_snapshot = {
-                let cache = contents_cache.lock().await;
-                cache.get(&contents_key(&path_owned)).cloned()
-            };
-            let result = transport
-                .request(
+            // The request names no position, but the token stream is lines and
+            // characters in the bytes the engine held when it answered, so the
+            // query is bound at its frame's position like any positional query.
+            let Some((query, result)) = transport
+                .request_query(
                     "textDocument/semanticTokens/full",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                    }),
+                    &contents_key(&path_owned),
+                    |_| {
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                return Ok(vec![]);
+            };
 
             let data = result
                 .get("data")
@@ -3931,11 +4087,9 @@ impl TypeProvider for TsgoTypeProvider {
                 .cloned()
                 .unwrap_or_default();
 
-            Ok(decode_semantic_tokens(
-                &data,
-                content_snapshot.as_deref(),
-                &legend,
-            ))
+            let tokens = decode_semantic_tokens(&data, query.requested().map(|c| &**c), &legend);
+            transport.ledger.settle(&query, [])?;
+            Ok(tokens)
         })
     }
 
@@ -3947,44 +4101,43 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
-                    }
-                    None => {
-                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
-                        // position for the engine (see `get_hover`).
-                        tracing::warn!(
-                            "TSGO get_document_highlights: no cached contents for {path_owned} — \
-                             failing closed instead of fabricating a position"
-                        );
-                        return Ok(Vec::new());
-                    }
-                }
-            };
-            let result = transport
-                .request(
+            let Some((query, result)) = transport
+                .request_query(
                     "textDocument/documentHighlight",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                    }),
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let (line, character) = offset_to_position(requested?, offset);
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "position": { "line": line, "character": character },
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // FAIL CLOSED: never fabricate a `(0, byte-offset)` position for
+                // the engine (see `get_hover`).
+                tracing::warn!(
+                    "TSGO get_document_highlights: no delivered or disk content for {path_owned} — \
+                     failing closed instead of fabricating a position"
+                );
+                return Ok(Vec::new());
+            };
 
             let items = result.as_array().cloned().unwrap_or_default();
             // One index for the whole highlight batch — every highlight converts
-            // two endpoints against this same content snapshot.
-            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
-            Ok(items
+            // two endpoints against the bytes the request was converted against.
+            let index = query
+                .requested()
+                .map(|content| SourceIndex::new_utf16(content));
+            let highlights = items
                 .iter()
                 .filter_map(|item| parse_document_highlight(item, index.as_ref()))
-                .collect())
+                .collect();
+            transport.ledger.settle(&query, [])?;
+            Ok(highlights)
         })
     }
 
@@ -3997,40 +4150,42 @@ impl TypeProvider for TsgoTypeProvider {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (start_line, start_char, end_line, end_char, content_snapshot) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => {
-                        let index = SourceIndex::new_utf16(c);
+            let Some((query, result)) = transport
+                .request_query(
+                    "textDocument/inlayHint",
+                    &contents_key(&path_owned),
+                    |requested| {
+                        let index = SourceIndex::new_utf16(requested?);
                         let (sl, sc) = clamped_offset_to_position(&index, start_offset);
                         let (el, ec) = clamped_offset_to_position(&index, end_offset);
-                        (sl, sc, el, ec, Some(c.clone()))
-                    }
-                    None => (0, start_offset, 0, end_offset, None),
-                }
-            };
-            let result = transport
-                .request(
-                    "textDocument/inlayHint",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "range": {
-                            "start": { "line": start_line, "character": start_char },
-                            "end": { "line": end_line, "character": end_char },
-                        },
-                    }),
+                        Some(serde_json::json!({
+                            "textDocument": { "uri": uri },
+                            "range": {
+                                "start": { "line": sl, "character": sc },
+                                "end": { "line": el, "character": ec },
+                            },
+                        }))
+                    },
+                    ProviderPriority::Interactive,
                 )
-                .await?;
+                .await?
+            else {
+                // No bytes to place the range in: never a fabricated position.
+                return Ok(vec![]);
+            };
 
             let items = result.as_array().cloned().unwrap_or_default();
-            // One index for the whole hint batch.
-            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
-            Ok(items
+            // One index for the whole hint batch, over the requested bytes.
+            let index = query
+                .requested()
+                .map(|content| SourceIndex::new_utf16(content));
+            let hints = items
                 .iter()
                 .filter_map(|item| parse_inlay_hint(item, index.as_ref()))
-                .collect())
+                .collect();
+            transport.ledger.settle(&query, [])?;
+            Ok(hints)
         })
     }
 
@@ -4041,7 +4196,6 @@ impl TypeProvider for TsgoTypeProvider {
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         let uri = Self::path_to_uri(path);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let path_owned = path.to_string();
         Box::pin(async move {
             // TSGO resolves through the upstream-LSP handle. A non-LSP resolve
@@ -4060,9 +4214,20 @@ impl TypeProvider for TsgoTypeProvider {
                 "textDocument": { "uri": uri },
             });
 
-            let result = transport
-                .request("completionItem/resolve", resolve_item)
-                .await?;
+            // The resolve names no position, but its edits are lines and
+            // characters in the bytes the engine held when it answered, so it is
+            // bound at its own frame's position like any positional query.
+            let Some((query, result)) = transport
+                .request_query(
+                    "completionItem/resolve",
+                    &contents_key(&path_owned),
+                    |_| Some(resolve_item),
+                    ProviderPriority::Interactive,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
 
             // Parse additionalTextEdits from the response. Edits may be absent —
             // a resolve can still enrich the item with detail/documentation/
@@ -4075,17 +4240,15 @@ impl TypeProvider for TsgoTypeProvider {
                 .cloned()
                 .unwrap_or_default();
 
-            let content_snapshot = {
-                let cache = contents_cache.lock().await;
-                cache.get(&contents_key(&path_owned)).cloned()
-            };
-
             // One index for every edit this resolve carries.
-            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
+            let index = query
+                .requested()
+                .map(|content| SourceIndex::new_utf16(content));
             let additional_text_edits: Vec<ResolvedTextEdit> = edits
                 .iter()
                 .filter_map(|edit| parse_additional_text_edit(edit, index.as_ref()))
                 .collect();
+            transport.ledger.settle(&query, [])?;
 
             // The resolve response may also carry the lazy detail/documentation
             // and a refined `labelDetails` (a STANDARD resolve property we
@@ -5248,3 +5411,7 @@ mod dto_path_canonicalization_tests {
 #[cfg(test)]
 #[path = "ipc_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "query_coordinates_tests.rs"]
+mod query_coordinates_tests;

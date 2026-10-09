@@ -322,21 +322,52 @@ the same provider and epoch, without repeating provider writes. Before carrier
 activation and installation, all replay admissions are refreshed in one bounded
 pass. The final checkpoint requires unchanged membership and the exact replay
 incarnation; a later refresh's content-only edit cannot reject installation.
-Live writes and queries still require a current full-basis witness, so replay
-does not warm an earlier content binding. Changed membership fails installation.
+Live writes still require a current full-basis witness, so replay does not warm
+an earlier content binding. Changed membership fails installation.
 Managed non-close mutations whose caller deadline elapses return the typed
 `DeadlineElapsed` refusal; work still queued before application is discarded.
 Closes and mutations without a generated-unit resolver retain ordered queued
 delivery after the caller stops waiting.
-The tsserver router is the issuer that answers a basis drift with a fresh
-admission, bounded to two re-issues per operation: a query whose route expired
-`StaleBasis` while the engine answered discards that answer and is re-run under
-a fresh binding (`routed_query!`), and a generated-unit admission whose basis
-moved between the publication read and the hub binding is re-admitted before
-anything reaches the engine (`admit_current_unit`). A refusal on an unmoved
-basis, a withdrawn owner, or a spent budget is returned unchanged; a write the
-actor refused AFTER admission is not re-forwarded by the router and stays with
-the carrier sync's own retry.
+Read-only queries bind only what their answer depends on and are never
+re-issued. The router mints a query route through `ProviderHub::bind_query` /
+`admit_query`, which fence the serving incarnation (hub, epoch, provider) and
+the membership inputs (publication identity + project generation) — never the
+workspace content generation and never the warm write-binding memo — and
+`check_query` / `check_query_admission` settle the answer on the same terms.
+An unrelated document's edit while the engine answers is therefore served by
+that one engine call; a replaced engine (`StaleProvider`), moved membership or
+withdrawn owner (`StaleBasis`) refuse with their own reasons. The engine
+adapters bind the answer's coordinates (query-bound provider coordinates below).
+The tsserver router is the issuer that answers a WRITE's basis drift with a
+fresh admission (`WRITE_DRIFT_REISSUES` immediate re-issues, then
+`WRITE_DRIFT_BACKOFF`): a generated-unit admission whose basis moved between
+the publication read and the hub binding is re-admitted before anything
+reaches the engine (`admit_current_unit`), and a carrier write the hub refused
+on a drifted basis is re-applied (`settle_under_fresh_admission`,
+`rearm_admitted_state`) because nothing else re-drives it. A refusal on an
+unmoved basis, a withdrawn owner, or a spent budget is returned unchanged.
+**Query-bound provider coordinates.** Every tsserver and tsgo positional query converts its request offset and
+decodes every response range from one `verter_type_runtime::provider_query::
+ProviderQuery` capability, never from a second read of a live content cache.
+Each engine incarnation's transport owns a `DeliveryLedger`: the bytes the
+engine holds, recorded at the wire position of the frame that delivered them
+(tsserver records under the same lock that places the frame on its single
+FIFO stdin; tsgo's stdin writer, which alone orders its priority lanes,
+records a document frame as it places it). A query binds at its own frame's
+position: tsserver converts the request under that lock; tsgo converts first
+and the writer refuses the frame with the typed `ProviderQueryConflict`
+(`TypeProviderError::query_conflict`) if a delivery of the requested file was
+placed in between. The capability retains the requested bytes and an O(1)
+persistent snapshot of every delivered file, so a definition/references/rename
+target decodes through its own bytes as the request met them; an undelivered
+target falls back to its disk bytes, as the engine reads it. Bytes an engine
+reads out of band — the tsserver plugin's carrier store, a `load_file` on
+either adapter (a non-owning tsgo attach's relay-injected carriers) — carry no
+wire position: a query that decoded through one re-checks that entry's stamp
+after the answer (`DeliveryLedger::settle`) and returns the typed conflict if
+it was republished. An out-of-band record never displaces a protocol buffer,
+and identical bytes keep their stamp. A query on a file with neither delivered
+nor disk bytes sends nothing (no fabricated position).
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
 before receiving them, and the install announces exactly what it dropped

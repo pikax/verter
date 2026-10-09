@@ -952,12 +952,12 @@ fn hover_calls(provider: &MockTypeProvider) -> usize {
         .count()
 }
 
-/// A query whose basis drifts while the engine answers is settled under a
-/// FRESH admission, never on the drifted one: an unrelated document's edit
-/// re-issues the query and serves the engine's answer, while a drift that
-/// withdraws ownership still refuses without a second engine call.
+/// A read query binds the serving engine and the project membership, never
+/// the workspace content generation: an unrelated document's edit landing
+/// while the engine answers is answered by that ONE engine call, while a drift
+/// that withdraws ownership still refuses — also without a second call.
 #[tokio::test]
-async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
+async fn query_racing_an_unrelated_edit_is_answered_by_one_engine_call() {
     let BatchRouterFixture {
         _temp,
         router,
@@ -966,8 +966,6 @@ async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
         members,
     } = batch_router_fixture().await;
     router.activate_carrier_members(&members).await.unwrap();
-    // The drift callbacks below need the router while it is serving a query.
-    let router = Arc::new(router);
     let companion = members[0].companion_path.clone();
     providers[0].set_hover(
         &companion,
@@ -985,18 +983,12 @@ async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
     // An unrelated document changes while the engine answers.
     let injecting = Arc::clone(&workspace);
     let unrelated = format!("{}.unrelated.ts", members[2].source_path);
-    let drifting = Arc::clone(&router);
+    let host = Arc::clone(&router.host);
+    let before = ResolvedPublication::current(&host).unwrap();
     providers[0].set_on_query(
         &companion,
         Box::new(move || {
             injecting.inject_file(unrelated, Arc::from("export {};"));
-            // Engine discovery is substituted in this fixture: carry the
-            // pre-resolved engines over to the drifted basis, as a real
-            // install's re-resolution would.
-            let drifted = ResolvedPublication::current(&drifting.host).unwrap();
-            for mut spec in drifting.engine_specs.iter_mut() {
-                spec.basis = drifted.clone();
-            }
         }),
     );
     let hover = router
@@ -1007,10 +999,17 @@ async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
         hover.map(|info| info.contents).as_deref(),
         Some("const answer: number")
     );
+    assert_ne!(
+        ResolvedPublication::current(&host)
+            .unwrap()
+            .content_generation,
+        before.content_generation,
+        "the unrelated edit really advanced the workspace content generation"
+    );
     assert_eq!(
         hover_calls(&providers[0]),
-        2,
-        "the drifted answer is discarded and the query re-issued once"
+        1,
+        "an unrelated edit neither discards the answer nor re-issues the query"
     );
 
     // Ownership is withdrawn while the engine answers.
@@ -1036,7 +1035,7 @@ async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
     assert_eq!(
         hover_calls(&providers[0]),
         1,
-        "a refused re-admission must not reach the engine again"
+        "a withdrawn owner refuses the answer without a second engine call"
     );
 }
 

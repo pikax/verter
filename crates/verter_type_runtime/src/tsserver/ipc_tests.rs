@@ -713,6 +713,7 @@ async fn tsserver_shutdown_completes_within_timeout() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1223,6 +1224,7 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1300,6 +1302,7 @@ async fn run_update_file_capture(
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -1474,6 +1477,7 @@ async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_j
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     });
 
     let files: Vec<String> = companions
@@ -1545,6 +1549,7 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     });
     let refresh = Arc::new(TsserverCarrierRefresh::default());
     schedule_carrier_refresh(
@@ -1789,14 +1794,14 @@ async fn diagnostic_pull_requires_success_from_every_category_even_with_cached_c
         let transport = Arc::new(test_transport(stdin_tx));
         let generation = AtomicU64::new(0);
         let file = "/proj/src/control.ts".to_string();
+        transport.ledger.record_out_of_band([SurfaceEffect::deliver(
+            file.clone(),
+            Arc::from("export {};"),
+        )]);
         let query = DiagnosticsQuery {
             file: file.clone(),
             diagnostic_file: file.clone(),
             transport: Arc::clone(&transport),
-            contents_cache: Arc::new(Mutex::new(HashMap::from([(
-                file.clone(),
-                Arc::from("export {};"),
-            )]))),
             carrier_companions: Default::default(),
             normalize_response_paths: false,
             active_sources: Default::default(),
@@ -2231,6 +2236,7 @@ async fn run_resync_capture(
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -2378,6 +2384,7 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     };
 
     let file = "/project/src/App.vue.tsx";
@@ -2428,6 +2435,7 @@ async fn carrier_activation_rolls_back_when_transient_bootstrap_cannot_be_sent()
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     let active = Arc::new(parking_lot::RwLock::new(BTreeSet::new()));
     let projects = Arc::new(parking_lot::RwLock::new(HashMap::new()));
@@ -2472,6 +2480,7 @@ async fn duplicate_carrier_activation_is_a_control_plane_noop() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     let file = "/project/src/App.svelte".to_string();
     let active = Arc::new(parking_lot::RwLock::new(BTreeSet::from([file.clone()])));
@@ -2555,6 +2564,7 @@ async fn carrier_activation_bootstraps_then_retains_the_authored_source() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     let file = "/project/src/App.svelte".to_string();
     let companion = "/project/src/App.svelte.__verter.tsx".to_string();
@@ -3427,6 +3437,7 @@ fn resync_harness() -> ResyncHarness {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     ResyncHarness {
         transport,
@@ -3631,6 +3642,7 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     };
 
     let opened_files: Mutex<HashMap<String, OpenKind>> = Mutex::new(HashMap::new());
@@ -3765,6 +3777,7 @@ fn storm_harness_with_crash_notify(crash_notify: Arc<Notify>) -> StormHarness {
         crash_notify: Some(Arc::clone(&crash_notify)),
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     StormHarness {
         transport,
@@ -4369,6 +4382,7 @@ fn test_transport(stdin_tx: mpsc::Sender<TsserverStdinMessage>) -> TsserverTrans
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     }
 }
 
@@ -4385,6 +4399,7 @@ fn test_transport_with_notify(
         crash_notify: Some(crash_notify),
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     }
 }
 

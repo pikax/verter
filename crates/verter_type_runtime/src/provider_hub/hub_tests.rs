@@ -6140,3 +6140,123 @@ async fn cache_only_loads_remain_held_during_forward_and_replay() {
     );
     hub.shutdown().await.unwrap();
 }
+
+/// A read-only query binds the serving incarnation and the project membership
+/// it was admitted under — never the workspace content generation. An
+/// unrelated document's edit leaves it current (and its generated-unit proof
+/// reused), while a membership change or a replaced engine still refuses it
+/// with its own distinct reason. A write witness under the same drift stays
+/// fenced exactly as before.
+#[tokio::test]
+async fn read_query_admission_ignores_content_drift_but_not_membership_or_incarnation() {
+    use super::{AdmissionRefusal, ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+
+    let engine = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), MockProvider::new("tsgo")).await;
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let live = Arc::new(std::sync::Mutex::new(basis.clone()));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || Some(live.lock().unwrap().clone()))
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(source.into(), project.into(), Vec::new(), basis, reader);
+    let write_witness = harness.provider.bind_project(input.clone()).unwrap();
+    let query = harness.provider.bind_query(input.clone()).unwrap();
+    let resolutions = AtomicUsize::new(0);
+    let admit = |witness| {
+        harness
+            .provider
+            .admit_query(witness, std::slice::from_ref(&unit), || {
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                proof.clone()
+            })
+    };
+    let admitted = admit(&query).unwrap();
+
+    // An unrelated document's edit advances only the content generation.
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    assert!(harness.provider.check_query(&query).is_ok());
+    assert!(harness.provider.check_query_admission(&admitted).is_ok());
+    let rebound = harness
+        .provider
+        .bind_query(input.clone())
+        .expect("a query binds across content drift");
+    admit(&rebound).expect("and is admitted on the proof already decided");
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness.provider.check_project(&write_witness),
+        Err(AdmissionRefusal::StaleBasis),
+        "a write stays fenced on the whole basis"
+    );
+
+    // A republished project graph or a new project generation moves membership.
+    *live.lock().unwrap() = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot))),
+        2,
+        1,
+    );
+    assert_eq!(
+        harness.provider.check_query(&query),
+        Err(AdmissionRefusal::StaleBasis)
+    );
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 2, 2);
+    assert_eq!(
+        harness.provider.check_query_admission(&admitted),
+        Err(AdmissionRefusal::StaleBasis)
+    );
+    assert!(harness.provider.bind_query(input.clone()).is_err());
+
+    // A replaced engine is a different incarnation.
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    assert!(harness.provider.check_query(&query).is_ok());
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert_eq!(
+        harness.provider.check_query(&query),
+        Err(AdmissionRefusal::StaleProvider)
+    );
+    assert!(
+        engine.calls().is_empty(),
+        "admission never reaches the engine"
+    );
+}
