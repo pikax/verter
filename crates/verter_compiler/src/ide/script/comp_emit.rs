@@ -323,6 +323,8 @@ enum CompScope {
         iterable_expr: String,
         /// The iterator variable names (e.g. ["comp"] or ["comp", "index"]).
         binding_names: Vec<String>,
+        /// The alias list as authored (`item`, `item, index`, `{ a }, i`).
+        params_expr: String,
     },
 }
 
@@ -444,6 +446,11 @@ struct FlowChain {
     branches: Vec<FlowBranch>,
     /// Some branch holds a component function, directly or nested.
     live: bool,
+    /// Declarations of the `v-for` / `v-slot` bindings this chain's
+    /// conditions read that its parent region does not already declare.
+    scope_decls: String,
+    /// How many enclosing scopes are declared at this chain, its own included.
+    scope_len: usize,
 }
 
 struct FlowBranch {
@@ -462,14 +469,71 @@ enum FlowItem {
     Chain(usize),
 }
 
+/// Statements declaring the bindings `scope` introduces, typed the way the
+/// template frame types them. `index` keeps helper type names unique among the
+/// scopes of one flow function.
+fn scope_declaration(
+    index: usize,
+    scope: &CompScope,
+    prop_names: &rustc_hash::FxHashSet<&str>,
+) -> String {
+    match scope {
+        CompScope::VSlot {
+            parent_comp_offset,
+            slot_name,
+            params_expr,
+            ..
+        } if !params_expr.is_empty() => format!(
+            "\n  type __Parent{index} = ReturnType<typeof {PREFIX}Comp{parent_comp_offset}>;\
+             \n  type __SlotProps{index} = NonNullable<__Parent{index}['$slots']['{slot_name}']> extends (...args: infer A) => any ? A[0] : {{}};\
+             \n  const {params_expr} = {{}} as __SlotProps{index};"
+        ),
+        CompScope::VSlot { .. } => String::new(),
+        CompScope::VFor {
+            iterable_expr,
+            params_expr,
+            ..
+        } => {
+            let iterable = resolve_all_prop_refs_in_expr(iterable_expr, prop_names);
+            let helper = crate::ide::template::flow::each_helper(
+                crate::ide::template::directives::alias_arity(params_expr),
+            );
+            let pattern = if crate::ide::template::directives::alias_arity(params_expr) > 1 {
+                format!("[{params_expr}]")
+            } else {
+                params_expr.clone()
+            };
+            format!("\n  const {pattern} = {helper}(({iterable}));")
+        }
+    }
+}
+
 impl ComponentFlow {
     /// Open a chain inside `parent` (or at the top level).
-    fn open_chain(&mut self, parent: Option<FlowRegionRef>) -> usize {
+    ///
+    /// `scopes` are the template scopes enclosing the chain; those the parent
+    /// region does not already declare are declared ahead of its first
+    /// condition, since conditions evaluate in the flow function's own scope.
+    fn open_chain(
+        &mut self,
+        parent: Option<FlowRegionRef>,
+        scopes: &[CompScope],
+        prop_names: &rustc_hash::FxHashSet<&str>,
+    ) -> usize {
         let chain = self.chains.len();
+        let inherited = parent.map_or(0, |parent| self.chains[parent.chain].scope_len);
+        let scope_decls = scopes
+            .iter()
+            .enumerate()
+            .skip(inherited)
+            .map(|(index, scope)| scope_declaration(index, scope, prop_names))
+            .collect();
         self.chains.push(FlowChain {
             parent,
             branches: Vec::new(),
             live: false,
+            scope_decls,
+            scope_len: scopes.len(),
         });
         if let Some(parent) = parent {
             self.chains[parent.chain].branches[parent.branch]
@@ -591,6 +655,7 @@ impl ComponentFlow {
     /// and returns its record.
     fn write_chain(&self, buf: &mut String, chain: usize) {
         use std::fmt::Write;
+        buf.push_str(&self.chains[chain].scope_decls);
         let mut exhaustive = false;
         for (index, branch) in self.chains[chain].branches.iter().enumerate() {
             match (&branch.test, index) {
@@ -678,7 +743,7 @@ fn walk_children_for_comp(
                     let flow_chain = match continued {
                         Some(flow_chain) => flow_chain,
                         None => {
-                            let flow_chain = flow.open_chain(region);
+                            let flow_chain = flow.open_chain(region, comp_scopes, prop_names);
                             if let Some(chain) = authored {
                                 opened.insert(chain, flow_chain);
                             }
@@ -766,6 +831,7 @@ fn walk_children_for_comp(
                         new_comp_scopes.push(CompScope::VFor {
                             iterable_expr: iterable.to_string(),
                             binding_names,
+                            params_expr: params.to_string(),
                         });
                     }
                 }

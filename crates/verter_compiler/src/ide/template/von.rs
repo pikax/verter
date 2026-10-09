@@ -273,16 +273,48 @@ pub(super) fn process_v_on<'alloc>(
                     },
                 );
             };
+            // A callback under a condition re-narrows its outer references from
+            // their snapshots. The value is relocated, so the guard is spliced
+            // into the emitted plan at the same body offsets an in-place handler
+            // prepends at.
+            let parsed = oxc_prop.and_then(|p| p.exp.as_ref());
+            let guard = if is_fn_or_arrow {
+                parsed.and_then(|exp| {
+                    let expression = exp.expression.as_ref()?;
+                    flow.callback_guard(source, exp, CallbackSource::Function(expression), resolver)
+                })
+            } else if is_simple_ident || is_member_expr {
+                None
+            } else {
+                parsed.and_then(|exp| {
+                    let body = HandlerBody::of(exp)?;
+                    flow.callback_guard(
+                        source,
+                        exp,
+                        CallbackSource::Handler {
+                            body,
+                            body_start: tvs,
+                            event: has_event_param,
+                        },
+                        resolver,
+                    )
+                })
+            };
             let value = |out: &mut CodeGenOutput<'alloc>| {
-                emit_relocated_value(
-                    out,
-                    at,
+                let mut plan = plan_user_expr(
                     source,
                     value_range,
                     value_bindings,
                     resolver,
                     ExprOptions::default(),
                 );
+                if let Some(guard) = &guard {
+                    if let Some((close_at, close)) = guard.close {
+                        plan.splice_synthetic_at(close_at, close.to_string());
+                    }
+                    plan.splice_synthetic_at(guard.source_offset, guard.text.clone());
+                }
+                emit_expr_plan(out, &plan, Placement::Relocated { at }, source);
             };
             // The spread object's string key is the JSX event name (`"onKeyDown"`,
             // `"onMy-custom-event"`). The event NAME is a navigable semantic anchor

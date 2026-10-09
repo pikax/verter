@@ -268,6 +268,63 @@ fn v_bind_function_expr_gets_block_guard() {
 }
 
 #[test]
+fn v_if_guards_relocated_spread_event_handlers() {
+    // A hyphenated event spreads its handler, relocating the value. Each
+    // callback form is still re-narrowed from the snapshot under `v-if`.
+    let guard = "if (!___VERTER___flowNarrow(handle, ___VERTER___o0) || ___VERTER___flowExcluded(___VERTER___o0)(handle)) throw 0;";
+    let bindings = [
+        ("ok", BindingType::SetupConst),
+        ("handle", BindingType::SetupConst),
+        ("LocalComp", BindingType::SetupConst),
+    ];
+
+    let inline = gen_tsx_template_with_bindings(
+        r#"<template><LocalComp v-if="ok" @my-event="handle()"/></template>"#,
+        &bindings,
+    );
+    assert!(
+        inline.contains(&format!("\"onMy-event\": () => {{{guard} handle()}}")),
+        "inline spread handler must open with the guard: {inline}"
+    );
+
+    let event_param = gen_tsx_template_with_bindings(
+        r#"<template><LocalComp v-if="ok" @my-event="handle($event)"/></template>"#,
+        &bindings,
+    );
+    assert!(
+        event_param.contains(&format!("{guard} handle($event)")),
+        "`$event` spread handler must open with the guard: {event_param}"
+    );
+
+    let arrow_expr = gen_tsx_template_with_bindings(
+        r#"<template><LocalComp v-if="ok" @my-event="() => handle()"/></template>"#,
+        &bindings,
+    );
+    assert!(
+        arrow_expr.contains(&format!("() => {{ {guard} return handle(); }}) satisfies")),
+        "arrow-expression spread handler must become a guarded block: {arrow_expr}"
+    );
+
+    let arrow_block = gen_tsx_template_with_bindings(
+        r#"<template><LocalComp v-if="ok" @my-event="() => { handle() }"/></template>"#,
+        &bindings,
+    );
+    assert!(
+        arrow_block.contains(&format!("=> {{{guard}  handle() }}) satisfies")),
+        "arrow-block spread handler must open with the guard: {arrow_block}"
+    );
+
+    let unconditional = gen_tsx_template_with_bindings(
+        r#"<template><LocalComp @my-event="handle()"/></template>"#,
+        &bindings,
+    );
+    assert!(
+        !unconditional.contains("throw 0"),
+        "no condition, no guard: {unconditional}"
+    );
+}
+
+#[test]
 fn v_if_guarded_function_value_tsx_is_byte_equivalent() {
     // The re-narrowing guard of a function-typed value prop, per callback shape.
     // The authored function stays in place; only the guard (and, for an

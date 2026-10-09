@@ -211,21 +211,27 @@ fn v_for_of_variant() {
         "v-for 'of' separator must not appear in output, got: {}",
         result
     );
-    // Simple identifier iterable should get type annotation
+    // The alias is typed by the frame helper, never by an indexed access.
     assert!(
-        result.contains(": (typeof items)[number]"),
-        "single param with simple iterable should get type annotation, got: {}",
+        !result.contains("[number]"),
+        "alias must not carry an indexed-access annotation, got: {}",
         result
     );
 }
 
 #[test]
-fn v_for_simple_param_has_type_annotation() {
-    let result =
-        gen_tsx_template(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+fn v_for_simple_param_is_typed_by_frame_helper_not_indexed_access() {
+    // `v-for="n in count"` (number) / Map / Set / nullable sources have no
+    // numeric index; an indexed-access annotation would be a false diagnostic.
+    let result = gen_tsx_template(r#"<template><div v-for="n in count">{{ n }}</div></template>"#);
     assert!(
-        result.contains(": (typeof items)[number]"),
-        "single param with simple iterable should get type annotation, got: {}",
+        result.contains("const n = ___VERTER___flowEach1(___VERTER___v0);"),
+        "alias must be typed only by flowEach1, got: {}",
+        result
+    );
+    assert!(
+        !result.contains("[number]"),
+        "no indexed-access annotation on the alias, got: {}",
         result
     );
 }

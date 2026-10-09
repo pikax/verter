@@ -123,7 +123,6 @@ pub fn emit_v_for_open<'alloc>(
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
-    is_jsx: bool,
     bare: bool,
     source_name: &str,
 ) -> bool {
@@ -175,20 +174,6 @@ pub fn emit_v_for_open<'alloc>(
         out.prepend_ordered_unmapped(target_pos, "]");
     }
 
-    // Type annotation for a single identifier alias of a (different) simple
-    // identifier iterable, to preserve named types in hover. TSX only
-    // (annotations are invalid in JS).
-    if !is_jsx
-        && is_simple_identifier(params_trimmed)
-        && is_simple_identifier(iterable_trimmed)
-        && params_trimmed != iterable_trimmed
-    {
-        out.prepend_ordered_unmapped(
-            target_pos,
-            &format!(": (typeof {iterable_trimmed})[number]"),
-        );
-    }
-
     out.prepend_ordered_unmapped(
         target_pos,
         &format!(" = {}({source_name});", super::flow::each_helper(arity)),
@@ -196,21 +181,12 @@ pub fn emit_v_for_open<'alloc>(
     true
 }
 
-fn is_simple_identifier(text: &str) -> bool {
-    text.chars()
-        .next()
-        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
-        && text
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-}
-
 /// Opens the body of a `v-for` frame after its declarations.
 pub const V_FOR_BODY_OPEN: &str = " return (";
 
 /// Number of top-level aliases in a `v-for` alias list (`item`, `item, index`,
 /// `{ a, b }, index`).
-fn alias_arity(aliases: &str) -> usize {
+pub(crate) fn alias_arity(aliases: &str) -> usize {
     let mut depth = 0i32;
     let mut arity = 1;
     for byte in aliases.bytes() {

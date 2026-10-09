@@ -1174,3 +1174,46 @@ fn define_props_type_content_is_source_mapped() {
         "type content should be in the Prettify wrapper: {output}"
     );
 }
+
+#[test]
+fn comp_flow_declares_enclosing_v_for_bindings_before_its_conditions() {
+    let source = r#"<script setup lang="ts">
+import Child from './Child.vue'
+const items = [{ ok: true }]
+</script>
+<template>
+  <div v-for="(item, index) in items">
+    <Child v-if="item.ok && index > 0" ref="el" />
+  </div>
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let chain = tag_offset(source, "Child");
+    assert!(
+        code.contains(&format!(
+            "function ___VERTER___Flow{chain}() {{\n  const [item, index] = ___VERTER___flowEach2((items));\n  if (item.ok && index > 0) {{"
+        )),
+        "the flow function declares the v-for aliases before the condition reads them, got:\n{code}"
+    );
+}
+
+#[test]
+fn comp_flow_declares_enclosing_v_slot_bindings_before_its_conditions() {
+    let source = r#"<script setup lang="ts">
+import Parent from './Parent.vue'
+import Child from './Child.vue'
+</script>
+<template>
+  <Parent v-slot="{ shown }">
+    <Child v-if="shown" ref="el" />
+  </Parent>
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let chain = tag_offset(source, "Child");
+    let parent = tag_offset(source, "Parent");
+    assert!(
+        code.contains(&format!(
+            "function ___VERTER___Flow{chain}() {{\n  type __Parent0 = ReturnType<typeof ___VERTER___Comp{parent}>;"
+        )) && code.contains("const { shown } = {} as __SlotProps0;\n  if (shown) {"),
+        "the flow function declares the v-slot bindings before the condition reads them, got:\n{code}"
+    );
+}

@@ -315,7 +315,6 @@ fn walk_element<'a, 'alloc>(
             ctx.source,
             ctx.out,
             ctx.resolver,
-            ctx.options.is_jsx,
             chain_mode == ChainMode::LiftedBranch,
             &ctx.flow.frame_source_name(),
         ) {
