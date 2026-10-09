@@ -1,0 +1,59 @@
+{
+  "id": "case-table.v1",
+  "schema": 1,
+  "contractNode": "ENC0",
+  "describesHead": {
+    "landingTitle": "fix(ci): retry marketplace extension installs in the VS Code E2E (#798)",
+    "date": "2026-10-09"
+  },
+  "implementer": {
+    "node": "ENC0T",
+    "successorPath": ["ENC0", "ENC0T"],
+    "home": "crates/verter_span/src/coord/*_tests.rs and coord/ doctests",
+    "note": "ENC0T turns each case into a compile_fail doctest or a table-driven test row. Cases marked boundaryOwner are specified here for the boundary owner's own corpus (ENCL0 subblock 5, ENCF0 subblock 6, EMB0I) and are not ENC0T acceptance."
+  },
+  "errorVocabulary": {
+    "InvalidBoundary": "The offset or range is outside the domain's extent, or a range is inverted. Never normalised.",
+    "Overflow": "Checked arithmetic left the integer width (overflow or underflow). Never saturated or wrapped.",
+    "NotCharBoundary": "The offset lands inside a UTF-8 sequence, or a requester offset lands inside a surrogate pair. Never snapped to the nearest boundary."
+  },
+  "rules": {
+    "noClamp": "Every failure below is a typed error. No case is satisfied by clamping, saturating, snapping to a character start or to the nearest token.",
+    "wireDefined": "A behaviour a wire contract itself defines (LSP 3.17 character past line length) is applied only by the boundary adapter, for read-only queries, and is recorded as that wire's rule. Internal arithmetic never inherits it."
+  },
+  "cases": [
+    { "id": "K01", "group": "domain-mixing", "acceptance": "ENC0T-AC1", "case": "Adding, subtracting or comparing a SourceByteOffset with a GeneratedByteOffset or EmbeddedByteOffset", "expected": "does not compile" },
+    { "id": "K02", "group": "domain-mixing", "acceptance": "ENC0T-AC1", "case": "Passing a SourceByteOffset/Range where a GeneratedByteOffset/Range or EmbeddedByteOffset/Range is expected, and every other cross-domain pair", "expected": "does not compile" },
+    { "id": "K03", "group": "domain-mixing", "acceptance": "ENC0T-AC1", "case": "Implicit conversion from u32/usize (From, Into, Deref, Add<u32>, `as`-style coercion) into any domain type", "expected": "does not compile; only the explicit named constructor accepts a raw integer" },
+
+    { "id": "K04", "group": "checked-arithmetic", "acceptance": "ENC0T-AC2", "case": "offset + length where the sum exceeds u32::MAX", "expected": "Overflow" },
+    { "id": "K05", "group": "checked-arithmetic", "acceptance": "ENC0T-AC2", "case": "Rebasing an offset below its base (offset - base with base > offset)", "expected": "Overflow" },
+    { "id": "K06", "group": "checked-arithmetic", "acceptance": "ENC0T-AC2", "case": "Constructing a range with end < start", "expected": "InvalidBoundary; the range is not swapped or emptied" },
+    { "id": "K07", "group": "checked-arithmetic", "acceptance": "ENC0T-AC2", "case": "Empty range start == end, including at offset 0 and at end-of-file", "expected": "valid; len() == 0 without saturating subtraction" },
+    { "id": "K08", "group": "checked-arithmetic", "acceptance": "ENC0T-AC2", "case": "Relative-to-absolute rebase whose base + offset exceeds u32::MAX", "expected": "Overflow" },
+
+    { "id": "K09", "group": "boundary", "acceptance": "ENC0T-AC2", "case": "Offset equal to the content length (end-of-file)", "expected": "valid" },
+    { "id": "K10", "group": "boundary", "acceptance": "ENC0T-AC2", "case": "Offset greater than the content length", "expected": "InvalidBoundary; not clamped to end-of-file" },
+    { "id": "K11", "group": "boundary", "acceptance": "ENC0T-AC2", "case": "Offset inside a 2-byte (U+00E9), 3-byte (U+2014) and 4-byte (U+1F600) UTF-8 sequence", "expected": "NotCharBoundary for each interior byte; not snapped to the sequence start" },
+    { "id": "K12", "group": "boundary", "acceptance": "ENC0T-AC2", "case": "Empty content", "expected": "offset 0 valid; offset 1 InvalidBoundary" },
+
+    { "id": "K13", "group": "line-terminators", "acceptance": "ENC0T-AC2", "case": "\"a\\r\\nb\": \\r\\n is one terminator", "expected": "LSP and TypeScript rules both put b on line 1, column 0" },
+    { "id": "K14", "group": "line-terminators", "acceptance": "ENC0T-AC2", "case": "Byte offset between \\r and \\n of a \\r\\n pair converted to line/column", "expected": "a valid byte offset in the source domain, but it lies inside a two-byte terminator and has no line/column position: conversion to a line/column form returns InvalidBoundary instead of reporting a column past the line end or a position on the next line" },
+    { "id": "K15", "group": "line-terminators", "acceptance": "ENC0T-AC2", "case": "Lone \\r (\"a\\rb\")", "expected": "LSP 3.17 and TypeScript rules both start a new line after \\r; b is line 1, column 0", "boundaryOwner": "ENCL0", "note": "LI1 (verter_type_runtime::codec) breaks only at \\n at the described head" },
+    { "id": "K16", "group": "line-terminators", "acceptance": "ENC0T-AC2", "case": "U+2028 and U+2029 in the content", "expected": "TypeScript rule: a new line starts after each; LSP 3.17 rule: no new line. The same byte offset converts to different line/column pairs under the two rules, and converting between the two forms goes through the byte offset, never line/column directly", "boundaryOwner": "ENCT0" },
+    { "id": "K17", "group": "line-terminators", "acceptance": "ENC0T-AC2", "case": "Content ending with a terminator", "expected": "line count = terminators + 1; (last line, 0) is valid and equals end-of-file" },
+    { "id": "K18", "group": "line-terminators", "acceptance": "ENC0T-AC2", "case": "One file mixing \\n, \\r\\n and lone \\r", "expected": "each terminator counted once by its rule; round trip byte -> line/column -> byte is exact for every scalar boundary" },
+
+    { "id": "K19", "group": "unicode", "acceptance": "ENC0T-AC2", "case": "Astral scalar U+1F600 before the position", "expected": "UTF-8 width 4, UTF-16 width 2, UTF-32 width 1; round trips exact in all three" },
+    { "id": "K20", "group": "unicode", "acceptance": "ENC0T-AC2", "case": "Requester UTF-16 offset or column landing between the two units of a surrogate pair", "expected": "NotCharBoundary at ingress for edits and checked paths", "boundaryOwner": "ENCL0, ENCF0", "note": "The accepted TypeScript wire index (LI2) resolves an in-pair offset to the pair start by design; ENCT0 verifies that behaviour instead of migrating it" },
+    { "id": "K21", "group": "unicode", "acceptance": "ENC0T-AC2", "case": "Combining sequence e + U+0301", "expected": "the offset between base and mark is a valid scalar boundary; columns count code units, not graphemes" },
+    { "id": "K22", "group": "unicode", "acceptance": "ENC0T-AC2", "case": "ZWJ sequence (U+1F468 U+200D U+1F469 U+200D U+1F467)", "expected": "every scalar boundary valid; widths are the sum of the scalars' widths per encoding" },
+    { "id": "K23", "group": "unicode", "acceptance": "ENC0T-AC2", "case": "Leading byte-order mark U+FEFF", "expected": "counted as content (3 bytes, 1 UTF-16 unit) in every domain; a layer that strips it re-bases through a declared offset, never silently" },
+    { "id": "K24", "group": "unicode", "acceptance": "ENC0T-AC2", "case": "Generated source containing non-ASCII authored identifiers and string literals", "expected": "byte and UTF-16 positions differ and both convert exactly; no ASCII assumption" },
+    { "id": "K25", "group": "unicode", "acceptance": "ENC0T-AC2", "case": "A lone surrogate arriving from a JavaScript string (NAPI/WASM text, cooked template literal)", "expected": "has no UTF-8 position; ingress returns a typed failure (for cooked literals, EMB0's NonUnicodeCookedLiteral partiality) before any offset is minted", "boundaryOwner": "ENCF0, EMB0I" },
+
+    { "id": "K26", "group": "baseline-cost", "acceptance": "ENC0T-AC3", "case": "size_of and align_of every offset newtype versus u32, and every range versus two u32", "expected": "equal; types are #[repr(transparent)] over the existing width" },
+    { "id": "K27", "group": "baseline-cost", "acceptance": "ENC0T-AC3", "case": "A UTF-8-negotiated LSP session handling a position request", "expected": "allocates no conversion buffer (UAK0 Z05)", "boundaryOwner": "ENCL0", "confirmer": "PER0E" },
+    { "id": "K28", "group": "baseline-cost", "acceptance": "ENC0T-AC3", "case": "ASCII fast path versus the general path on the same input", "expected": "identical results on every offset of an ASCII and a non-ASCII corpus; the fast path is a differential, not an assumption" }
+  ]
+}
