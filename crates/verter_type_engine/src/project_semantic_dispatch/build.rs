@@ -7842,6 +7842,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// (`this.v`) reads a sibling this way; lowering the whole class body
     /// would lower the reading member's own body-derived return and
     /// re-enter it.
+    ///
+    /// The read follows the demanded name up the inheritance path one class
+    /// at a time, iteratively, however deep the chain: each base answers
+    /// through its own member position, applied to the arguments the
+    /// `extends` clause passes, and keeps the base as its declaring owner.
+    /// A base the selective route cannot serve (a value-only base, a merged
+    /// class) or one the path already followed (a circular chain) is read
+    /// through the previous class's `extends` arm whole.
     pub(super) fn class_member_source(
         &self,
         canonical: &str,
@@ -7850,31 +7858,52 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<SemanticNodeId> {
-        self.class_member_source_along(canonical, owner, class, args, name, &mut Vec::new())
+        let mut followed: FxHashSet<(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>)> =
+            FxHashSet::default();
+        let mut at: (
+            Arc<str>,
+            verter_type_expr::TopLevelOwnerId,
+            Arc<str>,
+            Vec<SemanticNodeId>,
+        ) = (Arc::from(canonical), owner, Arc::from(class), args.to_vec());
+        // The `extends` arm of the class last followed: what the read
+        // answers with when the next class cannot answer selectively.
+        let mut through: Option<SemanticNodeId> = None;
+        loop {
+            let (canonical, owner, class, args) = at;
+            if !followed.insert((canonical.clone(), owner, class.clone())) {
+                return through;
+            }
+            match self.class_member_step(&canonical, owner, &class, &args, name) {
+                None => return through,
+                Some(ClassMemberStep::Declared(node)) => return Some(node),
+                Some(ClassMemberStep::Inherited { heritage, base }) => {
+                    through = Some(heritage);
+                    let Some((base, base_args)) = base else {
+                        return through;
+                    };
+                    at = (
+                        base.canonical_id.clone(),
+                        base.owner,
+                        base.decl_name.clone(),
+                        base_args,
+                    );
+                }
+            }
+        }
     }
 
-    /// [`Self::class_member_source`] for one class of the inheritance path
-    /// a read follows; `path` holds the classes already followed, so a
-    /// circular `extends` chain stops instead of re-entering a class.
-    fn class_member_source_along(
+    /// One class of the inheritance path a [`Self::class_member_source`]
+    /// read follows: the class's own members named `name`, else its
+    /// `extends` arm and the class declaration that arm references.
+    fn class_member_step(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         class: &str,
         args: &[SemanticNodeId],
         name: &str,
-        path: &mut Vec<(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>)>,
-    ) -> Option<SemanticNodeId> {
-        if path.len() >= MAX_CLASS_MEMBER_INHERITANCE_DEPTH
-            || path.iter().any(|(seen_canonical, seen_owner, seen_class)| {
-                seen_canonical.as_ref() == canonical
-                    && *seen_owner == owner
-                    && seen_class.as_ref() == class
-            })
-        {
-            return None;
-        }
-        path.push((Arc::from(canonical), owner, Arc::from(class)));
+    ) -> Option<ClassMemberStep> {
         let prepared = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, class)?;
@@ -8001,9 +8030,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         if !own.is_empty() {
-            return Some(self.graph().intern_node_with_scope(
-                SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
-                scope,
+            return Some(ClassMemberStep::Declared(
+                self.graph().intern_node_with_scope(
+                    SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
+                    scope,
+                ),
             ));
         }
         // A class another module augments (`declare module "./c" {
@@ -8030,13 +8061,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
         );
         // A base that is itself a class declaration answers through its own
-        // member position, applied to the arguments the `extends` clause
-        // passes: the read follows the demanded name up the inheritance path
-        // one class at a time and never lowers a base's other members. The
-        // member keeps the base as its declaring owner (its scope and
-        // declaration origin). A base the selective route cannot serve (a
-        // value-only base, a merged class, a circular chain) is read through
-        // the `extends` arm whole, as before.
+        // member position; the caller follows it.
         let base = match self.graph().node_data(heritage).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => Some((identity.clone(), Vec::new())),
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
@@ -8044,17 +8069,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => None,
         };
-        let inherited = base.and_then(|(base, base_args)| {
-            self.class_member_source_along(
-                &base.canonical_id,
-                base.owner,
-                &base.decl_name,
-                &base_args,
-                name,
-                path,
-            )
-        });
-        Some(inherited.unwrap_or(heritage))
+        Some(ClassMemberStep::Inherited { heritage, base })
     }
 
     /// Whether another module's `declare module` block contributes to the
@@ -17530,11 +17545,20 @@ enum LibStep {
 /// already counted (998 further steps answer, 999 fail).
 const LIB_AWAITED_ENTRY_DEPTH: u32 = 2;
 
-/// How many classes one selective member read follows up an `extends`
-/// chain before reading the remaining base through its `extends` arm whole.
-/// The bound only caps the recursion's stack: a chain deeper than this still
-/// answers, through the whole-surface read of the class where it stopped.
-const MAX_CLASS_MEMBER_INHERITANCE_DEPTH: usize = 256;
+/// What one class of an inheritance path answers for a demanded member
+/// read.
+enum ClassMemberStep {
+    /// The class declares the member: an object of its own members of that
+    /// name.
+    Declared(SemanticNodeId),
+    /// The class does not declare it: its `extends` arm, and the class
+    /// declaration (with the clause's type arguments) that arm references,
+    /// when it references one.
+    Inherited {
+        heritage: SemanticNodeId,
+        base: Option<(crate::semantic_query::DeclIdentity, Vec<SemanticNodeId>)>,
+    },
+}
 
 /// The lib conditional's recursion on one evaluation path, counted the way
 /// the checker counts it.

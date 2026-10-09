@@ -1377,17 +1377,6 @@ impl FunctionProgramIndex {
             .unwrap_or_default()
     }
 
-    /// An identity of this file's capture summary, equal for two indexes
-    /// sharing it while either is alive, so a reader summing the summaries
-    /// it retains counts each once. `None` when the index serves no
-    /// function.
-    #[must_use]
-    pub fn capture_summary_identity(&self) -> Option<usize> {
-        self.entries
-            .first()
-            .map(|entry| entry.captures.summary_ptr() as usize)
-    }
-
     /// Test-support read of `entries`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn entries_for_test(&self) -> &Arc<[FunctionProgramEntry]> {
