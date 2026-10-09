@@ -1,5 +1,6 @@
 export * from "./components/index.js";
 export * from "./emits/index.js";
+export * from "./flow/index.js";
 export * from "./helpers/index.js";
 export * from "./instance/index.js";
 export * from "./loops/index.js";

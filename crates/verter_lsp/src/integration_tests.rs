@@ -3489,6 +3489,22 @@ fn verter_types_stub_covers_tsx_imports() {
         stub.contains("defineOptions_Box"),
         "stub must export defineOptions_Box"
     );
+
+    // Template condition re-narrowing and v-for frame helpers
+    for name in [
+        "flowNarrow",
+        "flowExcluded",
+        "flowBranch",
+        "flowEach1",
+        "flowEach2",
+        "flowEach3",
+    ] {
+        assert!(
+            stub.contains(&format!("export declare function {name}"))
+                || stub.contains(&format!("export declare const {name}")),
+            "stub must export {name}"
+        );
+    }
 }
 
 // ─── Hover with MockTypeProvider (regression test for TSGO integration) ───

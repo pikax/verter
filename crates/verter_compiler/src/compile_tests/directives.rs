@@ -671,14 +671,15 @@ fn tsx_v_for_with_index_and_destructure_params() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("map((item, index) => { return ("),
-        "v-for with (item, index) should preserve both params, got:\n{}",
+        tsx.code
+            .contains("{ const [item, index] = ___VERTER___flowEach2(___VERTER___v0);"),
+        "v-for with (item, index) should preserve both aliases, got:\n{}",
         tsx.code
     );
     assert!(
-        tsx.code.contains("map(({obj}, key, index) => { return (")
-            || tsx.code.contains("map(({ obj }, key, index) => { return ("),
-        "v-for with destructured value/key/index params should be preserved, got:\n{}",
+        tsx.code
+            .contains("{ const [{obj}, key, index] = ___VERTER___flowEach3(___VERTER___v1);"),
+        "v-for with destructured value/key/index aliases should be preserved, got:\n{}",
         tsx.code
     );
 }
@@ -691,8 +692,8 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> { return ("),
-        "template v-for should compile to map over item with statement body, got:\n{}",
+        tsx.code.contains("{ const item") && tsx.code.contains("); return ("),
+        "template v-for should compile to a frame over item with statement body, got:\n{}",
         tsx.code
     );
     assert!(
@@ -702,7 +703,7 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
         tsx.code
     );
     assert!(
-        tsx.code.contains("</>) })"),
+        tsx.code.contains("</>); } })()"),
         "template v-for branch should close with fragment + statement-body syntax, got:\n{}",
         tsx.code
     );
@@ -715,8 +716,8 @@ pub(super) fn tsx_v_for_with_v_if_combination_contains_condition_and_map() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> { return ("),
-        "v-for branch should still emit map expression with statement body when combined with v-if, got:\n{}",
+        tsx.code.contains("{ const item") && tsx.code.contains("); return ("),
+        "v-for branch should still emit a frame with statement body when combined with v-if, got:\n{}",
         tsx.code
     );
     assert!(
@@ -743,8 +744,8 @@ const items = [1]
         tsx.code
     );
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> { return ("),
-        "Child v-for under parent v-if should still emit map expression with statement body, got:\n{}",
+        tsx.code.contains("{ const item") && tsx.code.contains("); return ("),
+        "Child v-for under parent v-if should still emit a frame with statement body, got:\n{}",
         tsx.code
     );
 }
@@ -774,8 +775,8 @@ const items = [1]
         tsx.code
     );
     assert!(
-        tsx.code.contains(".map((item") && tsx.code.contains("=> { return (<Comp"),
-        "Component with v-for should keep Comp tag inside map statement body, got:\n{}",
+        tsx.code.contains("{ const item") && tsx.code.contains("); return (<Comp"),
+        "Component with v-for should keep Comp tag inside the frame statement body, got:\n{}",
         tsx.code
     );
 }
@@ -1089,8 +1090,8 @@ const props = defineProps<{ render: 'svg' | 'img' }>()
     // Verify the template IIFE region is valid JSX by extracting and parsing it.
     // (Full TSX validation is not possible here because the return object uses
     // `as unknown as typeof x` casts that OXC's parser rejects.)
-    let iife_start = tsx.code.find("{()=>{if(").expect("IIFE should exist");
-    let iife_end = tsx.code[iife_start..].find("}}}").expect("IIFE close") + iife_start + 3;
+    let iife_start = tsx.code.find("{(()=>{if(").expect("IIFE should exist");
+    let iife_end = tsx.code[iife_start..].find("}})()}").expect("IIFE close") + iife_start + 6;
     let iife_region = &tsx.code[iife_start..iife_end];
     // Wrap in a JSX expression context for parsing
     let wrapper = format!("const x = <>{}</>", iife_region);
