@@ -140,18 +140,35 @@ impl SemanticGraphStore {
     }
 
     /// Hash-cons memo lookup for
-    /// `evaluate_deferred_semantic_node_with_context`. Bumps
-    /// `evaluate_deferred_memo_hits` on hit,
+    /// `evaluate_deferred_semantic_node_with_context`: the evaluated node
+    /// and the receipt of the evaluation that produced it, which the reader
+    /// replays before using it. Bumps `evaluate_deferred_memo_hits` on hit,
     /// `evaluate_deferred_memo_misses` on miss.
     pub fn evaluate_deferred_memo_get(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
         let hit = self
             .evaluate_deferred_memo
             .get(&(node, context))
-            .map(|entry| *entry.value());
+            .map(|entry| {
+                let (read, receipt) = entry.value();
+                // A deferred evaluation is a pure function of interned
+                // nodes: it records no dependency facts, and only complete
+                // evaluations enter the memo.
+                crate::semantic_query::CacheRead {
+                    value: *read,
+                    dep_signature: super::empty_signature(),
+                    walker_diagnostics: std::sync::Arc::from([]),
+                    cache_suppress: false,
+                    result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    receipt: crate::semantic_query::ReadReceipt::Priced(std::sync::Arc::clone(
+                        receipt,
+                    )),
+                }
+            });
         if hit.is_some() {
             self.stats
                 .evaluate_deferred_memo_hits
@@ -173,7 +190,14 @@ impl SemanticGraphStore {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         result: SemanticNodeId,
+        receipt: std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     ) {
+        // The receipt lives as long as the entry: it is charged to the
+        // retention account like every retained receipt, and an entry the
+        // account declines is not kept.
+        if receipt.reserve_retention(self.retention_account()).is_err() {
+            return;
+        }
         let key = (node, context);
         match self.evaluate_deferred_memo.entry(key) {
             Entry::Occupied(_) => {
@@ -181,7 +205,7 @@ impl SemanticGraphStore {
                 // published. No FIFO bookkeeping required.
             }
             Entry::Vacant(slot) => {
-                slot.insert(result);
+                slot.insert((result, receipt));
                 let mut fifo = self.evaluate_deferred_memo_fifo.lock();
                 fifo.push_back(key);
                 while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {

@@ -1,5 +1,4 @@
-//! Request pins: the document source and published root a foreground request
-//! admits, and the provider surface its query maps through, are released when
+//! Request pins: the document source a foreground request admits, and the provider surface its query maps through, are released when
 //! the client cancels it, whether the request was just admitted or the
 //! provider already held its query, and a cancelled request leaves nothing
 //! behind that a later one waits on.
@@ -13,9 +12,8 @@ use super::super::test_support::RequestBarrier;
 use super::movement::Handles;
 use super::{reference_answer, Fixture, Outcome, Route};
 
-/// Strong owners of each pinnable input: `(provider surface, document source,
-/// published root)`.
-type PinCounts = (usize, usize, usize);
+/// Strong owners of each pinnable input: `(provider surface, document source)`.
+type PinCounts = (usize, usize);
 
 fn pin_counts(handles: &Handles) -> PinCounts {
     let surface = handles.current_surface();
@@ -25,18 +23,10 @@ fn pin_counts(handles: &Handles) -> PinCounts {
         .get(&handles.uri)
         .map(|document| Arc::clone(&document.source))
         .expect("the carrier is open");
-    let root = handles
-        .server
-        .documents
-        .host()
-        .workspace_read()
-        .published_root()
-        .expect("the fixture published a root");
     // Each count includes the one this function holds.
     (
         Arc::strong_count(&surface) - 1,
         Arc::strong_count(&source) - 1,
-        Arc::strong_count(&root) - 1,
     )
 }
 
@@ -79,11 +69,11 @@ async fn assert_cancellation_releases_pins(route: Route, barrier: RequestBarrier
     }
     assert!(reached.load(Ordering::SeqCst));
     let during = during.lock().expect("the barrier measured the pins");
-    // The admission pins the document source and the published root; a query
+    // The admission pins the document source; a query
     // the provider holds also pins the surface it maps through.
     let surface_pinned = barrier != RequestBarrier::ProviderDispatch || during.0 > before.0;
     assert!(
-        during.1 > before.1 && during.2 > before.2 && surface_pinned,
+        during.1 > before.1 && surface_pinned,
         "{route:?} at {barrier:?}: the suspended request pins its inputs \
          (before {before:?}, during {during:?})"
     );
@@ -164,7 +154,7 @@ async fn cancellation_after_an_engine_write_releases_pins_and_the_write_still_se
         pin_counts(&handles)
     };
     assert!(
-        during.1 > before.1 && during.2 > before.2,
+        during.1 > before.1,
         "the request suspended on its engine write pins its admitted inputs \
          (before {before:?}, during {during:?})"
     );
@@ -172,8 +162,8 @@ async fn cancellation_after_an_engine_write_releases_pins_and_the_write_still_se
     // admission pin is released with the request.
     let cancelled = pin_counts(&handles);
     assert!(
-        cancelled.2 < during.2,
-        "cancellation releases the request's published-root pin while the write is in flight \
+        cancelled.1 < during.1,
+        "cancellation releases the request's source pin while the write is in flight \
          (during {during:?}, after cancellation {cancelled:?})"
     );
 
@@ -195,12 +185,10 @@ async fn cancellation_after_an_engine_write_releases_pins_and_the_write_still_se
         "the cancelled request's write was settled, not abandoned and written again"
     );
     // The settled write records a surface over the edited source, which the
-    // store now retains; the published root, which only requests and their
-    // in-flight writes hold, is back to its unpinned count.
-    assert_eq!(
-        pin_counts(&handles).2,
-        before.2,
-        "nothing the cancelled request or its write held outlives the write's settlement"
+    // store now retains; the cancelled request itself holds nothing more.
+    assert!(
+        pin_counts(&handles).1 <= cancelled.1,
+        "nothing the cancelled request held outlives the write's settlement"
     );
 
     // A later request neither waits on the cancelled one nor answers from an

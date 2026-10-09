@@ -5094,10 +5094,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         ),
                         None,
                     );
-                } else if let Err(refusal) = build.tail.step(
-                    self.connected_demand.tail_steps_budget(),
-                    CheckerDiagnosticOperation::ConditionalTail,
-                ) {
+                } else if let Err(refusal) = self
+                    .connected_demand
+                    .tail_step(&mut build.tail, CheckerDiagnosticOperation::ConditionalTail)
+                {
                     // Verter's tail budget stopped the run, not a proof:
                     // whether it is reached depends on the budget, so
                     // neither the recovery nor anything built from it is
@@ -9770,8 +9770,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if type_parameters.is_empty() {
             return Some(signature);
         }
+        // One clause, one base substitution: the clause's base constraints
+        // are computed once and applied to every parameter and the return,
+        // never re-derived per position.
+        let substitution = self.clause_base_substitution(
+            type_parameters
+                .iter()
+                .map(|decl| (decl.name.as_ref(), decl.constraint)),
+            crate::semantic_query::ClauseSpelling::Bound,
+        );
         let base = |node: SemanticNodeId| {
-            self.instantiate_signature_params_at_base_constraints(signature, node)
+            self.apply_clause_base_substitution(
+                &substitution,
+                node,
+                crate::semantic_query::ClauseSpelling::Bound,
+            )
         };
         let params: Arc<[crate::semantic_query::FunctionParam]> = params
             .iter()
@@ -9831,9 +9844,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         constraint_spelling: crate::semantic_query::ClauseSpelling,
         spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
+        let substitution = self.clause_base_substitution(clause, constraint_spelling);
+        self.apply_clause_base_substitution(&substitution, extracted, spelling)
+    }
+
+    /// Substitute a clause's base constraints
+    /// ([`Self::clause_base_substitution`]) out of `extracted`, claiming
+    /// the clause parameters by `spelling`.
+    fn apply_clause_base_substitution(
+        &self,
+        substitution: &ClauseBaseSubstitution<'_>,
+        extracted: SemanticNodeId,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId {
+        if substitution.names.is_empty() {
+            return extracted;
+        }
+        self.instantiate_clause_params(
+            substitution
+                .names
+                .iter()
+                .copied()
+                .zip(substitution.bases.iter().copied().map(Some)),
+            extracted,
+            spelling,
+        )
+    }
+
+    /// The base constraint of each clause parameter, the substitution
+    /// [`Self::instantiate_clause_at_base_constraints`] applies. A round
+    /// is a pure function of the previous round's bases, so the rounds
+    /// stop at the first one that changes nothing: a clause whose
+    /// constraints name no sibling settles after one round instead of
+    /// `N - 1`.
+    fn clause_base_substitution<'n>(
+        &self,
+        clause: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        constraint_spelling: crate::semantic_query::ClauseSpelling,
+    ) -> ClauseBaseSubstitution<'n> {
         let clause: Vec<(&str, Option<SemanticNodeId>)> = clause.into_iter().collect();
         if clause.is_empty() {
-            return extracted;
+            return ClauseBaseSubstitution {
+                names: Vec::new(),
+                bases: Vec::new(),
+            };
         }
         let names: Vec<&str> = clause.iter().map(|(name, _)| *name).collect();
         let circular = self.circular_clause_constraints(&clause, constraint_spelling);
@@ -9866,7 +9920,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
             .collect();
         for _ in 1..clause.len() {
-            bases = constraints
+            let next: Vec<SemanticNodeId> = constraints
                 .iter()
                 .map(|&constraint| {
                     self.instantiate_clause_params(
@@ -9876,12 +9930,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )
                 })
                 .collect();
+            if next == bases {
+                break;
+            }
+            bases = next;
         }
-        self.instantiate_clause_params(
-            names.iter().copied().zip(bases.iter().copied().map(Some)),
-            extracted,
-            spelling,
-        )
+        ClauseBaseSubstitution { names, bases }
     }
 
     /// Per clause parameter: whether its constraint reaches the parameter
@@ -10363,6 +10417,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if !visited.insert(node) {
                 continue;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            BINDER_COLLECTION_VISITS.with(|visits| visits.set(visits.get() + 1));
             let Some(data) = self.graph().node_data(node) else {
                 continue;
             };
@@ -11293,7 +11349,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (start_base, start_index) = if path.len() < 2 {
             (base, 0usize)
         } else {
-            find_longest_warm_prefix(self.graph(), self.ctx, base, path).unwrap_or((base, 0))
+            find_longest_warm_prefix(self.graph(), self.ctx, base, path, |receipt| {
+                self.admits_served(receipt)
+            })
+            .unwrap_or((base, 0))
         };
         let walker_path: Arc<[PathSegment]> = if start_index == 0 {
             Arc::clone(path)
@@ -11308,7 +11367,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // enumeration (per the boundary constraint that transit is the
         // non-publication rail).
         let mut walker = PathWalker::new(self, context, &fence);
+        walker.record_prefix_receipts(start_base, &walker_path);
         let result = walker.walk(start_base, walker_path.as_ref());
+        let prefix_receipts = walker.take_prefix_receipts();
+        let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
         // A member read through a class reference binds the member's
         // polymorphic `this` to that reference.
         let result = if path.len() == 1 && self.is_this_receiver(base) {
@@ -11333,6 +11395,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             other => other,
         };
+        drop(walker);
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` callers can
@@ -11391,8 +11454,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // here before the tracer finalises would attach a legacy-only
         // signature derived from the fence (the pre-carrier behaviour
         // flagged in `publish_warm_if_absent`).
-        let pending_prefix_backfills =
-            collect_prefix_backfills(start_base, &walker_path, &walker.intermediate_nodes);
+        let pending_prefix_backfills = collect_prefix_backfills(
+            start_base,
+            &walker_path,
+            &intermediate_nodes,
+            prefix_receipts,
+        );
         // §3.4 materialised-record set for the TERMINAL entry: the
         // terminal point at the FULL path (the caller's terminal mode)
         // PLUS one `Demand::navigate(prefix)` per CONTIGUOUS LINEAR walked
@@ -11406,7 +11473,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // materialisation per §3.4 and never inflate a prefix to the
         // terminal mode.
         let satisfied_projection =
-            path_walk_materialized_set(path, context.mode, start_index, &walker.intermediate_nodes);
+            path_walk_materialized_set(path, context.mode, start_index, &intermediate_nodes);
         // Self-version rooting: the projection result depends on the
         // file content the projection `base` was lowered from. The
         // base node's origin scope (recorded in the arena sidecar)
@@ -15486,8 +15553,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     break self.lib_awaited_nested(value, walk, false);
                 }
                 LibStep::Next(value) => {
-                    if let Err(refusal) = tail.step(
-                        self.connected_demand.tail_steps_budget(),
+                    if let Err(refusal) = self.connected_demand.tail_step(
+                        &mut tail,
                         crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
                     ) {
                         break LibAwaited::Reduced(self.lib_awaited_too_deep(refusal));
@@ -17003,6 +17070,7 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
+    admit: impl Fn(&crate::semantic_query::ReadReceipt) -> bool,
 ) -> Option<(SemanticNodeId, usize)> {
     for k in (1..path.len()).rev() {
         let prefix_path: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
@@ -17016,6 +17084,9 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
         // Validate-before-bubble: a stale prefix entry must neither
         // surface as a hit nor pollute the active fact tracer.
         if let Some(hit) = graph.get_validated(&prefix_key, ctx) {
+            if !admit(&hit.receipt) {
+                return None;
+            }
             if let QueryResult::Value(prefix_node) = hit.value {
                 #[cfg(any(test, feature = "test-support"))]
                 PREFIX_PEEK_HITS.with(|c| *c.borrow_mut() += 1);
@@ -17096,7 +17167,9 @@ fn collect_prefix_backfills(
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
     intermediates: &[Option<SemanticNodeId>],
+    receipts: Vec<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
 ) -> Vec<crate::project_semantic_dispatch::walk::PrefixBackfill> {
+    let mut receipts = receipts.into_iter();
     // Backfill is only meaningful for the contiguous LINEAR prefix of
     // the walk — the leading run of `Some(node)` entries before any
     // arm-split. Once the walker hits a Union / Intersection /
@@ -17139,6 +17212,7 @@ fn collect_prefix_backfills(
         out.push(crate::project_semantic_dispatch::walk::PrefixBackfill {
             key: prefix_key,
             node,
+            cost_receipt: receipts.next(),
             satisfied_projection,
         });
     }
@@ -17660,6 +17734,15 @@ fn index_key_present(
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static INDEX_KEY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BINDER_COLLECTION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The nodes the per-name binder collection visited on this thread, so far
+/// (test-only): the work a clause instantiation spends finding the binders
+/// it substitutes.
+#[cfg(any(test, feature = "test-support"))]
+pub fn binder_collection_visits_for_tests() -> usize {
+    BINDER_COLLECTION_VISITS.with(std::cell::Cell::get)
 }
 
 /// The key comparisons the finite index-key sets made on this thread, so
@@ -17667,4 +17750,11 @@ std::thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn index_key_probes_for_tests() -> usize {
     INDEX_KEY_PROBES.with(std::cell::Cell::get)
+}
+
+/// A clause's base substitution: each named parameter's base constraint,
+/// in clause order.
+struct ClauseBaseSubstitution<'n> {
+    names: Vec<&'n str>,
+    bases: Vec<SemanticNodeId>,
 }

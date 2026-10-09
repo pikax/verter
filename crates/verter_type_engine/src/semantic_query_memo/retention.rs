@@ -71,14 +71,27 @@ impl SemanticGraphStore {
     /// caller must SKIP the publish and return its complete value to the
     /// caller uncached. There is no uncharged arm — every store owns an
     /// account.
+    ///
+    /// The candidate's receipt is reserved first: its closure lives as long
+    /// as any result it costs is retained, so each receipt is charged once
+    /// against the same account, for as long as it lives
+    /// ([`DemandCostReceipt::reserve_retention`]).
+    ///
+    /// [`DemandCostReceipt::reserve_retention`]: crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt::reserve_retention
     pub(super) fn reserve_memo_candidate(
         &self,
         entry: &MemoEntry,
     ) -> Result<RetentionCharge, RetentionRefusal> {
-        match self
-            .retention_account()
-            .reserve(ChargeClass::Retained, entry.retained_footprint_bytes())
+        let admission = match entry
+            .cost_receipt
+            .reserve_retention(self.retention_account())
         {
+            Ok(()) => self
+                .retention_account()
+                .reserve(ChargeClass::Retained, entry.retained_footprint_bytes()),
+            Err(refusal) => RetentionAdmission::Refused(refusal),
+        };
+        match admission {
             RetentionAdmission::Admitted(charge) => Ok(charge),
             RetentionAdmission::Refused(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(

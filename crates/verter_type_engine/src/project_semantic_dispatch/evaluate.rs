@@ -311,6 +311,9 @@ struct DeferredEvaluationFrame {
     /// The dispatcher's operation-budget epoch when the frame began: a
     /// recovery made under it leaves the frame a resource partial.
     budget_epoch: u64,
+    /// Whether the frame's evaluation is recording its cost: from the
+    /// memo miss that made it evaluate until it finishes.
+    recording: bool,
 }
 
 impl DeferredEvaluationFrame {
@@ -327,6 +330,7 @@ impl DeferredEvaluationFrame {
             cache_suppress: false,
             stage: DeferredEvaluationStage::EvaluateCurrent,
             budget_epoch,
+            recording: false,
         }
     }
 
@@ -1964,6 +1968,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ));
         }
         if let Some(reasons) = self.connected_demand_trip() {
+            if frame.recording {
+                self.connected_demand.abandon_cost_scope();
+            }
             return EvaluateDeferredOutcome {
                 node: frame.entry_node,
                 completeness: frame
@@ -1972,9 +1979,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 cache_suppress: frame.cache_suppress,
             };
         }
-        if !frame.completeness.is_partial() && !frame.cache_suppress {
-            self.graph()
-                .evaluate_deferred_memo_publish(frame.entry_node, frame.context, result);
+        let complete = !frame.completeness.is_partial();
+        let receipt = if frame.recording {
+            if complete {
+                let request = crate::request_context::current_request_budget();
+                self.connected_demand.seal_cost_scope(request.as_deref())
+            } else {
+                self.connected_demand.abandon_cost_scope();
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(receipt) = &receipt {
+            self.connected_demand
+                .record_prerequisite(receipt, super::cost_receipt::Nesting::InPlace);
+        }
+        if let (true, false, Some(receipt)) = (complete, frame.cache_suppress, receipt) {
+            self.graph().evaluate_deferred_memo_publish(
+                frame.entry_node,
+                frame.context,
+                result,
+                receipt,
+            );
         }
         EvaluateDeferredOutcome {
             node: result,
@@ -1988,30 +2015,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
-        // A completed cacheable evaluation needs no connected work. Limited
-        // outcomes can never reach this memo.
-        if let Some(cached) = self
-            .graph()
-            .evaluate_deferred_memo_get(node, reduction_context)
-        {
-            return EvaluateDeferredOutcome::complete(cached);
-        }
-
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
-        let mut frames = vec![DeferredEvaluationFrame::new(
+        // A completed cacheable evaluation needs no connected work beyond
+        // what its receipt charges. Limited outcomes can never reach this
+        // memo; one this demand cannot pay for is evaluated here.
+        if let Some(served) = self
+            .graph()
+            .evaluate_deferred_memo_get(node, reduction_context)
+        {
+            if self.admits_served(&served.receipt) {
+                return EvaluateDeferredOutcome::complete(served.value);
+            }
+        }
+        // The root evaluates, and records from its first step: every step
+        // it takes is its own cost, so the receipt a later read replays
+        // charges exactly what computing it did. (A nested frame pays its
+        // first step to its parent whether it is served or computed.)
+        let mut root = DeferredEvaluationFrame::new(
             node,
             reduction_context,
             self.operation_budget_epoch.get(),
-        )];
+        );
+        self.connected_demand
+            .open_cost_scope(super::cost_receipt::CostIdentity::of_key((
+                node,
+                reduction_context,
+            )));
+        root.memo_checked = true;
+        root.recording = true;
+        let mut frames = vec![root];
         let mut completed_child: Option<EvaluateDeferredOutcome> = None;
 
         loop {
             if let Err(reasons) = self.charge_connected_work() {
+                for frame in frames.iter().rev() {
+                    if frame.recording {
+                        self.connected_demand.abandon_cost_scope();
+                    }
+                }
                 return aborted_evaluation_outcome(&frames, completed_child.as_ref(), reasons);
             }
 
@@ -2087,10 +2133,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     (frame.entry_node, frame.context, check_memo)
                 };
                 let memo_hit = if check_memo {
-                    self.graph().evaluate_deferred_memo_get(entry_node, context)
+                    self.graph()
+                        .evaluate_deferred_memo_get(entry_node, context)
+                        .filter(|served| self.admits_served(&served.receipt))
+                        .map(|served| served.value)
                 } else {
                     None
                 };
+                if check_memo && memo_hit.is_none() {
+                    // The frame evaluates: its charges are its own.
+                    self.connected_demand.open_cost_scope(
+                        super::cost_receipt::CostIdentity::of_key((entry_node, context)),
+                    );
+                    frames
+                        .last_mut()
+                        .expect("the evaluator retains a root frame")
+                        .recording = true;
+                }
                 if let Some(cached) = memo_hit {
                     DeferredEvaluationAction::Cached(cached)
                 } else {

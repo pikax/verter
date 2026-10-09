@@ -20,7 +20,8 @@ pub enum IndexedValueExpression {
         name: Arc<str>,
     },
     /// An expression outside the indexed expression domain: a
-    /// call-bearing compound, or a class field initializer reading `this`.
+    /// call-bearing compound, a class field initializer reading `this`, or
+    /// a value whose inference exhausted its work or depth fuse.
     UnsupportedCall { point: u32 },
     /// The template strings a tagged template passes as its first
     /// argument: a value of the GLOBAL `TemplateStringsArray` type,

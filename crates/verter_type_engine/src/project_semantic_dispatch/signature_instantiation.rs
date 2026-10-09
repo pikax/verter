@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use super::dispatch_txn::{InferenceInfoSetup, InferenceSessionSetup, RelationStep};
+use super::dispatch_txn::RelationStep;
+use super::inference::session::{FixationInput, InferenceInfoSetup, InferenceSessionSetup};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     ConstParamPolicy, ContextualInferenceMode, InferenceCandidatePriority, InferencePassKind,
@@ -117,7 +118,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         type_parameters: &[TypeParamDecl],
         pairs: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<Vec<super::dispatch_txn::FixationInput>> {
+    ) -> Option<Vec<FixationInput>> {
         let infer_params: Arc<[InferenceInfoSetup]> = type_parameters
             .iter()
             .map(|decl| {
@@ -144,22 +145,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .push_collecting_session(setup, None);
         let settled = pairs
             .iter()
-            .all(|&(from, into)| settled_relation(self.execute_relate_pair(from, into)).is_some());
+            .all(|&(from, into)| settled_relation(self.relate_collecting(from, into)).is_some());
         let inputs = {
             let txn = self.dispatch_txn.borrow();
             txn.relation
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
+                .session(session_id)
                 .and_then(|session| session.fixation_inputs())
         };
         if let Some(session) = self
             .dispatch_txn
             .borrow_mut()
             .relation
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
+            .session_mut(session_id)
         {
             session.abandon();
         }

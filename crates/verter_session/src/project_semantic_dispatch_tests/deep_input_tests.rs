@@ -64,6 +64,12 @@ fn return_on_a_small_stack(
         .expect("the return evaluates")
 }
 
+/// The typed outcome of a return that evaluated to its value, undegraded.
+const RETURNS_ITS_VALUE: Result<
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
+    FlowReturnError,
+> = Ok(None);
+
 /// The typed outcome of a return whose evaluation outgrew the demand's
 /// connected work: no value, and the work budget named.
 const WORK_BUDGET_EXCEEDED: Result<
@@ -272,16 +278,10 @@ fn calls_nested_500_deep_answer_on_production_stacks() {
     );
 }
 
-/// Calls nested 10,000 deep return on the production stacks (their call
-/// resolutions exceed the connected-demand work budget, so the return is
-/// its typed budget failure).
+/// Calls nested 10,000 deep answer on the production stacks: each call
+/// resolution is charged once to the connected demand, however many
+/// consumers read it, so the work budget admits all of them.
 #[test]
-fn calls_nested_10000_deep_return_on_production_stacks() {
-    assert_eq!(return_on_a_small_stack(calls(DEPTH)), WORK_BUDGET_EXCEEDED);
-}
-
-#[test]
-#[ignore = "the connected-demand work budget admits no 10,000 nested call resolutions"]
 fn calls_nested_10000_deep_answer_on_production_stacks() {
     assert_eq!(
         mismatches_on_a_small_stack(calls(DEPTH), RETURN, "number"),
@@ -489,14 +489,14 @@ fn module_calls_nested_1000_deep_answer_on_production_stacks() {
 }
 
 /// A module constant initialized by 10,000 nested calls, read in a
-/// function, returns on the production stacks (its calls' resolutions
-/// exceed the connected-demand work budget, so the return is its typed
-/// failure).
+/// function, returns its value on the production stacks: each call's
+/// resolution is charged once to the connected demand, so the work budget
+/// admits them.
 #[test]
 fn module_calls_nested_10000_deep_return_on_production_stacks() {
     assert_eq!(
         return_on_a_small_stack(module_calls(DEPTH, true)),
-        WORK_BUDGET_EXCEEDED
+        RETURNS_ITS_VALUE
     );
 }
 
@@ -515,8 +515,8 @@ const RECEIVER_CHAINS_UNDER_THE_WORK_BUDGET: usize = 400;
 /// A receiver chain, `b.m().m()…`: each call is a member call on the
 /// value of the call before it, lowered and evaluated from explicit
 /// stacks, the value its receiver. TypeScript 7.0.2: `B` for 2, 3 and 400
-/// links, under every setting; 10,000 links return the connected-demand
-/// work budget's typed failure on the production stacks.
+/// links, under every setting; 10,000 links return their value on the
+/// production stacks, each call charged once to the connected demand.
 #[test]
 fn receiver_chains_10000_deep_return_on_production_stacks() {
     for links in [2, 3, RECEIVER_CHAINS_UNDER_THE_WORK_BUDGET] {
@@ -528,7 +528,7 @@ fn receiver_chains_10000_deep_return_on_production_stacks() {
     }
     assert_eq!(
         return_on_a_small_stack(receiver_chain(DEPTH)),
-        WORK_BUDGET_EXCEEDED
+        RETURNS_ITS_VALUE
     );
 }
 
@@ -558,8 +558,8 @@ fn module_receiver_chains_answer() {
 }
 
 /// A module constant initialized by a receiver chain 10,000 links long,
-/// read in a function, returns the connected-demand work budget's typed
-/// failure on the production stacks.
+/// read in a function, returns its value on the production stacks, each
+/// call charged once to the connected demand.
 #[test]
 fn module_receiver_chains_10000_deep_read_on_production_stacks() {
     assert_eq!(
@@ -568,7 +568,7 @@ fn module_receiver_chains_10000_deep_read_on_production_stacks() {
 ",
             module_receiver_chain(DEPTH)
         )),
-        WORK_BUDGET_EXCEEDED
+        RETURNS_ITS_VALUE
     );
 }
 
@@ -616,21 +616,11 @@ fn generic_callbacks_nested_400_deep_answer_on_production_stacks() {
     );
 }
 
-/// Generic callbacks nested 2,000 deep return on the production stacks
-/// (their call resolutions exceed the connected-demand work budget, which
-/// 1,000 levels fit and 1,100 exceed, so the return is its typed budget
-/// failure); typing a callback in place instead of suspending the route
-/// overflows within 200 levels.
+/// Generic callbacks nested 10,000 deep answer on the production stacks:
+/// each call resolution is charged once to the connected demand, so the
+/// work budget admits them; typing a callback in place instead of
+/// suspending the route overflows within 200 levels.
 #[test]
-fn generic_callbacks_nested_2000_deep_return_on_production_stacks() {
-    assert_eq!(
-        return_on_a_small_stack(generic_callbacks(NESTED_FUNCTIONS)),
-        WORK_BUDGET_EXCEEDED
-    );
-}
-
-#[test]
-#[ignore = "the connected-demand work budget admits no 10,000 nested generic callback inferences"]
 fn generic_callbacks_nested_10000_deep_answer_on_production_stacks() {
     assert_eq!(
         mismatches_on_a_small_stack(generic_callbacks(DEPTH), RETURN, "number"),
