@@ -611,6 +611,11 @@ enum MockCall {
         companion_path: String,
         script_kind: crate::traits::CarrierScriptKind,
     },
+    /// A gated activation's settlement certified the companion's registered bytes.
+    CarrierApplied {
+        companion_path: String,
+        content: String,
+    },
 }
 
 fn call_path(call: &MockCall) -> &str {
@@ -624,7 +629,8 @@ fn call_path(call: &MockCall) -> &str {
         MockCall::UpdateWorkspaceFolders { .. } => "",
         MockCall::RegisterCarrierMember { companion_path, .. } => companion_path,
         MockCall::RegisterCarrierMetadata { companion_path, .. } => companion_path,
-        MockCall::ActivateCarrier { companion_path, .. } => companion_path,
+        MockCall::ActivateCarrier { companion_path, .. }
+        | MockCall::CarrierApplied { companion_path, .. } => companion_path,
     }
 }
 
@@ -662,6 +668,11 @@ struct MockInner {
     configure_fails: std::sync::atomic::AtomicBool,
     /// The ambient request deadline observed by every `open_file` call.
     open_deadlines: parking_lot::Mutex<Vec<Option<tokio::time::Instant>>>,
+    /// When set, an acknowledged carrier activation settles only once the gate
+    /// opens: the engine's project build after the refresh was ordered.
+    activation_settlement_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
+    /// When set, a gated activation settlement fails instead of certifying.
+    activation_settlement_fails: std::sync::atomic::AtomicBool,
 }
 
 /// A recording `TypeProvider` mock. Cloning shares the recorded state (so the
@@ -691,6 +702,8 @@ impl MockProvider {
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
                 open_deadlines: parking_lot::Mutex::new(Vec::new()),
+                activation_settlement_gate: parking_lot::Mutex::new(None),
+                activation_settlement_fails: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -768,6 +781,10 @@ impl TypeProvider for MockProvider {
                     companion_path,
                     content,
                     ..
+                }
+                | MockCall::CarrierApplied {
+                    companion_path,
+                    content,
                 } if companion_path == path => {
                     return AppliedContent::Applied(Arc::from(content.as_str()))
                 }
@@ -889,13 +906,58 @@ impl TypeProvider for MockProvider {
         &'a self,
         members: &'a [crate::traits::CarrierActivation],
     ) -> ProviderFuture<'a, ()> {
+        Box::pin(async move { self.dispatch_carrier_members(members).await?.await })
+    }
+
+    fn dispatch_carrier_members<'a>(
+        &'a self,
+        members: &'a [crate::traits::CarrierActivation],
+    ) -> ProviderFuture<'a, crate::traits::CarrierActivationSettlement> {
         for member in members {
             self.record(MockCall::ActivateCarrier {
                 companion_path: member.companion_path.clone(),
                 script_kind: member.script_kind,
             });
         }
-        Box::pin(async { Ok(()) })
+        let Some(gate) = self.inner.activation_settlement_gate.lock().clone() else {
+            return Box::pin(async { Ok(crate::traits::CarrierActivationSettlement::settled()) });
+        };
+        let registered: Vec<MockCall> = members
+            .iter()
+            .filter_map(|member| {
+                self.calls().into_iter().rev().find_map(|call| match call {
+                    MockCall::RegisterCarrierMetadata {
+                        companion_path,
+                        content,
+                        ..
+                    } if companion_path == member.companion_path => {
+                        Some(MockCall::CarrierApplied {
+                            companion_path,
+                            content,
+                        })
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            Ok(crate::traits::CarrierActivationSettlement::pending(
+                async move {
+                    let _permit = gate
+                        .acquire()
+                        .await
+                        .map_err(|_| TypeProviderError::new("settlement gate closed"))?;
+                    if inner.activation_settlement_fails.load(Ordering::SeqCst) {
+                        return Err(TypeProviderError::new("mock refresh failure"));
+                    }
+                    for call in registered {
+                        record_call(&inner, call);
+                    }
+                    Ok(())
+                },
+            ))
+        })
     }
 
     fn get_completions(
@@ -3283,7 +3345,9 @@ fn held_state(calls: &[MockCall]) -> HeldState {
                     ),
                 );
             }
-            MockCall::Hover { .. } | MockCall::ActivateCarrier { .. } => {}
+            MockCall::Hover { .. }
+            | MockCall::ActivateCarrier { .. }
+            | MockCall::CarrierApplied { .. } => {}
         }
     }
     held
@@ -6139,4 +6203,104 @@ async fn cache_only_loads_remain_held_during_forward_and_replay() {
         matches!(hub.applied_content("/w/live.ts"), AppliedContent::Applied(bytes) if bytes.as_ref() == "live")
     );
     hub.shutdown().await.unwrap();
+}
+
+fn entry_activation() -> [crate::traits::CarrierActivation; 1] {
+    [crate::traits::CarrierActivation {
+        source_path: "/p/App.vue".to_string(),
+        companion_path: "/p/App.vue.tsx".to_string(),
+        project_file_name: "/p/tsconfig.json".to_string(),
+        script_kind: crate::traits::CarrierScriptKind::Tsx,
+    }]
+}
+
+/// The engine's project build after an activation's refresh is ordered must not
+/// hold the actor: an entry's dependency publication (carrier metadata, local
+/// bookkeeping) progresses while the activation is still applying, and the
+/// activated companion is certified only once that application settles.
+#[tokio::test(start_paused = true)]
+async fn independent_carrier_metadata_progresses_while_an_activation_is_still_applying() {
+    let initial = MockProvider::new("tsserver");
+    let (hub, _crash_notify, _spawn_gate) =
+        make_resilient(initial.clone(), MockProvider::new("tsserver")).await;
+    let settlement_gate = Arc::new(Semaphore::new(0));
+    *initial.inner.activation_settlement_gate.lock() = Some(Arc::clone(&settlement_gate));
+    hub.register_carrier_metadata("/p/App.vue", "/p/App.vue.tsx", "app", "/p/tsconfig.json")
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        hub.activate_carrier_members(&entry_activation()),
+    )
+    .await
+    .expect("an ordered activation is acknowledged while the engine still applies it")
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        hub.register_carrier_metadata(
+            "/p/Child.vue",
+            "/p/Child.vue.tsx",
+            "child",
+            "/p/tsconfig.json",
+        ),
+    )
+    .await
+    .expect("independent metadata must not queue behind the activation's application")
+    .unwrap();
+    assert!(initial.calls().iter().any(|call| matches!(
+        call,
+        MockCall::RegisterCarrierMetadata { companion_path, .. }
+            if companion_path == "/p/Child.vue.tsx"
+    )));
+    assert_eq!(
+        hub.applied_content("/p/App.vue.tsx"),
+        crate::traits::AppliedContent::NotApplied,
+        "acknowledgement is not readiness"
+    );
+
+    settlement_gate.add_permits(1);
+    await_cond(
+        || {
+            hub.applied_content("/p/App.vue.tsx")
+                == crate::traits::AppliedContent::Applied(Arc::from("app"))
+        },
+        "the settled activation certifies the companion's registered bytes",
+    )
+    .await;
+    assert!(hub.serving_epoch().is_some());
+}
+
+/// An acknowledged activation the engine then fails to apply is the same
+/// divergence as a failed forward: the hub retires that engine itself, since no
+/// submitter is still waiting to receive the error.
+#[tokio::test(start_paused = true)]
+async fn a_failed_activation_settlement_retires_the_engine_that_acknowledged_it() {
+    let initial = MockProvider::new("tsserver");
+    let (hub, _crash_notify, _spawn_gate) =
+        make_resilient(initial.clone(), MockProvider::new("tsserver")).await;
+    let settlement_gate = Arc::new(Semaphore::new(0));
+    *initial.inner.activation_settlement_gate.lock() = Some(Arc::clone(&settlement_gate));
+    initial
+        .inner
+        .activation_settlement_fails
+        .store(true, Ordering::SeqCst);
+    hub.register_carrier_metadata("/p/App.vue", "/p/App.vue.tsx", "app", "/p/tsconfig.json")
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        hub.activate_carrier_members(&entry_activation()),
+    )
+    .await
+    .expect("an ordered activation is acknowledged while the engine still applies it")
+    .unwrap();
+    assert!(hub.serving_epoch().is_some());
+
+    settlement_gate.add_permits(1);
+    await_down(&hub).await;
+    assert_eq!(
+        hub.applied_content("/p/App.vue.tsx"),
+        crate::traits::AppliedContent::NotApplied
+    );
 }

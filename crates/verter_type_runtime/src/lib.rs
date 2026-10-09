@@ -74,8 +74,8 @@ pub use trace::{
     with_type_runtime_trace_context_async, TypeRuntimeTraceContext, TypeRuntimeTraceEvent,
 };
 pub use traits::{
-    CarrierActivation, CarrierScriptKind, ProviderFuture, ProviderPriority, TypeProvider,
-    WatchedFileChange, WatchedFileChangeKind,
+    CarrierActivation, CarrierActivationSettlement, CarrierScriptKind, ProviderFuture,
+    ProviderPriority, TypeProvider, WatchedFileChange, WatchedFileChangeKind,
 };
 pub use uri::{
     file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string, percent_decode,

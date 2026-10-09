@@ -665,15 +665,20 @@ impl TsserverTransport {
         }
     }
 
+    /// An ordered interactive transaction. `on_first_enqueued` runs once the
+    /// first frame is in the stdin FIFO while the interactive lane is held, so
+    /// background work admitted afterwards waits for the whole transaction.
     async fn request_interactive_batch(
         &self,
         requests: &[(&str, serde_json::Value)],
+        on_first_enqueued: &(dyn Fn() + Sync),
     ) -> Result<Vec<serde_json::Value>, TypeProviderError> {
         let _interactive = self.begin_interactive_request();
         let mut responses = Vec::with_capacity(requests.len());
-        for (command, arguments) in requests {
+        for (index, (command, arguments)) in requests.iter().enumerate() {
+            let on_enqueued = (index == 0).then_some(on_first_enqueued);
             responses.push(
-                self.request_inner(command, arguments.clone(), None, None)
+                self.request_unbounded_inner(command, arguments.clone(), None, on_enqueued)
                     .await?,
             );
         }
@@ -713,7 +718,7 @@ impl TsserverTransport {
     ) -> Result<serde_json::Value, TypeProviderError> {
         let Some(configured) = timeout else {
             return self
-                .request_unbounded_inner(command, arguments, background_epoch)
+                .request_unbounded_inner(command, arguments, background_epoch, None)
                 .await;
         };
         crate::type_runtime_trace_scope_async!(
@@ -927,11 +932,15 @@ impl TsserverTransport {
     /// cold configured project is valid work, not an empty result. Dropping the
     /// caller future still removes the pending entry and sends tsserver's
     /// out-of-band cancellation file through [`TsserverPendingRequest::drop`].
+    /// `on_enqueued` runs once the request's frame is in the stdin writer's FIFO,
+    /// before its response is awaited: every frame enqueued afterwards reaches
+    /// tsserver after this one.
     async fn request_unbounded_inner(
         &self,
         command: &str,
         arguments: serde_json::Value,
         background_epoch: Option<u64>,
+        on_enqueued: Option<&(dyn Fn() + Sync)>,
     ) -> Result<serde_json::Value, TypeProviderError> {
         crate::type_runtime_trace_scope_async!(
             "tsserver_transport_request",
@@ -996,6 +1005,9 @@ impl TsserverTransport {
                     registration.disarm();
                     self.pending.table.take(seq);
                     return Err(TypeProviderError::new("stdin writer closed"));
+                }
+                if let Some(on_enqueued) = on_enqueued {
+                    on_enqueued();
                 }
 
                 let value = match rx.await {
@@ -1798,6 +1810,9 @@ pub struct TsserverTypeProvider {
 struct TsserverCarrierRefresh {
     requested_generation: AtomicU64,
     urgent_generation: AtomicU64,
+    /// Highest generation whose interactive refresh is ordered on tsserver's
+    /// request FIFO. Ordering is not application: see `applied_generation`.
+    dispatched_generation: AtomicU64,
     applied_generation: AtomicU64,
     running: AtomicBool,
     completion: Notify,
@@ -2450,12 +2465,17 @@ fn remap_carrier_response_path(
         .unwrap_or(path)
 }
 
+/// `on_dispatched` runs once an interactive refresh holds the interactive lane
+/// and its plugin configuration is enqueued: from then on every later request
+/// reaches tsserver behind it, and background work waits for its fence. A
+/// preemptible background refresh never reports dispatch.
 async fn notify_carriers_changed_inner(
     transport: Arc<TsserverTransport>,
     files: Vec<String>,
     refresh_generation: u64,
     active_carrier_sources: Vec<String>,
     priority: CarrierRefreshPriority,
+    on_dispatched: &(dyn Fn() + Sync),
 ) -> Result<(), TypeProviderError> {
     let Some(fence_file) = files.first().cloned() else {
         return Ok(());
@@ -2501,7 +2521,9 @@ async fn notify_carriers_changed_inner(
                 .collect::<Result<Vec<_>, _>>()?;
         }
         CarrierRefreshPriority::Interactive => {
-            transport.request_interactive_batch(&requests).await?;
+            transport
+                .request_interactive_batch(&requests, on_dispatched)
+                .await?;
         }
     }
     Ok(())
@@ -2543,12 +2565,19 @@ fn schedule_carrier_refresh(
                 CarrierRefreshPriority::Background
             };
             let active = active_sources.read().iter().cloned().collect();
+            let mark_dispatched = || {
+                refresh
+                    .dispatched_generation
+                    .fetch_max(target, Ordering::AcqRel);
+                refresh.completion.notify_waiters();
+            };
             if let Err(error) = notify_carriers_changed_inner(
                 Arc::clone(&transport),
                 vec![changed_file.clone()],
                 target,
                 active,
                 priority,
+                &mark_dispatched,
             )
             .await
             {
@@ -2625,6 +2654,36 @@ async fn wait_for_carrier_refresh(
     generation: u64,
 ) -> Result<(), TypeProviderError> {
     wait_for_carrier_refresh_on_gap(refresh, generation, |_| {}).await
+}
+
+/// Wait until `generation` is ordered on tsserver's request FIFO — or already
+/// applied, or failed before it could be ordered. The refresh worker notifies
+/// `completion` for each of the three.
+async fn wait_for_carrier_refresh_dispatch(
+    refresh: &TsserverCarrierRefresh,
+    generation: u64,
+) -> Result<(), TypeProviderError> {
+    loop {
+        let notified = refresh.completion.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if refresh.dispatched_generation.load(Ordering::Acquire) >= generation
+            || refresh.applied_generation.load(Ordering::Acquire) >= generation
+        {
+            return Ok(());
+        }
+        if let Some((failed_generation, error)) = refresh
+            .failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            if *failed_generation >= generation {
+                return Err(error.clone());
+            }
+        }
+        notified.await;
+    }
 }
 
 /// Subscribe to `notify_waiters` BEFORE the applied-generation re-check.
@@ -2872,6 +2931,31 @@ async fn certify_carrier_content(
             receipts.insert(path, ContentReceipt::Applied(bytes));
         }
     }
+}
+
+/// Acknowledge an activation once its refresh `generation` is ordered on
+/// tsserver's FIFO, and hand the refresh's completion back as the settlement
+/// that alone may certify `captured`. No generation means the working set did
+/// not change, so the captured bytes certify against the last applied refresh.
+async fn acknowledge_carrier_refresh(
+    refresh: Arc<TsserverCarrierRefresh>,
+    generation: Option<u64>,
+    contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
+    accepted: Arc<parking_lot::RwLock<HashMap<String, ContentReceipt>>>,
+    captured: Vec<(String, Arc<str>)>,
+) -> Result<crate::traits::CarrierActivationSettlement, TypeProviderError> {
+    if let Some(generation) = generation {
+        wait_for_carrier_refresh_dispatch(&refresh, generation).await?;
+    }
+    Ok(crate::traits::CarrierActivationSettlement::pending(
+        async move {
+            if let Some(generation) = generation {
+                wait_for_carrier_refresh(&refresh, generation).await?;
+            }
+            certify_carrier_content(&contents, &accepted, captured).await;
+            Ok(())
+        },
+    ))
 }
 
 impl TypeProvider for TsserverTypeProvider {
@@ -3433,6 +3517,18 @@ impl TypeProvider for TsserverTypeProvider {
         &'a self,
         members: &'a [crate::traits::CarrierActivation],
     ) -> ProviderFuture<'a, ()> {
+        Box::pin(async move { self.dispatch_carrier_members(members).await?.await })
+    }
+
+    /// The working-set change is acknowledged once its plugin refresh is the
+    /// next transaction on tsserver's FIFO; the configured-project build that
+    /// refresh triggers is owned by the returned settlement, which certifies the
+    /// captured bytes only after the refresh succeeds and only while they are
+    /// still the registered bytes.
+    fn dispatch_carrier_members<'a>(
+        &'a self,
+        members: &'a [crate::traits::CarrierActivation],
+    ) -> ProviderFuture<'a, crate::traits::CarrierActivationSettlement> {
         let mut members = members.to_vec();
         members.sort_unstable_by(|left, right| {
             left.source_path
@@ -3507,7 +3603,7 @@ impl TypeProvider for TsserverTypeProvider {
             // configuration transaction. Even when a later activation failed,
             // publish the earlier durable working-set changes before returning
             // that error so provider and desired state cannot diverge.
-            if let Some(changed_file) = changed_file {
+            let generation = changed_file.map(|changed_file| {
                 let generation = refresh_generation.fetch_add(1, Ordering::Relaxed) + 1;
                 schedule_carrier_refresh(
                     transport,
@@ -3517,13 +3613,22 @@ impl TypeProvider for TsserverTypeProvider {
                     changed_file,
                     CarrierRefreshPriority::Interactive,
                 );
-                wait_for_carrier_refresh(&refresh, generation).await?;
-            }
+                generation
+            });
             if let Some(error) = activation_error {
+                if let Some(generation) = generation {
+                    wait_for_carrier_refresh(&refresh, generation).await?;
+                }
                 return Err(error);
             }
-            certify_carrier_content(&self.contents, &self.accepted, captured).await;
-            Ok(())
+            acknowledge_carrier_refresh(
+                refresh,
+                generation,
+                Arc::clone(&self.contents),
+                Arc::clone(&self.accepted),
+                captured,
+            )
+            .await
         })
     }
 
