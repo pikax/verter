@@ -45,7 +45,7 @@
     "states": {
       "active": "A1-A4 hold",
       "inactive": "any of A1-A4 does not hold at an admitted release",
-      "unsupported-version": "an installed @mdx-js/mdx or React release outside its lock",
+      "unsupported-version": "an installed @mdx-js/mdx, @mdx-js/react or React release outside its lock",
       "off": "frameworks.mdx = off"
     }
   },
@@ -53,7 +53,7 @@
     {
       "id": "N1",
       "case": "a .mdx file extension alone",
-      "reason": "a file name is never an activation source; the extension only selects the carrier row, which stays ungated-fallback until FWA1 admits mdx"
+      "reason": "a file name is never an activation source; the extension only selects the carrier row, which stays gated until FWA1 admits mdx"
     },
     {
       "id": "N2",

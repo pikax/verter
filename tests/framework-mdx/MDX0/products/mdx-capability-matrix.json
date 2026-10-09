@@ -387,10 +387,14 @@
       "host": "typescript-plugin-compat",
       "profile": "mdx-react",
       "producer": "MDX6",
-      "acceptance": "MDX9-AC1",
+      "acceptance": "MDX6-AC5",
       "verterComputesTsAnswer": false,
       "tsPluginMdxWork": "none",
-      "tsgoOps": []
+      "tsgoOps": [],
+      "acceptanceObligation": {
+        "acceptance": "MDX6-AC5",
+        "discriminatingCase": "with the typescript-plugin compat path, import Doc from \"./doc.mdx\" in a .tsx importer resolves to the MDX3 module surface from the MDX6 carrier publication; packages/typescript-plugin carries no MDX code, and a planted MDX decoration in the plugin fails"
+      }
     },
     {
       "id": "C34",
@@ -684,7 +688,7 @@
     "appliesTo": "a cell's evidence; a rule's provenance (such as componentCandidateRule.source) is not evidence"
   },
   "noDenominatorShrinking": true,
-  "notes": "Cells cover the mdx-react profile, the only admitted profile. Every operation a plan node delivers for MDX has a cell or an exclusion: MDX1S's structure features (C34-C38), MDX8F's carrier formatting views (C39-C41), MDX8F-MD's Markdown content formatting (C42), and MDX1G's client grammar as exclusion X12. A cell carrying acceptanceObligation names the discriminating case its producer AC must hold (C20 at MDX6-AC2, C22 at MDX5-AC2, C25 at MDX5-AC5); the obligation's acceptance equals the cell's acceptance. MDX10-AC1/AC4 hold the terminal: the generated rows equal this matrix and no cell shrinks to unsupported without a ratified replan.",
+  "notes": "Cells cover the mdx-react profile, the only admitted profile. Every operation a plan node delivers for MDX has a cell or an exclusion: MDX1S's structure features (C34-C38), MDX8F's carrier formatting views (C39-C41), MDX8F-MD's Markdown content formatting (C42), and MDX1G's client grammar as exclusion X12. A cell carrying acceptanceObligation names the discriminating case its producer AC must hold (C20 at MDX6-AC2, C22 at MDX5-AC2, C25 at MDX5-AC5, C33 at MDX6-AC5); the obligation's acceptance equals the cell's acceptance. MDX10-AC1/AC4 hold the terminal: the generated rows equal this matrix and no cell shrinks to unsupported without a ratified replan.",
   "overridableConstructs": {
     "rule": "the closed set of Markdown constructs whose rendered element a provider or `components` prop can substitute; MDX2 records a slot only for these names and MDX4 resolves only these; every other lowercase tag is an intrinsic",
     "source": "mdx-js/mdx 3.1.1 docs/table-of-components.mdx (the components you can overwrite); typed by @types/mdx@2.0.14 MDXComponents",

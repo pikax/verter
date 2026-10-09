@@ -93,8 +93,9 @@ Deletion population: empty. The contract is additive; no route is displaced.
 These are not MDX0 validator rows: they are the discriminating fixture cases each cell's
 `acceptanceObligation` binds to its producer AC. The producer implements and executes them after MDX0.
 
-| Cell  | AC       | Discriminating case                                                                                                                           |
-| ----- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `C20` | MDX6-AC2 | a type error inside an `.mdx` `{expression}` is published once by tsgo at its exact authored range; a planted off-by-one projection map fails |
-| `C22` | MDX5-AC2 | a capitalised export that is not a proven React component is not a component auto-import candidate; a proven React component export is        |
-| `C25` | MDX5-AC5 | the symbol tree holds each named ESM export and the layout default export under MDX1S's outline; a planted import symbol fails                |
+| Cell  | AC       | Discriminating case                                                                                                                                                          |
+| ----- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `C20` | MDX6-AC2 | a type error inside an `.mdx` `{expression}` is published once by tsgo at its exact authored range; a planted off-by-one projection map fails                                |
+| `C22` | MDX5-AC2 | a capitalised export that is not a proven React component is not a component auto-import candidate; a proven React component export is                                       |
+| `C25` | MDX5-AC5 | the symbol tree holds each named ESM export and the layout default export under MDX1S's outline; a planted import symbol fails                                               |
+| `C33` | MDX6-AC5 | a `.tsx` importer under the TS-plugin compat path resolves `import Doc from "./doc.mdx"` to the MDX3 surface; a planted MDX decoration in `packages/typescript-plugin` fails |

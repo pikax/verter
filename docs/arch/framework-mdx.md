@@ -187,9 +187,12 @@ Component completion (`C22`) offers a component auto-import candidate only for
 an export proven to be a React component; a capitalised name is never proof,
 and generic MDX parses and binds without React.
 
-Three cells bind a discriminating case to their producer's acceptance through
+Four cells bind a discriminating case to their producer's acceptance through
 `acceptanceObligation`: `C20` at MDX6-AC2 (an expression type error is
-published once at its exact authored range; an off-by-one map fails), `C22` at
+published once at its exact authored range; an off-by-one map fails), `C33` at
+MDX6-AC5 (a `.tsx` importer under the TS-plugin compat path resolves `.mdx`
+to the MDX3 surface from the MDX6 carrier publication; a planted MDX decoration
+in `packages/typescript-plugin` fails), `C22` at
 MDX5-AC2 (a proven React component is an auto-import candidate; a capitalised
 non-component export is not) and `C25` at MDX5-AC5 (named ESM exports and the
 layout default export sit beneath MDX1S's outline at exact ranges; an
