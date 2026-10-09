@@ -3096,10 +3096,9 @@ fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
     });
 }
 
-/// A leaf whose lowering trips the shallow leaf-lowering work budget
-/// (`> MAX_SEMANTIC_INFERENCE_WORK` visits): a `satisfies` over a
-/// conditional holding a 5,000-element array literal, which the leaf
-/// lowering infers whole ([`budget_tripping_content_trips_when_lowered`]).
+/// A leaf whose evaluation trips the flow-return work budget: a `satisfies`
+/// over a conditional holding a 5,000-element array literal
+/// ([`budget_tripping_content_trips_when_lowered`]).
 fn budget_tripping_content() -> String {
     format!(
         "(true ? [{}] : 0) satisfies unknown",
