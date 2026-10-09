@@ -227,18 +227,57 @@ impl ReceiptBinding {
         ledger: &parking_lot::Mutex<DeliveryLedger>,
         targets: impl IntoIterator<Item = String>,
     ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
+        self.settle_targets(ledger, targets, false)
+    }
+
+    /// [`Self::settle`] for a read-only navigation answer, whose locations are
+    /// independent: a target with no receipt is left out of the map, so its
+    /// locations drop while the rest still decode through their receipts. The
+    /// answer is refused when none of its targets was delivered.
+    fn settle_navigation(
+        &self,
+        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        targets: impl IntoIterator<Item = String>,
+    ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
+        self.settle_targets(ledger, targets, true)
+    }
+
+    fn settle_targets(
+        &self,
+        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        targets: impl IntoIterator<Item = String>,
+        omit_undelivered: bool,
+    ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
         let mut decoded = HashMap::new();
-        for path in std::iter::once(self.file.clone()).chain(targets) {
+        let mut undelivered = None;
+        let mut any_target_decoded = false;
+        for (index, path) in std::iter::once(self.file.clone())
+            .chain(targets)
+            .enumerate()
+        {
+            let is_target = index > 0;
             if decoded.contains_key(&path) {
+                any_target_decoded |= is_target;
                 continue;
             }
             let Some((_, bytes)) = self.receipts.get(&path) else {
-                return Err(ProviderQueryConflict::new(&path, ConflictKind::Undelivered));
+                let conflict = ProviderQueryConflict::new(&path, ConflictKind::Undelivered);
+                if !omit_undelivered {
+                    return Err(conflict);
+                }
+                undelivered.get_or_insert(conflict);
+                continue;
             };
             if path != self.file {
                 self.query.check_intended_target(&path, Some(bytes))?;
             }
             decoded.insert(path, Arc::clone(bytes));
+            any_target_decoded |= is_target;
+        }
+        if let Some(conflict) = undelivered {
+            if !any_target_decoded {
+                return Err(conflict);
+            }
         }
         let ledger = ledger.lock();
         for path in decoded.keys() {
@@ -755,7 +794,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
                 })
                 .unwrap_or_default();
-            let cache_snapshot = binding.settle(&self.applied, targets)?;
+            let cache_snapshot = binding.settle_navigation(&self.applied, targets)?;
             let locs = result
                 .as_array()
                 .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
@@ -796,7 +835,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
                 })
                 .unwrap_or_default();
-            let cache_snapshot = binding.settle(&self.applied, targets)?;
+            let cache_snapshot = binding.settle_navigation(&self.applied, targets)?;
             let locs = result
                 .as_array()
                 .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
@@ -837,7 +876,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
                 })
                 .unwrap_or_default();
-            let cache_snapshot = binding.settle(&self.applied, targets)?;
+            let cache_snapshot = binding.settle_navigation(&self.applied, targets)?;
             let locs = result
                 .get("refs")
                 .and_then(|v| v.as_array())

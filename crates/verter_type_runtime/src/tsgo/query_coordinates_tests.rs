@@ -713,3 +713,54 @@ async fn a_cache_only_load_binds_nothing_until_the_file_is_delivered() {
     );
     assert!(hover.expect("a delivered file binds").is_none());
 }
+
+#[tokio::test]
+async fn a_definition_keeps_its_delivered_locations_when_one_target_is_undelivered() {
+    let (provider, mut engine) = provider();
+    let origin = path("a.ts");
+    let target = path("b.ts");
+    provider
+        .update_file(&origin, "import { beta } from './b';\nbeta;\n")
+        .await
+        .expect("open origin");
+    engine.expect("textDocument/didOpen").await;
+    provider
+        .update_file(&target, DISPATCHED)
+        .await
+        .expect("open target");
+    engine.expect("textDocument/didOpen").await;
+
+    let engine_side = async {
+        let definition = engine.expect("textDocument/definition").await;
+        engine
+            .answer(
+                &definition,
+                serde_json::json!([
+                    {
+                        "uri": TsgoTypeProvider::path_to_uri(&target),
+                        "range": beta_range(),
+                    },
+                    {
+                        "uri": TsgoTypeProvider::path_to_uri(&path("never-delivered.d.ts")),
+                        "range": beta_range(),
+                    },
+                ]),
+            )
+            .await;
+    };
+    let (locations, ()) = tokio::join!(
+        provider.get_definition(&ProviderQuery::at_engine_surface(&origin), 29),
+        engine_side
+    );
+    let locations = locations.expect("the delivered location still answers");
+    let start = beta_offset(DISPATCHED);
+    assert_eq!(
+        locations
+            .iter()
+            .map(|location| (location.start, location.end))
+            .collect::<Vec<_>>(),
+        vec![(start, start + 4)],
+        "only the location in the file the engine read itself drops: {locations:?}"
+    );
+    assert!(locations[0].path.ends_with("b.ts"), "{locations:?}");
+}

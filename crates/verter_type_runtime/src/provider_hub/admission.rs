@@ -360,6 +360,22 @@ impl MembershipInputs {
     }
 }
 
+/// Drop every read-query cache entry retaining a publication other than
+/// `incoming`'s, so a republish releases the superseded workspace snapshot
+/// instead of keeping it alive until a cache fills. Entries under the same
+/// publication survive content edits, which read admission never compares.
+fn prune_superseded_query_caches(state: &mut AdmissionState, incoming: &ProjectBasis) {
+    state.query_requests.retain(|_, request| {
+        Arc::ptr_eq(
+            &request.witness.0.input.basis.publication,
+            &incoming.publication,
+        )
+    });
+    state
+        .query_proofs
+        .retain(|_, decided| Arc::ptr_eq(&decided.publication, &incoming.publication));
+}
+
 fn provider_identity<P: ?Sized>(provider: &Arc<P>) -> usize {
     Arc::as_ptr(provider) as *const () as usize
 }
@@ -640,6 +656,7 @@ pub(super) fn generated_query<P: ?Sized>(
     let request = AdmittedRequest { witness, units };
     check_query_witness(shared, &request.witness)?;
     let mut state = shared.admission.lock().unwrap_or_else(|e| e.into_inner());
+    prune_superseded_query_caches(&mut state, &request.witness.0.input.basis);
     if state.query_requests.len() >= 4096 {
         state.query_requests.clear();
     }
@@ -879,6 +896,7 @@ where
                 .admission
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            prune_superseded_query_caches(&mut state, basis);
             if state.query_proofs.len() >= 4096 {
                 state.query_proofs.clear();
             }

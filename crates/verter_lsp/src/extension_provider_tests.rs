@@ -2285,3 +2285,50 @@ async fn a_query_on_a_cache_only_load_sends_nothing() {
         "no position converted against undelivered bytes reaches the service"
     );
 }
+
+#[tokio::test]
+async fn references_keep_their_receipted_locations_when_one_target_was_never_handed() {
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let (origin, target) = ("/ws/src/main.ts", "/ws/src/b.ts");
+    open_acknowledged(&provider, &transport, target, TARGET_A).await;
+    open_acknowledged(&provider, &transport, origin, "beta;\n").await;
+    let referencing = {
+        let provider = Arc::clone(&provider);
+        tokio::spawn(async move {
+            provider
+                .get_references(
+                    &crate::type_provider::traits::ProviderQuery::at_engine_surface(origin),
+                    1,
+                )
+                .await
+        })
+    };
+    let held = transport.next_arrival().await;
+    assert_eq!(held.command, "references");
+    let location = |file: &str| {
+        json!({
+            "file": file,
+            "start": { "line": 2, "offset": 7 },
+            "end": { "line": 2, "offset": 11 },
+        })
+    };
+    held.answer(json!({
+        "refs": [location(target), location("/lib/never-delivered.d.ts")],
+    }));
+    let locations = referencing
+        .await
+        .expect("the references task completes")
+        .expect("the receipted location still answers");
+    assert_eq!(
+        locations
+            .iter()
+            .map(|location| (location.path.as_str(), location.start))
+            .collect::<Vec<_>>(),
+        vec![(target, TARGET_A.find("beta").expect("beta") as u32)],
+        "only the location in the file the service reads itself drops"
+    );
+}

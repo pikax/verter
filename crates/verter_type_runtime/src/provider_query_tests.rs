@@ -521,3 +521,80 @@ fn the_binding_carries_the_admission_the_query_was_dispatched_under() {
     );
     assert!(requester.admission().incarnation.is_none());
 }
+
+#[test]
+fn a_navigation_answer_drops_only_its_undelivered_targets() {
+    let ledger = DeliveryLedger::default();
+    ledger.deliver_with(
+        [
+            SurfaceEffect::deliver("/ws/a.ts", bytes("a")),
+            SurfaceEffect::deliver("/ws/b.ts", bytes("b")),
+        ],
+        || (),
+    );
+    let bound = bind(&ledger, &at_engine("/ws/a.ts")).expect("bind");
+    let paths = |list: &[&str]| -> HashSet<String> {
+        list.iter().map(|path| (*path).to_string()).collect()
+    };
+
+    let mixed = paths(&["/ws/a.ts", "/ws/b.ts", "/lib/lib.dom.d.ts"]);
+    let decoded = bound
+        .navigation_targets(&mixed, str::to_string)
+        .expect("delivered targets still decode");
+    assert_eq!(
+        decoded.len(),
+        2,
+        "only the library target drops: {decoded:?}"
+    );
+    assert_eq!(&*decoded["/ws/a.ts"], "a");
+    assert_eq!(&*decoded["/ws/b.ts"], "b");
+    assert_eq!(
+        bound.targets(&mixed, str::to_string).unwrap_err().kind(),
+        ConflictKind::Undelivered,
+        "an edit answer stays whole or refused"
+    );
+
+    let only_undelivered = paths(&["/lib/lib.dom.d.ts", "/ws/closed.ts"]);
+    assert_eq!(
+        bound
+            .navigation_targets(&only_undelivered, str::to_string)
+            .unwrap_err()
+            .kind(),
+        ConflictKind::Undelivered,
+        "an answer with nothing delivered is the typed conflict, never an empty success"
+    );
+    assert!(bound
+        .navigation_targets(&HashSet::new(), str::to_string)
+        .expect("no targets")
+        .is_empty());
+}
+
+#[test]
+fn a_navigation_answer_still_refuses_every_conflict_other_than_undelivered() {
+    let ledger = DeliveryLedger::default();
+    ledger.deliver_with(
+        [
+            SurfaceEffect::deliver("/ws/a.ts", bytes("a")),
+            SurfaceEffect::deliver("/ws/B.vue.tsx", bytes("B2")),
+        ],
+        || (),
+    );
+    let query = at_engine("/ws/a.ts").with_targets(Arc::new(Captured(HashMap::from([(
+        "/ws/B.vue.tsx".to_string(),
+        bytes("B1"),
+    )]))));
+    let bound = bind(&ledger, &query).expect("bind");
+    let targets: HashSet<String> = ["/ws/a.ts", "/ws/B.vue.tsx", "/lib/lib.dom.d.ts"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        bound
+            .navigation_targets(&targets, str::to_string)
+            .unwrap_err()
+            .kind(),
+        ConflictKind::IntendedSurface,
+        "a target decoded through other bytes than the requester maps it through \
+         refuses the whole answer"
+    );
+}

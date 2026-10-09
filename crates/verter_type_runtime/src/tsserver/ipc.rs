@@ -4510,12 +4510,12 @@ impl TypeProvider for TsserverTypeProvider {
                 let target_paths = locations
                     .map(|arr| crate::contents_snapshot::tsserver_location_target_paths(arr))
                     .unwrap_or_default();
-                let cache = bound.targets(&target_paths, |path| {
+                let cache = bound.navigation_targets(&target_paths, |path| {
                     remap_carrier_response_path(path, &carrier_companions, true)
                 })?;
                 transport
                     .ledger
-                    .settle(&bound, target_paths.iter().map(String::as_str))?;
+                    .settle(&bound, cache.keys().map(String::as_str))?;
                 locations
                     .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
@@ -4569,12 +4569,12 @@ impl TypeProvider for TsserverTypeProvider {
                 let target_paths = locations
                     .map(|arr| crate::contents_snapshot::tsserver_location_target_paths(arr))
                     .unwrap_or_default();
-                let cache = bound.targets(&target_paths, |path| {
+                let cache = bound.navigation_targets(&target_paths, |path| {
                     remap_carrier_response_path(path, &carrier_companions, true)
                 })?;
                 transport
                     .ledger
-                    .settle(&bound, target_paths.iter().map(String::as_str))?;
+                    .settle(&bound, cache.keys().map(String::as_str))?;
                 locations
                     .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
@@ -4628,12 +4628,12 @@ impl TypeProvider for TsserverTypeProvider {
                 let target_paths = locations
                     .map(|arr| crate::contents_snapshot::tsserver_location_target_paths(arr))
                     .unwrap_or_default();
-                let cache = bound.targets(&target_paths, |path| {
+                let cache = bound.navigation_targets(&target_paths, |path| {
                     remap_carrier_response_path(path, &carrier_companions, true)
                 })?;
                 transport
                     .ledger
-                    .settle(&bound, target_paths.iter().map(String::as_str))?;
+                    .settle(&bound, cache.keys().map(String::as_str))?;
                 locations
                     .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()

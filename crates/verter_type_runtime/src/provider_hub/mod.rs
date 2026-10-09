@@ -954,13 +954,20 @@ where
         });
         // A coordinate conflict is the engine answering (or the query being
         // refused before it reached the engine) over bytes the requester did
-        // not intend — never evidence that the request harms the engine, so it
-        // is not a crash-attributable error.
-        guard.complete(
-            settled
-                .as_ref()
-                .map_or_else(|error| error.query_conflict, |_| true),
-        );
+        // not intend: evidence neither that the request harms the engine nor
+        // that it is safe, so it neither records an error nor erases crash
+        // strikes. A conflict from an engine retired meanwhile proves nothing
+        // about the serving one and stays a conservative error.
+        match &settled {
+            Ok(_) => guard.complete(true),
+            Err(error)
+                if error.query_conflict
+                    && self.state.shared.serving_epoch() == Some(serving.epoch) =>
+            {
+                guard.complete_neutral();
+            }
+            Err(_) => guard.complete(false),
+        }
         settled
     }
 

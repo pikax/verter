@@ -876,3 +876,56 @@ async fn a_carrier_row_withdrawn_under_an_answer_is_a_typed_conflict() {
     let error = hover.expect_err("the engine may have evaluated the withdrawn publication");
     assert!(error.query_conflict, "typed conflict, got {error}");
 }
+
+#[tokio::test]
+async fn references_keep_their_delivered_locations_when_one_target_is_undelivered() {
+    let (provider, mut engine) = provider();
+    let origin = "/ws/src/a.ts";
+    let target = "/ws/src/b.ts";
+    for (file, content) in [
+        (origin, "import { beta } from './b';\nbeta;\n"),
+        (target, DISPATCHED),
+    ] {
+        let (opened, ()) = tokio::join!(
+            provider.open_file(file, content),
+            engine.acknowledge("updateOpen")
+        );
+        opened.expect("open");
+    }
+
+    let location = |file: &str| {
+        serde_json::json!({
+            "file": TsserverTypeProvider::normalize_path(file),
+            "start": { "line": 2, "offset": 7 },
+            "end": { "line": 2, "offset": 11 },
+        })
+    };
+    let engine_side = async {
+        let references = engine.next().await;
+        assert_eq!(references["command"], "references");
+        engine.answer(
+            &references,
+            serde_json::json!({
+                "refs": [location(target), location("/lib/never-delivered.d.ts")],
+            }),
+        );
+    };
+    let (locations, ()) = tokio::join!(
+        provider.get_references(&ProviderQuery::at_engine_surface(origin), 29),
+        engine_side
+    );
+    let locations = locations.expect("the delivered location still answers");
+    let start = beta_offset(DISPATCHED);
+    assert_eq!(
+        locations
+            .iter()
+            .map(|location| (location.path.as_str(), location.start, location.end))
+            .collect::<Vec<_>>(),
+        vec![(
+            TsserverTypeProvider::normalize_path(target).as_str(),
+            start,
+            start + 4
+        )],
+        "only the location in the file the engine read itself drops"
+    );
+}

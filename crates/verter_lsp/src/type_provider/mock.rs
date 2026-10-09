@@ -13,6 +13,7 @@ mod inner {
     use crate::server::test_support::{RequestBarrier, RequestBarriers};
     use crate::type_provider::protocol::*;
     use crate::type_provider::traits::{ProviderFuture, ProviderQuery, TypeProvider};
+    use verter_type_runtime::provider_query::{ConflictKind, ProviderQueryConflict};
 
     /// Test-side mint for the branded provider display signature.
     ///
@@ -380,6 +381,18 @@ mod inner {
             Ok(())
         }
 
+        /// The engine's bytes for each of `targets` as the query is
+        /// dispatched, for [`settle_targets`] to recheck once the answer is in.
+        fn held_targets<'a>(
+            &self,
+            targets: impl IntoIterator<Item = &'a str>,
+        ) -> Vec<(String, Option<Arc<str>>)> {
+            targets
+                .into_iter()
+                .map(|path| (path.to_string(), self.engine_targets.get(path).cloned()))
+                .collect()
+        }
+
         /// Record that a query at `path` is evaluated now, against the bytes
         /// the engine holds there at this instant.
         fn note_evaluation(&mut self, path: &str) {
@@ -388,6 +401,24 @@ mod inner {
             self.evaluations
                 .push((path.to_string(), bytes, incarnation));
         }
+    }
+
+    /// Refuse `result` when the engine's bytes for any target it locates into
+    /// moved after the query was dispatched, as an adapter's settlement refuses
+    /// an answer whose decoded targets changed under it.
+    fn settle_targets<T>(
+        state: &Mutex<MockState>,
+        held: &[(String, Option<Arc<str>>)],
+        result: Result<T, TypeProviderError>,
+    ) -> Result<T, TypeProviderError> {
+        let result = result?;
+        let state = state.lock().unwrap();
+        for (path, at_dispatch) in held {
+            if state.engine_targets.get(path) != at_dispatch.as_ref() {
+                return Err(ProviderQueryConflict::new(path, ConflictKind::Moved).into());
+            }
+        }
+        Ok(result)
     }
 
     /// A mock `TypeProvider` for testing.
@@ -1783,7 +1814,7 @@ mod inner {
             offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let path = query.path();
-            let (result, on_query, fail, hang) = {
+            let (result, held, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDefinition {
                     path: path.to_string(),
@@ -1802,6 +1833,7 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
                 let result = state
                     .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
                     .map(|()| result);
@@ -1811,7 +1843,7 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query, fail, state.hang_definition)
+                (result, held, on_query, fail, state.hang_definition)
             };
             if hang {
                 // A wedged provider: never resolves. The handler must fail closed
@@ -1823,13 +1855,14 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
+            let state = Arc::clone(&self.state);
             self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient definition failure".to_string(),
                     ));
                 }
-                result
+                settle_targets(&state, &held, result)
             }))
         }
 
@@ -1873,7 +1906,7 @@ mod inner {
             offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let path = query.path();
-            let (result, on_query) = {
+            let (result, held, on_query) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetReferences {
                     path: path.to_string(),
@@ -1886,6 +1919,7 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
                 let result = state
                     .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
                     .map(|()| result);
@@ -1895,14 +1929,17 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, held, on_query)
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered(Box::pin(async move { result }))
+            let state = Arc::clone(&self.state);
+            self.barriered(Box::pin(
+                async move { settle_targets(&state, &held, result) },
+            ))
         }
 
         fn get_rename_locations(
@@ -2003,15 +2040,19 @@ mod inner {
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, actions)| actions.clone())
                 .unwrap_or_default();
-            let result = state
-                .check_targets(
-                    query,
-                    result
-                        .iter()
-                        .flat_map(|action| action.edits.iter().map(|edit| edit.path.as_str())),
-                )
-                .map(|()| result);
-            self.barriered(Box::pin(async move { result }))
+            let edit_targets = || {
+                result
+                    .iter()
+                    .flat_map(|action| action.edits.iter().map(|edit| edit.path.as_str()))
+            };
+            let held = state.held_targets(edit_targets());
+            let checked = state.check_targets(query, edit_targets());
+            let result = checked.map(|()| result);
+            drop(state);
+            let state = Arc::clone(&self.state);
+            self.barriered(Box::pin(
+                async move { settle_targets(&state, &held, result) },
+            ))
         }
 
         fn get_semantic_tokens(

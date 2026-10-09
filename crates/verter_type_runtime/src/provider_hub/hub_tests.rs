@@ -659,6 +659,8 @@ struct MockInner {
     /// When set, a gated hover SUCCEEDS once released (an answer that was in
     /// flight when its engine was retired) instead of failing.
     gated_hover_succeeds: std::sync::atomic::AtomicBool,
+    /// When set, every hover ends in the typed coordinate conflict.
+    hover_conflicts: std::sync::atomic::AtomicBool,
     /// When set, `configure_paths` fails (an engine rejecting replay).
     configure_fails: std::sync::atomic::AtomicBool,
     /// The ambient request deadline observed by every `open_file` call.
@@ -692,6 +694,7 @@ impl MockProvider {
                 cache_only_loads: std::sync::atomic::AtomicBool::new(false),
                 shutdowns: AtomicUsize::new(0),
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
+                hover_conflicts: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
                 open_deadlines: parking_lot::Mutex::new(Vec::new()),
                 hover_admissions: parking_lot::Mutex::new(Vec::new()),
@@ -954,7 +957,16 @@ impl TypeProvider for MockProvider {
             _ => None,
         };
         let succeeds = self.inner.gated_hover_succeeds.load(Ordering::SeqCst);
+        let conflicts = self.inner.hover_conflicts.load(Ordering::SeqCst);
+        let conflict_path = path.to_string();
         Box::pin(async move {
+            if conflicts {
+                return Err(crate::provider_query::ProviderQueryConflict::new(
+                    &conflict_path,
+                    crate::provider_query::ConflictKind::Moved,
+                )
+                .into());
+            }
             if let Some(gate) = gate {
                 let _permit = gate.acquire().await;
                 if !succeeds {
@@ -3127,6 +3139,94 @@ async fn a_discarded_answer_from_a_retired_engine_keeps_its_crash_strikes() {
         1,
         "a discarded answer must not erase the crash strikes of its fingerprint"
     );
+}
+
+/// A coordinate conflict is evidence neither that a request harms the engine
+/// nor that it is safe: settling one on the serving engine must leave the
+/// crash strikes its fingerprint accumulated exactly where they were.
+#[tokio::test(start_paused = true)]
+async fn a_coordinate_conflict_keeps_its_fingerprints_crash_strikes() {
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone()).await;
+    let provider = Arc::clone(&harness.provider);
+    let companion = "/p/Conflicted.svelte.jsx";
+    let offset = 42u32;
+    let fp = QueryFingerprint::new("hover", companion, u64::from(offset), 0);
+    let strikes = || {
+        provider
+            .state
+            .shared
+            .query_watch
+            .lock()
+            .unwrap()
+            .strike_count(&fp)
+    };
+
+    let gate = Arc::new(Semaphore::new(0));
+    initial.set_blocking_failing_hover(companion, Arc::clone(&gate));
+    let in_flight = tokio::spawn({
+        let provider = Arc::clone(&provider);
+        async move {
+            provider
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                    offset,
+                )
+                .await
+        }
+    });
+    await_cond(
+        || hover_count(&initial, companion, offset) == 1,
+        "the hover reached the first engine",
+    )
+    .await;
+    harness.crash_notify.notify_one();
+    await_down(&provider).await;
+    gate.add_permits(1);
+    assert!(in_flight.await.unwrap().is_err());
+    assert_eq!(strikes(), 1, "the crash must strike the in-flight request");
+    harness.spawn_gate.add_permits(1);
+    await_live(&provider).await;
+
+    replacement
+        .inner
+        .hover_conflicts
+        .store(true, Ordering::SeqCst);
+    let conflicted = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+            offset,
+        )
+        .await
+        .expect_err("the serving engine answers with the typed conflict");
+    assert!(
+        conflicted.query_conflict,
+        "typed conflict, got {conflicted}"
+    );
+    assert_eq!(
+        hover_count(&replacement, companion, offset),
+        1,
+        "the struck request reached the serving engine"
+    );
+    assert_eq!(
+        strikes(),
+        1,
+        "a conflict must not erase the crash strikes of its fingerprint"
+    );
+
+    replacement
+        .inner
+        .hover_conflicts
+        .store(false, Ordering::SeqCst);
+    provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+            offset,
+        )
+        .await
+        .expect("a real answer");
+    assert_eq!(strikes(), 0, "a successful completion still self-heals");
 }
 
 /// A state update whose submitter deadline elapses before the actor settles the
@@ -6616,5 +6716,99 @@ async fn a_managed_read_survives_unrelated_content_drift_with_one_engine_call() 
     assert_eq!(
         refused.admission_refusal,
         Some(AdmissionRefusal::StaleBasis)
+    );
+}
+
+/// A republished workspace supersedes every read-query cache entry decided
+/// under the old publication: admitting under the new one releases the old
+/// snapshot instead of retaining it until the cache fills, while a content
+/// edit under the same publication keeps its decided proof.
+#[tokio::test]
+async fn a_republish_releases_the_superseded_publication_from_the_read_caches() {
+    use super::{ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let sources = ["d:/ws/src/Foo.vue", "d:/ws/src/Bar.vue"];
+    let units = sources.map(|source| CanonicalPath::new(&format!("{source}.tsx")));
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    for source in sources {
+        workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    }
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proofs = units.clone().map(|unit| {
+        let proof = decide_generated_unit_admission(
+            &snapshot,
+            &CanonicalPath::new(project),
+            std::slice::from_ref(&unit),
+        );
+        assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+        proof
+    });
+
+    let harness = make_harness(MockProvider::new("tsgo"), MockProvider::new("tsgo")).await;
+    let live = Arc::new(std::sync::Mutex::new(None::<ProjectBasis>));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || live.lock().unwrap().clone())
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let admit_under = |which: usize, basis: ProjectBasis| {
+        *live.lock().unwrap() = Some(basis.clone());
+        let input = ProjectBindingInput::new(
+            sources[which].into(),
+            project.into(),
+            Vec::new(),
+            basis,
+            Arc::clone(&reader),
+        );
+        let witness = harness.provider.bind_query(input).expect("binds");
+        harness
+            .provider
+            .admit_query(&witness, std::slice::from_ref(&units[which]), || {
+                proofs[which].clone()
+            })
+            .expect("admitted");
+    };
+
+    let superseded = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    admit_under(0, ProjectBasis::new(Arc::clone(&superseded), 1, 1));
+    let held_after_one_proof = Arc::strong_count(&superseded);
+    admit_under(1, ProjectBasis::new(Arc::clone(&superseded), 2, 1));
+    assert_eq!(
+        Arc::strong_count(&superseded),
+        held_after_one_proof + 1,
+        "a content edit under the same publication keeps the first decided proof          beside the second"
+    );
+
+    let republished = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    admit_under(1, ProjectBasis::new(Arc::clone(&republished), 2, 1));
+    assert_eq!(
+        Arc::strong_count(&superseded),
+        1,
+        "nothing but this test still holds the superseded publication"
     );
 }

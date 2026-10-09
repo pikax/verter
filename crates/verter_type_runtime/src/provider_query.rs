@@ -903,6 +903,40 @@ impl BoundQuery {
             .map(|path| Ok((path.clone(), self.target(path, &intended_as(path))?)))
             .collect()
     }
+
+    /// [`Self::targets`] for a read-only navigation answer (definition,
+    /// type definition, references), whose locations are independent of one
+    /// another: a target the engine was never handed is left out of the map, so
+    /// its locations drop while every location in a delivered file still
+    /// decodes through that file's own bytes. Edits never use this — a partial
+    /// edit is unsafe, so their answer stays whole or refused.
+    ///
+    /// # Errors
+    /// Any conflict other than [`ConflictKind::Undelivered`] refuses the whole
+    /// answer, and so does an answer none of whose targets was delivered.
+    pub fn navigation_targets(
+        &self,
+        paths: &HashSet<String>,
+        intended_as: impl Fn(&str) -> String,
+    ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
+        let mut decoded = HashMap::with_capacity(paths.len());
+        let mut undelivered = None;
+        for path in paths {
+            match self.target(path, &intended_as(path)) {
+                Ok(bytes) => {
+                    decoded.insert(path.clone(), bytes);
+                }
+                Err(conflict) if conflict.kind() == ConflictKind::Undelivered => {
+                    undelivered.get_or_insert(conflict);
+                }
+                Err(conflict) => return Err(conflict),
+            }
+        }
+        match undelivered {
+            Some(conflict) if decoded.is_empty() => Err(conflict),
+            _ => Ok(decoded),
+        }
+    }
 }
 
 #[cfg(test)]

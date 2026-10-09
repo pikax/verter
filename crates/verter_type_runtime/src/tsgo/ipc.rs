@@ -2006,9 +2006,10 @@ fn lsp_wire_pos_to_byte_offset(
     index.checked_position_to_offset(LineColumn { line, character })
 }
 
-/// Decode a location batch, each location against its own file's bytes as the
-/// query's request frame met them, after settling every out-of-band file the
-/// batch decodes through.
+/// Decode a navigation location batch, each location against its own file's
+/// bytes as the query's request frame met them, after settling every
+/// out-of-band file the batch decodes through. A location in a file the engine
+/// was never handed drops; the rest of the batch still decodes.
 fn decode_locations(
     transport: &LspTransport,
     bound: &BoundQuery,
@@ -2019,7 +2020,10 @@ fn decode_locations(
         .filter_map(|location| location.get("uri").and_then(|uri| uri.as_str()))
         .map(|uri| contents_key(&uri_to_file_path(uri)))
         .collect();
-    let contents = settled_targets(transport, bound, &targets)?;
+    let contents = bound.navigation_targets(&targets, str::to_string)?;
+    transport
+        .ledger
+        .settle(bound, contents.keys().map(String::as_str))?;
     Ok(parse_lsp_locations_per_target(locations, |target_path| {
         contents
             .get(&contents_key(target_path))
