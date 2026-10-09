@@ -21,7 +21,7 @@ The reviewed contract data lives in `tests/kernel/PAR0/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `parser-inventory.v1.json` | Decision kinds `DK1`–`DK5`, contracts `PD01`–`PD09`, current parser routes `G01`–`G13`, the grammar classification `CL01`–`CL38` plus SQL dialect rows `CL34P`, `CL34L` and `CL34M`, parser homes `H01`–`H09`, outcomes `PAR-O..`, consumers `PAR-C..`, plan consumers `PAR-P..`, the displaced routes `PAR-D01` and `PAR-D02`, referenced routes, category coverage, empty populations, findings `PAR-F..` and transferred obligations |
+| `parser-inventory.v1.json` | Decision kinds `DK1`–`DK5`, contracts `PD01`–`PD09`, current parser routes `G01`–`G13`, the grammar classification `CL01`–`CL38` plus SQL dialect rows `CL34P`, `CL34L` and `CL34M`, parser homes `H01`–`H09`, outcomes `PAR-O..`, consumers `PAR-C..`, plan consumers `PAR-P..`, the displaced routes `PAR-D01`–`PAR-D04`, referenced routes, category coverage, empty populations, findings `PAR-F..` and transferred obligations `PAR-T..` |
 | `parser-case-table.v1.json` | Negative cases `PN01`–`PN12`, which UAI0 runs, positive cases `PP01`–`PP05` and work counters `WC01`–`WC03` |
 
 Every `successorPath` starts at PAR0 and follows predecessor edges in the
@@ -77,7 +77,8 @@ refines or references them by id.
     are UAK0 `D01` (`G08`).
 - **The retained OXC snapshot is keyed by content.** `SnapshotKey` is
   `{canonical, whole_hash, parse_env_hash}`. The `SourceType` rides beside the
-  key and is read only on a cold parse (`G09`, `PAR-F01`).
+  key, and a warm hit returns before reading it (`G09`, `PAR-F01`). The
+  cutover is `PAR-D03`, owned by FWC1 (`FWC1-AC5`) on the path PAR0 → FWC1.
 - **Two text formats are read with ad-hoc tooling.**
   - TOML: `verter_validation_probe` and the `xtask` workspace member both
     depend on the `toml` crate as a normal dependency (`G11`, `PAR-D01`,
@@ -85,8 +86,14 @@ refines or references them by id.
     dev-dependency. `extensions/lapce` and `extensions/zed` are outside the
     workspace members list and dev-depend on `toml` 0.8 (`PAR-C10`,
     `PAR-C11`).
-  - JSON/JSONC: four in-house comment strippers feed `serde_json` (`G12`,
-    `PAR-F05`).
+  - JSON/JSONC: three in-house comment strippers feed `serde_json`
+    (`verter_workspace` `config.rs`, `verter_tsc` `tsconfig.rs`,
+    `verter_diagnostics` `config.rs`). `verter_lsp` `config.rs` re-exports the
+    diagnostics implementation, so there are four surfaces and three
+    implementations (`G12`, `PAR-F05`). The cutover is `PAR-D04`, owned by
+    DATA1 (`DATA1-AC1`, `DATA1-AC5`) on the path PAR0 → DATA0 → DATA1. CENV
+    keeps config meaning. `package_index::parse_package_json` is plain
+    `serde_json` and is not a stripper.
 - **Nothing else.** There is no parser for HTML, Pug, Astro, Angular, Marko,
   Glimmer, MDX, ERB, Liquid, TOML, XML, JSON5, YAML, Markdown, GraphQL, SQL,
   Cypher, DynamoDB or regex, and no third-party parser crate for them (`G13`).
@@ -307,10 +314,17 @@ Every dedicated-grammar row carries two acceptance slots:
 - an exact-version grammar slot (`grammarSlot`);
 - a lossless-recovery slot (`recoverySlot`).
 
-Both name the owning vertical's receiving acceptance ID; for example
-`AST1-AC1`/`AST1-AC2` or `TOML1-AC1`/`TOML1-AC2`. The P0 locks (AST0, ANG0,
-MDX0, MRK0, GLM0, ERB0, LIQ0) fill the open kind choices of their rows in their
-owned matrix (`AC2`). The overlay and attachment locks record "no parser".
+A slot names a receiving acceptance only when that acceptance's text carries
+the obligation (a lossless round trip of the pinned corpus, or recovery on
+that grammar's own malformed corpus). `AST1-AC1`/`AST1-AC2`, `LIQ1-AC4`/
+`LIQ1-AC2` and `RGX1-AC1`/`RGX1-AC2` do. Where the receiver's charter has no
+such acceptance, the slot names a transferred obligation `PAR-T01`–`PAR-T26`.
+The 2026-10-02 parallelisation rule amends that charter to add the acceptance;
+the slot is rebound to the new id. A dialect cell does not inherit the core
+parser's recovery (`PD05`, `PN07`), so `CL34P`, `CL34L` and `CL34M` do not use
+`SQL1-AC2`. The P0 locks (AST0, ANG0, MDX0, MRK0, GLM0, ERB0, LIQ0) fill the
+open kind choices of their rows in their owned matrix (`AC2`). The overlay and
+attachment locks record "no parser".
 
 ## Parser homes
 
@@ -332,13 +346,15 @@ glob makes them members.
 | ----- | -------- | ---- | ----- |
 | `PAR-D01` | parser admission | `toml` as a normal dependency of `verter_validation_probe` | TOMLX (`TOMLX-AC1`) |
 | `PAR-D02` | parser admission | `toml` as a normal dependency of the `xtask` workspace member | TOMLX (`TOMLX-AC1`) |
+| `PAR-D03` | untagged coordinate / public identity | content-only `SnapshotKey` | FWC1 (`FWC1-AC5`) |
+| `PAR-D04` | parser admission | three JSONC comment strippers and the LSP re-export | DATA1 (`DATA1-AC1`, `DATA1-AC5`) |
 
 | Category | Recorded here | Referenced |
 | -------- | ------------- | ---------- |
 | central framework switch | — | `D01`, `D04`, `D07` (CPF1); `K03` (FWC1); `F-D01` (CPF1) |
-| untagged coordinate/public identity | — | `D08` (CPF1) |
+| untagged coordinate/public identity | `PAR-D03` | `D08` (CPF1) |
 | duplicate component information authority | — | `F-D06` (CPF1); `D12` (TIF1) |
-| parser admission | `PAR-D01`, `PAR-D02` | — |
+| parser admission | `PAR-D01`, `PAR-D02`, `PAR-D04` | — |
 
 Each central grammar match at this head already has an owner. PAR0 adds the
 rule (`PD02`) and the negatives that keep a new one out (`PN03`, `PN06`,
@@ -365,6 +381,11 @@ rule (`PD02`) and the negatives that keep a new one out (`PN03`, `PN06`,
 | `PAR-C09` | `xtask` cutover-state TOML reader | TOMLX (`TOMLX-AC1`) |
 | `PAR-C10` | Lapce extension `toml` 0.8 dev-dependency (not a workspace member) | TOMLX (`TOMLX-AC1`) |
 | `PAR-C11` | Zed extension `toml` 0.8 dev-dependency (not a workspace member) | TOMLX (`TOMLX-AC1`) |
+| `PAR-C12` | Workspace JSONC comment stripper | DATA1 (`DATA1-AC1`, `DATA1-AC5`) |
+| `PAR-C13` | tsc tsconfig JSONC comment stripper | DATA1 (`DATA1-AC1`, `DATA1-AC5`) |
+| `PAR-C14` | Diagnostics JSONC comment stripper | DATA1 (`DATA1-AC1`, `DATA1-AC5`) |
+| `PAR-C15` | LSP re-export of the diagnostics stripper | DATA1 (`DATA1-AC1`, `DATA1-AC5`) |
+| `PAR-C16` | Retained OXC parse snapshot | FWC1 (`FWC1-AC5`) |
 
 The plan consumers `PAR-P01`–`PAR-P15` list which successor reads which rows.
 A row names one node, or a `bindings` list with one entry per node. Each
@@ -374,11 +395,12 @@ binding has that node's successor path and its own receiving acceptance.
 
 - **The retained snapshot reuses by content** (`PAR-F01`).
   - `SnapshotKey` carries no parser identity or `SourceType`, and a warm hit
-    ignores the requested `SourceType`. `PD03` forbids this shape; no defect
-    has been reproduced.
-  - No PAR0 descendant charters this key. It is routed to UAI0's drift return,
-    which runs `PN01` against it. Operator question `par0-unowned-parse-routes`
-    asks who owns the cutover.
+    returns before reading the requested `SourceType`. `PD03` forbids this
+    shape.
+  - FWC1 owns the cutover (`FWC1-AC5`, `PAR-D03`, `PAR-C16`) on PAR0 → FWC1.
+    `ParseKey` distinguishes the retained source, `SourceType`, parser identity
+    and grammar epoch. The parser-free DTO, the one cache and zero eager
+    bodies stay. UAI0 still runs `PN01`; it does not implement the cutover.
 - **Two grammar-version notions** (`PAR-F02`, CPF1). `ParseKey` uses
   per-domain compatibility epochs, while `CarrierParserGrammarVersion` enters
   only the fingerprint. `PD03` needs one `ParserGrammarEpoch` in the key.
@@ -387,8 +409,12 @@ binding has that node's successor path and its own receiving acceptance.
   identity (VID0 `R15`).
 - **Scattered `SourceType` mappings** (`PAR-F04`, CPF1). The target is one
   neutral mapping from the region's embedded `CarrierProfileId` (CAT0 `T05`).
-- **Four JSONC comment strippers** (`PAR-F05`). No descendant charters their
-  cutover onto `CL29`. They take the same question and route as `PAR-F01`.
+- **Three JSONC comment strippers** (`PAR-F05`). DATA1 owns their cutover
+  onto `CL29` (`DATA1-AC1`, `DATA1-AC5`, `PAR-D04`, `PAR-C12`–`PAR-C15`) on
+  PAR0 → DATA0 → DATA1. The implementations are `verter_workspace`
+  `config.rs`, `verter_tsc` `tsconfig.rs` and `verter_diagnostics`
+  `config.rs`. `verter_lsp` `config.rs` re-exports the diagnostics
+  implementation. CENV keeps config meaning.
 - **Three hand-written JSDoc tag scanners** (`PAR-F06`, NCF-JD-JSDOC).
 - **REG0, LIQ1 and ERB1 place grammar work in `verter_language`** (`PAR-F07`).
   - REG0 pre-registers `verter_language/src/carriers/` "when PAR0 places them
@@ -414,8 +440,11 @@ inspection are the right evidence. The diff adds no test.
 
 - **AC1 — ownership contract.**
   - The inventory binds every outcome, consumer, classification row, home and
-    the one displaced route to one existing plan node, a successor path from
-    PAR0 and a receiving acceptance ID.
+    each displaced route (`PAR-D01` through `PAR-D04`) to one existing plan
+    node, a successor path from PAR0 and a receiving acceptance ID. A grammar
+    or recovery slot that the receiver's charter does not yet carry is a
+    transferred obligation (`PAR-T01`–`PAR-T26`) instead of an unrelated
+    acceptance.
   - UAK0, UAK1, VID0, CAT0 and CPF0 rows are referenced, not re-owned.
   - The executable validator and the negatives belong to UAI0
     (`UAI0-AC-R1`).
