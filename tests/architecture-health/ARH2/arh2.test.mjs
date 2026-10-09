@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
 import {
   loadManifest,
   loadProducts,
@@ -863,21 +864,9 @@ test("source references are optional context, independent of commit identity", (
 });
 
 test("ARH2 CI: architecture-health filter selects performance methodology inputs", () => {
-  const ci = fs.readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const start = ci.indexOf("\n            arch:\n");
-  assert.notEqual(start, -1, "ci.yml must declare the arch filter");
-  const rest = ci.slice(start + 1);
-  const next = rest.search(/\n            [a-z_]+:\n/);
-  const block = next === -1 ? rest : rest.slice(0, next);
-  const paths = [...block.matchAll(/- '([^']+)'/g)].map((m) => m[1]);
-  assert.ok(
-    paths.includes("performance-gates.toml"),
-    `arch filter omits performance-gates.toml: ${paths.join(", ")}`,
-  );
-  assert.ok(
-    paths.includes("scripts/validate-performance-gates.mjs"),
-    `arch filter omits scripts/validate-performance-gates.mjs: ${paths.join(", ")}`,
-  );
+  for (const input of ["performance-gates.toml", "scripts/validate-performance-gates.mjs"]) {
+    assert.equal(matchPathFilters([input]).hits.arch, true, `arch filter omits ${input}`);
+  }
 });
 
 test("ARH2-verify CLI: the manifest verify command runs validate() and exits 0 on the clean tree", () => {
