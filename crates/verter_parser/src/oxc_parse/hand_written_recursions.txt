@@ -6,10 +6,11 @@
 verter_compiler/src/ide/script/comp_emit.rs collect_binding_pattern_names
 verter_compiler/src/ide/script/detectors.rs detect_gci_in_expr
 verter_compiler/src/ide/script/detectors.rs detect_gci_in_stmt
-verter_compiler/src/ide/template/flow_check/builder.rs chain
+verter_compiler/src/ide/template/flow.rs chain
+verter_compiler/src/ide/template/flow.rs chain_from
+verter_compiler/src/ide/template/flow.rs pattern
+verter_compiler/src/ide/template/flow.rs visit_expression
 verter_compiler/src/ide/template/flow_check/builder.rs is_reference_path
-verter_compiler/src/ide/template/flow_check/builder.rs pattern
-verter_compiler/src/ide/template/flow_check/builder.rs visit_expression
 verter_compiler/src/ide/vue_projection/binder_capture.rs leftmost_expression_identifier
 verter_compiler/src/ide/vue_projection/binder_capture.rs leftmost_type_name
 verter_compiler/src/ide/vue_projection/binding_views.rs pattern_names

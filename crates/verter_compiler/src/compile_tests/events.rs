@@ -1377,10 +1377,16 @@ const msg: string | number = Math.random() > 0.5 ? 'x' : 0
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
-    // In the new output, .value is NOT appended — msg stays as msg
+    // The handler re-narrows the references it reads from snapshots taken in
+    // the branch block (no .value — msg stays as msg).
+    assert!(
+        normalized.contains("{(()=>{if(typeofmsg==='string'){const___VERTER___o0=msg;const___VERTER___o1=msg!.toLowerCase;"),
+        "the branch block should snapshot the handler's outer references, got:\n{}",
+        tsx.code
+    );
     assert!(
         normalized.contains(
-            "onClick={()=>{if(!((typeofmsg==='string'))){returnundefined;}msg.toLowerCase()}}"
+            "onClick={()=>{if(!___VERTER___flowNarrow(msg,___VERTER___o0)||___VERTER___flowExcluded(___VERTER___o0)(msg)||!___VERTER___flowNarrow(msg!.toLowerCase,___VERTER___o1)||___VERTER___flowExcluded(___VERTER___o1)(msg!.toLowerCase))throw0;msg.toLowerCase()}}"
         ),
         "v-if event handlers should include the guard inside callback for narrowing (no .value), got:\n{}",
         tsx.code
@@ -1426,8 +1432,9 @@ fn tsx_v_for_item_in_items_emits_map_expression() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items).map((item") || tsx.code.contains("_ctx.items).map((item"),
-        "v-for item in items should compile to .map expression, got:\n{}",
+        tsx.code.contains("items); { const item")
+            && tsx.code.contains("___VERTER___flowEach1(___VERTER___v0)"),
+        "v-for item in items should compile to a frame, got:\n{}",
         tsx.code
     );
 }
@@ -1439,8 +1446,9 @@ fn tsx_v_for_item_of_items_emits_map_expression() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items).map((item") || tsx.code.contains("_ctx.items).map((item"),
-        "v-for item of items should compile to .map expression, got:\n{}",
+        tsx.code.contains("items); { const item")
+            && tsx.code.contains("___VERTER___flowEach1(___VERTER___v0)"),
+        "v-for item of items should compile to a frame, got:\n{}",
         tsx.code
     );
     assert!(
@@ -1458,8 +1466,8 @@ fn tsx_v_for_nested_loop_emits_nested_maps() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.matches(".map((").count() >= 2,
-        "Nested v-for should produce nested map expressions, got:\n{}",
+        tsx.code.matches("___VERTER___flowEach1(").count() >= 2,
+        "Nested v-for should produce nested frames, got:\n{}",
         tsx.code
     );
 }
