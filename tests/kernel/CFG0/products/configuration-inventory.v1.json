@@ -1,0 +1,1284 @@
+{
+  "id": "configuration-inventory.v1",
+  "schema": 1,
+  "contractNode": "CFG0",
+  "finalOwner": "expansion.kernel: typed immutable universal catalog and demand-selected kernel services",
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "describesHead": {
+    "landingTitle": "fix(core): walk a class's extends chain iteratively for inherited (#797)",
+    "date": "2026-10-09"
+  },
+  "companionCaseTable": "configuration-case-table.v1.json",
+  "inherits": {
+    "nodes": [
+      "UAK0",
+      "UAK1",
+      "VID0"
+    ],
+    "files": [
+      "tests/kernel/UAK0/products/owner-consumer-inventory.v1.json",
+      "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "tests/kernel/UAK1/products/constitution-inventory.v1.json",
+      "tests/kernel/VID0/products/identity-inventory.v1.json"
+    ],
+    "rule": "UAK0, UAK1 and VID0 rows keep their owners; CFG0 references them by id. CFG0 adds contract rules CR01-CR24, outcomes CF-O01-CF-O14, consumers CF-C01-CF-C19, retained host inputs CF-H01-CF-H04 and displaced routes CF-D01-CF-D10, and maps each charter deletion category to its recorded and referenced routes (categoryCoverage). Profile sections are keyed by VID0 identities I05 and I07; configuration files by I01 and I02."
+  },
+  "subblocks": [
+    {
+      "n": 1,
+      "subblock": "Versioned verter.config.jsonc envelope",
+      "rules": [
+        "CR01",
+        "CR02",
+        "CR03",
+        "CR04"
+      ]
+    },
+    {
+      "n": 2,
+      "subblock": "Root/extends/override/profile precedence and provenance",
+      "rules": [
+        "CR05",
+        "CR06",
+        "CR07",
+        "CR08",
+        "CR09",
+        "CR10",
+        "CR11"
+      ]
+    },
+    {
+      "n": 3,
+      "subblock": "Typed opaque product-config sections with downstream-owned schemas",
+      "rules": [
+        "CR03",
+        "CR12"
+      ]
+    },
+    {
+      "n": 4,
+      "subblock": "Unknown top-level, cycle, trust and NeedInputs outcomes",
+      "rules": [
+        "CR01",
+        "CR02",
+        "CR04",
+        "CR09",
+        "CR19",
+        "CR20",
+        "CR23"
+      ]
+    },
+    {
+      "n": 5,
+      "subblock": "Config read sets and invalidation",
+      "rules": [
+        "CR13",
+        "CR14",
+        "CR15",
+        "CR16",
+        "CR17"
+      ]
+    },
+    {
+      "n": 6,
+      "subblock": "NAPI/WASM prepared-input contracts",
+      "rules": [
+        "CR22",
+        "CR23"
+      ]
+    }
+  ],
+  "envelope": {
+    "fileName": "verter.config.jsonc",
+    "format": "JSONC (comments and trailing commas)",
+    "version": 1,
+    "envelopeKeys": [
+      "$schema",
+      "version",
+      "root",
+      "extends",
+      "overrides",
+      "profiles"
+    ],
+    "baseSections": [
+      {
+        "section": "frameworks",
+        "shape": "{ <family>: auto | off | { state: on, release: <exact admitted release> } }",
+        "allowedIn": [
+          "top level",
+          "overrides"
+        ],
+        "forbiddenIn": [
+          "profiles (Invalid(ActivationKeyInProfile))"
+        ],
+        "consumer": "CF-C01"
+      },
+      {
+        "section": "embedded",
+        "shape": "{ tags: [ { kind, module, export, dialect? } ], dialects: { <kind>: <dialect> } }",
+        "allowedIn": [
+          "top level",
+          "overrides",
+          "profiles"
+        ],
+        "consumer": [
+          "CF-C05",
+          "CF-C06",
+          "CF-C07"
+        ]
+      },
+      {
+        "section": "coexistence",
+        "shape": "{ <capability cell>: verter | official | per-feature }",
+        "allowedIn": [
+          "user layer top level",
+          "workspace-root file top level"
+        ],
+        "forbiddenIn": [
+          "any other file, overrides, profiles (Invalid(ScopeRestrictedKey))"
+        ],
+        "consumer": "CF-C08"
+      }
+    ],
+    "productSections": [
+      {
+        "section": "lint",
+        "schemaOwner": "LNTCFG0"
+      },
+      {
+        "section": "assist",
+        "schemaOwner": "LK3"
+      },
+      {
+        "section": "format",
+        "schemaOwner": "FCFG0"
+      },
+      {
+        "section": "build",
+        "schemaOwner": "TSB4X",
+        "firstRow": "build.solid"
+      },
+      {
+        "section": "mcp",
+        "schemaOwner": "AGM5"
+      }
+    ],
+    "productSectionRegistration": "catalog row owned by CAT0; UAO0 reconciles CAT0's rows with this list",
+    "precedence": [
+      "catalog defaults",
+      "user layer (host-supplied)",
+      "configuration chain, outermost first; per file: extends targets in declared order (depth-first), then the body; per body: top level < project-profile section < framework-profile section < matching overrides in array order"
+    ],
+    "provenanceKinds": [
+      "default",
+      "user",
+      "source",
+      "inherited",
+      "override",
+      "profile",
+      "captured"
+    ],
+    "outcomes": [
+      "Complete",
+      "Invalid { diagnostics }",
+      "Cycle { chain }",
+      "NeedInputs { paths }",
+      "Uncaptured { reason }"
+    ]
+  },
+  "contractRules": [
+    {
+      "id": "CR01",
+      "group": "envelope",
+      "rule": "verter.config.jsonc carries a required version; only 1 is admitted. A missing or unknown version is Invalid(UnsupportedSchemaVersion), never read as the nearest known version.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR02",
+      "group": "envelope",
+      "rule": "The top-level key set is closed: envelope keys ($schema, version, root, extends, overrides, profiles), base sections (frameworks, embedded, coexistence) and catalog-registered product sections. Any other key is Invalid(UnknownKey). $schema is never fetched.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR03",
+      "group": "envelope",
+      "rule": "A product section is an opaque typed slot with exactly one downstream schema owner; the envelope knows its name and owner, never its fields. Registering a section name is a catalog row, not an envelope version change.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR04",
+      "group": "envelope",
+      "rule": "Framework family, release, profile, embedded kind, dialect and capability-cell spellings decode once at capture into typed identities; a spelling that does not decode is Invalid and is never kept or matched later (VID0 R03).",
+      "owner": "G01"
+    },
+    {
+      "id": "CR05",
+      "group": "precedence",
+      "rule": "Layers apply in one total order, lowest first: catalog defaults, the host-supplied user layer, then the configuration chain outermost first.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR06",
+      "group": "precedence",
+      "rule": "The chain is every verter.config.jsonc from the stop directory down to the configured file's directory; the stop directory is the nearest root:true file or the workspace root, whichever is nearer. Nothing above the workspace root is read.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR07",
+      "group": "precedence",
+      "rule": "A file expands to its extends targets in declared order, each expanded depth-first, then its own body; the body wins over what it extends.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR08",
+      "group": "precedence",
+      "rule": "Inside one body: top-level sections < project-profile section < framework-profile section < matching overrides entries in array order (each entry's profiles directly after it). A nested file's lowest rank beats its parent's highest. Discovery, load and registration order never decide.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR09",
+      "group": "precedence",
+      "rule": "extends entries are relative paths or package specifiers resolved through PM2 to a .jsonc file. Outside the workspace root is Invalid(OutsideWorkspace); a proven-absent target is Invalid(MissingExtends), an unproven one NeedInputs; root in an extended file is Invalid(RootInExtended); a cycle is Cycle { chain }.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR10",
+      "group": "precedence",
+      "rule": "profiles keys decode to ProjectProfileId or FrameworkProfileId (VID0 I07, I05) and apply only where that profile is active in the demand plan; two framework profiles active on one region stay VID0's typed ambiguity (R10), never a merge.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR11",
+      "group": "provenance",
+      "rule": "Base sections merge by key: objects recursively, scalars and arrays replace. Every leaf records its winning contribution and the shadowed ones as source unit, JSON pointer and span.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR12",
+      "group": "provenance",
+      "rule": "Product sections are not merged by the envelope: the consumer receives the ordered contributions (rank, source unit, content, JSON pointer, span, exact authored value) and reports each as applied, shadowed or rejected. Nothing is dropped silently.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR13",
+      "group": "identity",
+      "rule": "A configuration file is identified by SourceUnitId and ContentId (VID0 I01, I02); no path string is a configuration identity.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR14",
+      "group": "identity",
+      "rule": "An effective-configuration query key is the chain's ordered (SourceUnitId, ContentId) pairs with the extends closure, the user-layer revision, the configured file's root-relative path, the active profile identities and the section, through the canonical tagged encoding (VID0 R12, R13). It is independent of ConfiguredProjectId.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR15",
+      "group": "read-set",
+      "rule": "Every result records its read set: each probed path present (ContentId) or proven absent, each package-specifier resolution proof, the user-layer revision and each captured snapshot consumed.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR16",
+      "group": "invalidation",
+      "rule": "Invalidation is per (section, profile) fingerprint: a consumer recomputes only when a fingerprint it read changes. Fingerprints are content-addressed, so edit and revert restore the original result.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR17",
+      "group": "invalidation",
+      "rule": "Invalid, Cycle, NeedInputs, Uncaptured, cancelled and superseded results return to the caller and never warm a cache (ReturnOnly).",
+      "owner": "G01"
+    },
+    {
+      "id": "CR18",
+      "group": "placement",
+      "rule": "Profile identities and configuration values are not threaded into HostConfig, CompileProfile or CodegenOptions (VID0 R16; UAK0 S13); consumers read configuration on demand.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR19",
+      "group": "capture",
+      "rule": "Static capture parses data formats as data. For an executable config it may extract only literal forms through the tool's fact owner, reports non-literal forms as partial, never executes or spawns a runtime, and an unreadable executable config is Uncaptured { reason }, never empty.",
+      "owner": "CENV1C"
+    },
+    {
+      "id": "CR20",
+      "group": "capture",
+      "rule": "Dynamic evaluation runs only through an explicitly authorized execution service and yields a new captured snapshot recording service, authorization, declared inputs, exact tool version, environment binding and observed read set; it never mutates the static snapshot. A read outside the declared inputs prevents a hermetic-complete claim; without authorization the outcome stays Uncaptured { ExecutionNotAuthorized }.",
+      "owner": "CENV5"
+    },
+    {
+      "id": "CR21",
+      "group": "capture",
+      "rule": "Every captured snapshot names its tool row, source unit, capture mode (Static | Executed), completeness (Complete | Partial | Uncaptured) and an opaque payload whose schema belongs to the tool's fact owner.",
+      "owner": "CENV1C"
+    },
+    {
+      "id": "CR22",
+      "group": "host",
+      "rule": "The user layer is an explicit host input (client user settings, or a path passed on the command line). No code reads $HOME, XDG or other ambient global configuration; the workspace root bounds every read.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR23",
+      "group": "host",
+      "rule": "A host without a filesystem supplies prepared inputs (workspace root, each config file as bytes or proven absent, the user layer, captured snapshots). The core runs the same parser and merger; JavaScript never pre-merges Verter configuration. A path neither supplied nor proven absent is NeedInputs { paths }, never absent and never an empty success.",
+      "owner": "G01"
+    },
+    {
+      "id": "CR24",
+      "group": "secrets",
+      "rule": "No configuration value holds a secret. An admitted environment reference { \"$env\": NAME } is captured as a secret handle (key identity, scope, classification, provenance); the value stays host-owned and resolves only under a grant. Logs, audit, fingerprints and read sets use the handle and a host-supplied opaque revision, never the value or its hash. Base sections admit no environment reference; an environment binding travels beside a captured snapshot's identity.",
+      "owner": "CENV2"
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "CF-O01",
+      "outcome": "Versioned verter.config.jsonc envelope with a closed top-level key set and decode-once spellings (subblock 1; CR01-CR04)",
+      "owner": null,
+      "openGap": "G01"
+    },
+    {
+      "id": "CF-O02",
+      "outcome": "Root/extends/override/profile precedence with leaf provenance for base sections (subblock 2; CR05-CR11)",
+      "owner": null,
+      "openGap": "G01"
+    },
+    {
+      "id": "CF-O03",
+      "outcome": "Opaque product sections delivered as ordered contributions with exact source and provenance (subblock 3; CR03, CR12)",
+      "owner": null,
+      "openGap": "G01",
+      "note": "Section-name registration is a catalog row owned by CAT0 (contract) and implemented under CAT0's binding; UAO0 reconciles the two. No CFG0 successor path reaches the catalog implementation node."
+    },
+    {
+      "id": "CF-O04",
+      "outcome": "Fail-closed envelope outcomes: unknown key, unsupported version, unknown framework release or profile key, root in extended, outside workspace, Cycle, NeedInputs (subblock 4; CR09, outcome table)",
+      "owner": null,
+      "openGap": "G01"
+    },
+    {
+      "id": "CF-O05",
+      "outcome": "Admission of a release named by frameworks.<family> = on: an unadmitted release is unsupported-version at activation",
+      "owner": "FWA1",
+      "successorPath": [
+        "CFG0",
+        "FWA1"
+      ],
+      "receivingAcceptance": "FWA1-AC6"
+    },
+    {
+      "id": "CF-O06",
+      "outcome": "Effective-configuration key, read set and per-(section, profile) invalidation; degraded results never warm (subblock 5; CR13-CR17)",
+      "owner": null,
+      "openGap": "G01"
+    },
+    {
+      "id": "CF-O07",
+      "outcome": "NAPI/WASM prepared-input layers run through the one core merger (subblock 6; CR23)",
+      "owner": null,
+      "openGap": "G01"
+    },
+    {
+      "id": "CF-O08",
+      "outcome": "A missing prepared input surfaces as NeedInputs on every public surface, never an empty success",
+      "owner": "PUB0T",
+      "successorPath": [
+        "CFG0",
+        "LRA0",
+        "PUB0",
+        "PUB0T"
+      ],
+      "receivingAcceptance": "PUB0T-AC2"
+    },
+    {
+      "id": "CF-O09",
+      "outcome": "Static capture of ecosystem data formats into typed captured snapshots with tool, source, mode, completeness and provenance (CR19, CR21)",
+      "owner": "CENV1C",
+      "successorPath": [
+        "CFG0",
+        "CENV1C"
+      ],
+      "receivingAcceptance": "CENV1C-AC1"
+    },
+    {
+      "id": "CF-O10",
+      "outcome": "An executable ecosystem config stays Uncaptured during static capture and indexing; nothing executes it (CR19; preserves UAK1 U01)",
+      "owner": "CENV1C",
+      "successorPath": [
+        "CFG0",
+        "CENV1C"
+      ],
+      "receivingAcceptance": "CENV1C-AC2"
+    },
+    {
+      "id": "CF-O11",
+      "outcome": "Dynamic evaluation only through an authorized execution service, producing a new captured snapshot with execution provenance (CR20; contract XEC0)",
+      "owner": "CENV5",
+      "successorPath": [
+        "CFG0",
+        "CENV1C",
+        "CENV2",
+        "CENV5"
+      ],
+      "receivingAcceptance": "CENV5-AC2"
+    },
+    {
+      "id": "CF-O12",
+      "outcome": "Secret handle/value boundary over configuration values (CR24)",
+      "owner": "CENV2",
+      "successorPath": [
+        "CFG0",
+        "CENV1C",
+        "CENV2"
+      ],
+      "receivingAcceptance": "CENV2-AC2"
+    },
+    {
+      "id": "CF-O13",
+      "outcome": "Environment binding and profile identity carried beside each captured snapshot; fresh equals incremental under capture changes",
+      "owner": "CENV1C",
+      "successorPath": [
+        "CFG0",
+        "CENV1C"
+      ],
+      "receivingAcceptance": "CENV1C-AC3"
+    },
+    {
+      "id": "CF-O14",
+      "outcome": "User layer as an explicit host input with a host-supplied revision; no ambient global configuration (CR22)",
+      "owner": null,
+      "openGap": "G01"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "CF-C01",
+      "consumer": "Framework activation switch frameworks.<family> = auto | on | off",
+      "reads": [
+        "frameworks"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/project_capabilities.rs"
+      ],
+      "owner": "FWA1",
+      "successorPath": [
+        "CFG0",
+        "FWA1"
+      ],
+      "receivingAcceptance": "FWA1-AC3"
+    },
+    {
+      "id": "CF-C02",
+      "consumer": "Lint section and captured ESLint, TS-ESLint, Vue, Svelte and Stylelint snapshots",
+      "reads": [
+        "lint"
+      ],
+      "owner": "LNTCFG0",
+      "successorPath": [
+        "CFG0",
+        "LNTCFG0"
+      ],
+      "receivingAcceptance": "LNTCFG0-AC2"
+    },
+    {
+      "id": "CF-C03",
+      "consumer": "Lint and assist vocabulary, and self-lint of verter.config.jsonc",
+      "reads": [
+        "lint",
+        "assist"
+      ],
+      "owner": "LK3",
+      "successorPath": [
+        "CFG0",
+        "LNTCFG0",
+        "LNT2",
+        "LK3"
+      ],
+      "receivingAcceptance": "LK3-AC2"
+    },
+    {
+      "id": "CF-C04",
+      "consumer": "Format section and captured Prettier snapshots",
+      "reads": [
+        "format"
+      ],
+      "owner": "FCFG0",
+      "successorPath": [
+        "CFG0",
+        "FCFG0"
+      ],
+      "receivingAcceptance": "FCFG0-AC2"
+    },
+    {
+      "id": "CF-C05",
+      "consumer": "Embedded tag bindings and user-declared sinks, including SQL and Cypher tags",
+      "reads": [
+        "embedded.tags"
+      ],
+      "owner": "INT5",
+      "successorPath": [
+        "CFG0",
+        "DEM0",
+        "IDX0",
+        "LSO2",
+        "INT1",
+        "INT2",
+        "INT5"
+      ],
+      "receivingAcceptance": "INT5-AC5"
+    },
+    {
+      "id": "CF-C06",
+      "consumer": "Default and per-tag SQL dialect",
+      "reads": [
+        "embedded.dialects",
+        "embedded.tags[].dialect"
+      ],
+      "owner": "SQL2",
+      "successorPath": [
+        "CFG0",
+        "DEM0",
+        "IDX0",
+        "LSO2",
+        "INT1",
+        "INT2",
+        "INT5",
+        "SQL2"
+      ],
+      "receivingAcceptance": "SQL2-AC4"
+    },
+    {
+      "id": "CF-C07",
+      "consumer": "Vue and Svelte embedded-document tag bindings",
+      "reads": [
+        "embedded.tags"
+      ],
+      "owner": "EDOC1",
+      "successorPath": [
+        "CFG0",
+        "DEM0",
+        "IDX0",
+        "LSO2",
+        "INT1",
+        "INT2",
+        "INT5",
+        "EDOC1"
+      ],
+      "receivingAcceptance": "EDOC1-AC1"
+    },
+    {
+      "id": "CF-C08",
+      "consumer": "Persisted per-capability coexistence choices at user and workspace scope",
+      "reads": [
+        "coexistence"
+      ],
+      "owner": "COXD2",
+      "successorPath": [
+        "CFG0",
+        "CENV1C",
+        "COXD-DETECT",
+        "COXD2"
+      ],
+      "receivingAcceptance": "COXD2-AC2"
+    },
+    {
+      "id": "CF-C09",
+      "consumer": "Per-tool and per-family MCP disable switches",
+      "reads": [
+        "mcp"
+      ],
+      "owner": "AGM5",
+      "successorPath": [
+        "CFG0",
+        "CENV1C",
+        "COXD-DETECT",
+        "COXD2",
+        "AGM5"
+      ],
+      "receivingAcceptance": "AGM5-AC6"
+    },
+    {
+      "id": "CF-C10",
+      "consumer": "Solid build mode build.solid = compile | preserve",
+      "reads": [
+        "build"
+      ],
+      "owner": "TSB4X",
+      "successorPath": [
+        "CFG0",
+        "FWA1",
+        "TSB4X"
+      ],
+      "receivingAcceptance": "TSB4X-AC2"
+    },
+    {
+      "id": "CF-C11",
+      "consumer": "Typed configuration facts with source provenance and inheritance edges over the effective configuration and captured snapshots",
+      "reads": [
+        "all sections",
+        "captured snapshots"
+      ],
+      "owner": "CENV1C",
+      "successorPath": [
+        "CFG0",
+        "CENV1C"
+      ],
+      "receivingAcceptance": "CENV1C-AC1"
+    },
+    {
+      "id": "CF-C12",
+      "consumer": "Effective value provenance and secret handles",
+      "reads": [
+        "$env handles"
+      ],
+      "owner": "CENV2",
+      "successorPath": [
+        "CFG0",
+        "CENV1C",
+        "CENV2"
+      ],
+      "receivingAcceptance": "CENV2-AC2"
+    },
+    {
+      "id": "CF-C13",
+      "consumer": "Executed-config capture through an authorized execution service",
+      "reads": [
+        "captured snapshots"
+      ],
+      "owner": "CENV5",
+      "successorPath": [
+        "CFG0",
+        "CENV1C",
+        "CENV2",
+        "CENV5"
+      ],
+      "receivingAcceptance": "CENV5-AC2"
+    },
+    {
+      "id": "CF-C14",
+      "consumer": "Captured tsconfig/jsconfig and package.json lineage with its discovery read set",
+      "reads": [
+        "captured snapshots"
+      ],
+      "paths": [
+        "crates/verter_workspace/src/config.rs",
+        "crates/verter_workspace/src/snapshot_builder.rs"
+      ],
+      "owner": "PM1",
+      "successorPath": [
+        "CFG0",
+        "PM0",
+        "PM1"
+      ],
+      "receivingAcceptance": "PM1-AC3"
+    },
+    {
+      "id": "CF-C15",
+      "consumer": "Captured Vite aliases and environment facts",
+      "reads": [
+        "captured snapshots"
+      ],
+      "owner": "SM1",
+      "successorPath": [
+        "CFG0",
+        "SM0",
+        "SM1"
+      ],
+      "receivingAcceptance": "SM1-AC1"
+    },
+    {
+      "id": "CF-C16",
+      "consumer": "Captured Nuxt configuration with its read set",
+      "reads": [
+        "captured snapshots"
+      ],
+      "owner": "NUX0",
+      "successorPath": [
+        "CFG0",
+        "PPR0",
+        "NUX0"
+      ],
+      "receivingAcceptance": "NUX0-AC2"
+    },
+    {
+      "id": "CF-C17",
+      "consumer": "Captured SvelteKit configuration with its read set",
+      "reads": [
+        "captured snapshots"
+      ],
+      "owner": "SKT0",
+      "successorPath": [
+        "CFG0",
+        "PPR0",
+        "SKT0"
+      ],
+      "receivingAcceptance": "SKT0-AC2"
+    },
+    {
+      "id": "CF-C18",
+      "consumer": "Prepared-input NeedInputs outcome on NAPI, WASM, LSP, MCP and CLI",
+      "reads": [
+        "prepared inputs"
+      ],
+      "paths": [
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs"
+      ],
+      "owner": "PUB0T",
+      "successorPath": [
+        "CFG0",
+        "LRA0",
+        "PUB0",
+        "PUB0T"
+      ],
+      "receivingAcceptance": "PUB0T-AC2"
+    },
+    {
+      "id": "CF-C19",
+      "consumer": "verter init and verter migrate write verter.config.jsonc and migrate .verterrc.json and ESLint settings without silent drops",
+      "reads": [
+        "all sections"
+      ],
+      "owner": "LCL4",
+      "successorPath": [
+        "CFG0",
+        "FCFG0",
+        "LCL4"
+      ],
+      "receivingAcceptance": "LCL4-AC1"
+    }
+  ],
+  "retainedHostInputs": [
+    {
+      "id": "CF-H01",
+      "input": "Host construction options",
+      "symbols": [
+        "HostConfig",
+        "FfiHostConfig",
+        "NapiHostConfig",
+        "WasmHostConfigWire",
+        "CompileProfile"
+      ],
+      "paths": [
+        "crates/verter_session/src/types.rs",
+        "crates/verter_protocol/src/types.rs"
+      ],
+      "disposition": "retained host input (UAK0 seam S13); never a configuration layer",
+      "owner": "verter_session"
+    },
+    {
+      "id": "CF-H02",
+      "input": "Client presentation settings",
+      "symbols": [
+        "initializationOptions.{statistics, interactionTrace, hover, inlayHints, analysis}",
+        "verter.decorations.*",
+        "verter.trace.server",
+        "verter.server.logLevel",
+        "verter.mcp.{enabled, port, claudeCodeNotification}",
+        "verter.providerRecommendations"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/server/lifecycle.rs",
+        "crates/verter_lsp/src/config.rs",
+        "packages/vue-vscode/package.json"
+      ],
+      "disposition": "retained client/session setting; never a configuration layer",
+      "owner": "client"
+    },
+    {
+      "id": "CF-H03",
+      "input": "Engine provisioning inputs",
+      "symbols": [
+        "verter.typeProvider",
+        "verter.typescript.tsdk",
+        "verter.lspBinaryPath",
+        "VERTER_TSGO_BIN",
+        "VERTER_TSGO_DEV_ALLOW_NIGHTLY",
+        "HOME/PATH/USER probes locating Node"
+      ],
+      "paths": [
+        "crates/verter_type_runtime/src/discovery.rs",
+        "crates/verter_tsgo_api/src/toolchain/discovery.rs",
+        "crates/verter_tsgo_api/src/toolchain/policy.rs"
+      ],
+      "disposition": "retained engine-provisioning input; never a configuration layer and never ambient configuration",
+      "owner": "EPR4",
+      "successorPath": [
+        "CFG0",
+        "EPR0",
+        "EPR1",
+        "EPR4"
+      ],
+      "receivingAcceptance": "EPR4-AC1"
+    },
+    {
+      "id": "CF-H04",
+      "input": "Experimental compile flags",
+      "symbols": [
+        "ExperimentalInitOptions.{strict_slots, conditional_root_narrowing}",
+        "verter.experimental.*",
+        "McpServerConfig.strict_slots"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/config.rs",
+        "crates/verter_mcp/src/config.rs"
+      ],
+      "disposition": "retained CompileProfile input (UAK0 S13); option vocabulary and any move to a profile-scoped key are assigned by CMP0-F",
+      "owner": "verter_session"
+    }
+  ],
+  "displacedRoutes": [
+    {
+      "id": "CF-D01",
+      "category": "configuration-authority",
+      "unit": ".verterrc.json project reader beside the envelope",
+      "symbols": [
+        "discover_lint_config",
+        "load_verterrc",
+        "VerterProjectConfig",
+        "ProjectLintConfig",
+        "ProjectSsrConfig"
+      ],
+      "paths": [
+        "crates/verter_diagnostics/src/config.rs",
+        "crates/verter_lsp/src/workspace_state.rs",
+        "crates/verter_mcp/src/server.rs"
+      ],
+      "disposition": "replace",
+      "successor": "the lint section of the effective configuration; .verterrc.json is never merged beside verter.config.jsonc. Its ssr key waits on G01.",
+      "deletionOwner": "LNTCFG0",
+      "receivingAcceptance": "LNTCFG0-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "LNTCFG0"
+      ]
+    },
+    {
+      "id": "CF-D02",
+      "category": "configuration-authority",
+      "unit": "Legacy ESLint JSON reader mapping only vue/ rules",
+      "symbols": [
+        "load_eslint_config",
+        ".eslintrc.json",
+        "package.json eslintConfig"
+      ],
+      "paths": [
+        "crates/verter_diagnostics/src/config.rs"
+      ],
+      "disposition": "replace",
+      "successor": "captured ESLint snapshots and LNTCFG0's static translator",
+      "deletionOwner": "LNTCFG0",
+      "receivingAcceptance": "LNTCFG0-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "LNTCFG0"
+      ]
+    },
+    {
+      "id": "CF-D03",
+      "category": "configuration-authority",
+      "unit": "Lint settings from client and process inputs",
+      "symbols": [
+        "merge_init_options",
+        "init_lint_options",
+        "verter.lint.{enabled, preset}",
+        "verter.mcp.lintPreset",
+        "McpServerConfig.lint_preset"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/config.rs",
+        "crates/verter_lsp/src/server/lifecycle.rs",
+        "crates/verter_mcp/src/config.rs",
+        "packages/vue-vscode/package.json"
+      ],
+      "disposition": "replace",
+      "successor": "the user layer and the lint section",
+      "deletionOwner": "LNTCFG0",
+      "receivingAcceptance": "LNTCFG0-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "LNTCFG0"
+      ]
+    },
+    {
+      "id": "CF-D04",
+      "category": "configuration-authority",
+      "unit": "Rust-side Vite config capture, including Node execution from the LSP host",
+      "symbols": [
+        "analyze_vite_config",
+        "execute_trusted_vite_config",
+        "discover_vite_aliases",
+        "LKG_CACHE",
+        "ViteConfigOptions",
+        "ViteConfigTrustInfo",
+        "ViteConfigTrustRequired ($/verter/viteConfigTrustRequired)",
+        "verter.viteConfig.{enabled, trustedFiles}"
+      ],
+      "paths": [
+        "crates/verter_workspace/src/vite_config.rs",
+        "crates/verter_lsp/src/background_init.rs",
+        "crates/verter_lsp/src/server/lifecycle.rs",
+        "crates/verter_lsp/src/protocol_types.rs",
+        "packages/vue-vscode/src/extension.ts"
+      ],
+      "disposition": "replace",
+      "successor": "JS-host capture adapters publishing HostAliasFact through captured snapshots (CR19, CR20)",
+      "deletionOwner": "SM1",
+      "receivingAcceptance": "SM1-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "SM0",
+        "SM1"
+      ]
+    },
+    {
+      "id": "CF-D05",
+      "category": "central-framework-switch",
+      "unit": "SSR and Nuxt detection by file-name probe",
+      "symbols": [
+        "detect_ssr_project (nuxt.config.*, .nuxt/)",
+        "detectNuxt"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/config.rs",
+        "crates/verter_lsp/src/workspace_state.rs",
+        "packages/unplugin/src/index.ts"
+      ],
+      "disposition": "replace",
+      "successor": "Nuxt profile applicability from captured, read-set-bearing facts",
+      "deletionOwner": "NUX0",
+      "receivingAcceptance": "NUX0-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "PPR0",
+        "NUX0"
+      ]
+    },
+    {
+      "id": "CF-D06",
+      "category": "configuration-authority",
+      "unit": "Duplicate tsconfig readers",
+      "symbols": [
+        "verter_workspace::config::{parse_tsconfig_json, resolve_tsconfig_extends, extends_specs}",
+        "virtual_config::extends_target (follows only a string extends)",
+        "verter_tsc::tsconfig::{load_tsconfig, resolve_extends_path}",
+        "component-meta parseTsconfig (no extends)"
+      ],
+      "paths": [
+        "crates/verter_workspace/src/config.rs",
+        "crates/verter_workspace/src/virtual_config.rs",
+        "crates/verter_tsc/src/tsconfig.rs",
+        "packages/component-meta/src/runtime/discovery.ts"
+      ],
+      "disposition": "replace",
+      "successor": "one captured tsconfig lineage with its ProjectDiscoveryReadSet; PM0-AC1 may move a member within PM1-PM4",
+      "deletionOwner": "PM1",
+      "receivingAcceptance": "PM1-AC3",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "PM0",
+        "PM1"
+      ]
+    },
+    {
+      "id": "CF-D07",
+      "category": "configuration-authority",
+      "unit": "Whole-workspace re-initialisation on any configuration-file change",
+      "symbols": [
+        "is_config_file",
+        "trigger_registry_rebuild",
+        "WorkspaceChange::ConfigChanged",
+        "bump_source_env_generation"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/server_utils.rs",
+        "crates/verter_lsp/src/server/sync_orchestration.rs",
+        "crates/verter_workspace/src/changes.rs",
+        "crates/verter_workspace/src/engine.rs"
+      ],
+      "disposition": "replace",
+      "successor": "read-set invalidation (CR15, CR16) under atomic project-snapshot publication",
+      "deletionOwner": "PM3",
+      "receivingAcceptance": "PM3-AC3",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "PM0",
+        "PM1",
+        "PM3"
+      ]
+    },
+    {
+      "id": "CF-D08",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Host-config wire that accepts unknown fields silently",
+      "symbols": [
+        "FfiHostConfig (no deny_unknown_fields)",
+        "WasmHostConfigWire (#[serde(flatten)] over FfiHostConfig)"
+      ],
+      "paths": [
+        "crates/verter_protocol/src/types.rs",
+        "crates/verter_wasm/src/lib.rs"
+      ],
+      "disposition": "reject",
+      "successor": "the versioned public envelope rejects unknown fields with a typed refusal",
+      "deletionOwner": "PUB0T",
+      "receivingAcceptance": "PUB0T-AC4",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "LRA0",
+        "PUB0",
+        "PUB0T"
+      ]
+    },
+    {
+      "id": "CF-D09",
+      "category": "configuration-authority",
+      "unit": "Documented unplugin custom-element option that is never forwarded",
+      "symbols": [
+        "VerterPluginOptions.template.compilerOptions.isCustomElement",
+        "typedRenderRequest (isCustomElement: [])"
+      ],
+      "paths": [
+        "packages/unplugin/src/core/types.ts",
+        "packages/unplugin/src/core/compiler.ts"
+      ],
+      "disposition": "replace",
+      "successor": "the Vue consumer isCustomElement policy captured and invalidated through its owner",
+      "deletionOwner": "VCE0",
+      "receivingAcceptance": "VCE0-AC2",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "DEM0",
+        "TIF0",
+        "EAK1",
+        "VCE0"
+      ]
+    },
+    {
+      "id": "CF-D10",
+      "category": "configuration-authority",
+      "unit": "Lint settings that go stale until restart",
+      "symbols": [
+        "RESTART_REQUIRED_SETTINGS (no verter.lint.*)",
+        "no workspace/didChangeConfiguration handler"
+      ],
+      "paths": [
+        "packages/vue-vscode/src/languageServerConfig.ts",
+        "crates/verter_lsp/src/server/lifecycle.rs"
+      ],
+      "disposition": "replace",
+      "successor": "user-layer revisions invalidate exactly the lint consumers (CR16)",
+      "deletionOwner": "LNTCFG0",
+      "receivingAcceptance": "LNTCFG0-AC3",
+      "productionCapable": true,
+      "successorPath": [
+        "CFG0",
+        "LNTCFG0"
+      ]
+    }
+  ],
+  "referencedRoutes": [
+    {
+      "id": "D09",
+      "node": "UAK0",
+      "category": "untagged-coordinate-or-public-identity",
+      "why": "Framework admission through --frameworks, FrameworkOptions and the NAPI/WASM frameworks option; its configuration successor is the frameworks base section read by FWA1 (CF-C01). NapiMetaProject::new and with_workspace never apply frameworks; that gap belongs to the same population.",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "D10",
+      "node": "UAK0",
+      "category": "central-framework-switch",
+      "why": "The client sends initializationOptions.configuration (including a vue section) that the server never reads",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "D19",
+      "node": "UAK0",
+      "category": "untagged-coordinate-or-public-identity",
+      "why": "ProjectRegistry and ProjectConfig group per-project lint, alias, vite and ssr configuration; derived project identity replaces them",
+      "owner": "PM1",
+      "receivingAcceptance": "PM1-AC1"
+    },
+    {
+      "id": "V-D05",
+      "node": "VID0",
+      "category": "untagged-coordinate-or-public-identity",
+      "why": "A package.json version read admits Svelte by string prefix; captured package facts plus FWA1 replace it",
+      "owner": "FWA1",
+      "receivingAcceptance": "FWA1-AC1"
+    }
+  ],
+  "categoryCoverage": [
+    {
+      "category": "central-framework-switch",
+      "recorded": [
+        "CF-D05"
+      ],
+      "referenced": [
+        "D10"
+      ]
+    },
+    {
+      "category": "untagged-coordinate-or-public-identity",
+      "recorded": [
+        "CF-D08"
+      ],
+      "referenced": [
+        "D09",
+        "D19",
+        "V-D05"
+      ]
+    },
+    {
+      "category": "duplicate-component-information-authority",
+      "recorded": [],
+      "referenced": [],
+      "note": "No configuration route carries component information at this head."
+    },
+    {
+      "category": "configuration-authority",
+      "recorded": [
+        "CF-D01",
+        "CF-D02",
+        "CF-D03",
+        "CF-D04",
+        "CF-D06",
+        "CF-D07",
+        "CF-D09",
+        "CF-D10"
+      ],
+      "referenced": [],
+      "note": "This decision's own displaced-route population beyond the three charter categories."
+    }
+  ],
+  "openGaps": [
+    {
+      "id": "G01",
+      "unit": "verter.config.jsonc envelope loader",
+      "covers": [
+        "CF-O01",
+        "CF-O02",
+        "CF-O03",
+        "CF-O04",
+        "CF-O06",
+        "CF-O07",
+        "CF-O14"
+      ],
+      "rules": [
+        "CR01",
+        "CR02",
+        "CR03",
+        "CR04",
+        "CR05",
+        "CR06",
+        "CR07",
+        "CR08",
+        "CR09",
+        "CR10",
+        "CR11",
+        "CR12",
+        "CR13",
+        "CR14",
+        "CR15",
+        "CR16",
+        "CR17",
+        "CR18",
+        "CR22",
+        "CR23"
+      ],
+      "evidence": "No production code reads verter.config.* at this head; the only mention is docs/plans/framework-plugin-system.md. No plan node owns the loader.",
+      "disposition": "open; the charter's 2026-10-02 amendment records it and UAO0 reports it as a finding against this binding table without implementing it",
+      "question": "cfg0-envelope-loader-owner",
+      "reporter": "UAO0",
+      "reporterAcceptance": "UAO0-AC-R1"
+    }
+  ],
+  "findings": [
+    {
+      "id": "CF-F01",
+      "finding": "Rust executes trusted Vite configs: execute_trusted_vite_config spawns Node from the LSP host. UAK1's empty population 'project configuration is not executed by Rust or WASM at this head' holds for embedded engines only.",
+      "route": "CF-D04",
+      "receiver": "SM1",
+      "receivingAcceptance": "SM1-AC1",
+      "alsoConcerns": "UAK1 U01 (CENV1C-AC2)"
+    },
+    {
+      "id": "CF-F02",
+      "finding": "The server has no workspace/didChangeConfiguration handler; the VS Code client restarts it for some settings and does nothing for verter.lint.*.",
+      "route": "CF-D10",
+      "receiver": "LNTCFG0",
+      "receivingAcceptance": "LNTCFG0-AC3"
+    },
+    {
+      "id": "CF-F03",
+      "finding": "The .verterrc.json ssr key has no successor key; it waits on G01.",
+      "route": "CF-D01",
+      "receiver": "G01"
+    },
+    {
+      "id": "CF-F04",
+      "finding": "initializationOptions.frameworks and initializationOptions.configuration are sent by the client and never read by the server.",
+      "route": "D09, D10",
+      "receiver": "COX0",
+      "receivingAcceptance": "COX0-AC1"
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "unit": "verter.config.* loader",
+      "evidence": "No Rust or TypeScript code reads verter.config.*; the only mention is the design note docs/plans/framework-plugin-system.md.",
+      "consequence": "G01."
+    },
+    {
+      "unit": "Ambient global configuration",
+      "evidence": "No production code reads dirs::home_dir, XDG directories or ~/.config. HOME is read only to locate Node (CF-H03).",
+      "consequence": "CR22 is a preservation rule; nothing to delete."
+    },
+    {
+      "unit": "Framework section in tsconfig",
+      "evidence": "No vueCompilerOptions or similar tsconfig key is read.",
+      "consequence": "Nothing to migrate from tsconfig into a framework section."
+    },
+    {
+      "unit": "Configured embedded-language tags, dialects and coexistence choices",
+      "evidence": "No configuration key binds an embedded tag, sets a dialect or persists a coexistence choice.",
+      "consequence": "INT5, SQL2, EDOC1 and COXD2 start from an empty population."
+    },
+    {
+      "unit": "Svelte, Prettier, EditorConfig and Biome configuration reads",
+      "evidence": "svelte.config.js, .prettierrc, .editorconfig and biome.json are not read.",
+      "consequence": "SKT0 and FCFG0 add capture, with nothing to delete."
+    },
+    {
+      "unit": "Secrets in configuration values",
+      "evidence": "No production path resolves an environment reference inside a configuration value.",
+      "consequence": "CR24 is a preservation rule for CENV2."
+    }
+  ],
+  "transferredObligations": [
+    {
+      "obligation": "Executable inventory validator over tests/kernel/CFG0/products/ and its negative controls: missing inventory member, unknown or pathless owner, missing receiving AC, conflicting assignment; G01 reported as a finding",
+      "receiver": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R1"
+    },
+    {
+      "obligation": "Executable fixtures for precedence (CC01 deterministic monorepo and nested precedence, CC02 root stop, CC03 extends order, cycle and escape, CC13 no ambient global configuration), fail-closed unknowns (CC04 unknown framework release and top-level fields), provenance (CC06 product payloads keep exact provenance) and invalidation (CC07 irrelevant config does not invalidate unrelated profiles)",
+      "receiver": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2"
+    }
+  ]
+}

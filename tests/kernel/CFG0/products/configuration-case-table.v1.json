@@ -1,0 +1,258 @@
+{
+  "id": "configuration-case-table.v1",
+  "schema": 1,
+  "contractNode": "CFG0",
+  "describesHead": {
+    "landingTitle": "fix(core): walk a class's extends chain iteratively for inherited (#797)",
+    "date": "2026-10-09"
+  },
+  "companionInventory": "configuration-inventory.v1.json",
+  "rule": "Each case states its input, the required outcome and the forbidden outcome, and names the node whose test makes it executable. CFG0 ships no test; the executable owner adds it. Cases owned by UAO0 run under UAO0-AC-R2 and need the G01 loader; UAO0 reports a missing loader as a finding rather than implementing it.",
+  "cases": [
+    {
+      "id": "CC01",
+      "name": "deterministic monorepo and nested precedence",
+      "input": "A workspace root verter.config.jsonc extending ./base.jsonc; packages/app/verter.config.jsonc with an overrides entry for src/legacy/**; a user layer from the host; files packages/app/src/a.vue and packages/app/src/legacy/b.vue; discovery run in two different orders",
+      "required": "Each leaf of a base section resolves by CR05-CR08: defaults < user < base.jsonc < root body < packages/app body < matching override; b.vue sees the override and a.vue does not; both discovery orders give byte-identical effective configuration and provenance",
+      "forbidden": "A result that depends on discovery, load or registration order; an outer file beating an inner one; the user layer beating a workspace file",
+      "rules": [
+        "CR05",
+        "CR06",
+        "CR07",
+        "CR08",
+        "CR11"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2"
+    },
+    {
+      "id": "CC02",
+      "name": "root stops the chain",
+      "input": "packages/lib/verter.config.jsonc declares \"root\": true under a workspace root config",
+      "required": "Files under packages/lib read only packages/lib's chain; the read set records no probe above packages/lib; editing the workspace root config leaves their fingerprints unchanged",
+      "forbidden": "Any workspace-root value leaking into packages/lib; a probe above the workspace root anywhere",
+      "rules": [
+        "CR06",
+        "CR15",
+        "CR16"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2"
+    },
+    {
+      "id": "CC03",
+      "name": "extends order, cycle and escape",
+      "input": "a.jsonc extends [b.jsonc, c.jsonc]; then b.jsonc extends a.jsonc; then an extends entry naming ../../outside.jsonc above the workspace root; then an extended file declaring root",
+      "required": "b's values are shadowed by c's and both by a's body; the cycle yields Cycle { chain: [a, b, a] }; the escape yields Invalid(OutsideWorkspace); root in an extended file yields Invalid(RootInExtended)",
+      "forbidden": "Last-loaded wins; a cycle that hangs or silently truncates; reading a file outside the workspace root",
+      "rules": [
+        "CR07",
+        "CR09"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2"
+    },
+    {
+      "id": "CC04",
+      "name": "unknown framework release and top-level fields fail closed",
+      "input": "Configs with: a top-level key \"lnt\"; \"version\": 2; frameworks.svelte = { state: on, release: \"latest\" }; frameworks.svelte = { state: on, release: \"4\" } where only Svelte 5 is admitted; frameworks.vue inside profiles",
+      "required": "Invalid(UnknownKey), Invalid(UnsupportedSchemaVersion), Invalid(UnknownFrameworkRelease) twice, Invalid(ActivationKeyInProfile); every scope reading the file is Invalid; scopes that do not read it are unaffected",
+      "forbidden": "The key ignored and defaults used; the nearest known version or a coerced release used; an implied default major; a whole-workspace failure for a sibling package that does not read the file",
+      "rules": [
+        "CR01",
+        "CR02",
+        "CR04"
+      ],
+      "existingEvidence": [
+        "verter_session framework::options::tests::unknown_name_is_rejected_naming_the_supported_set",
+        "verter_session framework::options::tests::duplicate_name_is_rejected",
+        "verter_session framework::options::tests::empty_admission_is_rejected"
+      ],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2",
+      "activationOwner": "FWA1",
+      "activationAcceptance": "FWA1-AC6"
+    },
+    {
+      "id": "CC05",
+      "name": "explicit on admits only an admitted release",
+      "input": "A workspace with no alpinejs manifest entry and frameworks.alpine = { state: on, release: <the admitted 3.x line> }, then auto, then on naming an unadmitted release",
+      "required": "active with provenance explicit; inactive; unsupported-version",
+      "forbidden": "Activation from the spelling alone; a range or floating tag accepted",
+      "rules": [
+        "CR04"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "FWA1",
+      "receivingAcceptance": "FWA1-AC6"
+    },
+    {
+      "id": "CC06",
+      "name": "product payloads keep exact provenance",
+      "input": "The lint section set in base.jsonc, the root body and an overrides entry, with one misspelt rule option in the override",
+      "required": "The lint consumer receives three ordered contributions, each with rank, source unit, content, JSON pointer, span and the exact authored value; the translator reports two applied or shadowed and rejects the misspelt option with its span",
+      "forbidden": "The envelope merging inside lint; a contribution dropped; the misspelt option silently ignored; provenance reduced to a file path",
+      "rules": [
+        "CR03",
+        "CR12"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2",
+      "translatorOwner": "LNTCFG0",
+      "translatorAcceptance": "LNTCFG0-AC2"
+    },
+    {
+      "id": "CC07",
+      "name": "irrelevant config does not invalidate unrelated profiles",
+      "input": "A monorepo with a Vue 3 package and a Svelte 5 package sharing the root config; edits to (a) profiles.<Svelte 5 framework profile>.lint, (b) the format section, (c) a comment",
+      "required": "(a) recomputes only lint consumers in Svelte 5 scopes; (b) recomputes only format consumers; (c) changes ContentId but no section fingerprint, so no consumer recomputes",
+      "forbidden": "A family-wide or file-wide fingerprint that recomputes Vue scopes on a Svelte edit, or lint on a format edit",
+      "rules": [
+        "CR10",
+        "CR14",
+        "CR16"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2"
+    },
+    {
+      "id": "CC08",
+      "name": "edit and revert equal fresh; degraded never warms",
+      "input": "Edit a config to an invalid state, then revert it; separately cancel an effective-configuration query mid-flight",
+      "required": "During the invalid state every reading scope is Invalid and nothing is cached; after revert results equal a fresh run with the original fingerprints; the cancelled query publishes nothing",
+      "forbidden": "A stale valid result served during the invalid state; a cached Invalid or cancelled result served later",
+      "rules": [
+        "CR16",
+        "CR17"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "CENV1C",
+      "receivingAcceptance": "CENV1C-AC3"
+    },
+    {
+      "id": "CC09",
+      "name": "static capture never executes an executable config",
+      "input": "vite.config.ts whose default export is a function reading process.env; svelte.config.js importing a plugin",
+      "required": "Static capture returns Partial or Uncaptured { reason } with the non-literal forms named; no process is spawned and no module is imported",
+      "forbidden": "A Node, Deno or embedded engine run during static capture or indexing; Uncaptured reported as an empty config",
+      "rules": [
+        "CR19",
+        "CR21"
+      ],
+      "existingEvidence": [
+        "verter_lsp config::tests::fallback_project_complex_config_not_trusted"
+      ],
+      "executableOwner": "CENV1C",
+      "receivingAcceptance": "CENV1C-AC2",
+      "routeOwner": "SM1",
+      "routeAcceptance": "SM1-AC1"
+    },
+    {
+      "id": "CC10",
+      "name": "authorized dynamic evaluation yields a new snapshot",
+      "input": "The CC09 vite.config.ts captured through an authorized execution service, then the authorization revoked, then a read outside the declared inputs",
+      "required": "A new captured snapshot whose provenance names the service, authorization, declared inputs, exact tool version, environment binding and read set; the static snapshot is unchanged; after revocation the outcome is Uncaptured { ExecutionNotAuthorized }; the undeclared read prevents a hermetic-complete claim",
+      "forbidden": "Mutating the static snapshot in place; executing on workspace open; a hermetic-complete claim despite the undeclared read",
+      "rules": [
+        "CR20"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "CENV5",
+      "receivingAcceptance": "CENV5-AC2"
+    },
+    {
+      "id": "CC11",
+      "name": "secret handles never leak values",
+      "input": "A product section admitting { \"$env\": \"API_TOKEN\" } with the host holding a value",
+      "required": "The effective configuration, logs, audit, fingerprints and read sets carry the handle and a host revision only; the value resolves only under a grant",
+      "forbidden": "The value or a guessable hash of it in any record; an $env reference accepted in a base section",
+      "rules": [
+        "CR24"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "CENV2",
+      "receivingAcceptance": "CENV2-AC2"
+    },
+    {
+      "id": "CC12",
+      "name": "prepared inputs and NeedInputs",
+      "input": "A WASM host supplying the workspace root config but neither supplying nor proving absent packages/app/verter.config.jsonc",
+      "required": "NeedInputs { paths: [packages/app/verter.config.jsonc] }; once supplied as proven absent the result equals the native result for a tree without that file",
+      "forbidden": "Treating the unsupplied path as absent; an empty success; a JavaScript-side pre-merge",
+      "rules": [
+        "CR23"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "PUB0T",
+      "receivingAcceptance": "PUB0T-AC2"
+    },
+    {
+      "id": "CC13",
+      "name": "no ambient global configuration",
+      "input": "A machine with a verter.config.jsonc in the home directory and in an XDG config directory, outside the workspace root, and a host that supplies no user layer",
+      "required": "Neither file is read; the read set holds no path outside the workspace root; supplying the same content as the host user layer applies it with provenance user",
+      "forbidden": "Any read of $HOME, XDG or a parent of the workspace root for configuration",
+      "rules": [
+        "CR06",
+        "CR22"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2"
+    },
+    {
+      "id": "CC14",
+      "name": "embedded tags bind to resolved bindings",
+      "input": "embedded.tags binds kind sql to export sql of module postgres with dialect postgresql; a file uses the imported sql tag and also a local function named sql; a tag bound to a dialect the registry does not know",
+      "required": "The imported tag activates a SQL region under postgresql; the local function activates nothing; the unknown dialect is Invalid at capture and is never validated under a default dialect",
+      "forbidden": "Activation by tag spelling; validation under a default dialect",
+      "rules": [
+        "CR04"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "INT5",
+      "receivingAcceptance": "INT5-AC5",
+      "dialectOwner": "SQL2",
+      "dialectAcceptance": "SQL2-AC4",
+      "documentOwner": "EDOC1",
+      "documentAcceptance": "EDOC1-AC1"
+    },
+    {
+      "id": "CC15",
+      "name": "coexistence choices at user and workspace scope",
+      "input": "A user-layer coexistence choice official for a lint cell, and a workspace-root choice verter for the same cell; then the same key in a nested package config",
+      "required": "The workspace-root choice wins with provenance source; the nested key is Invalid(ScopeRestrictedKey); the core writes no choice",
+      "forbidden": "A nested package overriding a workspace choice; a choice written without consent",
+      "rules": [
+        "CR05",
+        "CR22"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "COXD2",
+      "receivingAcceptance": "COXD2-AC2"
+    },
+    {
+      "id": "CC16",
+      "name": "no dual configuration authority",
+      "input": "A workspace holding both verter.config.jsonc and .verterrc.json with different lint presets",
+      "required": "The effective configuration's provenance names only verter.config.jsonc; .verterrc.json contributes nothing and is reported for migration",
+      "forbidden": "Merging .verterrc.json as a second layer; precedence decided by which reader ran last",
+      "rules": [
+        "CR02",
+        "CR12"
+      ],
+      "existingEvidence": [
+        "verter_diagnostics config::tests::discover_lint_config_verterrc"
+      ],
+      "executableOwner": "LNTCFG0",
+      "receivingAcceptance": "LNTCFG0-AC1",
+      "migrationOwner": "LCL4",
+      "migrationAcceptance": "LCL4-AC1"
+    }
+  ]
+}
