@@ -9,22 +9,26 @@ framework-native planning.
 
 It describes the repository at `docs(arch): record the parser decision,
 ownership, reuse and lineage (#812)`, 2026-10-09. It follows the docs-only
-rule in [the kernel README](../../../../docs/arch/kernel/README.md): it
+rule in [the kernel README](../kernel/README.md): it
 changes no production route and adds no check. It builds on the
-[identities](../../../../docs/arch/kernel/identities.md),
-[configuration](../../../../docs/arch/kernel/configuration.md),
-[demand](../../../../docs/arch/kernel/demand-activation.md),
-[parser](../../../../docs/arch/kernel/parser-ownership.md) and
-[carrier frontend/backend](../../../../docs/arch/kernel/carrier-frontend-backend.md)
+[identities](../kernel/identities.md),
+[configuration](../kernel/configuration.md),
+[demand](../kernel/demand-activation.md),
+[parser](../kernel/parser-ownership.md) and
+[carrier frontend/backend](../kernel/carrier-frontend-backend.md)
 decisions and does not re-own anything they assign.
+
+This directory is the architecture contract for the compiler request. The
+files are not test artifacts. Plan-node identifiers inside them are ownership
+bindings, not a test name.
 
 ## Machine-readable products
 
-The reviewed contract data lives in `tests/compiler-core/CMP0/products/`:
+The reviewed contract data lives in `docs/arch/compiler-request/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `compile-request-inventory.v1.json` | Rules `RQ01`–`RQ10`, `DC01`–`DC06`, `SK01`–`SK10`, `OB01`–`OB05`, `NB01`–`NB06`, `MG01`–`MG09`; outcomes `CMP-O01`–`CMP-O18`; consumers `CMP-C01`–`CMP-C14`; displaced routes `CMP-D01`–`CMP-D17`; referenced routes, category coverage, empty populations, findings `CMP-F01`–`CMP-F16`, the proposed receiving-charter amendment `RA02`, plan consumers and transferred obligations `CMP-T01`–`CMP-T04` |
+| `compile-request-inventory.v1.json` | Rules `RQ01`–`RQ10`, `DC01`–`DC06`, `SK01`–`SK10`, `OB01`–`OB05`, `NB01`–`NB06`, `MG01`–`MG09`; outcomes `CMP-O01`–`CMP-O18`; consumers `CMP-C01`–`CMP-C14`; displaced routes `CMP-D01`–`CMP-D17`; referenced routes, category coverage, empty populations, findings `CMP-F01`–`CMP-F16`, the authorised receiving-charter amendment `RA02`, the proposed amendment `RA03`, plan consumers and transferred obligations `CMP-T01`–`CMP-T05` |
 | `option-impact-classification.v1.json` | The seven option-impact classes, rules `OI01`–`OI06`, and one row per caller-settable request field (`OC-T..`, `OC-P..`, `OC-V..`, `OC-S..`) plus the host-resolved execution inputs (`OC-H..`), each with its class and its routing status at the described head |
 | `compile-request-case-table.v1.json` | Negative cases `CN01`–`CN13`, positive cases `CP01`–`CP05` and work counters `WC01`–`WC04` |
 
@@ -60,9 +64,12 @@ CMP0 references them by id.
   (`supported canonical`, `derived`, `unsupported fail-closed`, …), not by
   *invalidation impact*.
 - **No policy, contract id or version field.** There is no `CompilerPolicy`,
-  no `Default`/`Optimized`, no contract id. Each framework is pinned to one
-  compatibility domain (`core@3.6.0-rc.3`, `svelte@5.56.8`) as informational
-  capability dispositions.
+  no `Default`/`Optimized`, no contract id. The capability-matrix
+  `compatibility_domain` cells (`core@3.6.0-rc.3`, `svelte@5.56.8`) are a
+  frozen evidence package. They are not `DefaultCompilationContractId`.
+  The contract id's release is the admitted exact release of the framework
+  lock (VID0 `I04`): `@vue/compiler-sfc` `3.6.0-rc.5` and `svelte` `5.56.10`
+  at the described head.
 - **Admission is route-local.** The host integrations refuse options their
   bundle cannot route (`refuse_unproducible_vue_options`,
   `refuse_unproducible_svelte_options`, `unroutable_host_request_axis`). The
@@ -129,8 +136,13 @@ CompileRequest
 - `CompilerPolicy` is one closed type, `Default(DefaultCompilationContractId)`
   or `Optimized`. The source plan's `CompilePolicy` is the same type (`DC01`).
 - Public `Default` normalizes at admission to an exact
-  `DefaultCompilationContractId` = (VID0 `ReleaseId`, target kind, contract
-  revision), recorded in artifact provenance (`DC02`).
+  `DefaultCompilationContractId` = (VID0 `ReleaseId` of the admitted exact
+  release of the framework lock, target kind, contract revision), recorded
+  in artifact provenance (`DC02`). The capability-matrix
+  `compatibility_domain` cell is not that id. A workspace re-resolution of
+  the lock re-issues the registry row; the previous id does not stay in
+  force. The matrix cell is re-issued only by its own re-certification
+  (`packages/framework-conformance-harness/evidence/version-domain.md`).
 - The registry has one row per (exact release, target). Each row lists
   per-stage contract epochs and its intentional divergence records. A
   revision that changes one stage advances only that stage's epoch (`DC03`).
@@ -172,12 +184,21 @@ Vue IDE axes (`OC-P08`, `OC-P09`); no profile-scoped key is introduced
 
 ```text
 ParseKey             existing verter_identity ParseKey (re-exported, never re-minted)
-SemanticKey          = H(sorted ParseKeys of demanded regions, semantic profile, Semantic options, semantic epoch, semantic admission basis)
+SemanticKey          = H(sorted ParseKeys of demanded regions, FrameworkProfileId, Semantic-class option bytes, semantic epoch, semantic admission basis)
 CompileStructureKey  = H(SemanticKey, product demand-closure digest, CompileStructure options, structure epoch)
 TargetPlanKey        = H(CompileStructureKey, target, TargetPlan options, target epoch)
 EmitKey              = H(TargetPlanKey, Emit options, MapMode, emit epoch)
-TerminalKey          = H(EmitKey, Terminal options, terminal epoch)
+TerminalKey          = H(EmitKey, Terminal-class option bytes, terminal epoch)
 ```
+
+`FrameworkProfileId` (VID0 `I05`, `OC-T02`) is the only profile identity named
+in the `SemanticKey` composition. `TypeScriptSemanticProfileId`
+(`CompileRequest.semantic_profile`, `OC-T03`) enters that key once, inside the
+Semantic-class option bytes, and is not a second field. `OutputProfileId`,
+`SerializationProfileId` and `PresentationProfileId` (`OC-P04`, `OC-P05`,
+`OC-P12`, `OC-P13`, `OC-P14`, `OC-P17`, `OC-P18`) are Terminal-class option
+bytes and enter `TerminalKey` only. A profile id is never copied into a later
+class for safety.
 
 - Six distinct nominal types (`SK01`). `ParseKey` is PAR0's `G07` identity;
   the compiler re-exports it (`SK02`, `CMP-F09`).
@@ -191,7 +212,12 @@ TerminalKey          = H(EmitKey, Terminal options, terminal epoch)
 - Map encoding never invalidates semantics (`SK06`); a framework option never
   re-keys another framework (`SK07`).
 - Complete-only: degraded outcomes never publish under a key (`SK08`), and
-  incremental equals fresh across edits and reverts (`SK09`).
+  incremental equals fresh across edits and reverts (`SK09`). A stage key
+  addresses a host cache slot. It is not the host validity oracle. The
+  session store-view and fact-signature revalidation
+  (`compile_slot_facts_validate` against the live store view) remains the
+  sole condition for admitting a warm host artifact (`MG05`). No stage key
+  may be widened or narrowed to stand in for that rail.
 - CMP0K defines the types and composition law; CMP1 derives them; CMP4E keys
   `EmitPlan` by `EmitKey` (`SK10`).
 
@@ -228,7 +254,7 @@ engine or cache until OPT0 (`OB05`).
 | `MG02` | `RuntimeCompileOptions`, `IdeCompileOptions` | each backend receives its own typed request plus host assembly axes | `CMP-D12` |
 | `MG03` | session `CompileProfile` framework fields | typed request; host-only input remains (UAK0 `S13`) or the type goes | `CMP-D13` |
 | `MG04` | session `CompileTarget`, `request_from_target`, `compileWithAudit(target)`, `compileMany` render profile | typed requests | `CMP-D13` |
-| `MG05` | `compile_profile_hash` and the profile-hash keys | per-product `TerminalKey` | `CMP-D14` |
+| `MG05` | `compile_profile_hash` and the profile-hash keys | per-product `TerminalKey` as the slot address only; host fact-signature revalidation stays the sole warm admission | `CMP-D14` |
 | `MG07` | route-local refusal lists | the single admission | `CMP-D15` |
 
 No adapter survives its last consumer, and no dual admission remains
@@ -278,7 +304,7 @@ emit request to TSE1 (`TSE1-AC3`); the Solid request to SXC2 (`SXC2-AC1`).
 | `CMP-D11` | unqualified artifact assembly | publication addressed by `ArtifactId` lineage only | CMP4 (`CMP4-AC1`) |
 | `CMP-D12` | mixed request/policy conversion | `RuntimeCompileOptions`, `derive_legacy_vue_options`, `compile_from_parsed_legacy` and their round trips | CMP1 (`CMP1-AC1`) |
 | `CMP-D13` | mixed request/policy conversion | session `CompileProfile` option bag and its conversions | CMP1 (`CMP1-AC1`) |
-| `CMP-D14` | unqualified cache identity | `compile_profile_hash` and the profile-hash keys | CMP1 (`CMP1-AC3`) |
+| `CMP-D14` | unqualified cache identity | `compile_profile_hash` and the profile-hash keys, replaced by `TerminalKey` as a lookup key only | CMP1 (`CMP1-AC3`, `RA02`) |
 | `CMP-D15` | ignored or route-local option | route-local refusal lists; standalone ignoring admitted fields | CMP1 (`CMP1-AC1`) |
 | `CMP-D16` | ignored or route-local option | `vue.ssr`, `svelte.dev`, Svelte `componentId` | CMP1 (`CMP1-AC1`) |
 | `CMP-D17` | unqualified cache identity | unplugin filename-keyed caches | BND1 (`BND1-AC1`) |
@@ -306,14 +332,20 @@ populations in the inventory).
 - **`ParseKey` already exists** (`CMP-F09`); **`RegionId` is VID0's**
   (`CMP-F10`); **`CompilePolicy` and `CompilerPolicy` are one type**
   (`CMP-F11`).
-- **CMP1's write scope does not cover its recorded deletion** (`CMP-F12`).
-  The plan already records CMP1 as owner of the mixed conversion, but the
-  F10 scope covers only CMP1's module homes and RA01's transport paths.
-  Amendment `RA02` is proposed through question
-  `cmp0-ra02-cmp1-cutover-scope`; the binding stands on the existing
-  ownership until the ruling.
-- **VCP6 and SCP6 surfaces** list only their new module homes while their
-  deletion lists name the legacy routes recorded here (`CMP-F13`).
+- **CMP1's write scope for the cutover is authorised** (`CMP-F12`, `RA02`).
+  The operator ruling on `cmp0-ra02-cmp1-cutover-scope` (2026-10-09) extends
+  CMP1's write scope and conflict domains to the session, LSP, MCP, dx
+  baseline and the listed compiler, napi and wasm paths, under `CMP1-AC1`
+  and `CMP1-AC3`. `RA01` stays. The former F10 scope is superseded only for
+  this cutover. The migration preserves host fact validation,
+  stale-publication fences, complete-only cache admission and
+  incremental/fresh equivalence. Production work stays after this contract.
+- **VCP6, SCP6 and CMP4 surfaces** do not name every path on `CMP-D01`–
+  `CMP-D11` (`CMP-F13`). Those nodes stay the deletion owners. Amendment
+  `RA03` is proposed through question
+  `cmp0-ra03-out-of-surface-deletion-scope`, asking the controller to extend
+  each node's write scope to the paths already listed. Until that ruling the
+  bindings stand on the recorded owners.
 - **TSC0's projections are not stage classes** (`CMP-F14`).
 - Two identities outside CMP0's graph are recorded, not bound: a `Debug`
   rendering in `CarrierInventory::artifact_identity_token` (`CMP-F15`, CPF1)
