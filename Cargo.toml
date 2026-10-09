@@ -98,16 +98,42 @@ opt-level = 0
 # `CARGO_PROFILE_DEV_DEBUG=2 cargo ...`.
 debug = "line-tables-only"
 
-# Strip debug info from non-workspace dependencies entirely. Our own crates
+# Non-workspace dependencies: no debug info, and OPTIMISED. Our own crates
 # keep `line-tables-only` (above) for backtraces; third-party deps do not need
 # even line tables, which shrinks dependency rlibs and cuts link input size.
+#
+# `opt-level = 2` for dependencies only: workspace crates stay at opt-level 0
+# (above), so the edit -> rebuild loop is untouched, while the dependency code
+# the tests drive hardest (oxc parsing, `syn` in the source-scanning guards,
+# hashbrown/serde) runs optimised. Measured on a shared 32-core Windows/MSVC
+# host under 40-100% foreign CPU load (so +-15% noise), opt-level 0 -> 2:
+#   - cold `cargo test --workspace --no-run`: 762s -> ~790s (dependencies
+#     compile early and in parallel; the critical path is the workspace chain);
+#   - incremental rebuild after a one-line edit in verter_session or
+#     verter_compiler: 134-212s -> 106-139s (smaller dependency rlibs link
+#     faster on MSVC; never slower);
+#   - dependency-bound tests: verter_semantic lib summed per-test time
+#     52.7s -> 23.3s, the heaviest oxc parse test 34s -> 29s, `syn`-walking
+#     guards ~0.6x. Tests dominated by workspace code are unchanged, as are
+#     generics instantiated in workspace crates (they codegen at opt-level 0).
+#   - opt-level 1 was measured too: same build cost, roughly half the runtime
+#     gain (verter_semantic lib 52.7s -> 39.2s).
+# Precedence: `package."*"` outranks `build-override`, so external build
+# scripts and proc-macros (serde_derive, ts-rs, oxc_ast_macros, ...) compile
+# at this opt-level as well; a `build-override` table would only reach the
+# eight workspace-owned build scripts / derive macros, which measured as noise.
+# Both `package."*"` and `build-override` tables ARE inherited through
+# `inherits = "dev"`, so `no-debug-assertions` mirrors this explicitly below
+# and `artifact-dev` pins its own dependency opt-level.
 [profile.dev.package."*"]
 debug = false
+opt-level = 2
 
 # Test profile that reproduces the CONDITIONAL-COMPILATION and runtime-check
 # state of a shipped build — `debug_assertions` off, `overflow-checks` off —
-# while keeping dev codegen (opt-level 0, no LTO, many codegen units) so it
-# compiles at debug speed.
+# while keeping dev codegen (workspace crates at opt-level 0, dependencies at
+# opt-level 2 exactly as `dev`, no LTO, many codegen units) so it compiles at
+# debug speed.
 #
 # Why it exists: `debug_assert!` does not evaluate its argument when
 # `debug_assertions` is off, and `#[cfg(debug_assertions)]` items disappear.
@@ -132,8 +158,12 @@ inherits = "dev"
 debug-assertions = false
 overflow-checks = false
 
+# Mirror of the `dev` dependency settings. They are inherited anyway; stated
+# explicitly so the shipped-cfg lane cannot silently diverge from the
+# debug test run it stands beside.
 [profile.no-debug-assertions.package."*"]
 debug = false
+opt-level = 2
 
 # Host developer artifact profile — what `pnpm build` compiles NAPI and the
 # LSP under. Plain `dev` (opt-level 0)
@@ -148,8 +178,11 @@ inherits = "dev"
 opt-level = 2
 debug = "line-tables-only"
 
+# `opt-level` pinned explicitly: it inherits `dev`'s dependency value today,
+# but this profile's dependencies must stay at 2 even if the `dev` value moves.
 [profile.artifact-dev.package."*"]
 debug = false
+opt-level = 2
 
 # Internal release-testing profile — thin LTO + many codegen units instead of
 # `release`'s fat LTO + one codegen unit, to measure whether fat LTO earns
