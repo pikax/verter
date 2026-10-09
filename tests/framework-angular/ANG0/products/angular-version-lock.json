@@ -1,0 +1,225 @@
+{
+  "schema": "AngularVersionLock",
+  "version": 1,
+  "product": "AngularVersionLock",
+  "node": "ANG0",
+  "kind": "lock",
+  "family": "angular",
+  "pinRule": "every-version-is-an-exact-published-version-with-a-named-source",
+  "releaseLaw": {
+    "authority": "docs/arch/kernel/identities.md (VID0 R04-R08, R11)",
+    "rules": [
+      "One manifest declares exactly one release; this lock admits one release.",
+      "A release is exact: no range, versions array, floating tag or implied major.",
+      "latest, next, canary, nightly and every other dist-tag or range never decode into a release.",
+      "Activation reads the resolved installed version of @angular/core, never the declared range.",
+      "An installed version that is not an admitted exact release is unsupported-version and is never coerced."
+    ]
+  },
+  "admittedReleases": [
+    {
+      "releaseId": "angular@22.2.1",
+      "profileId": "angular-22.2.1-standalone",
+      "channel": "stable",
+      "activationPackage": "@angular/core",
+      "compilationScope": "standalone",
+      "packages": [
+        {
+          "name": "@angular/core",
+          "version": "22.2.1",
+          "role": "activation-package",
+          "license": "MIT",
+          "source": "https://registry.npmjs.org/@angular/core/22.2.1",
+          "published": "2026-09-30",
+          "integrity": "sha512-a8WlYTRiaMPz1KvLE5xjeWrLyZUuQX8bh6Ak7zajUci9iWsTUQefschjSwP1WKlin3JhM3XjmsTEDyZvSLIfRg=="
+        },
+        {
+          "name": "@angular/compiler-cli",
+          "version": "22.2.1",
+          "role": "release-pair and test-only oracle (ngc strictTemplates)",
+          "license": "MIT",
+          "source": "https://registry.npmjs.org/@angular/compiler-cli/22.2.1",
+          "integrity": "sha512-Nh8sCBl0JF6x+H7/1hemY76JeTRC66EfMULT4B3ryF9srRSLYc6X6RfPRtYvrIyjgr6h3jZgrNHlV76wiJaOcA=="
+        },
+        {
+          "name": "@angular/compiler",
+          "version": "22.2.1",
+          "role": "exact peer of @angular/core and @angular/compiler-cli 22.2.1",
+          "license": "MIT",
+          "source": "https://registry.npmjs.org/@angular/compiler/22.2.1"
+        }
+      ],
+      "upstreamPeerFacts": [
+        {
+          "declaredBy": "@angular/compiler-cli@22.2.1 peerDependencies",
+          "package": "typescript",
+          "declaredRange": ">=6.0 <6.1",
+          "note": "Recorded upstream fact, not a Verter pin. The oracle runs on the repository's pinned ts-js engine (typescript 6.0.3, tests/sfc-projection/STP1/products/engine-matrix.json), which satisfies it. Editor TS-region answers come from tsgo, never from this oracle."
+        }
+      ],
+      "featureSources": [
+        {
+          "repository": "https://github.com/angular/angular",
+          "tag": "v22.2.1",
+          "license": "MIT (repository LICENSE)",
+          "paths": [
+            "packages/compiler/test/ml_parser/lexer_spec.ts",
+            "packages/compiler/test/ml_parser/html_parser_spec.ts",
+            "packages/compiler/test/expression_parser/parser_spec.ts",
+            "packages/compiler/test/render3/r3_template_transform_spec.ts",
+            "packages/compiler/test/render3/r3_ast_spans_spec.ts",
+            "packages/compiler-cli/src/ngtsc/typecheck/test/type_check_block_spec.ts",
+            "packages/compiler-cli/test/ngtsc/template_typecheck_spec.ts",
+            "packages/compiler-cli/test/compliance/test_cases/r3_view_compiler_control_flow/TEST_CASES.json"
+          ],
+          "use": "grammar, recovery and type-check corpus inputs for ANG1, ANG6 and ANG9; expected outputs are written from these official sources"
+        },
+        {
+          "repository": "https://github.com/angular/angular",
+          "tag": "v22.2.1",
+          "license": "MIT (repository LICENSE)",
+          "paths": [
+            "adev/src/content/guide/templates/control-flow.md",
+            "adev/src/content/guide/templates/defer.md",
+            "adev/src/content/guide/templates/expression-syntax.md",
+            "adev/src/content/guide/templates/variables.md",
+            "adev/src/content/guide/components/inputs.md",
+            "adev/src/content/guide/components/outputs.md",
+            "adev/src/content/guide/components/content-projection.md",
+            "adev/src/content/guide/components/selectors.md",
+            "adev/src/content/reference/migrations/control-flow.md"
+          ],
+          "use": "angular.dev guide examples for the feature corpus and the documented semantics of the admitted profile"
+        }
+      ]
+    }
+  ],
+  "excludedReleases": [
+    {
+      "id": "angular-23-next",
+      "channel": "next/rc",
+      "disposition": "excluded",
+      "reason": "unpublished: on 2026-10-09 the npm registry lists no 23.x version of @angular/core or @angular/compiler-cli (dist-tag next is 22.3.0-next.1). No exact version can be named, and pinning the channel would be a floating tag.",
+      "readmission": "A lock amendment that names an exact published 23.0.0 next or rc version, with its source and integrity, once the major is announced. FWA1 then reads the amended table. Until then an installed 23.x is unsupported-version."
+    },
+    {
+      "id": "angular-22-other-builds",
+      "channel": "stable and prerelease builds of 22.x other than 22.2.1",
+      "disposition": "unsupported-version",
+      "reason": "A release is exact (VID0 R04, R06). 22.2.2 (published 2026-10-08) and the 22.3.0 next builds are not admitted; each needs a re-pin of this lock.",
+      "readmission": "A lock amendment that replaces the admitted exact release."
+    },
+    {
+      "id": "angular-legacy-majors",
+      "channel": "21.x and older",
+      "disposition": "unsupported-version",
+      "reason": "Legacy majors are out of scope (framework-common Versions).",
+      "readmission": "none"
+    },
+    {
+      "id": "angular-canary-nightly",
+      "channel": "canary, nightly, snapshot builds",
+      "disposition": "unsupported-version",
+      "reason": "No canary or nightly is admitted (framework-common Versions).",
+      "readmission": "none"
+    }
+  ],
+  "excludedModes": [
+    {
+      "id": "ngmodule-scope",
+      "construct": "a component declared in @NgModule({ declarations: [...] }), and any declarations array",
+      "disposition": "unsupported-profile",
+      "reason": "Legacy compilation mode (ruling 2). Only standalone components and their imports scope are admitted.",
+      "refusalProof": ["ANG2-AC5", "ANG5-AC2"]
+    },
+    {
+      "id": "structural-sugar-builtins",
+      "construct": "*ngIf, *ngFor and *ngSwitch / *ngSwitchCase / *ngSwitchDefault",
+      "disposition": "unsupported-profile",
+      "reason": "Superseded by the built-in control flow. The official migration is `ng generate @angular/core:control-flow` (adev/src/content/reference/migrations/control-flow.md at v22.2.1). Verter never rewrites it itself.",
+      "refusalProof": ["ANG1-AC3", "ANG8-AC3"]
+    }
+  ],
+  "admittedModes": [
+    {
+      "id": "custom-structural-microsyntax",
+      "construct": "a custom *dir attribute, for example *appRepeat=\"let x of xs\"",
+      "disposition": "admitted",
+      "proof": "ANG1-AC3"
+    },
+    {
+      "id": "builtin-control-flow",
+      "construct": "@if/@else if/@else, @for with track and @empty, @switch/@case/@default, @defer with @placeholder/@loading/@error, @let",
+      "disposition": "admitted",
+      "proof": "ANG1-AC1"
+    }
+  ],
+  "divergedPins": [
+    {
+      "source": "tests/web-product/WDX1/fixtures/mixed-framework/case.json",
+      "pinned": "angular 20.0.0",
+      "status": "diverged",
+      "reason": "Names a legacy major that is not an admitted release.",
+      "resolution": "ANG9 re-pins the scenario to angular@22.2.1 (ANG9 Surfaces). Until then the row is never evidence for any cell."
+    }
+  ],
+  "wireTag": {
+    "enum": "FrameworkTag",
+    "name": "FRAMEWORK_TAG_ANGULAR",
+    "value": 11,
+    "proto": "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+    "allocation": {
+      "classA": {"PREACT": 6, "QWIK": 7, "STENCIL": 8, "LIT": 9},
+      "classB": {"ASTRO": 10, "ANGULAR": 11, "MARKO": 12, "EMBER_GLIMMER": 13, "MDX": 14},
+      "existing": {"NONE": 0, "VUE": 1, "SVELTE": 2, "REACT": 3, "SOLID": 4, "OPEN_CANONICAL": 5}
+    },
+    "structuralNonTags": ["FRAMEWORK_TAG_NONE", "FRAMEWORK_TAG_OPEN_CANONICAL"],
+    "landsWith": "REG0 pre-allocates the value as DeferredVertical (REG0-AC2); ANG1 registers the adapter descriptor and flips tag_disposition to Registered (ANG1-AC5).",
+    "rejected": [
+      "FRAMEWORK_TAG_OPEN_CANONICAL (5) as the Angular adapter tag: tag_disposition returns None for it",
+      "any value already used (0-5) or allocated to another family (6-10, 12-14)"
+    ]
+  },
+  "fileAssociations": {
+    "newLanguageIds": [],
+    "componentFiles": {"extension": ".ts", "languageId": "typescript", "note": "inline templates are regions of the host .ts file"},
+    "externalTemplates": {
+      "extension": ".html",
+      "languageId": "html",
+      "classification": "FileLanguage::FrameworkTemplate { adapter_id, owner_hint } only through the FWA1-gated LanguageRow::gated row; otherwise neutral HTML"
+    },
+    "externalStyles": {"extensions": [".css", ".scss", ".less"], "note": "attached to their component by ANG1M; parsed by verter_css_syntax and its admitted dialects"},
+    "clientInjections": [
+      {"scopeName": "verter.angular.template", "injectTo": ["text.html.derivative", "text.html.basic"], "owner": "ANG1G"},
+      {"scopeName": "verter.angular.inline", "injectTo": ["source.ts"], "owner": "ANG1G"}
+    ],
+    "parserHome": "H02 crates/verter_angular_syntax (PAR0 CL12)"
+  },
+  "oracles": [
+    {
+      "package": "@angular/compiler-cli",
+      "version": "22.2.1",
+      "use": "ngc strictTemplates diagnostics and facet agreement",
+      "testOnly": true,
+      "owner": "ANG9"
+    },
+    {
+      "package": "@angular/language-service",
+      "version": "22.2.1",
+      "source": "https://registry.npmjs.org/@angular/language-service/22.2.1",
+      "use": "type-answer comparison only; never an authority or an editor route",
+      "testOnly": true,
+      "owner": "ANG9"
+    }
+  ],
+  "rejectedOracles": [
+    {
+      "package": "prettier",
+      "reason": "Not an official Angular source. ANG8F proves formatting by idempotence, meaning preservation and delegation equality (ANG8F-AC1, ANG8F-AC3)."
+    }
+  ],
+  "lintProfileAlignment": {
+    "owner": "LNG1",
+    "note": "LNG1 names the same @angular/core and @angular/compiler-cli 22.2.1 release and a 23 next/rc channel. Lint packs run only where FWA1 admits a release from this lock, so the 23 channel stays inactive until this lock admits an exact 23 version."
+  }
+}
