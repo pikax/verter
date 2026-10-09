@@ -145,6 +145,7 @@ verter_semantic/src/analysis/flow/mod.rs open_site_at
 verter_semantic/src/analysis/flow/mod.rs record_assignment_targets
 verter_semantic/src/analysis/flow/mod.rs record_maybe_default_target
 verter_semantic/src/analysis/flow/mod.rs reference_root_identifier
+verter_semantic/src/analysis/flow/mod.rs visit_statement
 verter_semantic/src/analysis/flow/value_descent.rs chain_is_call_valued
 verter_semantic/src/analysis/flow/value_descent.rs expression_contains_call
 verter_semantic/src/analysis/flow/value_descent.rs sequence_value_takes_await_arm
