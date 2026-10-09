@@ -1,0 +1,149 @@
+{
+  "schema": "ErbCoexistence",
+  "version": 1,
+  "product": "ErbCoexistence",
+  "node": "ERB0",
+  "kind": "lock",
+  "registry": "COXD1 competing-tool registry: these are the ERB train's declaration entries; COXD1-AC1 validates each capability against the COX0 vocabulary",
+  "ownershipResolver": "COXD2 decides ownership per capability through LSPX11 owns(capability, position); Unknown means Verter owns. Verter never stacks a result on a competitor's",
+  "tools": [
+    {
+      "id": "ruby-lsp",
+      "name": "Ruby LSP",
+      "publisher": "Shopify",
+      "vscodeExtensionIds": [
+        "Shopify.ruby-lsp"
+      ],
+      "erbSupport": "answers Ruby features inside ERB islands and delegates host-language (HTML) requests to the language service registered for that file type",
+      "source": "https://shopify.github.io/ruby-lsp/#features"
+    },
+    {
+      "id": "herb",
+      "name": "Herb",
+      "publisher": "Marco Roth",
+      "vscodeExtensionIds": [
+        "marcoroth.herb-lsp"
+      ],
+      "npmPackages": [
+        "@herb-tools/core",
+        "@herb-tools/linter",
+        "@herb-tools/formatter"
+      ],
+      "erbSupport": "HTML+ERB parser; language server with diagnostics, hovers and formatting; linter; formatter (marked experimental by its publisher)",
+      "source": "https://github.com/marcoroth/herb"
+    }
+  ],
+  "cells": [
+    {
+      "id": "coex.html-features.ruby-lsp",
+      "operation": "op.html-features",
+      "capability": "completion",
+      "tool": "ruby-lsp",
+      "conflictClass": "competing-completion",
+      "basis": "delegated HTML requests"
+    },
+    {
+      "id": "coex.html-hover.ruby-lsp",
+      "operation": "op.html-features",
+      "capability": "hover",
+      "tool": "ruby-lsp",
+      "conflictClass": "competing-hover",
+      "basis": "delegated HTML requests"
+    },
+    {
+      "id": "coex.html-hover.herb",
+      "operation": "op.html-features",
+      "capability": "hover",
+      "tool": "herb",
+      "conflictClass": "competing-hover",
+      "basis": "Herb language server hovers"
+    },
+    {
+      "id": "coex.lint.herb",
+      "operation": "lint.markup",
+      "capability": "diagnostics",
+      "tool": "herb",
+      "conflictClass": "duplicate-diagnostics",
+      "basis": "Herb linter and language-server diagnostics"
+    },
+    {
+      "id": "coex.lint-percent-close.herb",
+      "operation": "lint.percent-close-in-ruby-string",
+      "capability": "diagnostics",
+      "tool": "herb",
+      "conflictClass": "duplicate-diagnostics",
+      "basis": "Herb language-server diagnostics over the same document"
+    },
+    {
+      "id": "coex.format.herb",
+      "operation": "format.document",
+      "capability": "formatting",
+      "tool": "herb",
+      "conflictClass": "competing-formatting",
+      "basis": "Herb formatter and language-server formatting"
+    },
+    {
+      "id": "coex.semantic-tokens.ruby-lsp",
+      "operation": "op.semantic-tokens",
+      "capability": "semantic-tokens",
+      "tool": "ruby-lsp",
+      "conflictClass": "competing-semantic-tokens",
+      "basis": "Ruby features inside islands include semantic highlighting"
+    },
+    {
+      "id": "coex.assists.ruby-lsp",
+      "operation": "assists.structure",
+      "capability": "code-actions",
+      "tool": "ruby-lsp",
+      "conflictClass": "competing-edits",
+      "basis": "Ruby code actions inside islands of the same document"
+    },
+    {
+      "id": "coex.structure.herb",
+      "operation": "op.structure",
+      "capability": "document-structure",
+      "tool": "herb",
+      "conflictClass": "parallel-parser",
+      "basis": "Herb's HTML+ERB parser produces a template tree; no editor overlap, recorded so FCH1 and COXD2 see it",
+      "cox0Binding": "COXD1 binds or rejects this capability name against the COX0 vocabulary (COXD1-AC1)"
+    }
+  ],
+  "noCompetitorKnown": [
+    "scan.islands",
+    "scan.block-structure",
+    "scan.recovery",
+    "scan.incremental",
+    "compose.templated-html",
+    "compose.regions",
+    "compose.hosts",
+    "activation.inactive-zero-work",
+    "op.block-pairs",
+    "op.linked-editing",
+    "sinks.raw-output",
+    "fragments.html-response",
+    "client.registration",
+    "qualification.conformance",
+    "qualification.incremental",
+    "qualification.exposure",
+    "terminal.capability-truth",
+    "terminal.step-down",
+    "terminal.mcp",
+    "terminal.docs"
+  ],
+  "rule": "every capability-matrix operation either has a cell here for each declared competitor that provides it, or is listed in noCompetitorKnown; a competitor capability discovered later is a new cell, never a silent overlap",
+  "notes": "Ruby semantics inside islands are excluded from Verter (x.ruby-semantics), so Ruby LSP's Ruby features need no Verter cell.",
+  "conflictClasses": {
+    "seed": [
+      "duplicate-diagnostics",
+      "competing-completion",
+      "competing-formatting",
+      "competing-edits"
+    ],
+    "proposed": [
+      "competing-hover",
+      "competing-semantic-tokens",
+      "parallel-parser"
+    ],
+    "rule": "seed classes are COXD1's; a proposed class is bound or rejected by COXD1 when it lands, and the cell stays declared either way"
+  }
+}

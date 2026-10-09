@@ -1,0 +1,65 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "ERB0",
+  "kind": "lock",
+  "products": [
+    "ErbVersionLock",
+    "ErbCapabilityMatrix",
+    "ErbActivationPolicy",
+    "ErbCoexistence"
+  ],
+  "productFiles": {
+    "ErbVersionLock": "tests/framework-erb/ERB0/products/erb-version-lock.json",
+    "ErbCapabilityMatrix": "tests/framework-erb/ERB0/products/erb-capability-matrix.json",
+    "ErbActivationPolicy": "tests/framework-erb/ERB0/products/erb-activation-policy.json",
+    "ErbCoexistence": "tests/framework-erb/ERB0/products/erb-coexistence.json"
+  },
+  "mandatoryCases": [
+    "ERB0-pin",
+    "ERB0-matrix",
+    "ERB0-activation",
+    "ERB0-coexistence"
+  ],
+  "cases": [
+    {
+      "id": "ERB0-pin",
+      "acceptance": "ERB0-AC1",
+      "disposition": "reject",
+      "twins": ["P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10", "P11", "P12"]
+    },
+    {
+      "id": "ERB0-matrix",
+      "acceptance": "ERB0-AC2",
+      "disposition": "reject",
+      "twins": ["M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08", "M09", "M10", "M11", "M12", "M13", "M14"]
+    },
+    {
+      "id": "ERB0-activation",
+      "acceptance": "ERB0-AC3",
+      "disposition": "reject",
+      "twins": ["A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08", "A09", "A10", "A11"]
+    },
+    {
+      "id": "ERB0-coexistence",
+      "acceptance": "ERB0-AC4",
+      "disposition": "reject",
+      "twins": ["C01", "C02", "C03", "C04", "C05", "C06", "C07"]
+    },
+    {
+      "id": "ERB0-clean",
+      "disposition": "accept",
+      "twins": ["OK1", "OK2", "OK3", "OK4"]
+    }
+  ],
+  "casesFile": "tests/framework-erb/ERB0/cases.md",
+  "validator": {
+    "owner": "ERB1G",
+    "acceptance": "ERB1G-ACV",
+    "files": ["tests/framework-erb/ERB0/contract.ts", "tests/framework-erb/ERB0/erb-lock.spec.ts"],
+    "test": "node --test tests/framework-erb/ERB0/erb-lock.spec.ts",
+    "present": false
+  },
+  "runtimeCorrectness": false,
+  "notes": "Contract data only. The validator and every planted-row rejection are ERB1G's; REG0's lock runner discovers the spec once it exists. No production code, CI lane or runtime activation is authorised by this lock."
+}
