@@ -29,7 +29,7 @@ The reviewed contract data lives in `tests/kernel/CFG0/products/`:
 | File | Holds |
 | ---- | ----- |
 | `configuration-inventory.v1.json` | Contract rules `CR01`–`CR24`, outcomes `CF-O01`–`CF-O14`, consumers `CF-C01`–`CF-C19`, retained host inputs `CF-H01`–`CF-H04`, displaced routes `CF-D01`–`CF-D10`, the UAK0 routes it references, coverage of each deletion category, empty populations, the open binding gap `G01`, findings and transferred obligations |
-| `configuration-case-table.v1.json` | Cases `CC01`–`CC16`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable |
+| `configuration-case-table.v1.json` | Cases `CC01`–`CC17`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable |
 
 Every `successorPath` starts at CFG0 and follows predecessor edges in the
 controller-owned plan. UAK0, UAK1 and VID0 rows keep their owners; CFG0 only
@@ -69,21 +69,27 @@ evaluates JavaScript to read it.
   framework family key, a release, a profile key, an embedded-language kind, a
   dialect and a coexistence capability cell each decode through the catalog
   or the owning registry. A spelling that does not decode is `Invalid`; it is
-  never kept as a string and never matched later (VID0 `R03`).
+  never kept as a string and never matched later (VID0 `R03`, `R07`).
+  Admission is not decoding. A release spelling that decodes to a `ReleaseId`
+  the catalog does not admit stays in the configuration, and activation
+  yields `unsupported-version` (VID0 `R06`). Rows the decode consulted are
+  part of the query identity (`CR14`).
 
 ### Base sections
 
 The envelope owns these three schemas. No other base section exists.
 
 - **`frameworks`** — `{ "<family>": "auto" | "off" | { "state": "on",
-  "release": "<exact admitted release>" } }`. `auto` is the default. `on`
-  must name a release that decodes to an admitted `ReleaseId` (VID0 `R04`–`R07`).
-  A floating tag, a range, a versions array or an unknown family is
-  `Invalid(UnknownFrameworkRelease)` or `Invalid(UnknownKey)`. FWA1 owns what
-  the switch does. `frameworks` may appear at the top level and in
-  `overrides`, never inside `profiles`: profile selection depends on
-  activation, so a profile-scoped activation key would be a cycle
-  (`Invalid(ActivationKeyInProfile)`).
+  "release": "<exact release>" } }`. `auto` is the default. `on` must name a
+  spelling that decodes to a `ReleaseId` (VID0 `I04`). A decoded `ReleaseId`
+  that is not admitted is a valid configuration value; FWA1 reports
+  `unsupported-version` and does not coerce it (VID0 `R06`). A floating tag,
+  a range, a versions array or any other spelling that does not decode is
+  `Invalid(UnknownFrameworkRelease)` (VID0 `R07`). An unknown family is
+  `Invalid(UnknownKey)`. FWA1 owns what the switch does. `frameworks` may
+  appear at the top level and in `overrides`, never inside `profiles`:
+  profile selection depends on activation, so a profile-scoped activation
+  key would be a cycle (`Invalid(ActivationKeyInProfile)`).
 - **`embedded`** — tag bindings and default dialects for embedded-language
   recognition. `embedded.tags` is a list of `{ "kind", "module", "export",
   "dialect"? }`: a tag is bound to an import source and export, never to a
@@ -93,10 +99,17 @@ The envelope owns these three schemas. No other base section exists.
   owns dialect resolution and EDOC1 owns embedded documents.
 - **`coexistence`** — persisted per-capability ownership choices
   (`{ "<capability cell>": "verter" | "official" | "per-feature" }`). It is
-  allowed only in the user layer and in the workspace-root file; anywhere
-  else it is `Invalid(ScopeRestrictedKey)`. COXD2 is the sole choice authority.
-  The core never writes a choice; a host writes one only with consent
-  (COXD3L).
+  allowed only in the user layer and in the workspace-root file's own body.
+  Anywhere else the key is `Invalid(ScopeRestrictedKey)` and that file is
+  `Invalid`. A file the workspace-root file `extends` is not the
+  workspace-root file: a coexistence key there is not inherited. A nested
+  `"root": true` file stops the chain (`CR06`), so files under it never
+  read the workspace-root coexistence section, and a coexistence key in
+  that nested root file is still `Invalid(ScopeRestrictedKey)`. Those
+  packages take workspace-scope choices only from the user layer. There is
+  no per-package and no per-root coexistence scope. COXD2 is the sole
+  choice authority. The core never writes a choice; a host writes one only
+  with consent (COXD3L).
 
 ## Precedence and provenance
 
@@ -111,12 +124,24 @@ The envelope owns these three schemas. No other base section exists.
 - **CR07.** A file expands to its `extends` targets in declared order, each
   expanded depth-first, followed by the file's own body. The body wins over
   everything it extends (provenance `inherited` for extended values).
-- **CR08.** Inside one body the rank is: top-level sections, then
-  `profiles` for the active project profile, then `profiles` for the active
-  framework profile, then each matching `overrides` entry in array order (an
-  entry's own `profiles` rank directly after that entry). A nested file's
-  lowest rank beats its parent's highest. Discovery order, load order and
-  registration order never decide.
+- **CR08.** An `overrides` entry is
+  `{ "files": ["<glob>", ...], "excludedFiles"?: ["<glob>", ...], ...sections }`.
+  `files` is required and non-empty. Each glob is relative: `*` is one path
+  segment, `**` crosses segments, `?` is one character other than `/`. There
+  is no brace expansion, no absolute path, no `..` segment and no negation
+  inside a pattern; exclusion is only `excludedFiles`. A pattern that breaks
+  that rule is `Invalid(InvalidOverrideSelector)`. A configured file matches
+  an entry when its path matches any `files` glob and no `excludedFiles`
+  glob. Every glob is anchored at the directory of the source file that
+  authored the entry, including an entry reached through `extends`. The
+  anchor is not the workspace root, not the extending file and not the
+  configured file's directory. Paths compare as workspace-root-relative
+  paths with `/` separators. Inside one body the rank is: top-level
+  sections, then `profiles` for the active project profile, then `profiles`
+  for the active framework profile, then each matching `overrides` entry in
+  array order (an entry's own `profiles` rank directly after that entry). A
+  nested file's lowest rank beats its parent's highest. Discovery order,
+  load order, registration order and pattern order never decide.
 - **CR09.** `extends` entries are relative paths or package specifiers. A
   package specifier resolves through the project model's module resolution
   (PM2) to a `.jsonc` file. A target outside the workspace root is
@@ -131,12 +156,13 @@ The envelope owns these three schemas. No other base section exists.
   never a merge of both sections.
 - **CR11.** Base sections merge by key. Objects merge recursively; scalars and
   arrays replace. Every leaf records the winning contribution and the
-  contributions it shadowed, each as source unit, JSON pointer and span.
+  contributions it shadowed, each as source unit, source revision, JSON
+  pointer and span.
 - **CR12.** Product sections are not merged by the envelope. The consumer
   receives the ordered list of contributions for its section, each with rank,
-  source unit, content, JSON pointer, span and the exact authored value. The
-  translator applies its own merge and reports every contribution as applied,
-  shadowed or rejected. Nothing is dropped silently.
+  source unit, source revision, content, JSON pointer, span and the exact
+  authored value. The translator applies its own merge and reports every
+  contribution as applied, shadowed or rejected. Nothing is dropped silently.
 
 Provenance kinds are `default`, `user`, `source`, `inherited`, `override`,
 `profile` and `captured`. The effective configuration is immutable: a change
@@ -146,23 +172,42 @@ produces a new effective configuration, never an edit of the old one.
 
 - **CR13.** A configuration file is a source unit like any other: it is
   identified by `SourceUnitId` and `ContentId` (VID0 `I01`, `I02`). No path
-  string is a configuration identity.
+  string is a configuration identity. `SourceRevision` is that unit's
+  revision authority (VID0 `I02`) and joins `ContentId` in every source-text
+  cache key (`CR14`); it does not stand in for the bytes.
 - **CR14.** An effective-configuration query is keyed by the chain's ordered
-  `(SourceUnitId, ContentId)` pairs including the `extends` closure, the user
-  layer's host-supplied revision, the configured file's root-relative path
-  (for `overrides`), the active profile identities, and the section. The key
-  is encoded through the canonical tagged encoding (VID0 `R12`, `R13`). It
-  is independent of `ConfiguredProjectId`: configuration scope follows
-  directories; PM1 binds it to projects.
+  `(SourceUnitId, SourceRevision, ContentId)` triples, including the
+  `extends` closure (VID0 `R12`); the user layer's host-supplied revision;
+  the workspace-root-relative path of the configured file and of each
+  declaring config in the chain (override anchors; paths are match inputs,
+  not source identities); the active profile identities; the section; and
+  the identity of each catalog or registry row the decode consulted
+  (product-section registration, and each decoded family, release, profile,
+  kind, dialect and capability cell; VID0 `I09`). The key does not carry the
+  whole `CatalogSnapshot`. A catalog edit that changes no consulted row
+  leaves the key unchanged; one that changes a consulted row misses the
+  cache. Two revisions of one unit with identical bytes do not alias. The
+  key is encoded through the canonical tagged encoding (VID0 `R12`, `R13`).
+  It is independent of `ConfiguredProjectId`: configuration scope follows
+  directories; PM1 binds it to projects. Value fingerprints (`CR16`) stay
+  content-addressed and omit `SourceRevision`.
 - **CR15.** Every result records its read set: each probed path as present
-  (with `ContentId`) or proven absent, each package-specifier resolution
-  proof, the user-layer revision, and each captured snapshot it consumed.
-- **CR16.** Invalidation is per section and per profile. A consumer records
-  the `(section, profile)` fingerprints it read and recomputes only when one
-  of them changes. Editing `format` does not invalidate lint consumers;
-  editing a Svelte profile section does not invalidate a Vue-only scope.
-  Fingerprints are content-addressed, so edit and revert restore the
-  original results.
+  (with `ContentId` and `SourceRevision`) or proven absent, each
+  package-specifier resolution proof, the user-layer revision, the
+  `CatalogSnapshot` identity, the consulted catalog or registry row
+  identities, and each captured snapshot it consumed.
+- **CR16.** Invalidation is per section and per profile, on two
+  content-addressed digests. The value fingerprint covers the ordered
+  decoded contributions (rank, source unit, JSON pointer, exact authored
+  value) and excludes spans, comments and `SourceRevision`. The span anchor
+  covers those contributions' spans. A consumer recomputes only when a
+  value fingerprint it read changes. A consumer that publishes diagnostics
+  or provenance re-anchors spans when a span anchor it read changes, and
+  does not recompute. Editing `format` does not invalidate lint consumers;
+  editing a Svelte profile section does not invalidate a Vue-only scope. A
+  comment changes `ContentId`. It changes a span anchor only for sections
+  whose contribution spans move, and it never changes a value fingerprint.
+  Edit and revert restore both digests.
 - **CR17.** `Invalid`, `Cycle`, `NeedInputs`, `Uncaptured`, cancelled and
   superseded results return to their caller and are never cached as warm
   results (the existing `ReturnOnly` law).
@@ -175,10 +220,11 @@ produces a new effective configuration, never an edit of the old one.
 - **CR19.** Static capture parses data formats as data (tsconfig and
   jsconfig, package.json, JSON ESLint and Prettier files). For an executable
   config (`*.config.{js,ts,mjs,cjs,mts,cts}`, `svelte.config.js`), static
-  capture may only extract literal forms through that tool's fact owner, and
-  reports any non-literal form as partial. It never executes the file, never
-  spawns a runtime, and an executable config it cannot read is
-  `Uncaptured { reason }`, not empty.
+  capture may only extract literal forms through that tool's fact owner. It
+  never executes the file and never spawns a runtime. A file whose extracted
+  forms are all literal is `Complete`. A file with both literal facts and
+  non-literal forms is `Partial`, and the non-literal forms are named. A
+  file with no extractable literal form is `Uncaptured { reason }`, not empty.
 - **CR20.** Dynamic evaluation happens only through an explicitly authorized
   execution service (contract XEC0, implementation CENV5). It produces a new
   captured snapshot that records the service, the authorization, the
@@ -365,7 +411,7 @@ coverage and bounded inspection discriminate it. The diff adds no test.
   owners named per case.
 - **AC3 — incremental equivalence: not applicable.** No cache, cancellation,
   stale-publication or partial-result authority is touched, and no production
-  byte changes. `CR16`, `CR17`, `CC07` and `CC08` bind the later proof.
+  byte changes. `CR16`, `CR17`, `CC07`, `CC08` and `CC17` bind the later proof.
 - **AC4 — bounded work: not applicable.** No hot path changes. `CC07` fixes
   the zero-recompute expectation for irrelevant edits; DEM0's zero-work
   fixtures stay UAO0's.

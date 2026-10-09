@@ -12,9 +12,9 @@
     {
       "id": "CC01",
       "name": "deterministic monorepo and nested precedence",
-      "input": "A workspace root verter.config.jsonc extending ./base.jsonc; packages/app/verter.config.jsonc with an overrides entry for src/legacy/**; a user layer from the host; files packages/app/src/a.vue and packages/app/src/legacy/b.vue; discovery run in two different orders",
-      "required": "Each leaf of a base section resolves by CR05-CR08: defaults < user < base.jsonc < root body < packages/app body < matching override; b.vue sees the override and a.vue does not; both discovery orders give byte-identical effective configuration and provenance",
-      "forbidden": "A result that depends on discovery, load or registration order; an outer file beating an inner one; the user layer beating a workspace file",
+      "input": "Workspace verter.config.jsonc is { \"version\": 1, \"extends\": [\"./shared/base.jsonc\"] }. shared/base.jsonc is { \"version\": 1, \"overrides\": [{ \"files\": [\"src/legacy/**\"], \"lint\": { \"from\": \"base\" } }] }. packages/app/verter.config.jsonc is { \"version\": 1, \"overrides\": [{ \"files\": [\"src/legacy/**\"], \"excludedFiles\": [\"src/legacy/skip/**\"], \"lint\": { \"from\": \"app\" } }] }. A host user layer is set. Files: packages/app/src/a.vue, packages/app/src/legacy/b.vue, packages/app/src/legacy/skip/c.vue, shared/src/legacy/e.vue, src/legacy/d.vue. Discovery runs in two orders.",
+      "required": "Each leaf of a base section resolves by CR05-CR08: defaults < user < shared/base.jsonc < root body < packages/app body < matching override. Globs anchor at the directory of the file that authored the entry. b.vue matches the app entry and a.vue does not; c.vue is excluded by excludedFiles; e.vue matches the base.jsonc entry because that entry is anchored at shared/; d.vue matches neither the base entry nor the app entry. Both discovery orders give byte-identical effective configuration and provenance.",
+      "forbidden": "A result that depends on discovery, load or registration order; an outer file beating an inner one; the user layer beating a workspace file; anchoring a glob at the workspace root or at the extending file (that would select d.vue for the base entry and miss b.vue for the app entry)",
       "rules": [
         "CR05",
         "CR06",
@@ -58,9 +58,9 @@
     {
       "id": "CC04",
       "name": "unknown framework release and top-level fields fail closed",
-      "input": "Configs with: a top-level key \"lnt\"; \"version\": 2; frameworks.svelte = { state: on, release: \"latest\" }; frameworks.svelte = { state: on, release: \"4\" } where only Svelte 5 is admitted; frameworks.vue inside profiles",
-      "required": "Invalid(UnknownKey), Invalid(UnsupportedSchemaVersion), Invalid(UnknownFrameworkRelease) twice, Invalid(ActivationKeyInProfile); every scope reading the file is Invalid; scopes that do not read it are unaffected",
-      "forbidden": "The key ignored and defaults used; the nearest known version or a coerced release used; an implied default major; a whole-workspace failure for a sibling package that does not read the file",
+      "input": "Configs with: a top-level key \"lnt\"; \"version\": 2; frameworks.svelte = { state: on, release: \"latest\" }; frameworks.vue inside profiles",
+      "required": "Invalid(UnknownKey), Invalid(UnsupportedSchemaVersion), Invalid(UnknownFrameworkRelease), Invalid(ActivationKeyInProfile); every scope reading the file is Invalid; scopes that do not read it are unaffected. release \"latest\" does not decode (VID0 R07) and never reaches activation.",
+      "forbidden": "The key ignored and defaults used; the nearest known version or a coerced release used; an implied default major; a whole-workspace failure for a sibling package that does not read the file; treating a decoded but unadmitted ReleaseId as Invalid(UnknownFrameworkRelease)",
       "rules": [
         "CR01",
         "CR02",
@@ -72,16 +72,14 @@
         "verter_session framework::options::tests::empty_admission_is_rejected"
       ],
       "executableOwner": "UAO0",
-      "receivingAcceptance": "UAO0-AC-R2",
-      "activationOwner": "FWA1",
-      "activationAcceptance": "FWA1-AC6"
+      "receivingAcceptance": "UAO0-AC-R2"
     },
     {
       "id": "CC05",
       "name": "explicit on admits only an admitted release",
-      "input": "A workspace with no alpinejs manifest entry and frameworks.alpine = { state: on, release: <the admitted 3.x line> }, then auto, then on naming an unadmitted release",
-      "required": "active with provenance explicit; inactive; unsupported-version",
-      "forbidden": "Activation from the spelling alone; a range or floating tag accepted",
+      "input": "A workspace with no alpinejs manifest entry and frameworks.alpine = { state: on, release: <the admitted 3.x line> }, then auto, then frameworks.svelte = { state: on, release: \"4\" } where the registry decodes \"4\" to a ReleaseId and only Svelte 5 is admitted",
+      "required": "The configuration is Complete in every case, because each release spelling decoded. Activation is active with provenance explicit; inactive; unsupported-version. The unadmitted ReleaseId is not Invalid(UnknownFrameworkRelease).",
+      "forbidden": "Activation from the spelling alone; a range or floating tag accepted; capture rejecting a decoded unadmitted ReleaseId as Invalid",
       "rules": [
         "CR04"
       ],
@@ -93,7 +91,7 @@
       "id": "CC06",
       "name": "product payloads keep exact provenance",
       "input": "The lint section set in base.jsonc, the root body and an overrides entry, with one misspelt rule option in the override",
-      "required": "The lint consumer receives three ordered contributions, each with rank, source unit, content, JSON pointer, span and the exact authored value; the translator reports two applied or shadowed and rejects the misspelt option with its span",
+      "required": "The lint consumer receives three ordered contributions, each with rank, source unit, source revision, content, JSON pointer, span and the exact authored value; the translator reports two applied or shadowed and rejects the misspelt option with its span",
       "forbidden": "The envelope merging inside lint; a contribution dropped; the misspelt option silently ignored; provenance reduced to a file path",
       "rules": [
         "CR03",
@@ -108,9 +106,9 @@
     {
       "id": "CC07",
       "name": "irrelevant config does not invalidate unrelated profiles",
-      "input": "A monorepo with a Vue 3 package and a Svelte 5 package sharing the root config; edits to (a) profiles.<Svelte 5 framework profile>.lint, (b) the format section, (c) a comment",
-      "required": "(a) recomputes only lint consumers in Svelte 5 scopes; (b) recomputes only format consumers; (c) changes ContentId but no section fingerprint, so no consumer recomputes",
-      "forbidden": "A family-wide or file-wide fingerprint that recomputes Vue scopes on a Svelte edit, or lint on a format edit",
+      "input": "A monorepo with a Vue 3 package and a Svelte 5 package sharing the root config; edits to (a) profiles.<Svelte 5 framework profile>.lint, (b) the format section, (c) a comment line inserted above the lint section, (d) a comment placed so that no contribution span moves",
+      "required": "(a) recomputes only lint consumers in Svelte 5 scopes; (b) recomputes only format consumers; (c) changes ContentId and the span anchor of every section whose contribution spans move, so those diagnostics re-anchor, and changes no value fingerprint, so no consumer recomputes; (d) changes ContentId only",
+      "forbidden": "A family-wide or file-wide fingerprint that recomputes Vue scopes on a Svelte edit, or lint on a format edit; a comment edit that leaves diagnostics published at the old spans; a comment edit that semantically recomputes a consumer whose values did not change",
       "rules": [
         "CR10",
         "CR14",
@@ -137,9 +135,9 @@
     {
       "id": "CC09",
       "name": "static capture never executes an executable config",
-      "input": "vite.config.ts whose default export is a function reading process.env; svelte.config.js importing a plugin",
-      "required": "Static capture returns Partial or Uncaptured { reason } with the non-literal forms named; no process is spawned and no module is imported",
-      "forbidden": "A Node, Deno or embedded engine run during static capture or indexing; Uncaptured reported as an empty config",
+      "input": "vite.config.ts exporting only a function that reads process.env; svelte.config.js exporting an object with one literal field and one imported plugin call",
+      "required": "vite.config.ts is Uncaptured { reason } naming the non-literal export. svelte.config.js is Partial: the literal field is captured and the plugin call is named as non-literal. No process is spawned and no module is imported.",
+      "forbidden": "A Node, Deno or embedded engine run during static capture or indexing; Uncaptured or Partial reported as an empty config; a fully non-literal file reported Partial or Complete; a mixed file reported Uncaptured or Complete",
       "rules": [
         "CR19",
         "CR21"
@@ -225,11 +223,12 @@
     {
       "id": "CC15",
       "name": "coexistence choices at user and workspace scope",
-      "input": "A user-layer coexistence choice official for a lint cell, and a workspace-root choice verter for the same cell; then the same key in a nested package config",
-      "required": "The workspace-root choice wins with provenance source; the nested key is Invalid(ScopeRestrictedKey); the core writes no choice",
-      "forbidden": "A nested package overriding a workspace choice; a choice written without consent",
+      "input": "First, a user-layer coexistence choice official for a lint cell and a workspace-root file body choice verter for the same cell. Separately, the same key only in shared/base.jsonc, which the workspace-root file extends. Separately, the same key in packages/lib/verter.config.jsonc with root true, under a workspace-root file that has no coexistence key.",
+      "required": "The workspace-root body choice wins over the user layer with provenance source. The key in shared/base.jsonc is Invalid(ScopeRestrictedKey), is not inherited, and makes every scope that reads base.jsonc Invalid. The key in the nested root file is Invalid(ScopeRestrictedKey); files under packages/lib do not read the workspace-root coexistence section and take the user-layer choice only. The core writes no choice.",
+      "forbidden": "A nested root or an extends target overriding or supplying a workspace choice; a choice written without consent; treating root true as a coexistence scope",
       "rules": [
         "CR05",
+        "CR06",
         "CR22"
       ],
       "existingEvidence": [],
@@ -253,6 +252,23 @@
       "receivingAcceptance": "LNTCFG0-AC1",
       "migrationOwner": "LCL4",
       "migrationAcceptance": "LCL4-AC1"
+    },
+    {
+      "id": "CC17",
+      "name": "catalog admission changes invalidate only consulted decodes",
+      "input": "A cached Complete for a file whose build section and frameworks.svelte release both decoded against catalog snapshot S. Then the catalog unregisters build. Separately, from S, the catalog withdraws that svelte release while the spelling still decodes to the same ReleaseId. Separately, from S, the catalog registers an unrelated section.",
+      "required": "Unregistering build misses the cache for scopes that consulted the build registration and yields Invalid(UnknownKey); scopes that never consulted build keep their key and the cached Complete. Withdrawing the svelte release misses the cache for scopes that consulted that admission row; the configuration stays Complete and activation becomes unsupported-version. Registering an unrelated section changes no consulted row, so the cached Complete is still served.",
+      "forbidden": "Serving the cached Complete after a consulted row changes; invalidating a scope that did not consult the changed row; caching the Invalid result",
+      "rules": [
+        "CR02",
+        "CR04",
+        "CR14",
+        "CR15",
+        "CR17"
+      ],
+      "existingEvidence": [],
+      "executableOwner": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R2"
     }
   ]
 }

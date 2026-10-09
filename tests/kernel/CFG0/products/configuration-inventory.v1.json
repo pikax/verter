@@ -103,7 +103,7 @@
     "baseSections": [
       {
         "section": "frameworks",
-        "shape": "{ <family>: auto | off | { state: on, release: <exact admitted release> } }",
+        "shape": "{ <family>: auto | off | { state: on, release: <exact release spelling that decodes to a ReleaseId> } }",
         "allowedIn": [
           "top level",
           "overrides"
@@ -132,10 +132,10 @@
         "shape": "{ <capability cell>: verter | official | per-feature }",
         "allowedIn": [
           "user layer top level",
-          "workspace-root file top level"
+          "workspace-root file body"
         ],
         "forbiddenIn": [
-          "any other file, overrides, profiles (Invalid(ScopeRestrictedKey))"
+          "any other file, including an extends target of the workspace-root file and a nested root:true file; overrides; profiles (Invalid(ScopeRestrictedKey)). A nested root does not read the workspace-root coexistence section; its workspace-scope choice comes only from the user layer."
         ],
         "consumer": "CF-C08"
       }
@@ -167,7 +167,7 @@
     "precedence": [
       "catalog defaults",
       "user layer (host-supplied)",
-      "configuration chain, outermost first; per file: extends targets in declared order (depth-first), then the body; per body: top level < project-profile section < framework-profile section < matching overrides in array order"
+      "configuration chain, outermost first; per file: extends targets in declared order (depth-first), then the body; per body: top level < project-profile section < framework-profile section < matching overrides in array order. An override matches files globs minus excludedFiles globs, anchored at the directory of the file that authored the entry"
     ],
     "provenanceKinds": [
       "default",
@@ -208,7 +208,7 @@
     {
       "id": "CR04",
       "group": "envelope",
-      "rule": "Framework family, release, profile, embedded kind, dialect and capability-cell spellings decode once at capture into typed identities; a spelling that does not decode is Invalid and is never kept or matched later (VID0 R03).",
+      "rule": "Framework family, release, profile, embedded kind, dialect and capability-cell spellings decode once at capture into typed identities; a spelling that does not decode is Invalid and is never kept or matched later (VID0 R03, R07). A release spelling that decodes to a ReleaseId the catalog does not admit stays in the configuration; activation yields unsupported-version (VID0 R06). Consulted catalog rows are part of the CR14 key.",
       "owner": "G01"
     },
     {
@@ -232,7 +232,7 @@
     {
       "id": "CR08",
       "group": "precedence",
-      "rule": "Inside one body: top-level sections < project-profile section < framework-profile section < matching overrides entries in array order (each entry's profiles directly after it). A nested file's lowest rank beats its parent's highest. Discovery, load and registration order never decide.",
+      "rule": "An overrides entry is { files: [glob...], excludedFiles?: [glob...], ...sections }. files is required and non-empty. Globs are relative (* one segment, ** across segments, ? one non-slash); no braces, absolutes, .. or in-pattern negation. A broken pattern is Invalid(InvalidOverrideSelector). A file matches any files glob and no excludedFiles glob. The anchor is the directory of the source file that authored the entry, including through extends; not the workspace root, the extending file or the configured file. Inside one body: top-level sections < project-profile section < framework-profile section < matching overrides entries in array order (each entry's profiles directly after it). A nested file's lowest rank beats its parent's highest. Discovery, load, registration and pattern order never decide.",
       "owner": "G01"
     },
     {
@@ -250,37 +250,37 @@
     {
       "id": "CR11",
       "group": "provenance",
-      "rule": "Base sections merge by key: objects recursively, scalars and arrays replace. Every leaf records its winning contribution and the shadowed ones as source unit, JSON pointer and span.",
+      "rule": "Base sections merge by key: objects recursively, scalars and arrays replace. Every leaf records its winning contribution and the shadowed ones as source unit, source revision, JSON pointer and span.",
       "owner": "G01"
     },
     {
       "id": "CR12",
       "group": "provenance",
-      "rule": "Product sections are not merged by the envelope: the consumer receives the ordered contributions (rank, source unit, content, JSON pointer, span, exact authored value) and reports each as applied, shadowed or rejected. Nothing is dropped silently.",
+      "rule": "Product sections are not merged by the envelope: the consumer receives the ordered contributions (rank, source unit, source revision, content, JSON pointer, span, exact authored value) and reports each as applied, shadowed or rejected. Nothing is dropped silently.",
       "owner": "G01"
     },
     {
       "id": "CR13",
       "group": "identity",
-      "rule": "A configuration file is identified by SourceUnitId and ContentId (VID0 I01, I02); no path string is a configuration identity.",
+      "rule": "A configuration file is identified by SourceUnitId and ContentId (VID0 I01, I02); no path string is a configuration identity. SourceRevision is the unit's revision authority (VID0 I02) and joins ContentId in the CR14 cache key; it does not stand in for the bytes.",
       "owner": "G01"
     },
     {
       "id": "CR14",
       "group": "identity",
-      "rule": "An effective-configuration query key is the chain's ordered (SourceUnitId, ContentId) pairs with the extends closure, the user-layer revision, the configured file's root-relative path, the active profile identities and the section, through the canonical tagged encoding (VID0 R12, R13). It is independent of ConfiguredProjectId.",
+      "rule": "An effective-configuration query key is the chain's ordered (SourceUnitId, SourceRevision, ContentId) triples with the extends closure (VID0 R12), the user-layer revision, the workspace-root-relative path of the configured file and of each declaring config, the active profile identities, the section, and the identity of each catalog or registry row the decode consulted (VID0 I09). It does not carry the whole CatalogSnapshot: only a change to a consulted row misses the cache. Two revisions with identical bytes do not alias. Encoding is the canonical tagged encoding (VID0 R12, R13). The key is independent of ConfiguredProjectId. Value fingerprints omit SourceRevision.",
       "owner": "G01"
     },
     {
       "id": "CR15",
       "group": "read-set",
-      "rule": "Every result records its read set: each probed path present (ContentId) or proven absent, each package-specifier resolution proof, the user-layer revision and each captured snapshot consumed.",
+      "rule": "Every result records its read set: each probed path present (ContentId and SourceRevision) or proven absent, each package-specifier resolution proof, the user-layer revision, the CatalogSnapshot identity, the consulted catalog or registry row identities and each captured snapshot consumed.",
       "owner": "G01"
     },
     {
       "id": "CR16",
       "group": "invalidation",
-      "rule": "Invalidation is per (section, profile) fingerprint: a consumer recomputes only when a fingerprint it read changes. Fingerprints are content-addressed, so edit and revert restore the original result.",
+      "rule": "Invalidation is per (section, profile) on two content-addressed digests. The value fingerprint covers ordered decoded contributions (rank, source unit, JSON pointer, exact authored value) and excludes spans, comments and SourceRevision; a consumer recomputes only when one it read changes. The span anchor covers contribution spans; a consumer that publishes diagnostics or provenance re-anchors when it changes and does not recompute. A comment changes ContentId, changes a span anchor only when a contribution span in that section moves, and never changes a value fingerprint. Edit and revert restore both digests.",
       "owner": "G01"
     },
     {
@@ -298,7 +298,7 @@
     {
       "id": "CR19",
       "group": "capture",
-      "rule": "Static capture parses data formats as data. For an executable config it may extract only literal forms through the tool's fact owner, reports non-literal forms as partial, never executes or spawns a runtime, and an unreadable executable config is Uncaptured { reason }, never empty.",
+      "rule": "Static capture parses data formats as data. For an executable config it may extract only literal forms through the tool's fact owner and never executes or spawns a runtime. All-literal extraction is Complete; literal facts plus named non-literal forms are Partial; no extractable literal form is Uncaptured { reason }, never empty.",
       "owner": "CENV1C"
     },
     {
@@ -360,7 +360,7 @@
     },
     {
       "id": "CF-O05",
-      "outcome": "Admission of a release named by frameworks.<family> = on: an unadmitted release is unsupported-version at activation",
+      "outcome": "Admission of a release named by frameworks.<family> = on: a spelling that does not decode is Invalid at capture (CR04); a decoded ReleaseId that is not admitted stays in a Complete configuration and is unsupported-version at activation (VID0 R06, FWA1-AC6)",
       "owner": "FWA1",
       "successorPath": [
         "CFG0",
@@ -404,7 +404,7 @@
     },
     {
       "id": "CF-O10",
-      "outcome": "An executable ecosystem config stays Uncaptured during static capture and indexing; nothing executes it (CR19; preserves UAK1 U01)",
+      "outcome": "Static capture never executes an executable ecosystem config (preserves UAK1 U01). An entirely literal file is Complete; a file with captured literal facts and named non-literal forms is Partial; a file with no extractable literal form is Uncaptured { reason }, never an empty config (CR19, CR21)",
       "owner": "CENV1C",
       "successorPath": [
         "CFG0",
@@ -1276,7 +1276,7 @@
       "receivingAcceptance": "UAO0-AC-R1"
     },
     {
-      "obligation": "Executable fixtures for precedence (CC01 deterministic monorepo and nested precedence, CC02 root stop, CC03 extends order, cycle and escape, CC13 no ambient global configuration), fail-closed unknowns (CC04 unknown framework release and top-level fields), provenance (CC06 product payloads keep exact provenance) and invalidation (CC07 irrelevant config does not invalidate unrelated profiles)",
+      "obligation": "Executable fixtures for precedence (CC01 deterministic monorepo and nested precedence, including declaring-file override anchors, CC02 root stop, CC03 extends order, cycle and escape, CC13 no ambient global configuration), fail-closed unknowns (CC04 undecodable framework release and top-level fields), provenance (CC06 product payloads keep exact provenance) and invalidation (CC07 value fingerprint versus span anchor, CC17 catalog rows invalidate only consulted decodes)",
       "receiver": "UAO0",
       "receivingAcceptance": "UAO0-AC-R2"
     }
