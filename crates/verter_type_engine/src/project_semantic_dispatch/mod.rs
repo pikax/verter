@@ -589,6 +589,11 @@ pub struct BuildLocalTaint {
     /// the enclosing build's `QueryBuildOutput.observed_self_roots` so an
     /// edit to a discarded duplicate's file misses the warm read.
     pub observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The operation refusals raised or read while this frame was on top
+    /// ([`walk::ShallowDiagnostic::is_operation_refusal`]): the enclosing
+    /// build reports them with its own diagnostics, so a refusal reaches
+    /// every read composed over the refused operation.
+    pub(super) operation_refusals: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
 }
 
 /// Panic-safe RAII guard for a cold-build-local taint frame.
@@ -1255,6 +1260,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             read.cache_suppress,
             read.partial_reason_classes(),
         );
+        self.deposit_operation_refusals(read.walker_diagnostics.iter());
         Some(read)
     }
 
@@ -1470,16 +1476,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Record the operation refusals among `diagnostics` on the top
+    /// build-local frame, once each: the enclosing build reports them.
+    pub(super) fn deposit_operation_refusals<'d>(
+        &self,
+        diagnostics: impl IntoIterator<
+            Item = &'d crate::project_semantic_dispatch::walk::ShallowDiagnostic,
+        >,
+    ) {
+        let mut stack = self.build_local_taint.borrow_mut();
+        let Some(top) = stack.last_mut() else {
+            return;
+        };
+        for diagnostic in diagnostics {
+            if diagnostic.is_operation_refusal() && !top.operation_refusals.contains(diagnostic) {
+                top.operation_refusals.push(diagnostic.clone());
+            }
+        }
+    }
+
     /// Re-fold a finished nested observation frame into the ENCLOSING
-    /// build-local frame — taint rails AND the canonical-construction
-    /// self-roots the nested frame accumulated, so a root deposited under a
-    /// nested observation still reaches the enclosing build's memo entry.
+    /// build-local frame — taint rails, operation refusals AND the
+    /// canonical-construction self-roots the nested frame accumulated, so a
+    /// root deposited under a nested observation still reaches the
+    /// enclosing build's memo entry.
     pub(super) fn fold_observed_frame_into_top(&self, observed: &BuildLocalTaint) {
         self.fold_into_top_build_local_taint_with(
             observed.result_is_partial,
             observed.cache_suppress,
             observed.partial_reasons,
         );
+        self.deposit_operation_refusals(&observed.operation_refusals);
         if observed.observed_self_roots.is_empty() {
             return;
         }
@@ -2953,6 +2980,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         output.fold_partial(build_local.result_is_partial);
         output.cache_suppress |= build_local.cache_suppress;
         output.add_partial_reasons(build_local.partial_reasons);
+        for refusal in build_local.operation_refusals {
+            if !output.walker_diagnostics.contains(&refusal) {
+                output.walker_diagnostics.push(refusal);
+            }
+        }
         // A build that observed cancellation or a superseded/torn view is no
         // fact: its value flows to the caller but is never admitted.
         output.cache_suppress |= output.projection_fact(key).is_err();
@@ -3972,6 +4004,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             cache_read.cache_suppress,
             cache_read.partial_reason_classes(),
         );
+        self.deposit_operation_refusals(cache_read.walker_diagnostics.iter());
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
             ?key,
