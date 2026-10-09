@@ -44,14 +44,18 @@ references them by id.
    `verter_lsp`, the `parse_corpus_probe` binary, `StandaloneCompiler`,
    `verter_tsc`, NAPI, WASM, FFI and MCP. Paths follow producer→consumer edges,
    not name matches. The compile-request envelope the transports and `verter-tsc`
-   name is `P17`, owned by CMP0 (`F-C12`, `F-C14`). `StandaloneCompiler::compile`
+   name is `P17` (`F-C12`, `F-C14`): CMP0 owns its contract and CMP1 its
+   production migration. `StandaloneCompiler::compile`
    and `prepare` call `parse_sfc` / `parse_svelte` directly (`F-C13`, CPF1).
 3. Classified each product as frontend, semantic, projection, compiler backend
    or residue. Classified each module edge against UAK1's layers: the frontend
    half is `L3`, which may not import the optional compiler backends (`LC`).
 4. Chose each owner from the descendants whose charter allows production work
    and names that route: CPF1 for the split and the Vue/Svelte cutover, FWC1
-   for the kernel crate edge, UAI0 for the validator.
+   for the kernel crate edge, CMP1 for the compile-request consumers, UAI0 for
+   the validator. A docs-only contract node is never an implementation owner;
+   where one defines the boundary a row consumes, the row names it as
+   `contractOwner` beside the production-capable `owner`.
 
 ## What exists at the described head
 
@@ -87,7 +91,7 @@ The compiler shape survives in three places:
 | frontend | `P01` parse artifact, `P02` registered geometry, `P03` parse diagnostics and reject, `P04` parse admission, `P05` grammar fact, `P06` carrier opener, `P07` script source type | every carrier |
 | semantic | `P08` eval source, `P09` template facts | each semantic profile that registers one |
 | projection | `P10` IDE companion, public API and declarations; `P16` generated-identifier spelling | each profile that registers one |
-| compiler backend | `P11` runtime output and maps, `P12` compile admission and grants, `P13` bundle orchestration, `P14` compile artifact set, `P15` Vue audit compile, `P17` compile-request envelope (CMP0) | compile-capable carriers only (`P17` is the request contract the transports name) |
+| compiler backend | `P11` runtime output and maps, `P12` compile admission and grants, `P13` bundle orchestration, `P14` compile artifact set, `P15` Vue audit compile, `P17` compile-request envelope (contract CMP0, migration CMP1) | compile-capable carriers only (`P17` is the request contract the transports name) |
 | residue | `M07`–`M10`, `M18`–`M20` | nobody; deleted |
 
 The optional backend alone owns compiler output bytes and maps: runtime
@@ -165,6 +169,30 @@ exhaustive.
 All Vue and Svelte routes move in one CPF1 change. The structs, enums and shims
 are deleted in that same change, and no alias of the combined shape survives.
 
+## Compile-request consumers
+
+`P17` is the compile-request envelope. CMP0 is docs-only (zero production
+lines), so it owns the envelope's contract (`contractOwner`, `CMP0-AC1`,
+`CMP0-AC2`) and cannot receive a production migration. The migration of its
+production consumers belongs to CMP1 (successor path CPF0 → CMP0 → CMP1,
+`CMP1-AC1`). CMP1's compatibility closure makes the typed `CompileRequest`
+and `CompilerPolicy` the sole production admission route, and that change is
+what forces every envelope constructor to move.
+
+| Row | Consumer paths | Contract | Implementation |
+| --- | -------------- | -------- | -------------- |
+| `P17` | the envelope (`compile_request`) | CMP0 (`CMP0-AC2`) | CMP1 (`CMP1-AC1`) |
+| `F-C12` | `verter_napi` `host_compile_request.rs`, `compile_request_response.rs`, `lib.rs`; `verter_wasm` `lib.rs`; `verter_ffi` `convert/input.rs` | CMP0 (`CMP0-AC1`) | CMP1 (`CMP1-AC1`) |
+| `F-C14` | `verter_tsc` `checker.rs`, `main.rs` | CMP0 (`CMP0-AC1`) | CMP1 (`CMP1-AC1`) |
+
+**Receiving-charter amendment `RA01` (required).** CMP1's charter currently
+limits it to `crates/verter_compiler/src` and `crates/verter_semantic/src`,
+with write scope `compile_request/demand/` and `compiler_view/`. None of the
+seven consumer paths is inside it. CMP1 dispatches only after its charter adds
+those paths to its production surfaces and write scope, for the
+envelope-consumer migration only. The inventory records the amendment under
+`receivingCharterAmendments`. The parse cutover of `F-C13` stays CPF1's.
+
 ## Displaced routes recorded here
 
 | Route | Category | Unit | Owner |
@@ -201,7 +229,7 @@ Empty populations at this head:
   `StandaloneCompiler::compile` and `prepare` re-parse through `parse_sfc` and
   `parse_svelte` and never enter `CarrierFrontend::parse` (`F-C13`, CPF1).
   `verter-tsc` `generate_all_tsx`, reached from `pub fn run`, drives that
-  compile and names the compile-request envelope (`F-C14`, CMP0).
+  compile and names the compile-request envelope (`F-C14`, CMP1).
 - **`Unsupported` compiler implementations.** None exists, and `T03` forbids
   one.
 
@@ -269,8 +297,11 @@ Evidence selection: the change adds contract text and data only, so existing
 coverage and bounded inspection discriminate it. The diff adds no test.
 
 - **AC1 — ownership contract.** The inventory binds every method, product,
-  outcome, consumer and displaced route to one existing plan node, a successor
-  path from CPF0 and a receiving acceptance ID. UAK0, UAK1 and VID0 rows are
+  outcome, consumer and displaced route to one existing, production-capable
+  plan node, a successor path from CPF0 and a receiving acceptance ID.
+  Contract-only nodes appear as `contractOwner`, never as `owner`; the one
+  receiving charter that does not yet cover its paths carries the explicit
+  amendment `RA01`. UAK0, UAK1 and VID0 rows are
   referenced, not re-owned. The executable validator is UAI0's
   (`UAI0-AC-R1`).
 - **AC2 — positive contract.** Existing coverage pins the identity, provenance
