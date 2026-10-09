@@ -1,0 +1,146 @@
+{
+  "id": "ownership-negative-fixtures.v1",
+  "schema": 1,
+  "contractNode": "CAT0",
+  "describesHead": {
+    "landingTitle": "docs(arch): ratify orthogonal identities and the exact-release law (#802)",
+    "date": "2026-10-09"
+  },
+  "target": "catalog-inventory.v1.json",
+  "executableOwner": "UAI0",
+  "receivingAcceptance": "UAI0-AC-R1",
+  "rule": "Each fixture is one mutation of the unmodified inventory. The validator accepts the unmodified inventory (positive control) and refuses every mutation with the named reason. A mutation is applied only to the row it names; every other row stays as committed. Owners, paths and acceptance IDs are checked against the controller-owned plan, never against a repository copy of it. CAT0 ships the data; UAI0 ships the validator.",
+  "positiveControl": {
+    "id": "CN00",
+    "mutation": "none",
+    "expected": "accept"
+  },
+  "fixtures": [
+    {
+      "id": "CN01",
+      "case": "known-non-production-owner",
+      "mutation": {
+        "row": "displacedRoutes[CAT-D06]",
+        "set": {
+          "deletionOwner": "COX0D",
+          "successorPath": ["CAT0", "DEM0", "COX0D"],
+          "receivingAcceptance": "COX0D-AC1"
+        }
+      },
+      "whyEverythingElseIsValid": "COX0D exists in the plan, CAT0 -> DEM0 -> COX0D follows predecessor edges, and COX0D-AC1 is a real acceptance ID of COX0D.",
+      "expected": "refuse",
+      "reason": "production obligation assigned to an owner whose charter authorizes no production change (COX0D is a docs-only contract node with a zero production budget)",
+      "variants": [
+        {
+          "set": { "deletionOwner": "UAI0", "successorPath": ["CAT0", "UAI0"], "receivingAcceptance": "UAI0-AC1" },
+          "reason": "UAI0 is a family lock and deletes nothing"
+        },
+        {
+          "set": { "deletionOwner": "TIF1D", "successorPath": ["CAT0", "TIF1D"], "receivingAcceptance": "TIF1D-AC1" },
+          "reason": "TIF1D is a docs-only contract node"
+        }
+      ]
+    },
+    {
+      "id": "CN02",
+      "case": "unknown-owner",
+      "mutation": {
+        "row": "displacedRoutes[CAT-D01]",
+        "set": { "deletionOwner": "CPF9", "successorPath": ["CAT0", "CPF9"], "receivingAcceptance": "CPF9-AC1" }
+      },
+      "expected": "refuse",
+      "reason": "owner CPF9 is not a node of the plan"
+    },
+    {
+      "id": "CN03",
+      "case": "omission",
+      "mutation": {
+        "row": "displacedRoutes[CAT-D02]",
+        "remove": true
+      },
+      "expected": "refuse",
+      "reason": "inventory member missing: surfaceReferences and categoryCoverage cite CAT-D02, and FrameworkCapabilityCatalog::{compose, admitting, register_all} remain production symbols with no route, seam or out-of-scope entry",
+      "variants": [
+        {
+          "row": "consumers[CAT-C01]",
+          "remove": true,
+          "reason": "surfaceReferences cites CAT-C01 and CarrierGrammarAuthority consumes T01 with no consumer row"
+        }
+      ]
+    },
+    {
+      "id": "CN04",
+      "case": "path",
+      "mutation": {
+        "row": "displacedRoutes[CAT-D05]",
+        "set": { "successorPath": ["CAT0", "LNT3"] }
+      },
+      "expected": "refuse",
+      "reason": "CAT0 -> LNT3 is not a predecessor edge of the plan",
+      "variants": [
+        {
+          "set": { "successorPath": ["TIF1D", "LRA0", "PUB0", "LNT3"] },
+          "reason": "the successor path does not start at CAT0"
+        },
+        {
+          "set": { "successorPath": [] },
+          "reason": "pathless owner"
+        }
+      ]
+    },
+    {
+      "id": "CN05",
+      "case": "acceptance",
+      "mutation": {
+        "row": "outcomes[CAT-O02]",
+        "set": { "receivingAcceptance": "CPF1-AC9" }
+      },
+      "expected": "refuse",
+      "reason": "CPF1-AC9 is not an acceptance ID of CPF1",
+      "variants": [
+        {
+          "unset": "receivingAcceptance",
+          "reason": "missing receiving acceptance ID"
+        },
+        {
+          "set": { "receivingAcceptance": "COX0-AC1" },
+          "reason": "the acceptance ID belongs to a node other than the named owner"
+        }
+      ]
+    },
+    {
+      "id": "CN06",
+      "case": "conflict",
+      "mutation": {
+        "row": "displacedRoutes",
+        "append": {
+          "id": "CAT-D99",
+          "category": "displaced-registry-constructor-or-mirror",
+          "unit": "Duplicate assignment of the host composition",
+          "symbols": ["HostServices::composed"],
+          "paths": ["crates/verter_session/src/framework/registry.rs"],
+          "disposition": "replace",
+          "successor": "participation-filtered composition",
+          "deletionOwner": "COX0",
+          "productionCapable": true,
+          "successorPath": ["CAT0", "DEM0", "COX0"],
+          "receivingAcceptance": "COX0-AC1"
+        }
+      },
+      "expected": "refuse",
+      "reason": "conflicting assignment: HostServices::composed is assigned to CPF1 by CAT-D01 and to COX0 by CAT-D99",
+      "variants": [
+        {
+          "row": "outcomes",
+          "append": { "id": "CAT-O99", "outcome": "Client manifest and virtual-file naming mirrors rendered from snapshot rows and byte-pinned (CR12); Vue and Svelte bytes unchanged", "owner": "REG0", "successorPath": ["CAT0", "REG0"], "receivingAcceptance": "REG0-AC1" },
+          "reason": "one outcome with two implementation owners (CAT-O04 is CPF1's)"
+        },
+        {
+          "row": "displacedRoutes",
+          "append": { "id": "CAT-D98", "category": "central-framework-switch", "unit": "Hard-coded host framework registrations", "symbols": ["FrameworkAdapterRegistry::built_in_admitting"], "paths": ["crates/verter_session/src/framework/registry.rs"], "disposition": "replace", "successor": "snapshot rows", "deletionOwner": "REG0", "productionCapable": true, "successorPath": ["CAT0", "REG0"], "receivingAcceptance": "REG0-AC1" },
+          "reason": "a route re-owning a symbol UAK0 D06 already assigns to CPF1"
+        }
+      ]
+    }
+  ]
+}
