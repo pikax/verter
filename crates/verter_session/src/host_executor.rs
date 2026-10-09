@@ -6,10 +6,12 @@
 
 use std::sync::Arc;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 use verter_language::FileLanguage;
-use verter_scheduler::executor::{ExtractedDeps, StageError, StageErrorKind, StageExecutor};
+use verter_scheduler::execution::executor::{
+    ExtractedDeps, StageError, StageErrorKind, StageExecutor,
+};
 use verter_scheduler::node::{
     AnalysisSnapshot, ArtifactSnapshot, EmptyData, SnapshotData, SourceSnapshot,
 };
@@ -106,22 +108,26 @@ impl SnapshotData for HostSourceData {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields are part of the get_analysis surface.
 pub struct AnalysisArcs {
-    pub(crate) module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
-    pub(crate) macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
-    pub(crate) macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
-    pub(crate) vue_api_calls: Arc<Vec<verter_semantic::analysis::types::VueApiCallSite>>,
-    pub(crate) dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
+    pub(crate) module_references:
+        Arc<Vec<verter_session_query::analysis::types::AnalyzedModuleReference>>,
+    pub(crate) macros: Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>>,
+    pub(crate) macro_type_deps: Arc<Vec<verter_session_query::analysis::types::MacroTypeDep>>,
+    pub(crate) vue_api_calls: Arc<Vec<verter_session_query::analysis::types::VueApiCallSite>>,
+    pub(crate) dom_query_calls:
+        Arc<Vec<verter_session_query::analysis::script_snapshot::DomQueryCallSite>>,
     pub(crate) css_var_manipulations:
-        Arc<Vec<verter_semantic::analysis::types::CssVarManipulation>>,
+        Arc<Vec<verter_session_query::analysis::types::CssVarManipulation>>,
     pub(crate) script_binding_occurrences:
-        Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
-    pub(crate) store_usages: Arc<Vec<verter_semantic::analysis::types::StoreUsage>>,
-    pub(crate) store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
+        Arc<Vec<verter_session_query::analysis::types::ScriptBindingOccurrence>>,
+    pub(crate) store_usages: Arc<Vec<verter_session_query::analysis::types::StoreUsage>>,
+    pub(crate) store_definitions: Arc<Vec<verter_session_query::analysis::types::StoreDefinition>>,
 }
 
 impl AnalysisArcs {
     /// Build Arc-wrapped caches from a script analysis snapshot.
-    pub(crate) fn from_analysis(sa: &verter_semantic::analysis::ScriptAnalysisSnapshot) -> Self {
+    pub(crate) fn from_analysis(
+        sa: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
+    ) -> Self {
         Self {
             module_references: Arc::new(sa.module_references.clone()),
             macros: Arc::new(sa.macros.clone()),
@@ -143,10 +149,12 @@ impl AnalysisArcs {
 #[derive(Debug)]
 #[allow(dead_code)] // arcs field is part of the get_analysis surface.
 pub struct HostAnalysisData {
-    pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
-    pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
-    pub(crate) markup_class_tokens: Arc<Vec<verter_semantic::analysis::MarkupClassToken>>,
+    pub(crate) script_analysis:
+        Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
+    pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
+    pub(crate) style_analyses: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
+    pub(crate) markup_class_tokens:
+        Arc<Vec<verter_session_query::analysis::template::MarkupClassToken>>,
     pub(crate) arcs: AnalysisArcs,
 }
 
@@ -187,7 +195,7 @@ pub struct HostStageExecutor {
     /// once per Vue SFC structure parse so the cold-build dedup
     /// counters observe scheduler-stage parses (rayon workers have no
     /// capture-token TLS).
-    pub provenance: Arc<crate::types::MetaProvenance>,
+    pub provenance: Arc<crate::meta_provenance::MetaProvenance>,
     pub source_authority:
         Arc<verter_language::registered_source_authority::RegisteredSourceAuthority>,
     pub grammar_authority: Arc<verter_language::carrier_grammar::CarrierGrammarAuthority>,
@@ -207,7 +215,7 @@ impl HostStageExecutor {
     pub fn new(
         config: HostConfig,
         workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
-        provenance: Arc<crate::types::MetaProvenance>,
+        provenance: Arc<crate::meta_provenance::MetaProvenance>,
         source_authority: Arc<
             verter_language::registered_source_authority::RegisteredSourceAuthority,
         >,
@@ -245,7 +253,19 @@ impl HostStageExecutor {
         file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
+        incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
+        // Every ingress names this host's scheduler node object as well as
+        // its generation: a removed or reset file's successor restarts its
+        // generation sequence, so the generation alone could repeat a
+        // retired revision for different bytes.
+        let revision_token = crate::carrier_publication_store::HostSourceRevisionToken {
+            host_instance: self.host_instance,
+            source_version: verter_scheduler::node::SourceVersion {
+                incarnation,
+                generation,
+            },
+        };
         // Carrier dispatch: a framework CARRIER file whose catalog frontend
         // is installed routes source-stage parse through the publication
         // store. EVERY OTHER framework row (a framework TEMPLATE, an
@@ -280,7 +300,7 @@ impl HostStageExecutor {
         // on `HostSourceData` keeps its existing semantics; the audit
         // ledger push happens only when timing capture is on AND a
         // request context is installed.
-        let timing_on = verter_scheduler::request_context::current_timing_enabled();
+        let timing_on = verter_execution::request_context::current_timing_enabled();
 
         #[cfg(test)]
         let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.host_instance.get());
@@ -297,10 +317,7 @@ impl HostStageExecutor {
                 crate::parse::retained_semantic_for_source_stage(adapter_id, carrier_language_id)
                     .ok_or_else(|| StageError::new("semantic catalog miss for carrier identity"))?;
             let ingested = self.registered_envelope_ingest.lock().remove(canonical_id);
-            let (framework_parse, structure, file_incarnation, source_generation) = if let Some(
-                structure,
-            ) = ingested
-            {
+            let (framework_parse, structure) = if let Some(structure) = ingested {
                 let registered = structure.envelope().source();
                 if registered.canonical().as_str() != canonical_id
                     || registered.bytes() != content.as_ref()
@@ -310,25 +327,36 @@ impl HostStageExecutor {
                         "registered envelope/source identity mismatch",
                     ));
                 }
-                let file_incarnation = registered.file_incarnation();
-                let source_generation = registered.generation();
-                (
-                    Arc::clone(structure.artifact()),
-                    structure,
-                    file_incarnation,
-                    source_generation,
-                )
+                (Arc::clone(structure.artifact()), structure)
             } else {
+                // The registration names the scheduler node object that
+                // committed these bytes, so it lives and retires with that
+                // file lifetime: a removed or reset file's successor restarts
+                // at the same generation and must never mint the retired
+                // registration's snapshot or artifact identity.
+                let canonical = CanonicalFileId::new(canonical_id);
+                let file_incarnation = FileIncarnation::new(incarnation);
                 let registered = self
                     .source_authority
                     .register_source(
-                        CanonicalFileId::new(canonical_id),
-                        FileIncarnation::new(self.host_instance.get()),
+                        canonical.clone(),
+                        file_incarnation,
                         SourceGeneration::new(generation),
                         file_language.clone(),
                         Arc::clone(&content),
                     )
                     .map_err(|_| StageError::new("registered source authority rejected source"))?;
+                // Retract the base registrations of every node object this one
+                // replaced. Node incarnations increase across replacement, so a
+                // late stage of a retired node never retracts its successor;
+                // overlay registrations belong to their own views.
+                self.source_authority
+                    .retain_incarnations(&canonical, |registered| {
+                        registered.get()
+                            & crate::host_manage::overlay_materialize::OVERLAY_INCARNATION_BIT
+                            != 0
+                            || registered >= file_incarnation
+                    });
                 // Registered-identity fact read: the grammar comes from
                 // the file's frontend catalog row, keyed adapter ×
                 // carrier language. A miss (unregistered carrier, or a
@@ -357,7 +385,7 @@ impl HostStageExecutor {
                 let request = crate::carrier_publication_store::PublicationRequestContext::new(
                     crate::carrier_publication_store::AuditRequestId::new(generation),
                     crate::carrier_publication_store::PublicationSurface::ProjectionHost,
-                    verter_scheduler::cancellation::current_job_cancellation_token()
+                    verter_execution::cancellation::current_job_cancellation_token()
                         .unwrap_or_default(),
                     registered.snapshot_id().clone(),
                 );
@@ -380,8 +408,6 @@ impl HostStageExecutor {
                 (
                     Arc::clone(envelope.artifact()),
                     crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
-                    registered.file_incarnation(),
-                    registered.generation(),
                 )
             };
             let eval_source = crate::parse::invoke_retained_semantic_eval_source(
@@ -405,11 +431,6 @@ impl HostStageExecutor {
             // Sealed-identity wire tokens attach ONCE at record build, so
             // every serve reuses the stored styles Arc unchanged.
             crate::parse::attach_style_block_tokens(&structure, &mut parse_snapshot.style_analyses);
-            let revision_token = crate::carrier_publication_store::HostSourceRevisionToken {
-                host_instance: self.host_instance,
-                file_incarnation,
-                source_generation,
-            };
             crate::block_content::attach_external_request_tokens(
                 &structure,
                 revision_token,
@@ -423,6 +444,7 @@ impl HostStageExecutor {
                 whole_hash: parse_snapshot.whole_hash,
                 semantic_hash: parse_snapshot.semantic_hash,
                 generation,
+                incarnation,
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
@@ -454,22 +476,13 @@ impl HostStageExecutor {
                 whole_hash: parse_snapshot.whole_hash,
                 semantic_hash: parse_snapshot.semantic_hash,
                 generation,
+                incarnation,
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: None,
                     script_parse_key,
                     structure: None,
-                    revision_token: crate::carrier_publication_store::HostSourceRevisionToken {
-                        host_instance: self.host_instance,
-                        file_incarnation:
-                            verter_language::registered_source_authority::FileIncarnation::new(
-                                self.host_instance.get(),
-                            ),
-                        source_generation:
-                            verter_language::registered_source_authority::SourceGeneration::new(
-                                generation,
-                            ),
-                    },
+                    revision_token,
                     file_language,
                     source_type,
                     eval_source: content,
@@ -486,12 +499,14 @@ impl HostStageExecutor {
         // accounting.
         if timing_on {
             let total_ns = parse_start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-            if let Some(acc) = crate::request_context::current_accumulator() {
-                acc.push_file_parse_timing(crate::component_meta_audit::FileParseTiming {
-                    canonical_id: Arc::from(canonical_id),
-                    parse_ns: total_ns,
-                    lower_ns: 0,
-                });
+            if let Some(acc) = verter_type_engine::request_context::current_accumulator() {
+                acc.push_file_parse_timing(
+                    verter_type_engine::request_footprint::FileParseTiming {
+                        canonical_id: Arc::from(canonical_id),
+                        parse_ns: total_ns,
+                        lower_ns: 0,
+                    },
+                );
             }
         }
 
@@ -506,7 +521,7 @@ impl HostStageExecutor {
         // scheduler. Returns immediately when no token is bound (the
         // production hot path).
         #[cfg(any(test, feature = "test-support"))]
-        crate::capture_token::with_active_capture(|t| {
+        verter_type_engine::capture_token::with_active_capture(|t| {
             t.record_parse(canonical_id);
         });
 
@@ -530,9 +545,16 @@ impl StageExecutor for HostStageExecutor {
         file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
+        incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         let (snapshot, refused) = verter_parser::oxc_parse::refusals_within(|| {
-            self.source_snapshot(canonical_id, file_language, content, generation)
+            self.source_snapshot(
+                canonical_id,
+                file_language,
+                content,
+                generation,
+                incarnation,
+            )
         });
         match refused {
             Some(refused) => Err(StageError::stack_unavailable(refused.needed)),
@@ -559,8 +581,8 @@ impl StageExecutor for HostStageExecutor {
                 .resolve_import_outcome(
                     canonical_id,
                     specifier,
-                    verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                         kind,
                     },
                 )
@@ -582,7 +604,7 @@ impl StageExecutor for HostStageExecutor {
             if dep.import_source.starts_with('.') || dep.import_source.starts_with("../") {
                 let Some(resolved) = resolve_dep(
                     &dep.import_source,
-                    verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                    verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 ) else {
                     return ExtractedDeps::default();
                 };
@@ -618,6 +640,7 @@ impl StageExecutor for HostStageExecutor {
             let arcs = AnalysisArcs::from_analysis(&host_data.parse.script_analysis);
             Ok(AnalysisSnapshot {
                 generation,
+                incarnation: source.incarnation,
                 data: Arc::new(HostAnalysisData {
                     // `Arc::clone` of the shared snapshot — refcount bump, not
                     // a deep copy of ~18 owned vectors.

@@ -10,6 +10,7 @@ import {
   loadProducts,
   mandatoryCases,
   REPO_ROOT,
+  SCHEDULER_FIELD_ROUTE_WITNESSES,
   selectedCaseIds,
   validate,
 } from "./verify.mjs";
@@ -178,7 +179,7 @@ test("ARH2-characterization dirty twin: witness naming a nonexistent test is rej
 
 test("ARH2-characterization dirty twin: a filter that selects nothing is rejected (AC2)", () => {
   const dirty = cloneProducts();
-  const h = hotspot(dirty, "crates/verter_session/src/semantic_query.rs");
+  const h = hotspot(dirty, "crates/verter_type_engine/src/semantic_query.rs");
   h.pins[0].filter = "unrelated_module";
   h.pins[0].command = `cargo nextest run -p verter_session ${h.pins[0].filter}`;
   const result = validate(dirty);
@@ -186,6 +187,41 @@ test("ARH2-characterization dirty twin: a filter that selects nothing is rejecte
   assert.ok(
     result.errors.some(
       (e) => e.caseId === "ARH2-characterization" && e.code === "pin-filter-selects-nothing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: a pin whose witnesses compile in another package cannot run under the row's crate (AC2)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_type_engine/src/semantic_query.rs");
+  const pin = h.pins.find((p) => p.crate === "verter_type_engine");
+  delete pin.crate;
+  pin.command = `cargo nextest run -p ${h.crate} ${pin.filter}`;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "pin-filter-selects-nothing" &&
+        e.detail.includes(`is not a compiled module of ${h.crate}`),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: a pin naming a non-member crate is rejected (AC2)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_type_engine/src/semantic_query.rs");
+  const pin = h.pins.find((p) => p.crate === "verter_type_engine");
+  pin.crate = "verter_no_such_crate";
+  pin.command = `cargo nextest run -p ${pin.crate} ${pin.filter}`;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-characterization" && e.code === "hotspot-crate-unknown",
     ),
     JSON.stringify(result.errors),
   );
@@ -204,7 +240,7 @@ const retargetLane = (products, from, to) => {
 test("ARH2-characterization dirty twin: nested inline module is not a cross-product witness id (AC2)", () => {
   const dirty = cloneProducts();
   const retarget = (pin) => {
-    if (pin.filter !== "scheduler::tests") return;
+    if (pin.filter !== "scheduler::") return;
     const previous = pin.command;
     pin.filter = "scheduler::pool_topology";
     pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
@@ -234,9 +270,9 @@ test("ARH2-characterization dirty twin: witness is bound to its enclosing module
   const pin = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2").pins[0];
   const previous = pin.command;
   pin.witnesses = [
-    pin.witnesses.find((w) => w.test === "tombstone_rejects_pre_remove_source_submission"),
+    pin.witnesses.find((w) => w.test === "incarnation_rejects_pre_remove_source_submission"),
   ];
-  pin.filter = "scheduler::tombstone_rejects_pre_remove_source_submission";
+  pin.filter = "scheduler::incarnation_rejects_pre_remove_source_submission";
   pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
   retargetLane(dirty, previous, pin.command);
   const result = validate(dirty);
@@ -246,7 +282,7 @@ test("ARH2-characterization dirty twin: witness is bound to its enclosing module
       (e) =>
         e.caseId === "ARH2-characterization" &&
         e.code === "pin-filter-selects-nothing" &&
-        e.detail.includes("scheduler::tests::tombstone_rejects_pre_remove_source_submission"),
+        e.detail.includes("scheduler::tests::incarnation_rejects_pre_remove_source_submission"),
     ),
     JSON.stringify(result.errors),
   );
@@ -310,7 +346,7 @@ test("ARH2-characterization dirty twin: witness without a test attribute is reje
 });
 
 const COVERAGE_WITNESS =
-  "crates/verter_session/src/project_semantic_dispatch/flow_return_coverage_tests.rs";
+  "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs";
 const COVERAGE_FN = "vue_script_setup_functions_serve_under_the_instance_owner_only";
 
 function withReadOverlay(rel, mutate, run) {
@@ -402,7 +438,7 @@ test("ARH2-characterization dirty twin: duplicated route characterization is rej
 test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer pub is rejected", () => {
   const dirty = cloneProducts();
   const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2");
-  route.surface.items = ["tombstones", "generation_floors", "deferred_blocker_ids", "node"];
+  route.surface.items = ["deferred_blocker_ids", "node"];
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
@@ -410,6 +446,49 @@ test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer 
       (e) =>
         (e.code === "route-surface-drift" || e.code === "route-surface-not-live") &&
         e.caseId === "ARH2-characterization",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: dropping a required scheduler field-route witness is rejected", () => {
+  assert.deepEqual([...new Set(SCHEDULER_FIELD_ROUTE_WITNESSES.map((w) => w.concern))].sort(), [
+    "deferred-blocker replacement",
+    "incarnation rejection",
+    "removal drain",
+    "source-witness fence",
+  ]);
+  for (const dropped of SCHEDULER_FIELD_ROUTE_WITNESSES) {
+    const dirty = cloneProducts();
+    for (const pin of dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2")
+      .pins) {
+      pin.witnesses = pin.witnesses.filter(
+        (w) => w.file !== dropped.file || w.test !== dropped.test,
+      );
+    }
+    const result = validate(dirty);
+    assert.equal(result.ok, false, `dropping ${dropped.test} must fail`);
+    assert.ok(
+      result.errors.some(
+        (e) =>
+          e.caseId === "ARH2-characterization" &&
+          e.code === "route-required-witness-missing" &&
+          e.detail.includes(`${dropped.file}::${dropped.test}`),
+      ),
+      JSON.stringify(result.errors),
+    );
+  }
+  // A required witness re-homed to a different file is not the pinned proof.
+  const dirty = cloneProducts();
+  const pin = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2").pins[0];
+  const moved = pin.witnesses.find((w) => w.test === "deferred_blockers_are_replaced_not_appended");
+  moved.file = "crates/verter_scheduler/src/scheduler/lifecycle.rs";
+  const result = validate(dirty);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.code === "route-required-witness-missing" &&
+        e.detail.includes("scheduler.rs::deferred_blockers_are_replaced_not_appended"),
     ),
     JSON.stringify(result.errors),
   );
@@ -635,7 +714,7 @@ test("ARH2-separation dirty twin: prewarming the target is not a clean prepare (
     (d) => d.id === "clean-warm-build-time",
   );
   dim.mechanisms.find((recipe) => recipe.cacheState === "clean").prepare =
-    "cargo build -p verter_scheduler -p verter_session";
+    "cargo build -p verter_scheduler -p verter_type_engine -p verter_session";
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
@@ -710,7 +789,7 @@ test("ARH2-separation dirty twin: pinned lane missing from the dimension is reje
   const dirty = cloneProducts();
   const dims = dirty["complexity-measurements"].dimensions;
   const lanes = dims.find((d) => d.id === "production-behavior").mechanisms;
-  lanes.splice(lanes.indexOf("cargo nextest run -p verter_session stable_key_tests"), 1);
+  lanes.splice(lanes.indexOf("cargo nextest run -p verter_type_engine stable_key_tests"), 1);
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(

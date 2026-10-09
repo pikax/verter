@@ -11,13 +11,13 @@ use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 use verter_compiler::code_transform::CodeTransform;
 use verter_semantic::analysis::{build_script_analysis_with_scope, AnalysisScope};
-use verter_semantic::resolver_core::CARRIER_API_VIRTUAL_SUFFIX;
+use verter_session_query::resolution::CARRIER_API_VIRTUAL_SUFFIX;
 use verter_workspace::workspace_snapshot::{ConfiguredOwnerResolution, ProjectPayload};
 use verter_workspace::{FilesystemWorkspace, WorkspaceRead};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::TransformedBufferMap;
-use verter_semantic::resolver_core::{ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolvePhase, ResolveRequestKind};
 
 /// A provider projection is a query-returner over the workspace's immutable
 /// resolution root. Background discovery may publish a newer root while the
@@ -110,7 +110,7 @@ fn owner_resolves_verter_types(
         published,
         canonical_id,
         "@verter/types",
-        verter_semantic::resolver_core::ResolutionContext {
+        verter_session_query::resolution::ResolutionContext {
             kind: ResolveRequestKind::TypeImport,
             phase: ResolvePhase::ProviderGraph,
         },
@@ -262,7 +262,7 @@ pub(crate) fn configured_owners_allow_authored_carrier_specifiers(
     snapshot: &verter_workspace::WorkspaceSnapshot,
     canonical_id: &str,
 ) -> bool {
-    let owner_allows = |id: verter_workspace::workspace_snapshot::ProjectId| {
+    let owner_allows = |id: verter_session_query::resolution::ProjectId| {
         matches!(
             &snapshot.project(id).payload,
             ProjectPayload::Configured { compiler_options, .. }
@@ -343,7 +343,8 @@ fn prepare_carrier_provider_imports_with_verter_types(
     let mut replacements = Vec::new();
     let mut rewrote_verter_types = false;
     for reference in analysis.module_references {
-        if reference.analyzability != verter_semantic::analysis::ModuleReferenceAnalyzability::Exact
+        if reference.analyzability
+            != verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact
         {
             continue;
         }
@@ -369,7 +370,7 @@ fn prepare_carrier_provider_imports_with_verter_types(
                     published,
                     canonical_id,
                     specifier,
-                    verter_semantic::resolver_core::ResolutionContext {
+                    verter_session_query::resolution::ResolutionContext {
                         kind: if reference.is_type_only {
                             ResolveRequestKind::TypeImport
                         } else {
@@ -391,7 +392,7 @@ fn prepare_carrier_provider_imports_with_verter_types(
             };
             match resolved {
                 Some(resolved)
-                    if verter_semantic::resolver_core::path_is_carrier(&resolved.source_id) =>
+                    if verter_session_query::resolution::path_is_carrier(&resolved.source_id) =>
                 {
                     if resolved
                         .provider_specifier
@@ -405,7 +406,7 @@ fn prepare_carrier_provider_imports_with_verter_types(
                         )
                     }
                 }
-                _ if verter_semantic::resolver_core::path_is_carrier(specifier) => {
+                _ if verter_session_query::resolution::path_is_carrier(specifier) => {
                     format!("{specifier}{CARRIER_API_VIRTUAL_SUFFIX}")
                 }
                 _ => continue,

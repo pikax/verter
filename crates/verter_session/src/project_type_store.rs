@@ -20,23 +20,25 @@
 //! subsequent phases of the project-global overhaul — this module introduces
 //! the foundation without rewiring the hot path yet.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use verter_semantic::analysis::{AnalysisScope, Hash16};
+use verter_semantic::analysis::AnalysisScope;
+use verter_session_query::analysis::types::Hash16;
 
-use crate::component_meta_caches::{
-    DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
-};
 use crate::component_meta_result_db::ComponentMetaResultDb;
 use crate::file_artifact_store::FileArtifactStore;
-use crate::intrinsic_registry::IntrinsicRegistry;
 use crate::owner_import_surface::OwnerImportSurfaceDb;
 use crate::resolver_core::imported_root_db::ImportedRootDb;
 use crate::resolver_core::route_db::RouteDb;
-use crate::semantic_query::DepVersion;
-use crate::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::component_meta_caches::{
+    DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
+};
+use verter_type_engine::intrinsic_registry::IntrinsicRegistry;
+use verter_type_engine::semantic_query::DepVersion;
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 pub mod semantic_activity;
 pub use semantic_activity::SemanticActivityGuard;
@@ -175,29 +177,29 @@ pub struct IndexedReady {
     pub framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     /// Script-level analysis snapshot (imports/exports/macros/bindings/etc.).
     /// Always present after materialization.
-    pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    pub script_analysis:
+        Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Cached per-export signatures used by smart dependent invalidation.
-    pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
+    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines.
-    pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
     /// Parser-authored import/export routes from the retained program.
     /// Declaration headers and bodies live on the shallow state's memo.
-    pub route_inventory:
-        Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory>,
+    pub route_inventory: Arc<verter_session_query::analysis::route_inventory::ScriptRouteInventory>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
     /// the proof for files that demonstrably cannot contribute an
     /// `interface AppConfig` override without re-walking the analysis
     /// snapshot. Mirrored at materialization time from
-    /// [`verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG`].
+    /// [`verter_session_query::analysis::types::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG`].
     pub declares_interface_app_config: bool,
     /// Lazy, singleflight, content-addressed mirror of this file's Vue SFC
     /// MACRO type-argument graph handles — the
-    /// [`MacroHotMirror`](crate::structural_carrier_producer::MacroHotMirror).
+    /// [`MacroHotMirror`](verter_type_engine::structural_carrier_producer::MacroHotMirror).
     ///
-    /// A FILE-ARTIFACT child (mirrors the [`DeclBodyMemo`](crate::decl_body_memo::DeclBodyMemo)
+    /// A FILE-ARTIFACT child (mirrors the [`DeclBodyMemo`](verter_semantic_source::decl_body_memo::DeclBodyMemo)
     /// shape): keyed per `macro_index`, the mode-NEUTRAL `HotTypeRef` is
     /// produced on FIRST demand through the shared query-free structural
     /// lowerer, NOT eagerly at publish. Its identity is the owning
@@ -205,13 +207,16 @@ pub struct IndexedReady {
     /// addressed by construction, so a fresh `IndexedReady` carries a fresh
     /// empty mirror and a superseded one can never answer a new-content
     /// demand. Publishing an artifact produces ZERO mirror handles.
-    pub(crate) macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror,
+    pub(crate) macro_hot_mirror: verter_type_engine::structural_carrier_producer::MacroHotMirror,
     /// The exact parse identity of `raw_source`, derived on first demand
     /// ([`Self::source_parse_key`]) and kept with the artifact: a
     /// content-addressed key naming this source (one per function a flow
     /// demand reaches) reads it here instead of hashing the whole source
     /// again.
     pub(crate) source_parse_key: SourceParseKey,
+    pub(crate) input_projection: crate::resolver_core::request_inputs::CachedProjection<
+        verter_session_query::inputs::indexed::IndexedInputRecord,
+    >,
 }
 
 /// An artifact's source parse identity, derived once ([`IndexedReady::source_parse_key`]).
@@ -219,16 +224,20 @@ pub struct IndexedReady {
 pub(crate) struct SourceParseKey(std::sync::OnceLock<Option<verter_language::ParseKey>>);
 
 impl IndexedReady {
+    pub(crate) fn cached_source_parse_key(&self) -> Option<Option<verter_language::ParseKey>> {
+        self.source_parse_key.0.get().cloned()
+    }
+
     /// The exact parse identity of this artifact's source under its
     /// runtime language: its framework parse's key, or a plain script's,
     /// derived from the whole source the first time it is asked for. The
-    /// same identity [`crate::file_artifact_store::FileArtifactKey::for_source_identity`]
+    /// same identity [`verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity`]
     /// derives (`None` where that refuses).
     pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
         self.source_parse_key
             .0
             .get_or_init(|| {
-                crate::file_artifact_store::FileArtifactKey::for_source_identity(
+                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
                     Arc::from(""),
                     self.whole_hash,
                     self.raw_source.as_ref(),
@@ -288,11 +297,15 @@ impl IndexedReady {
             framework_parse: None,
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
             route_inventory,
             declares_interface_app_config: false,
-            macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+            macro_hot_mirror:
+                verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
     }
 
@@ -307,7 +320,7 @@ impl IndexedReady {
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         let route_inventory = Arc::new(
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
         );
         let shallow =
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
@@ -325,11 +338,15 @@ impl IndexedReady {
             framework_parse: None,
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
             route_inventory,
             declares_interface_app_config: false,
-            macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+            macro_hot_mirror:
+                verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
     }
 }
@@ -370,13 +387,14 @@ pub struct AnalysisReady {
     /// Script analysis snapshot (existing shape — migration work in a later
     /// phase replaces this with a reader over `IndexedReady`-owned lowered
     /// block facts).
-    pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    pub script_analysis:
+        Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Per-export signatures for smart invalidation, when the scope requested
     /// [`AnalysisScope::EXPORT_SIGNATURES`].
-    pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
+    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
     /// File-level analysis snapshot used by the existing component-meta and
     /// linter pipelines.
-    pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -389,7 +407,7 @@ pub struct AnalysisReadyDb {
     live_counter: Arc<AtomicU64>,
     stale_sweeps: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
+    /// [`verter_type_engine::cache_schema`] for the contract.
     schema_version: u32,
 }
 
@@ -402,7 +420,7 @@ impl AnalysisReadyDb {
         Self::with_counters_and_schema_version(
             live,
             stale,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
         )
     }
 
@@ -433,11 +451,11 @@ impl AnalysisReadyDb {
     /// Strict lookup by full key.
     #[must_use]
     pub fn get(&self, key: &AnalysisArtifactKey) -> Option<Arc<AnalysisReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self.entries.get(key).map(|v| v.clone());
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis
@@ -464,7 +482,7 @@ impl AnalysisReadyDb {
         whole_hash: Hash16,
         requested_scope: AnalysisScope,
     ) -> Option<Arc<AnalysisReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = {
@@ -481,7 +499,7 @@ impl AnalysisReadyDb {
             }
             found
         };
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis
@@ -554,7 +572,9 @@ impl AnalysisReadyDb {
             scope: AnalysisScope::empty(),
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
         });
         self.insert(key, value);
     }
@@ -566,7 +586,7 @@ impl Default for AnalysisReadyDb {
     }
 }
 
-impl crate::cache_schema::CacheSchemaVersioned for AnalysisReadyDb {
+impl verter_type_engine::cache_schema::CacheSchemaVersioned for AnalysisReadyDb {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -585,19 +605,19 @@ impl crate::cache_schema::CacheSchemaVersioned for AnalysisReadyDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for AnalysisReadyDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for AnalysisReadyDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent]
     }
-    fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
+    fn invalidate(&self, _domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
         // AnalysisReady survives project-generation bumps (the
         // (canonical, whole_hash, scope) identity is sufficient);
         // per-canonical eviction is the only invalidation mode.
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         self.invalidate_canonical(canonical_id)
     }
@@ -766,14 +786,14 @@ const _: fn() = || {
 // monomorphically.
 // ──────────────────────────────────────────────────────────────────────
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for CompileCacheDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for CompileCacheDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ProjectGeneration]
     }
 
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         match domain {
             ProjectGeneration => self.clear(),
             FileContent => {}
@@ -782,7 +802,7 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for CompileCacheDb {
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for CompileCacheDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for CompileCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         // Per-canonical eviction mirrors the off-store
         // `compile_cache.remove(canonical)` path that the rehoming
@@ -795,14 +815,14 @@ impl crate::invalidation_domain::InvalidationByCanonical for CompileCacheDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for DerivedRawCacheDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for DerivedRawCacheDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ProjectGeneration]
     }
 
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         match domain {
             ProjectGeneration => self.clear(),
             FileContent => {}
@@ -811,7 +831,7 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for DerivedRawCacheD
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for DerivedRawCacheDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for DerivedRawCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         if self.entries.remove(canonical_id).is_some() {
             1
@@ -821,14 +841,14 @@ impl crate::invalidation_domain::InvalidationByCanonical for DerivedRawCacheDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for DependencyCacheDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for DependencyCacheDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ProjectGeneration]
     }
 
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         match domain {
             ProjectGeneration => self.clear(),
             FileContent => {}
@@ -837,7 +857,7 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for DependencyCacheD
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for DependencyCacheDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for DependencyCacheDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         if self.entries.remove(canonical_id).is_some() {
             1
@@ -916,7 +936,7 @@ pub struct ProjectTypeStoreCounterSnapshot {
 /// **not** bump the project generation — they bump the per-canonical
 /// `whole_hash` and invalidate keys by identity.
 pub struct ProjectTypeStore {
-    project_generation: AtomicU64,
+    project_generation: Arc<AtomicU64>,
     /// Canonical [`IndexedReady`] cache.
     indexed: FileArtifactStore,
     /// Analysis augmentation cache keyed by `AnalysisScope`.
@@ -938,7 +958,7 @@ pub struct ProjectTypeStore {
     owner_import_surfaces: OwnerImportSurfaceDb,
     /// Final component-meta result cache. Keyed by
     /// `(owner_canonical, owner_whole_hash, options_fingerprint)`.
-    /// Payload is [`crate::component_meta_result_db::CachedComponentMetaResult`]
+    /// Payload is [`crate::component_meta_cached_result::CachedComponentMetaResult`]
     /// — the native `ComponentMetaAnalysis` plus the sanitized
     /// resolution sidecar template. `get_component_meta` consults
     /// the cache with completion-fence dep-signature validation
@@ -946,23 +966,23 @@ pub struct ProjectTypeStore {
     /// short-circuits `get_component_meta_with_resolution` so
     /// audit-mode warm replays return in near-zero time.
     component_meta_results:
-        ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult>,
+        Arc<ComponentMetaResultDb<crate::component_meta_cached_result::CachedComponentMetaResult>>,
     /// TypeScript `intrinsic` registry. Maps resolved
     /// declaration names that have `= intrinsic` bodies to their
     /// implementation arms. Userland aliases like `Pick` / `Omit` never
     /// reach this registry — it is consulted only after the normal
     /// declaration path resolves to `= intrinsic`.
-    intrinsic_registry: IntrinsicRegistry,
+    intrinsic_registry: Arc<IntrinsicRegistry>,
     // 10 host-owned typed DB wrappers for the component-meta engine's
     // previously engine-local caches. Each DB consumes the
-    // [`crate::cache_runtime::singleflight::cooperative_get_or_insert`]
+    // [`verter_type_engine::cache_runtime::singleflight::cooperative_get_or_insert`]
     // primitive (admission-control, panic safety, post-compute
     // revalidation). The engine keeps a per-request
     // `RefCell<FxHashMap>` mirror as non-authoritative scratch.
-    imported_registry_db: ImportedRegistryDb,
-    declaration_lookup_db: DeclarationLookupDb,
-    resolvability_db: ResolvabilityDb,
-    owner_collection_db: OwnerCollectionDb,
+    imported_registry_db: Arc<ImportedRegistryDb>,
+    declaration_lookup_db: Arc<DeclarationLookupDb>,
+    resolvability_db: Arc<ResolvabilityDb>,
+    owner_collection_db: Arc<OwnerCollectionDb>,
     /// Universal shape cache. Replaces the previously-split
     /// `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
     /// (SemanticNode-keyed) with a single store keyed on
@@ -972,8 +992,8 @@ pub struct ProjectTypeStore {
     /// `SurfaceMember.value`); the `ShapeDemand` carries a path
     /// segments slice + terminal mode + key filter + surface kind so
     /// per-hop path-precise demands narrow naturally.
-    /// See [`crate::component_meta_caches::ShapeCacheDb`].
-    shape_cache_db: ShapeCacheDb,
+    /// See [`verter_type_engine::component_meta_caches::ShapeCacheDb`].
+    shape_cache_db: Arc<ShapeCacheDb>,
     /// Issue #6 — host-owned proof cache for the ComponentConfig
     /// theme variant fast path. Keyed by
     /// `(app_config_decl_canonical_id, component_key_literal)`. An
@@ -984,7 +1004,7 @@ pub struct ProjectTypeStore {
     /// path consults this DB before projecting the prepared theme
     /// value directly. See
     /// [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
-    app_config_no_override_proof: crate::app_config_proof_db::AppConfigNoOverrideProofDb,
+    app_config_no_override_proof: Arc<crate::app_config_proof_db::AppConfigNoOverrideProofDb>,
     /// Profile-domain DB for the per-canonical compile cache (D48). Holds
     /// [`crate::types::ProfileState`] entries; the §3.4.2 invalidation
     /// matrix governs eviction triggers.
@@ -996,7 +1016,7 @@ pub struct ProjectTypeStore {
     /// the env-hash dimensions). The fact-validated `Session` mode uses
     /// the per-profile [`compile_cache_db`](Self::compile_cache_db)
     /// instead, so the two cache families are disjoint by construction.
-    compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent,
+    compile_output_pure_content: crate::compile_output_node::CompileOutputNodePureContent,
     /// The demand-sliced flow substrate's home: the
     /// once-per-content-version `FunctionFlowGraphStore` plus the
     /// content-addressed `FlowSliceHashNode` / `FlowSliceLoweredBodyNode`
@@ -1006,7 +1026,7 @@ pub struct ProjectTypeStore {
     /// per-canonical eviction rides the `evict_canonical` cascade.
     /// Memory-side only; persistent registration of the two nodes is
     /// separately owed and nothing here builds a persistence tier.
-    flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores,
+    flow_slice: Arc<verter_type_engine::cache_runtime::flow_slice_node::FlowSliceStores>,
     /// Source-content-domain DB for the per-canonical compile cache (D48).
     /// Holds [`crate::types::DerivedRawState`] entries (the
     /// caller-supplied route table plus source-derived analyses); the
@@ -1046,7 +1066,7 @@ pub struct ProjectTypeStore {
     /// provenance). Keyed `(canonical, parse_stable_hash, parse_env_hash)`
     /// so cosmetic edits preserve the entry. See
     /// [`crate::binder_identity_facts::BinderIdentityFactsStore`].
-    binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore,
+    binder_identity_facts: Arc<crate::binder_identity_facts::BinderIdentityFactsStore>,
     /// Host-owned mapped-binder ordinal registry. The
     /// registry hands out STABLE `param_index` ordinals for each
     /// `(canonical, display_name, fingerprint)` triple so two
@@ -1056,17 +1076,17 @@ pub struct ProjectTypeStore {
     /// `SemanticQueryKey::MappedType`. Replaces the legacy
     /// per-dispatcher counter that destabilised mapper identity
     /// across dispatcher instances. See
-    /// [`crate::mapper_binder_registry`].
-    mapper_binder_registry: Arc<crate::mapper_binder_registry::MapperBinderRegistry>,
+    /// [`verter_type_engine::mapper_binder_registry`].
+    mapper_binder_registry: Arc<verter_type_engine::mapper_binder_registry::MapperBinderRegistry>,
     /// Store-owned identity string intern pool: one pool per store
     /// (per-store lifetime, never process-global or request-local).
     /// Dedupes the canonical-id / symbol-name `Arc<str>` allocations the
     /// session minting boundaries (prepared-decl builders, bare-name
     /// resolution, import canonicalization) hand to
-    /// [`verter_semantic::analysis::type_solver::host::ResolvedRootIdentity`].
+    /// [`verter_session_query::type_solver::host::ResolvedRootIdentity`].
     /// Bounded by retained payload bytes; see
-    /// [`crate::identity_interner::IdentityInterner`].
-    identity_interner: Arc<crate::identity_interner::IdentityInterner>,
+    /// [`verter_type_engine::identity_interner::IdentityInterner`].
+    identity_interner: Arc<verter_type_engine::identity_interner::IdentityInterner>,
     /// The aggregate retained-byte account every store in this graph
     /// charges.
     ///
@@ -1076,7 +1096,7 @@ pub struct ProjectTypeStore {
     /// three loaded projects admits against one ceiling rather than
     /// three. A test may inject a private account to drive pressure
     /// deterministically without perturbing concurrent tests.
-    retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     /// Gate that defers close-time payload releases until no computation is
     /// in flight (see [`semantic_activity`]).
     activity_gate: semantic_activity::SemanticActivityGate,
@@ -1098,13 +1118,25 @@ impl std::fmt::Debug for ProjectTypeStore {
     }
 }
 
+/// The engine grants minted with a project store's engine: the inert output
+/// lease and the surface-claim authority. The store keeps neither; the
+/// host's composition root holds them and lends them to the request
+/// attachment alone.
+pub(crate) struct EngineGrants {
+    pub(crate) output_lease: crate::output_sinks::OutputLease,
+    pub(crate) surface_claims:
+        Arc<verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority>,
+}
+
 impl ProjectTypeStore {
     #[must_use]
     pub fn new() -> Self {
         Self::build(
             None,
-            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::StoreAccount::default(),
+            verter_execution::tasks::TaskRegistry::default(),
         )
+        .0
     }
 
     /// Construct a store charging `retention_account` instead of the
@@ -1114,38 +1146,51 @@ impl ProjectTypeStore {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_retention_account(
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
-        Self::build(None, retention_account)
+        Self::build(
+            None,
+            verter_session_query::retention::StoreAccount::new(retention_account),
+            verter_execution::tasks::TaskRegistry::default(),
+        )
+        .0
     }
 
     /// The aggregate retained-byte account this store's caches charge.
     #[must_use]
     pub fn retention_account(
         &self,
-    ) -> &Arc<crate::semantic_retention_account::SemanticRetentionAccount> {
+    ) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
         &self.retention_account
     }
 
-    /// Construct a store wired to the host's
-    /// [`MetaProvenance`](crate::types::MetaProvenance) so the embedded
+    /// Compose the host's store: wired to the host's
+    /// [`MetaProvenance`](crate::meta_provenance::MetaProvenance) so the embedded
     /// [`SemanticGraphStore`] reports its contention instrumentation
-    /// counters through the shared provenance surface. Test-only
+    /// counters through the shared provenance surface, and to the
+    /// composition root's `task_registry` cycle authority. Returns the
+    /// engine grants beside the store; the store keeps neither. Test-only
     /// `ProjectTypeStore::new()` callers stay uninstrumented
     /// (semantic-graph stats remain visible through their own
     /// `stats_snapshot` surface).
     #[must_use]
-    pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
+    pub(crate) fn compose(
+        provenance: Arc<crate::meta_provenance::MetaProvenance>,
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
-            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::StoreAccount::default(),
+            task_registry,
         )
     }
 
     fn build(
-        provenance: Option<Arc<crate::types::MetaProvenance>>,
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
-    ) -> Self {
+        provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
+        store_account: verter_session_query::retention::StoreAccount,
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> (Self, EngineGrants) {
+        let retention_account = Arc::clone(store_account.get());
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
         // `counters` so the `snapshot()` method sees in-place updates.
@@ -1162,45 +1207,55 @@ impl ProjectTypeStore {
         let component_meta_results = ComponentMetaResultDb::with_counters_and_account(
             Arc::clone(&counters.component_meta_live),
             Arc::clone(&counters.component_meta_stale_sweeps),
-            Arc::clone(&retention_account),
+            store_account.clone(),
         );
-        let semantic_graph = Arc::new(match provenance {
-            Some(prov) => SemanticGraphStore::with_provenance(prov, Arc::clone(&retention_account)),
-            None => SemanticGraphStore::with_account(Arc::clone(&retention_account)),
-        });
-        let imported_registry_db =
-            ImportedRegistryDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let declaration_lookup_db =
-            DeclarationLookupDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let resolvability_db =
-            ResolvabilityDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let owner_collection_db =
-            OwnerCollectionDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let shape_cache_db =
-            ShapeCacheDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        // The engine's own stores and the one output authority minted for
+        // them, plus the engine's surface-claim authority. Both authorities
+        // leave as grants for the composition root: the output authority
+        // behind its lease.
+        let (engine, output_authority, surface_claims) =
+            verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create(
+                provenance.map(|provenance| Arc::clone(&provenance.engine)),
+                store_account,
+                &counters.component_meta_cache_live,
+                task_registry,
+            );
+        let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
+            graph: semantic_graph,
+            flow_slice,
+            intrinsics: intrinsic_registry,
+            imported_registry: imported_registry_db,
+            declarations: declaration_lookup_db,
+            resolvability: resolvability_db,
+            owner_collections: owner_collection_db,
+            shapes: shape_cache_db,
+            identities: identity_interner,
+            mapper_binders: mapper_binder_registry,
+        } = engine;
         let app_config_no_override_proof =
             crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
             ));
-        Self {
-            project_generation: AtomicU64::new(0),
+        let store = Self {
+            project_generation: Arc::new(AtomicU64::new(0)),
             indexed,
             analysis,
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
             semantic_graph,
             owner_import_surfaces,
-            component_meta_results,
-            intrinsic_registry: IntrinsicRegistry::with_defaults(),
+            component_meta_results: Arc::new(component_meta_results),
+            intrinsic_registry,
             imported_registry_db,
             declaration_lookup_db,
             resolvability_db,
             owner_collection_db,
             shape_cache_db,
-            app_config_no_override_proof,
+            app_config_no_override_proof: Arc::new(app_config_no_override_proof),
             compile_cache_db: CompileCacheDb::new(),
-            compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
-            flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores::new(),
+            compile_output_pure_content:
+                crate::compile_output_node::CompileOutputNodePureContent::new(),
+            flow_slice,
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
@@ -1210,28 +1265,73 @@ impl ProjectTypeStore {
             member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore::new(
             ),
             member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
-            binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore::new(),
-            mapper_binder_registry: Arc::new(
-                crate::mapper_binder_registry::MapperBinderRegistry::new(),
+            binder_identity_facts: Arc::new(
+                crate::binder_identity_facts::BinderIdentityFactsStore::new(),
             ),
-            identity_interner: Arc::new(crate::identity_interner::IdentityInterner::new(
-                Arc::clone(&retention_account),
-            )),
+            mapper_binder_registry,
+            identity_interner,
             retention_account,
             counters,
             activity_gate: semantic_activity::SemanticActivityGate::default(),
-        }
+        };
+        let grants = EngineGrants {
+            output_lease: crate::output_sinks::OutputLease::new(output_authority),
+            surface_claims: Arc::new(surface_claims),
+        };
+        (store, grants)
     }
 
     /// The store-owned identity intern pool. Minting boundaries clone the
     /// `Arc` handle; the pool's lifetime is the store's.
     #[must_use]
-    pub(crate) fn identity_interner(&self) -> &Arc<crate::identity_interner::IdentityInterner> {
+    pub(crate) fn bind_engine(
+        &self,
+        observers: verter_type_engine::project_semantic_dispatch::EngineObservers,
+        macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
+    ) -> verter_type_engine::project_semantic_dispatch::EngineBinding<
+        crate::resolver_core::request_inputs::MacroMirrorSelector,
+    > {
+        verter_type_engine::project_semantic_dispatch::EngineBinding::new(
+            observers,
+            macro_mirrors,
+            Arc::clone(&self.semantic_graph),
+            Arc::clone(&self.flow_slice),
+            Arc::clone(&self.intrinsic_registry),
+            Arc::clone(&self.imported_registry_db),
+            Arc::clone(&self.declaration_lookup_db),
+            Arc::clone(&self.resolvability_db),
+            Arc::clone(&self.owner_collection_db),
+            Arc::clone(&self.shape_cache_db),
+            Arc::clone(&self.identity_interner),
+            Arc::clone(&self.mapper_binder_registry),
+        )
+    }
+
+    pub(crate) fn identity_interner(
+        &self,
+    ) -> &Arc<verter_type_engine::identity_interner::IdentityInterner> {
         &self.identity_interner
     }
 
     /// Current monotonic project generation. Owned by the host / workspace
     /// layer — queries read it but never mutate it.
+    /// The live project-generation clock a request snapshot carries.
+    pub(crate) fn project_generation_clock(
+        &self,
+    ) -> verter_type_engine::resolver_core::ProjectGenerationClock {
+        verter_type_engine::resolver_core::ProjectGenerationClock::new(Arc::clone(
+            &self.project_generation,
+        ))
+    }
+
+    pub(crate) fn project_generation_reader(
+        &self,
+    ) -> verter_session_query::facts::clocks::ProjectGenerationRead {
+        verter_session_query::facts::clocks::ProjectGenerationRead::new(Arc::clone(
+            &self.project_generation,
+        ))
+    }
+
     pub fn project_generation(&self) -> u64 {
         self.project_generation.load(Ordering::Acquire)
     }
@@ -1315,13 +1415,15 @@ impl ProjectTypeStore {
     /// [`crate::types::CompileCacheMode::Content`] requests.
     pub(crate) fn compile_output_pure_content(
         &self,
-    ) -> &crate::cache_runtime::CompileOutputNodePureContent {
+    ) -> &crate::compile_output_node::CompileOutputNodePureContent {
         &self.compile_output_pure_content
     }
 
     /// The demand-sliced flow substrate's project-global home (graph
     /// store + slice nodes + shared budget cell).
-    pub(crate) fn flow_slice(&self) -> &crate::cache_runtime::flow_slice_node::FlowSliceStores {
+    pub(crate) fn flow_slice(
+        &self,
+    ) -> &verter_type_engine::cache_runtime::flow_slice_node::FlowSliceStores {
         &self.flow_slice
     }
 
@@ -1364,7 +1466,8 @@ impl ProjectTypeStore {
     /// Final component-meta result cache.
     pub fn component_meta_results(
         &self,
-    ) -> &ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult> {
+    ) -> &ComponentMetaResultDb<crate::component_meta_cached_result::CachedComponentMetaResult>
+    {
         &self.component_meta_results
     }
 
@@ -1397,7 +1500,7 @@ impl ProjectTypeStore {
     /// `MaterializeMemoDb` + `MemberShapeCacheDb`. The `ShapeSubject`
     /// enum on the key discriminates TypeExpr-start vs
     /// SemanticNode-start callers.
-    /// See [`crate::component_meta_caches::ShapeCacheDb`].
+    /// See [`verter_type_engine::component_meta_caches::ShapeCacheDb`].
     pub fn shape_cache_db(&self) -> &ShapeCacheDb {
         &self.shape_cache_db
     }
@@ -1462,10 +1565,10 @@ impl ProjectTypeStore {
     /// SAME source mapper produce the SAME `TypeParam`
     /// SemanticNodeId — and therefore the SAME `MapperKey` cache
     /// key for `SemanticQueryKey::MappedType`. See
-    /// [`crate::mapper_binder_registry`].
+    /// [`verter_type_engine::mapper_binder_registry`].
     pub(crate) fn mapper_binder_registry(
         &self,
-    ) -> &Arc<crate::mapper_binder_registry::MapperBinderRegistry> {
+    ) -> &Arc<verter_type_engine::mapper_binder_registry::MapperBinderRegistry> {
         &self.mapper_binder_registry
     }
 
@@ -1505,16 +1608,19 @@ impl ProjectTypeStore {
     pub fn release_canonical(
         &self,
         canonical_id: &str,
-    ) -> crate::semantic_query_memo::SemanticReleaseReport {
+    ) -> verter_type_engine::semantic_query_memo::SemanticReleaseReport {
         // Only the semantic graph and the shape cache: both are pure map
         // work. The route-mutation cascade is deliberately NOT run here —
         // a close must not change what the scheduler sees (the other
         // per-canonical caches stay fact-validated and recompute on the
         // reload, exactly as after an edit).
         let mut report = self.semantic_graph.release_canonical(canonical_id);
-        report.shape_entries_released = self
-            .shape_cache_db
-            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report.shape_entries_released =
+            verter_type_engine::project_semantic_dispatch::memo::release_shape_canonical(
+                self.shape_cache_db.as_ref(),
+                canonical_id,
+                self.semantic_graph.as_ref(),
+            );
         report
     }
 
@@ -1526,13 +1632,16 @@ impl ProjectTypeStore {
         &self,
         canonical_id: &str,
         below: u64,
-    ) -> crate::semantic_query_memo::SemanticReleaseReport {
+    ) -> verter_type_engine::semantic_query_memo::SemanticReleaseReport {
         let mut report = self
             .semantic_graph
             .release_canonical_payloads_below(canonical_id, below);
-        report.shape_entries_released = self
-            .shape_cache_db
-            .release_canonical(canonical_id, &|node| self.semantic_graph.node_is_live(node));
+        report.shape_entries_released =
+            verter_type_engine::project_semantic_dispatch::memo::release_shape_canonical(
+                self.shape_cache_db.as_ref(),
+                canonical_id,
+                self.semantic_graph.as_ref(),
+            );
         report
     }
 
@@ -1611,7 +1720,7 @@ impl ProjectTypeStore {
         // file starts with a fresh `Arc::as_ptr` keyspace so a
         // pointer reuse across the content edit cannot collide
         // with a stale fingerprint. See
-        // [`crate::mapper_binder_registry`] for the registry
+        // [`verter_type_engine::mapper_binder_registry`] for the registry
         // contract.
         self.mapper_binder_registry
             .clear_for_canonical(canonical_id);
@@ -1899,7 +2008,7 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
 impl ProjectTypeStore {
     pub fn all_dbs_for_invalidation(
         &self,
-    ) -> Vec<&dyn crate::invalidation_domain::ParticipatesInInvalidation> {
+    ) -> Vec<&dyn verter_type_engine::invalidation_domain::ParticipatesInInvalidation> {
         vec![
             &self.indexed,
             &self.analysis,
@@ -1907,14 +2016,14 @@ impl ProjectTypeStore {
             &*self.imported_roots,
             &*self.semantic_graph,
             &self.owner_import_surfaces,
-            &self.component_meta_results,
-            &self.intrinsic_registry,
-            &self.imported_registry_db,
-            &self.declaration_lookup_db,
-            &self.resolvability_db,
-            &self.owner_collection_db,
-            &self.shape_cache_db,
-            &self.app_config_no_override_proof,
+            self.component_meta_results.as_ref(),
+            &*self.intrinsic_registry,
+            &*self.imported_registry_db,
+            &*self.declaration_lookup_db,
+            &*self.resolvability_db,
+            &*self.owner_collection_db,
+            &*self.shape_cache_db,
+            self.app_config_no_override_proof.as_ref(),
             &self.compile_cache_db,
             // Source-content-domain and dep-closure-domain siblings of
             // `compile_cache_db`.
@@ -1934,7 +2043,7 @@ impl ProjectTypeStore {
     /// Called by the host's per-file-content-change invalidation path
     /// (one call per canonical id whose `whole_hash` shifts). The
     /// per-DB implementations route through their own secondary
-    /// indices (see [`crate::invalidation_domain::CanonicalReverseIndex`])
+    /// indices (see [`verter_type_engine::invalidation_domain::CanonicalReverseIndex`])
     /// for O(K) drain, where K = entries owned by the canonical.
     ///
     /// `FileArtifactStore` and `ComponentMetaResultDb` are not on the
@@ -1944,7 +2053,7 @@ impl ProjectTypeStore {
     /// `invalidate_owner(owner_canonical)`. Both are invoked here so
     /// the cascade covers the inventory uniformly.
     pub fn invalidate_canonical_across_all_dbs(&self, canonical_id: &str) -> usize {
-        use crate::invalidation_domain::InvalidationByCanonical;
+        use verter_type_engine::invalidation_domain::InvalidationByCanonical;
 
         // Statically-dispatched InvalidationByCanonical calls — one
         // per registered DB-typed field on `ProjectTypeStore`. No
@@ -2008,8 +2117,8 @@ mod tests {
     /// about cache-key behaviour. Keeps the test surface decoupled from the
     /// real resolver's analysis output.
     fn empty_component_meta_analysis(
-    ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
-        use verter_semantic::analysis::component_meta::{
+    ) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        use verter_session_query::analysis::component_meta::{
             AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags,
             FallthroughSurface, NoFallthroughReason, RootReachability,
         };
@@ -2058,7 +2167,9 @@ mod tests {
     #[test]
     fn broader_analysis_scope_satisfies_narrower_request() {
         let db = AnalysisReadyDb::new();
-        let snapshot = Arc::new(crate::types::FileAnalysisSnapshot::default());
+        let snapshot = Arc::new(
+            verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+        );
         let whole_hash = [1u8; 16];
 
         // Cache a BUILD-scope entry.
@@ -2099,7 +2210,7 @@ mod tests {
         let hash_v1 = [1u8; 16];
         let hash_v2 = [2u8; 16];
         let route_inventory = Arc::new(
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
         );
         let shallow = Arc::new(
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
@@ -2120,11 +2231,15 @@ mod tests {
                 framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
-                snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+                snapshot: Arc::new(
+                    verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+                ),
                 route_inventory,
                 declares_interface_app_config: false,
-                macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+                macro_hot_mirror:
+                    verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
                 source_parse_key: crate::project_type_store::SourceParseKey::default(),
+                input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             }),
         );
         assert!(db
@@ -2155,7 +2270,7 @@ mod tests {
     fn indexed_counters_reflect_insertions_and_replacements() {
         let store = ProjectTypeStore::new();
         let route_inventory = Arc::new(
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
@@ -2174,11 +2289,12 @@ mod tests {
                 framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
-                snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+                snapshot: Arc::new(verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default()),
                 route_inventory: Arc::clone(&route_inventory),
                 declares_interface_app_config: false,
-                macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+                macro_hot_mirror: verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
                 source_parse_key: crate::project_type_store::SourceParseKey::default(),
+                input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
             })
         };
 
@@ -2239,7 +2355,8 @@ mod tests {
                 owner_canonical: Arc::from("/w/o.vue"),
                 owner_whole_hash: hash,
                 bindings: Arc::new(rustc_hash::FxHashMap::default()),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                read_set_signature:
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 validated_at_generation: 0,
             }),
         );
@@ -2255,24 +2372,28 @@ mod tests {
             },
             hash,
             crate::component_meta_result_db::ComponentMetaResultEntry {
-                payload: Arc::new(crate::component_meta_result_db::CachedComponentMetaResult {
-                    analysis: empty_component_meta_analysis(),
-                    resolution_template: crate::component_meta_result_db::ResolutionTemplate {
-                        mode: crate::types::ProjectionMode::Expanded,
+                payload: Arc::new(
+                    crate::component_meta_cached_result::CachedComponentMetaResult {
+                        analysis: empty_component_meta_analysis(),
+                        resolution_template:
+                            crate::component_meta_cached_result::ResolutionTemplate {
+                                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                                whole_hash: hash,
+                                resolved_macros: Vec::new(),
+                                resolved_type_registry: Vec::new(),
+                                resolved_type_registry_meta: Vec::new(),
+                                evaluated_types: None,
+                                fact_versions: Vec::new(),
+                                surface_identities: None,
+                                origin_graph: None,
+                                completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                            },
+                        canonical_id: Arc::from("/w/o.vue"),
                         whole_hash: hash,
-                        resolved_macros: Vec::new(),
-                        resolved_type_registry: Vec::new(),
-                        resolved_type_registry_meta: Vec::new(),
-                        evaluated_types: None,
-                        fact_versions: Vec::new(),
-                        surface_identities: None,
-                        origin_graph: None,
-                        completeness: crate::semantic_query::ResultCompleteness::Complete,
                     },
-                    canonical_id: Arc::from("/w/o.vue"),
-                    whole_hash: hash,
-                }),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                ),
+                read_set_signature:
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 validated_at_generation: 0,
             },
         );
@@ -2293,7 +2414,9 @@ mod tests {
     #[test]
     fn analysis_invalidate_canonical_removes_all_scopes_and_updates_counters() {
         let store = ProjectTypeStore::new();
-        let snapshot = Arc::new(crate::types::FileAnalysisSnapshot::default());
+        let snapshot = Arc::new(
+            verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+        );
         let hash = [1u8; 16];
 
         store.analysis().insert(

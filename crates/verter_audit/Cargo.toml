@@ -11,6 +11,9 @@ publish = false
 
 [features]
 default = []
+# Coordinated optional capture gate. Forwarded by owners, never enabled by a
+# production dependency. Legacy measurement opt-ins remain independently usable.
+semantic-observe = ["attribution"]
 # Measurement-only work attribution. Compiles the counter table, the
 # scope guards, the attributing global allocator, and the report
 # renderers behind `attribution::*`. NOT in `default`, requested by no

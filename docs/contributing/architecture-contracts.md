@@ -51,10 +51,10 @@ Responsibility split among cohesive modules:
 
 - Pool submission and admission control: `crates/verter_scheduler/src/dag.rs`
   (`SchedulerDag` is the sole readiness authority) and
-  `crates/verter_scheduler/src/pool.rs`.
+  `crates/verter_scheduler/src/execution/pool.rs`.
 - Batch coordination: `crates/verter_scheduler/src/driver.rs` (owns all
   admission and ordering policy, drains the `SubmissionInbox`).
-- Cancellation and retry bookkeeping: `crates/verter_scheduler/src/cancellation.rs`
+- Cancellation and retry bookkeeping: `crates/verter_execution/src/cancellation.rs`
   (one-shot clonable latches; dropping a handle cancels its pending work).
 - Snapshot-epoch source authority: `crates/verter_scheduler/src/source_root.rs`.
 
@@ -78,60 +78,67 @@ subset. Retained functions: `resolved_dag_budget`, `len`, `is_empty`,
 `handles`, `into_handles`, `new`, `with_executor`, `new_sync`,
 `new_sync_with_executor`, `execute_scoped_cache_node`, `submit_request`,
 `submit_batch_atomic`, `wait_batch`, `account_batch_submission`,
-`counters`, `try_get_source`, `capture_source_root`, `source_directory`,
+`counters`, `try_get_source`, `try_get_witnessed_source`,
+`try_get_source_for_witness`, `capture_source_root`, `source_directory`,
 `try_get_analysis`, `try_get_artifact`, `try_get_last_known_good`,
 `has_node`, `node_ids`, `reset`, `restart_driver`, `quiesce`,
 `register_resolved_deps`, `config`, `commit_artifact`,
-`remove_artifact_if_not_newer_than`, `overlay`, `invalidate`, `remove`,
+`remove_artifact_not_newer_than`, `overlay`, `invalidate`, `remove`,
 `close_file`, `has_driver_thread`, `driver_loop_native`, `drive_one`,
 `drive_all`, `wait_or_drive`, `wait_or_drive_with_caller`. Retained types:
 `SchedulerCounters`, `SchedulerConfig`, `Request`,
 `ScopedCacheNodeRequest`, `ScopedCacheNodeError`, `ScopedCacheFlight`,
-`Admission`, `BatchHandle`, `Scheduler`. The three bookkeeping fields
-(`tombstones`, `generation_floors`, `deferred_blocker_ids`) and the
-fifteen `test_`-prefixed hooks are ratified for narrowing to `pub(crate)` /
-test configuration — do not add new consumers of them; they are not a
+`Admission`, `BatchHandle`, `Scheduler`. The remaining bookkeeping field
+(`deferred_blocker_ids`; removal tombstones and generation floors have no
+storage) and the fifteen `test_`-prefixed hooks are ratified for narrowing to
+`pub(crate)` / test configuration — do not add new consumers of them; they are not a
 supported API for contributions.
 
-### Flow-return dispatch — `crates/verter_session/src/project_semantic_dispatch/flow_return.rs`
+### Flow-return dispatch — `crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs`
 
 Sole owner of flow-return semantic dispatch: the demand-sliced
 `FlowReturn` authority, the one `SemanticQueryKey::FlowReturn` producer
 through `ProjectSemanticDispatch`. Flow product assembly (all mutable
 product state) lives in
-`crates/verter_session/src/project_semantic_dispatch/flow_products.rs`.
+`crates/verter_type_engine/src/project_semantic_dispatch/flow_products.rs`.
 The module is already `pub(crate)` with zero cross-crate surface; the
 contract is that boundary itself — no widening to `pub` without a charter
 amendment.
 
-### Dispatch build/admission — `crates/verter_session/src/project_semantic_dispatch/build.rs`
+### Dispatch build/admission — `crates/verter_type_engine/src/project_semantic_dispatch/build.rs`
 
 Every semantic query variant that produces a new `SemanticNodeId` goes
 through one of the `build_*` methods collected here, with helpers kept
 `pub(super)`. The project-global dispatcher assembly is
-`crates/verter_session/src/project_semantic_dispatch/mod.rs` — the single
+`crates/verter_type_engine/src/project_semantic_dispatch/mod.rs` — the single
 dispatch site every reusable type-resolution operation flows through.
 
-### Semantic query envelope — `crates/verter_session/src/semantic_query.rs`
+### Semantic query envelope — `crates/verter_type_engine/src/semantic_query.rs`
 
 The host-owned memo table keyed by `SemanticQueryKey`. The cross-crate
 surface is cut to exactly ten retained envelope types (`HashValue`,
 `SemanticNodeId`, `ScopeId`, `ResolveDeclKey`, `SemanticQueryKey`,
 `ResultCompleteness`, `PartialReason`, `PartialReasonSet`,
-`ProjectionMode`, `OriginEdgeKind`) plus seven retained associated items
+`ProjectionMode`, `OriginEdgeKind`) plus eleven retained associated items
 (`PartialReasonSet::PROPAGATED`, `PartialReasonSet::SEMANTIC_QUERY_FAULT`,
+`PartialReasonSet::CONNECTED_MEMORY_LIMIT`, `PartialReasonSet::UNDECIDED_CONDITIONAL`,
 `PartialReasonSet::empty`, `PartialReasonSet::is_empty`,
-`PartialReasonSet::iter`, `ResultCompleteness::partial`, `ScopeId::file`)
+`PartialReasonSet::contains`, `PartialReasonSet::iter`,
+`ResultCompleteness::partial`, `ResultCompleteness::is_partial`, `ScopeId::file`)
 — everything else is ratified `pub(crate)` (see the bulk narrowing row and
 its 68-file consumer migration in the contract). The per-variant key/env
 binding table lives in
-`crates/verter_session/src/semantic_query/query_key_spec.rs` and is
+`crates/verter_type_engine/src/semantic_query/query_key_spec.rs` and is
 written only by its generator.
 
-### Flow slice content — `crates/verter_session/src/flow_slice_content.rs`
+### Flow slice content — `crates/verter_semantic_source/src/flow_slice_content.rs`
 
 The owned, arena-free content lowering of exactly one planned flow slice.
-A `pub(crate)` module with zero cross-crate consumers; slice publication
+A `pub` module of the source crate; the session reaches it through the
+declaration-body memo. Its retained surface is the object-member policy the
+memo's lowering entry takes (`ObjectMemberPolicy`), the sibling-selection
+helper the session-resident slice suite pins (`selected_span_child`) and the
+test-support lowering work probe (`LoweringWork`). Slice publication
 admission stays with `flow_return.rs`, where the budget outcome gates
 admission.
 
@@ -146,10 +153,10 @@ matrix linked above.
 | Hotspot | Catalog surfaces served |
 | ------- | ----------------------- |
 | `crates/verter_scheduler/src/scheduler.rs` (every retained fn/type above) | `vue.language_service.typing`, `vue.language_service.edit`, `svelte.language_service.typing`, `svelte.language_service.edit`, `vue.tsc.project_check`, `svelte.tsc.project_check`, `vue.managed.compile.raw`, `svelte.managed.compile.raw`, `vue.component_meta.scalar`, `svelte.component_meta.scalar`, `vue.host_lint`, `svelte.host_lint` |
-| `crates/verter_session/src/semantic_query.rs` (every retained type/assoc item above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
-| `crates/verter_session/src/project_semantic_dispatch/flow_return.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
-| `crates/verter_session/src/project_semantic_dispatch/build.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
-| `crates/verter_session/src/flow_slice_content.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_type_engine/src/semantic_query.rs` (every retained type/assoc item above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_type_engine/src/project_semantic_dispatch/build.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_semantic_source/src/flow_slice_content.rs` (every retained fn/type above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
 
 The contributor-docs model joins that table to every retained fn/type/assoc
 item (and to the hotspot path itself when the retained list is empty). A

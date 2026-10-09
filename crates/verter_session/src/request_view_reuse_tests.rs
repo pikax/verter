@@ -31,10 +31,13 @@
 //! Together the four tests discriminate per-call rebuilding, lost
 //! currentness, and overlay re-rooting errors.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
+use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use crate::resolver_core::{
-    CanonicalCompletionOverlay, HostResolverContext, ResolverContext, SessionResolverContext,
+    CanonicalCompletionOverlay, HostResolverContext, SessionResolverContext,
 };
 use crate::resolver_store::HOST_STORE_VIEW_FROM_HOST_BUILDS;
 use crate::types::FileLanguage;
@@ -269,7 +272,10 @@ fn session_overlay_rooting_runs_once_per_request() {
         fn source(&self, _canonical: &str) -> Option<Arc<str>> {
             None
         }
-        fn content_hash_for(&self, _canonical: &str) -> Option<crate::types::Hash16> {
+        fn content_hash_for(
+            &self,
+            _canonical: &str,
+        ) -> Option<verter_session_query::analysis::types::Hash16> {
             None
         }
         fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
@@ -368,7 +374,6 @@ fn session_overlay_rooting_runs_once_per_request() {
 /// The overlay hash must then validate while the base hash must not.
 #[test]
 fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
-    use crate::resolver_core::ResolverContext;
     use crate::session_view::{OverlaidView, SessionView};
     use rustc_hash::FxHashMap;
 
@@ -439,7 +444,8 @@ fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
     // OVERLAY hash succeeds (the overlay matches), and validation
     // against the BASE hash fails (the overlay shadows with the
     // overlay hash, mismatching the base hash).
-    let store_view = ctx.store_view();
+    let store_view =
+        &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx);
     assert!(
         store_view.validates_self_root_whole_hash(&canonical, &overlay_hash),
         "self-root validation against the overlay hash MUST succeed"
@@ -479,17 +485,18 @@ fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
 /// and the warm-hit `ResolvedImportFactsDb` lookup succeeds.
 #[test]
 fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical() {
-    use crate::resolver_core::{
-        CanonicalCompletionOverlay, FactVersionRef, RequestStoreView, ResolveImportsFactRef,
-        StoreView,
-    };
+    use crate::resolver_core::{CanonicalCompletionOverlay, RequestStoreView};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
+    use verter_session_query::facts::store_view::StoreView;
     // `ResolverStore` is intentionally absent here — the test exercises
     // the wrapper validator directly via `validates_fact_signature`
     // and does not need the store-mutation surface.
     use crate::session_view::{HostView, SessionView};
     use crate::types::DependencyResolution;
     use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
-    use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
+    use verter_session_query::facts::registry::{
+        FactKey, FactLane, InternedName, InternedSpecifier,
+    };
 
     let host = VerterHost::new_standalone(HostConfig {
         dev_mode: false,
@@ -627,7 +634,7 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
 #[test]
 fn completion_writers_publish_presence_under_the_map_lock_before_insertion() {
     use crate::file_artifact_store::FileFacts;
-    use crate::resolver_core::DerivedFactKind;
+    use verter_session_query::facts::fact_cache::DerivedFactKind;
 
     let overlay = CanonicalCompletionOverlay::new();
     overlay.verify_write_protocol_for_tests();
@@ -691,14 +698,17 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
     assert!(host
         .authoritative_current_artifact_key(&canonical)
         .is_some());
-    let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+    let before =
+        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests(
+        );
     for _ in 0..50 {
         assert!(host
             .authoritative_current_artifact_key(&canonical)
             .is_some());
     }
     assert_eq!(
-        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests(
+        ) - before,
         0,
         "fifty key reads hash the script's source no time at all"
     );
@@ -709,17 +719,19 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
         .script_parse_key
         .clone()
         .expect("a plain script's snapshot carries its parse identity");
-    let from_source = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-        Arc::from(canonical.as_str()),
-        state.whole_hash,
-        state.source.as_ref(),
-        state.file_language.clone(),
-        None,
-        crate::file_artifact_store::BASE_PARSE_ENV_HASH,
-    )
-    .expect("the script's language has a parse identity");
+    let from_source =
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+            Arc::from(canonical.as_str()),
+            state.whole_hash,
+            state.source.as_ref(),
+            state.file_language.clone(),
+            None,
+            verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
+        )
+        .expect("the script's language has a parse identity");
     assert_eq!(
-        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests(
+        ) - before,
         1,
         "deriving the key from the source hashes it once"
     );
@@ -746,8 +758,9 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
 /// remembered; a new request starts empty.
 #[test]
 fn a_request_validates_a_shared_receipt_once() {
-    use crate::resolver_core::{RequestStoreView, StoreView};
-    use verter_workspace::{FactVersionRef, ResultReceipt};
+    use crate::resolver_core::RequestStoreView;
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ResultReceipt};
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _) = small_host_with_one_script();
     let base = host.resolver_store_view_read().into_owned_view();
@@ -820,4 +833,114 @@ fn a_request_validates_a_shared_receipt_once() {
         33,
         "a new request"
     );
+}
+
+use verter_type_engine::resolver_core::request_ports::OwnedLowering as _;
+
+#[test]
+fn terminal_macro_inventory_preserves_indexed_absence_and_paired_base_fallback() {
+    use crate::session_view::SessionView;
+    use verter_type_engine::resolver_core::request_ports::OwnedLowering;
+
+    let (host, canonical) = small_host_with_one_component();
+    let scheduler_source = host.scheduler_source(&canonical).expect("parsed source");
+    let scheduler_analysis = Arc::clone(
+        &scheduler_source
+            .downcast_data::<crate::host_executor::HostSourceData>()
+            .expect("host source data")
+            .parse
+            .script_analysis,
+    );
+    let indexed = host
+        .ensure_indexed_ready_serve(&canonical)
+        .expect("indexed serve")
+        .indexed;
+    let key = host
+        .authoritative_current_artifact_key(&canonical)
+        .expect("exact runtime artifact key");
+    let mut without_analysis = indexed.as_ref().clone();
+    without_analysis.script_analysis = None;
+    host.project_type_store().indexed().insert_artifacts(
+        key,
+        Arc::new(crate::file_artifact_store::FileArtifacts::with_indexed(
+            Arc::new(without_analysis),
+        )),
+    );
+    assert!(host
+        .current_content_pinned_indexed(&canonical)
+        .expect("selected replacement")
+        .script_analysis
+        .is_none());
+    let view = host.resolver_store_view_read().into_owned_view();
+    let ctx = HostResolverContext::new(&host, &view, Arc::new(CanonicalCompletionOverlay::new()));
+    let answer = ctx.terminal_macro_inventory(&canonical);
+    assert_eq!(answer.origin_whole_hash, Some(indexed.whole_hash));
+    assert!(
+        answer.script_analysis.is_none(),
+        "present indexed artifact never falls back for absent analysis"
+    );
+
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .remove_canonical(&canonical)
+            > 0
+    );
+    let view = host.resolver_store_view_read().into_owned_view();
+    let ctx = HostResolverContext::new(&host, &view, Arc::new(CanonicalCompletionOverlay::new()));
+    let answer = ctx.terminal_macro_inventory(&canonical);
+    assert_eq!(answer.origin_whole_hash, Some(scheduler_source.whole_hash));
+    assert!(Arc::ptr_eq(
+        &answer.script_analysis.expect("paired scheduler analysis"),
+        &scheduler_analysis
+    ));
+    assert!(
+        host.current_content_pinned_indexed(&canonical).is_none(),
+        "terminal fallback does not materialize an artifact"
+    );
+
+    struct EmptySessionView {
+        identity: crate::file_artifact_store::ProjectIdentity,
+        env: crate::session_view::EnvHashes,
+    }
+    impl SessionView for EmptySessionView {
+        fn source(&self, _: &str) -> Option<Arc<str>> {
+            None
+        }
+        fn content_hash_for(
+            &self,
+            _: &str,
+        ) -> Option<verter_session_query::analysis::types::Hash16> {
+            None
+        }
+        fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
+            self.identity
+        }
+        fn env_hashes(&self) -> &crate::session_view::EnvHashes {
+            &self.env
+        }
+        fn resolved_import_facts(
+            &self,
+            _: &str,
+        ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+            None
+        }
+    }
+    let session = EmptySessionView {
+        identity: host.host_view_project_identity(),
+        env: crate::session_view::EnvHashes::default(),
+    };
+    let ctx = SessionResolverContext::new(
+        &host,
+        &session,
+        &view,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
+    let answer = ctx.terminal_macro_inventory(&canonical);
+    assert_eq!(answer.origin_whole_hash, None);
+    assert!(
+        answer.script_analysis.is_none(),
+        "any session view suppresses the base scheduler fallback"
+    );
+    assert!(host.current_content_pinned_indexed(&canonical).is_none());
 }

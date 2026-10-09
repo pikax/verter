@@ -1,14 +1,16 @@
 use crate::resolver_core::{
     run_stable_request, RequestRunResult, ResolutionNodeKey, SingleflightGroup,
-    StableExecutionValue, StableRequestExecutor, StoreView,
+    StableExecutionValue, StableRequestExecutor,
 };
+use verter_session_query::facts::store_view::StoreView;
 
 /// By-value result of the owner-scoped component-meta cold computation.
 /// `cache_refusal` is orthogonal to typed completeness: the value remains
 /// complete and returnable, but cannot be published or retained.
 pub(crate) struct ComponentMetaComputeOutcome<R> {
     pub(crate) value: Option<R>,
-    pub(crate) cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
+    pub(crate) cache_refusal:
+        Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation>,
 }
 
 pub(crate) struct ComponentMetaCacheLookup<R, P> {
@@ -27,7 +29,7 @@ impl<R> ComponentMetaComputeOutcome<R> {
         Self {
             value,
             cache_refusal: non_cacheable.then_some(
-                crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive,
+                verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
             ),
         }
     }
@@ -112,7 +114,7 @@ pub(crate) trait ComponentMetaRequestHost {
     fn resolution_completeness(
         &self,
         result: &Self::Resolution,
-    ) -> crate::semantic_query::ResultCompleteness;
+    ) -> verter_type_engine::semantic_query::ResultCompleteness;
 }
 
 struct ComponentMetaRequestExecutor<'a, H: ComponentMetaRequestHost> {
@@ -172,8 +174,8 @@ struct ComponentMetaRequestExecutor<'a, H: ComponentMetaRequestHost> {
     /// [`Self::snapshot_view_is_current`].
     snapshot_view_current: bool,
     captured_inputs: Option<H::CapturedInputs>,
-    last_completeness: crate::semantic_query::ResultCompleteness,
-    last_cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
+    last_completeness: verter_type_engine::semantic_query::ResultCompleteness,
+    last_cache_refusal: Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation>,
     last_admission: Option<H::AdmissionProof>,
     max_attempts: usize,
 }
@@ -189,7 +191,7 @@ impl<'a, H: ComponentMetaRequestHost> ComponentMetaRequestExecutor<'a, H> {
             fallback_snapshot_incoherent: false,
             snapshot_view_current: true,
             captured_inputs: None,
-            last_completeness: crate::semantic_query::ResultCompleteness::Complete,
+            last_completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
             last_cache_refusal: None,
             last_admission: None,
             max_attempts,
@@ -339,7 +341,7 @@ where
             .value
             .as_ref()
             .map(|value| self.host.resolution_completeness(value))
-            .unwrap_or(crate::semantic_query::ResultCompleteness::Complete);
+            .unwrap_or(verter_type_engine::semantic_query::ResultCompleteness::Complete);
         self.last_cache_refusal = outcome.cache_refusal;
         Ok(outcome.value)
     }
@@ -405,18 +407,21 @@ where
         self.max_attempts
     }
 
-    fn capture_completeness(&self) -> crate::semantic_query::ResultCompleteness {
+    fn capture_completeness(&self) -> verter_type_engine::semantic_query::ResultCompleteness {
         self.last_completeness
     }
 
     fn capture_cache_refusal(
         &self,
-    ) -> Option<crate::resolver_core::fact_read_set::NonCacheablePropagation> {
+    ) -> Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation> {
         self.last_cache_refusal
     }
 
-    fn fold_follower_completeness(&self, joined: crate::semantic_query::ResultCompleteness) {
-        crate::request_context::fold_result_completeness(joined);
+    fn fold_follower_completeness(
+        &self,
+        joined: verter_type_engine::semantic_query::ResultCompleteness,
+    ) {
+        verter_type_engine::request_context::fold_result_completeness(joined);
     }
 }
 
@@ -462,10 +467,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{
-        RequestSource, ResolutionNodeKind, StoreViewCompatToken, TraversalLens,
-    };
+    use crate::resolver_core::{RequestSource, ResolutionNodeKind, TraversalLens};
     use std::cell::Cell;
+    use verter_session_query::facts::store_view::StoreViewCompatToken;
 
     /// Validation-trivial view: the executor's stability gate now reads
     /// `current_view_supersession_fingerprint()` from the HOST, not the
@@ -483,7 +487,10 @@ mod tests {
             }
         }
 
-        fn validates(&self, _fact: &crate::resolver_core::FactVersionRef) -> bool {
+        fn validates(
+            &self,
+            _fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+        ) -> bool {
             false
         }
     }
@@ -633,13 +640,13 @@ mod tests {
         fn resolution_completeness(
             &self,
             _result: &Self::Resolution,
-        ) -> crate::semantic_query::ResultCompleteness {
+        ) -> verter_type_engine::semantic_query::ResultCompleteness {
             if self.live_fp.get() == PARTIAL_RESULT_FP {
-                crate::semantic_query::ResultCompleteness::partial(
-                    crate::semantic_query::PartialReasonSet::PROPAGATED,
+                verter_type_engine::semantic_query::ResultCompleteness::partial(
+                    verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
                 )
             } else {
-                crate::semantic_query::ResultCompleteness::Complete
+                verter_type_engine::semantic_query::ResultCompleteness::Complete
             }
         }
     }
@@ -955,7 +962,7 @@ mod tests {
         );
         assert_eq!(
             result.completeness,
-            crate::semantic_query::ResultCompleteness::Complete,
+            verter_type_engine::semantic_query::ResultCompleteness::Complete,
             "cache refusal is orthogonal to structural completeness"
         );
         assert!(

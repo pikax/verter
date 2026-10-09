@@ -23,6 +23,8 @@
 //! — no `invalidate_canonical`; `parse_stable_hash` is the
 //! alpha-normalised decl skeleton; `augmentation_index` is populated
 //! lazily. See `/type-cache-architecture`.
+use verter_session_query::source::artifact_key::{FileArtifactKey, BASE_PARSE_ENV_HASH};
+use verter_session_query::source::augmentation::{ModuleAugmentationFact, GLOBAL_AUGMENTATION_TAG};
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,8 +34,8 @@ use dashmap::mapref::entry::Entry as AugmentationIndexEntry;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use verter_language::FileLanguage;
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::registry as fact_registry;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::registry as fact_registry;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::project_type_store::IndexedReady;
@@ -44,7 +46,7 @@ use crate::resolver_core::bracketed_generation::BracketedGeneration;
 // them here so existing callers continue to see them under the
 // `verter_session::file_artifact_store::*` paths they already use
 // (no `pub use as` shimming — the types are identical, not renamed).
-pub use verter_semantic::facts::registry::{
+pub use verter_session_query::facts::registry::{
     InternedGlobPattern, InternedName, InternedSpecifier, SymbolSpace,
 };
 
@@ -52,236 +54,9 @@ pub use verter_semantic::facts::registry::{
 
 // Dependency-neutral project identity shared with the semantic observation
 // boundary (a plain `Hash16` newtype with no session/host behavior).
-pub use verter_semantic::resolver_core::ProjectIdentity;
+pub use verter_session_query::resolution::ProjectIdentity;
 
 // ── FileArtifactKey ──
-
-/// Cache key for [`FileArtifacts`].
-///
-/// Keys are content-addressed (R5, R6): identity is the conjunction of
-/// `canonical`, `content_hash`, `parse_env_hash`, `parse_key`, and
-/// `file_language_id`. Two project envs reading the same canonical at
-/// the same `content_hash` but different `parse_env_hash` coexist; the
-/// cache returns the matching entry for the caller's env.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FileArtifactKey {
-    pub canonical: Arc<str>,
-    pub content_hash: Hash16,
-    pub parse_env_hash: Hash16,
-    /// Exact source-bytes, language, compatibility-domain, and syntax-profile identity.
-    pub parse_key: verter_language::ParseKey,
-    /// Session-private derived-artifact shape identity.
-    pub build_toolchain_fingerprint: crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
-    /// The file's [`FileLanguage`] row — the PER-FILE classification
-    /// dimension of artifact identity (R21 scoping: nothing
-    /// capability-shaped enters the global `parse_env_hash`).
-    ///
-    /// Exact readers take this row from the scheduler/runtime source
-    /// authority. Exact writers take the retained row from
-    /// [`IndexedReady::file_language`]. Path classification is only a
-    /// pre-runtime fallback for synthetic tests and genuinely overlay-only
-    /// canonicals.
-    pub file_language_id: FileLanguage,
-}
-
-#[cfg(test)]
-thread_local! {
-    /// How many keys this thread derived by hashing a plain script's whole
-    /// source ([`FileArtifactKey::for_source_identity`]); test-only.
-    static SOURCE_PARSE_IDENTITY_DERIVATIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-/// How many artifact keys this thread derived from a plain script's whole
-/// source text so far (test-only).
-#[cfg(test)]
-pub(crate) fn source_parse_identity_derivations_for_tests() -> usize {
-    SOURCE_PARSE_IDENTITY_DERIVATIONS.with(std::cell::Cell::get)
-}
-
-impl FileArtifactKey {
-    /// Builds the exact key for an already-materialized artifact.
-    pub(crate) fn for_indexed(
-        canonical: Arc<str>,
-        indexed: &IndexedReady,
-        parse_env_hash: Hash16,
-    ) -> Self {
-        Self::for_source_identity(
-            canonical,
-            indexed.whole_hash,
-            indexed.raw_source.as_ref(),
-            indexed.file_language.clone(),
-            indexed.framework_parse.as_deref(),
-            parse_env_hash,
-        )
-        .expect("IndexedReady retains a compatible runtime language and parse artifact")
-    }
-
-    /// [`Self::for_source_identity`] for a plain script whose parse identity
-    /// the source stage already derived: no pass over the source bytes.
-    pub(crate) fn for_script_parse_identity(
-        canonical: Arc<str>,
-        content_hash: Hash16,
-        parse_key: verter_language::ParseKey,
-        file_language_id: FileLanguage,
-        parse_env_hash: Hash16,
-    ) -> Self {
-        Self {
-            canonical,
-            content_hash,
-            parse_env_hash,
-            parse_key,
-            build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
-            file_language_id,
-        }
-    }
-
-    /// Builds an exact key from the source-stage identity that produced an artifact.
-    pub(crate) fn for_source_identity(
-        canonical: Arc<str>,
-        content_hash: Hash16,
-        source: &str,
-        file_language_id: FileLanguage,
-        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
-        parse_env_hash: Hash16,
-    ) -> Option<Self> {
-        let parse_key = match framework_parse {
-            Some(artifact) => {
-                if artifact.adapter_id() != file_language_id.adapter_id()?
-                    || Some(artifact.language_id()) != file_language_id.carrier_language_id()
-                {
-                    return None;
-                }
-                artifact.parse_key().clone()
-            }
-            None => {
-                #[cfg(test)]
-                SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
-                verter_language::default_parse_identity_for(source, &file_language_id)
-                    .ok()?
-                    .1
-            }
-        };
-        Some(Self {
-            canonical,
-            content_hash,
-            parse_env_hash,
-            parse_key,
-            build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
-            file_language_id,
-        })
-    }
-
-    /// Extension-derived language for explicitly synthetic, source-less test
-    /// keys. Production exact identity always comes from runtime authority.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn synthetic_file_language_for_test(canonical: &str) -> FileLanguage {
-        verter_language::LanguageRegistry::global()
-            .classify_static(canonical)
-            .static_resolution()
-    }
-
-    /// Test-only constructor for a base-shaped synthetic key.
-    ///
-    /// A session-view overlay materialiser
-    /// ([`crate::VerterHost::materialize_overlay_indexed_ready_with_view`])
-    /// can resolve a relative import to an overlay-only helper that the
-    /// base workspace cannot see — so the overlay's `IndexedReady`
-    /// carries session-specific import routes. When the overlay source
-    /// bytes are identical to the base file, the overlay's content hash
-    /// equals the base hash, and a base-shaped key for the overlay
-    /// would collide with the base artifact's key: a base read would
-    /// observe the overlay's session routes, or the overlay read would
-    /// silently get the base routes. Byte-identical overlays are the
-    /// common case (every opened-but-unmodified file in an LSP session).
-    ///
-    /// Used by `tests/cases/g_misc0/eviction_policy.rs` and similar integration
-    /// tests that need to construct multiple distinct
-    /// `FileArtifactKey` variants for the same canonical to
-    /// exercise the per-canonical retention sweep + the
-    /// promotion-aware LRU floor. The production `pub(crate)`
-    /// surface is unchanged; this `pub fn` exists only inside
-    /// `#[cfg(any(test, feature = "test-support"))]` so production
-    /// builds carry no public exposure of the base constructor.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn base_for_test(canonical: Arc<str>, content_hash: Hash16) -> Self {
-        let language = Self::synthetic_file_language_for_test(&canonical);
-        let parse_key = verter_language::default_parse_identity_for("", &language)
-            .expect("test canonical has a supported parse identity")
-            .1;
-        Self {
-            canonical,
-            content_hash,
-            parse_env_hash: BASE_PARSE_ENV_HASH,
-            parse_key,
-            build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
-            file_language_id: language,
-        }
-    }
-
-    /// Test-only constructor for an overlay-shaped synthetic key.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn overlay_scoped_for_test(
-        canonical: Arc<str>,
-        content_hash: Hash16,
-        discriminator: Hash16,
-    ) -> Self {
-        let language = Self::synthetic_file_language_for_test(&canonical);
-        let parse_key = verter_language::default_parse_identity_for("", &language)
-            .expect("test canonical has a supported parse identity")
-            .1;
-        Self {
-            canonical,
-            content_hash,
-            parse_env_hash: discriminator,
-            parse_key,
-            build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
-            file_language_id: language,
-        }
-    }
-
-    /// `true` when this key has the base-artifact identity: the base
-    /// parse-environment sentinel and current build-toolchain fingerprint.
-    ///
-    /// A non-base key carries a session-overlay **discriminator** in
-    /// the `parse_env_hash` dimension — its
-    /// `IndexedReady` can hold session-specific import routes resolved
-    /// against an overlay-only helper the base workspace cannot see.
-    ///
-    /// The store's **base canonical-wide reads**
-    /// ([`FileArtifactStore::get_any`], [`FileArtifactStore::get_artifacts_any`]
-    /// — via their canonical→keys index candidates — and the
-    /// [`FileArtifactStore::snapshot_all`] scan) filter on
-    /// this predicate so a base `HostView` / `HostStoreView` reader can
-    /// never observe an overlay-scoped artifact and derive base cache
-    /// keys / route facts from another session's routes. A session-view
-    /// reader reaches its overlay artifact through the exact-key /
-    /// view-aware accessors ([`FileArtifactStore::get_overlay_scoped`],
-    /// `OverlayArtifactIdentity::lookup_overlay_artifacts`) instead —
-    /// they key on the full `FileArtifactKey` including the
-    /// discriminator. Lifecycle / removal
-    /// scans ([`FileArtifactStore::remove`],
-    /// [`FileArtifactStore::remove_canonical`]) do NOT filter on this —
-    /// an eviction must drain every key for a canonical, overlay-scoped
-    /// keys included.
-    #[must_use]
-    pub(crate) fn is_base(&self) -> bool {
-        self.parse_env_hash == BASE_PARSE_ENV_HASH
-            && self.build_toolchain_fingerprint
-                == crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
-    }
-}
-
-/// `parse_env_hash` sentinel marking a BASE artifact key
-/// used by the canonical-keyed base surface
-/// before later stages plumb the real env hash through every call site.
-/// An overlay-scoped key carries a non-zero session discriminator in
-/// this dimension instead, so it can never alias a base key.
-pub const BASE_PARSE_ENV_HASH: Hash16 = [0u8; 16];
 
 // ── FileFacts ──
 
@@ -411,32 +186,6 @@ impl FileFacts {
 
 // ── ModuleAugmentationFact ──
 
-/// A single `declare module "<specifier>" { ... }` block emitted by the
-/// parser during shallow analysis.
-///
-/// The type is defined here; the shallow walk populates it.
-/// Augmenting declarations are stitched into the consumer's merged
-/// declaration surface for that specifier.
-///
-/// Fields:
-///
-/// - `specifier` — the syntactic specifier inside `declare module "X" {}`.
-/// - `owner` — the lexical top-level owner that authored the declaration.
-/// - `augmented_name` — the name of an augmented binding inside the block.
-/// - `space` — which symbol space the augmented binding occupies.
-/// - `augmented_member_shape_fingerprint` — alpha-normalised fingerprint
-///   over the augmenting block's member set; used to detect
-///   when an augmenter's contribution to the effective surface changes
-///   without changing the augmenter set itself.
-#[derive(Debug, Clone)]
-pub struct ModuleAugmentationFact {
-    pub specifier: InternedSpecifier,
-    pub owner: TopLevelOwnerId,
-    pub augmented_name: InternedName,
-    pub space: SymbolSpace,
-    pub augmented_member_shape_fingerprint: Hash16,
-}
-
 // ── AugmentationTargetKey / AugmentationTargetKind ──
 
 /// Kind of augmentation target.
@@ -450,78 +199,27 @@ pub struct ModuleAugmentationFact {
 // registry values, and these key types contain no session/host behavior.
 // Their ordering supports `InputKey` load-set normalization; the store's
 // DashMap uses their `Hash`/`Eq` identity.
-pub use verter_semantic::resolver_core::{
+pub use verter_session_query::resolution::{
     AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
 };
-
-// ── AugmenterEntry / AugmenterSet ──
-
-/// One augmenter file's contribution identity inside an [`AugmenterSet`].
-///
-/// Carries the **exact** [`FileArtifactKey`] of the augmenter artifact
-/// scanned at index-population time — the full content-addressed
-/// identity, not just the canonical id. The augmentation-stitching
-/// semantic augmentation stitcher re-fetches the augmenter's `.augmentations` through
-/// [`FileArtifactStore::get_artifacts`] keyed by this exact key — never
-/// a content-agnostic canonical-only scan, which (with lazy cache
-/// invalidation) could surface a different content version of the
-/// augmenter than the one the fingerprint was computed over.
-///
-/// The captured key can itself go stale: the augmenter-set fingerprint
-/// folds over `parse_stable_hash` (the decl skeleton), so a member-body
-/// edit that leaves the skeleton intact reparses the augmenter under a
-/// new `FileArtifactKey` (new `content_hash`) WITHOUT moving the
-/// fingerprint — the cached `AugmenterSet` is not invalidated and this
-/// `artifact_key` keeps pointing at the drained pre-edit version. The
-/// stitch consumer self-heals that exact-key miss by re-deriving the
-/// augmenter's current key from the scheduler-authoritative content
-/// hash and writing the refreshed key back here.
-#[derive(Debug, Clone)]
-pub struct AugmenterEntry {
-    /// Exact content-addressed key of the augmenter artifact.
-    pub artifact_key: FileArtifactKey,
-    /// `parse_stable_hash` of the augmenter artifact — the structural
-    /// hash that the augmenter-set fingerprint folds in (R29).
-    pub parse_stable_hash: Hash16,
-}
-
-impl AugmenterEntry {
-    /// The augmenter file's canonical id.
-    #[must_use]
-    pub fn canonical(&self) -> &Arc<str> {
-        &self.artifact_key.canonical
-    }
-}
+use verter_session_query::resolution::{AugmenterEntry, AugmenterSet};
 
 /// An owned snapshot of one base artifact's augmenter-relevant fields,
 /// captured off the `self.artifacts` DashMap so the augmenter match
 /// (and any resolver it invokes) runs after every shard guard is
 /// released. See [`FileArtifactStore::collect_base_augmenter_candidates`].
-struct AugmenterCandidate {
+pub(crate) struct AugmenterCandidate {
     /// Exact content-addressed key of the candidate augmenter artifact.
-    artifact_key: FileArtifactKey,
+    pub(crate) artifact_key: FileArtifactKey,
     /// The candidate's canonical id (also reachable via `artifact_key`,
     /// kept alongside to avoid re-borrowing through the key on the hot
     /// match loop).
-    canonical: Arc<str>,
+    pub(crate) canonical: Arc<str>,
     /// `parse_stable_hash` folded into the augmenter-set fingerprint.
-    parse_stable_hash: Hash16,
+    pub(crate) parse_stable_hash: Hash16,
     /// The candidate's augmentation facts. Cloned `Arc` — a cheap
     /// refcount bump, not a deep copy.
-    augmentations: Arc<Vec<ModuleAugmentationFact>>,
-}
-
-/// The set of augmenter files that contribute to a given
-/// [`AugmentationTargetKey`], sorted by `(augmenter_canonical,
-/// augmenter_parse_stable_hash)`.
-#[derive(Debug, Clone)]
-pub struct AugmenterSet {
-    /// Per-augmenter contribution identities, sorted by
-    /// `(canonical, parse_stable_hash)`.
-    pub entries: SmallVec<[AugmenterEntry; 2]>,
-    /// Cached `stable_hash(entries)` — the basis of
-    /// `ModuleAugmentationIndexShape`.
-    pub fingerprint: Hash16,
+    pub(crate) augmentations: Arc<Vec<ModuleAugmentationFact>>,
 }
 
 // ── FileArtifacts ──
@@ -1012,6 +710,10 @@ impl Drop for FileArtifactRoot {
 struct RetiredArtifactVersion {
     span: VersionSpan,
     payload: Arc<FileArtifacts>,
+    /// The version's freshness evidence, shared with the live entry it was
+    /// copied from: a root that still reaches this payload keeps its
+    /// canonical's transition evidence owned.
+    _freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
 }
 
 /// One version of a canonical→keys index membership entry.
@@ -1065,15 +767,28 @@ struct StoredArtifact {
     /// [`FileArtifactStore::access_tick`]). Consumed by the LRU
     /// floor's recency ordering.
     last_access_tick: AtomicU64,
+    /// Ownership of the canonical's content-transition evidence while this
+    /// version is reachable. `indexed.built_at_content_generation` is
+    /// compared against the workspace's per-canonical transition rail; the
+    /// lease keeps that rail answering from this canonical's own evidence,
+    /// so retiring unrelated workspace history never makes this artifact
+    /// look stale. `None` when the store has no workspace history installed.
+    freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
 }
 
 impl StoredArtifact {
-    fn new(payload: Arc<FileArtifacts>, tick: u64, birth_epoch: u64) -> Self {
+    fn new(
+        payload: Arc<FileArtifacts>,
+        tick: u64,
+        birth_epoch: u64,
+        freshness: Option<Arc<verter_workspace::CanonicalFreshnessLease>>,
+    ) -> Self {
         Self {
             payload,
             birth_epoch,
             hits: AtomicU32::new(0),
             last_access_tick: AtomicU64::new(tick),
+            freshness,
         }
     }
 
@@ -1264,6 +979,16 @@ pub struct FileArtifactStore {
     /// artifact ingestion. Lookup of a global symbol reads the
     /// snapshot rather than scanning program membership.
     global_contributors: crate::global_contributors::GlobalContributorIndex,
+    /// The live workspace's content-transition history, through which
+    /// every stored version owns its canonical's freshness evidence.
+    /// Installed by the host for each workspace it serves; `None` leaves
+    /// versions unleased.
+    freshness_readers: parking_lot::RwLock<Option<verter_workspace::FreshnessReaders>>,
+    /// Test-only hook run once at the start of the next
+    /// [`Self::install_freshness_readers`], so a test can hold an
+    /// installation open while another workspace swap runs.
+    #[cfg(test)]
+    freshness_install_hook: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Test-only host-level audit hook.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
@@ -1296,7 +1021,7 @@ impl FileArtifactStore {
         Self::with_counters_and_schema_version(
             live,
             stale,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
         )
     }
 
@@ -1335,9 +1060,45 @@ impl FileArtifactStore {
             schema_version,
             augmentation_index: DashMap::new(),
             global_contributors: crate::global_contributors::GlobalContributorIndex::new(),
+            freshness_readers: parking_lot::RwLock::new(None),
+            #[cfg(test)]
+            freshness_install_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Install the content-transition history of the workspace this store's
+    /// artifacts are built from. Versions published afterwards own their
+    /// canonical's freshness evidence in it; versions already stored keep
+    /// whatever they held.
+    pub(crate) fn install_freshness_readers(
+        &self,
+        readers: Option<verter_workspace::FreshnessReaders>,
+    ) {
+        #[cfg(test)]
+        {
+            let hook = self.freshness_install_hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        *self.freshness_readers.write() = readers;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_freshness_install(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.freshness_install_hook.lock() = Some(hook);
+    }
+
+    fn lease_freshness(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_workspace::CanonicalFreshnessLease>> {
+        self.freshness_readers
+            .read()
+            .as_ref()
+            .map(|readers| Arc::new(readers.lease_canonical(canonical)))
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1475,7 +1236,7 @@ impl FileArtifactStore {
         root: &FileArtifactRoot,
         key: &FileArtifactKey,
     ) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         if !self.owns_root(root) || root.is_exhausted() {
@@ -1512,7 +1273,7 @@ impl FileArtifactStore {
         canonical: &str,
     ) -> SmallVec<[FileArtifactKey; 2]> {
         let mut keys: SmallVec<[FileArtifactKey; 2]> = SmallVec::new();
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return keys;
         }
         if !self.owns_root(root) || root.is_exhausted() {
@@ -1757,7 +1518,7 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self.canonical_keys.get(canonical_id).and_then(|slot| {
@@ -1778,7 +1539,7 @@ impl FileArtifactStore {
                     Arc::clone(&stored.payload.indexed)
                 })
         });
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1834,7 +1595,7 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self
@@ -1850,7 +1611,7 @@ impl FileArtifactStore {
                             && version.key.parse_key == *expected_parse_key
                             && version.key.file_language_id == *expected_file_language
                             && version.key.build_toolchain_fingerprint
-                                == crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+                                == verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
                     })
                     .find_map(|version| self.artifacts.get(&version.key))
                     .map(|entry| {
@@ -1860,7 +1621,7 @@ impl FileArtifactStore {
                         Arc::clone(&stored.payload.indexed)
                     })
             });
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1911,7 +1672,7 @@ impl FileArtifactStore {
     /// artifact uses [`Self::get_overlay_scoped`] (exact key) instead.
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let mut result: Option<Arc<IndexedReady>> = None;
@@ -1933,7 +1694,7 @@ impl FileArtifactStore {
                 }
             }
         }
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -2048,8 +1809,11 @@ impl FileArtifactStore {
             }
         }
         self.global_contributors.note_live(key.clone(), &payload);
-        self.artifacts
-            .insert(key.clone(), StoredArtifact::new(payload, tick, epoch));
+        let freshness = self.lease_freshness(&key.canonical);
+        self.artifacts.insert(
+            key.clone(),
+            StoredArtifact::new(payload, tick, epoch, freshness),
+        );
         slot.push(CanonicalKeyVersion {
             key,
             span: VersionSpan::born(epoch),
@@ -2092,11 +1856,12 @@ impl FileArtifactStore {
         key: &FileArtifactKey,
         epoch: u64,
     ) -> Option<Arc<FileArtifacts>> {
-        let (birth, payload) = {
+        let (birth, payload, freshness) = {
             let entry = self.artifacts.get(key)?;
             (
                 entry.value().birth_epoch,
                 Arc::clone(&entry.value().payload),
+                entry.value().freshness.clone(),
             )
         };
         self.retired_artifacts
@@ -2108,6 +1873,7 @@ impl FileArtifactStore {
                     retirement: Some(epoch),
                 },
                 payload: Arc::clone(&payload),
+                _freshness: freshness,
             });
         Some(payload)
     }
@@ -2729,7 +2495,7 @@ impl FileArtifactStore {
     /// Strict lookup by full content-addressed key.
     #[must_use]
     pub fn get_artifacts(&self, key: &FileArtifactKey) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         self.artifacts.get(key).map(|entry| {
@@ -2832,7 +2598,7 @@ impl FileArtifactStore {
         parse_key: &verter_language::ParseKey,
         file_language_id: &FileLanguage,
     ) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let mut matched: Option<Arc<FileArtifacts>> = None;
@@ -2845,7 +2611,7 @@ impl FileArtifactStore {
                         && version.key.parse_key == *parse_key
                         && version.key.file_language_id == *file_language_id
                         && version.key.build_toolchain_fingerprint
-                            == crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+                            == verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
                 })
                 .map(|version| &version.key)
             {
@@ -2879,7 +2645,7 @@ impl FileArtifactStore {
                 version.span.is_live()
                     && version.key.content_hash == content_hash
                     && version.key.build_toolchain_fingerprint
-                        == crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+                        == verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
             })
             .find_map(|version| self.artifacts.get(&version.key))
             .map(|entry| {
@@ -2931,7 +2697,7 @@ impl FileArtifactStore {
                     && version.key.parse_key == *parse_key
                     && version.key.file_language_id == *file_language_id
                     && version.key.build_toolchain_fingerprint
-                        == crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+                        == verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
             })
             .find_map(|version| self.artifacts.get(&version.key))
             .map(|entry| Arc::clone(&entry.value().payload))
@@ -2952,7 +2718,7 @@ impl FileArtifactStore {
     /// (exact key) instead.
     #[must_use]
     pub fn get_artifacts_any(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let mut matched: Option<Arc<FileArtifacts>> = None;
@@ -3058,7 +2824,7 @@ impl FileArtifactStore {
         // R23 typed event: a `FileArtifactStore` entry was admitted.
         // Best-effort emission — silent no-op when no observer
         // accumulator is installed on the current thread.
-        crate::host_manage::push_structured_event(
+        verter_type_engine::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                 canonical_id: Arc::clone(&canonical),
                 action: verter_audit::FileArtifactCacheAction::Admit,
@@ -3107,7 +2873,7 @@ impl FileArtifactStore {
             self.bump_artifact_generation();
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
-            crate::host_manage::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                     canonical_id: canonical,
                     action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3147,7 +2913,7 @@ impl FileArtifactStore {
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
             for (key, _payload) in &removed_pairs {
-                crate::host_manage::push_structured_event(
+                verter_type_engine::request_observers::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3184,7 +2950,7 @@ impl FileArtifactStore {
                 .fetch_add(removed as u64, Ordering::Relaxed);
             self.bump_artifact_generation();
             for (key, _payload) in &removed_pairs {
-                crate::host_manage::push_structured_event(
+                verter_type_engine::request_observers::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3228,7 +2994,7 @@ impl FileArtifactStore {
         content_hash: Hash16,
         mut visit: impl FnMut(&FileArtifactKey, &Arc<FileArtifacts>),
     ) {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return;
         }
         if let Some(slot) = self.canonical_keys.get(canonical) {
@@ -3375,6 +3141,12 @@ impl FileArtifactStore {
     /// The domain's current stable semantic generation, or `None` while
     /// an augmentation-world mutation is in flight.
     #[must_use]
+    pub(crate) fn route_generation_reader(
+        &self,
+    ) -> verter_session_query::facts::clocks::BracketedGenerationRead {
+        self.route_surface_generation.reader()
+    }
+
     pub(crate) fn stable_route_surface_generation(&self) -> Option<u64> {
         self.route_surface_generation.stable()
     }
@@ -3460,7 +3232,7 @@ impl FileArtifactStore {
     /// artifact carries a different discriminator and is excluded — overlay
     /// augmenters never cross sessions or poison the base index. Only
     /// artifacts carrying at least one augmentation fact are collected.
-    fn collect_augmenter_candidates(
+    pub(crate) fn collect_augmenter_candidates(
         &self,
         overlay_discriminator: Option<Hash16>,
     ) -> Vec<AugmenterCandidate> {
@@ -3514,105 +3286,18 @@ impl FileArtifactStore {
     /// a canonical when the queried target is `ResolvedRelativeCanonical`.
     /// `None` means the augmenter's specifier did not resolve to the
     /// queried canonical and the augmenter is skipped.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_augmentation_index_populated<R>(
         &self,
         key: &AugmentationTargetKey,
-        resolve_relative_canonical: R,
-        overlay_discriminator: Option<Hash16>,
+        resolve: R,
+        discriminator: Option<Hash16>,
     ) -> Arc<AugmenterSet>
     where
         R: Fn(&str, &str) -> Option<Arc<str>>,
     {
-        if let Some(existing) = self.augmentation_index.get(key) {
-            return Arc::clone(&existing.value().set);
-        }
-
-        // Cold scan — collect (canonical, parse_stable_hash) for
-        // every artifact whose augmentations include at least one
-        // matching `ModuleAugmentationFact` for the queried target.
-        // Dedup by canonical so a file with multiple matching facts
-        // contributes only once.
-        //
-        // The scan filters to base ([`FileArtifactKey::is_base`])
-        // artifacts: the augmentation index is keyed by a base
-        // resolve-domain identity (`project_identity`,
-        // `resolve_env_hash`, `lib_env_hash`). A session-overlay artifact
-        // An overlay-scoped key carries session-divergent
-        // augmentations and must not poison that base index.
-        // Snapshot first, then match off the guard: the resolver invoked
-        // by `augmenter_matches_target` for a relative target re-enters
-        // the store and inserts into `self.artifacts`, which cannot run
-        // while a `self.artifacts.iter()` shard guard is held (see
-        // `collect_augmenter_candidates`).
-        let candidates = self.collect_augmenter_candidates(overlay_discriminator);
-        let mut matched: Vec<AugmenterEntry> = Vec::new();
-        let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-        for candidate in &candidates {
-            for fact in candidate.augmentations.iter() {
-                if augmenter_matches_target(
-                    fact,
-                    key,
-                    candidate.canonical.as_ref(),
-                    &resolve_relative_canonical,
-                ) {
-                    if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
-                        // Capture the EXACT artifact key — the stitch
-                        // consumer re-fetches `.augmentations` via
-                        // `get_artifacts(&key)` so it reads precisely
-                        // the version fingerprinted here.
-                        matched.push(AugmenterEntry {
-                            artifact_key: candidate.artifact_key.clone(),
-                            parse_stable_hash: candidate.parse_stable_hash,
-                        });
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Sort by (canonical, parse_stable_hash) for determinism.
-        matched.sort_by(|a, b| {
-            a.canonical()
-                .as_ref()
-                .cmp(b.canonical().as_ref())
-                .then_with(|| a.parse_stable_hash.cmp(&b.parse_stable_hash))
-        });
-
-        let augmenter_count = matched.len() as u32;
-        let fingerprint = compute_augmenter_set_fingerprint(&matched);
-        let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
-        let set = Arc::new(AugmenterSet {
-            entries,
-            fingerprint,
-        });
-
-        // Insert. Capture prev fingerprint for audit event.
-        let prev = self.publish_augmenter_set(key.clone(), Arc::clone(&set));
-        let prev_fingerprint = prev.as_ref().map(|p| p.fingerprint);
-        // `route_surface_index_fingerprints` is snapshotted BY VALUE on a
-        // `HostStoreView`, and `artifact_generation` is folded into the
-        // store-view reuse oracle. Bump it ONLY when this cold populate
-        // actually changes the snapshotted fingerprint (R4 parity with
-        // `populate_augmenter_set`): when two threads cold-scan the same
-        // target concurrently, the
-        // second `insert` replaces the first with an IDENTICAL fingerprint,
-        // a no-op for the base snapshot that must not churn the token (which
-        // would spuriously invalidate the manager-cached base view and split
-        // singleflight lanes under batch load). Any real fingerprint change
-        // (including absent → present) still bumps (no under-bump).
-        if prev_fingerprint != Some(fingerprint) {
-            self.bump_artifact_generation();
-        }
-
-        // Emit `ModuleAugmentationIndexShape` typed audit event.
-        emit_module_augmentation_index_shape_event(
-            key,
-            prev_fingerprint,
-            fingerprint,
-            augmenter_count,
-        );
-
-        set
+        crate::host_manage::source_augmentation::AugmentationRequestDriver::new(self)
+            .ensure_populated(key, resolve, discriminator)
     }
 
     /// Invalidate every `augmentation_index` entry that the augmenter
@@ -3785,7 +3470,7 @@ impl FileArtifactStore {
     }
 }
 
-impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
+impl verter_type_engine::cache_schema::CacheSchemaVersioned for FileArtifactStore {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -3822,84 +3507,24 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for FileArtifactStore {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for FileArtifactStore {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent]
     }
-    fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
+    fn invalidate(&self, _domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
         // FileArtifacts survives project-generation bumps (content_hash is
         // sufficient identity); per-canonical eviction is the only
         // invalidation mode.
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let before = self.len();
         self.remove(canonical_id);
         let after = self.len();
         before.saturating_sub(after)
-    }
-}
-
-/// Special marker the parse-domain emission uses for `declare global
-/// { ... }` blocks (see `fact_emission::GLOBAL_AUGMENTATION_TAG`).
-/// Duplicated here to keep the matcher free-standing of fact_emission.
-pub(crate) const GLOBAL_AUGMENTATION_TAG: &str = "$global";
-
-/// Does `fact` (emitted by `augmenter_canonical`) contribute to the
-/// queried `target_key`?
-///
-/// Classification semantics by target-kind archetype:
-///
-/// - `ExternalSpecifier(s)` → match `fact.specifier == s` AND the
-///   specifier is NOT relative, NOT a wildcard, NOT the global tag.
-/// - `ResolvedRelativeCanonical(canon)` → match relative specifiers
-///   (the full TS `pathIsRelative` class via
-///   [`verter_semantic::resolver_core::is_relative_specifier`]) whose
-///   `resolve_relative_canonical` resolves equal to `canon`.
-/// - `WildcardAmbient(pattern)` → match `fact.specifier == pattern`
-///   AND the specifier contains a wildcard `*`.
-/// - `GlobalAugmentation` → match `fact.specifier == "$global"`.
-///
-/// Relative classification MUST be the shared resolver predicate, not
-/// a `./`/`../` prefix check: a `declare module '..'` fact is the
-/// parent-directory index module, and treating it as a bare external
-/// named `..` would match location-independently against any `'..'`
-/// import target regardless of the directories involved.
-pub(crate) fn augmenter_matches_target<R>(
-    fact: &ModuleAugmentationFact,
-    target_key: &AugmentationTargetKey,
-    augmenter_canonical: &str,
-    resolve_relative_canonical: R,
-) -> bool
-where
-    R: Fn(&str, &str) -> Option<Arc<str>>,
-{
-    use verter_semantic::resolver_core::is_relative_specifier;
-    let specifier: &str = fact.specifier.as_ref();
-    match &target_key.target {
-        AugmentationTargetKind::ExternalSpecifier(target_spec) => {
-            // Bare external: not relative, not wildcard, not global.
-            let is_relative = is_relative_specifier(specifier);
-            let is_wildcard = specifier.contains('*');
-            let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
-            !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
-        }
-        AugmentationTargetKind::ResolvedRelativeCanonical(target_canon) => {
-            if !is_relative_specifier(specifier) {
-                return false;
-            }
-            match resolve_relative_canonical(augmenter_canonical, specifier) {
-                Some(resolved) => resolved.as_ref() == target_canon.as_ref(),
-                None => false,
-            }
-        }
-        AugmentationTargetKind::WildcardAmbient(target_pattern) => {
-            specifier.contains('*') && specifier == target_pattern.as_ref()
-        }
-        AugmentationTargetKind::GlobalAugmentation => specifier == GLOBAL_AUGMENTATION_TAG,
     }
 }
 
@@ -3931,7 +3556,7 @@ fn augmenter_fact_could_contribute(
     // which facts are relative, or a `declare module '..'` fact would
     // be exact-matched as relative but never invalidate relative-target
     // entries.
-    let is_relative = verter_semantic::resolver_core::is_relative_specifier(specifier);
+    let is_relative = verter_session_query::resolution::is_relative_specifier(specifier);
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
             let is_wildcard = specifier.contains('*');
@@ -4020,7 +3645,7 @@ pub(crate) fn emit_module_augmentation_index_shape_event(
             None,
         ),
     };
-    crate::host_manage::push_structured_event(
+    verter_type_engine::request_observers::push_structured_event(
         crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationIndexShape {
             target_kind_tag: tag,
             external_specifier,
@@ -4085,7 +3710,7 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
 /// dimension); the parallel `semantic_hash` and `display_hash`
 /// fields carry both lane hashes simultaneously.
 fn emit_fact_registry_writes(canonical_id: &Arc<str>, fact: &fact_registry::Fact) {
-    crate::host_manage::push_structured_event(
+    verter_type_engine::request_observers::push_structured_event(
         crate::component_meta_audit::StructuredAuditEvent::FactRegistryWrite {
             canonical_id: Arc::clone(canonical_id),
             fact_key_kind: fact_key_kind_tag_for(&fact.key),
@@ -4103,3 +3728,65 @@ mod file_artifact_store_tests;
 #[cfg(test)]
 #[path = "route_surface_generation_tests.rs"]
 mod route_surface_generation_tests;
+
+/// FileArtifactKey operations that read session-owned state.
+pub(crate) trait FileArtifactKeySource: Sized {
+    /// Builds the exact key for an already-materialized artifact.
+    fn for_indexed(canonical: Arc<str>, indexed: &IndexedReady, parse_env_hash: Hash16) -> Self;
+
+    /// Builds an exact key from the source-stage identity that produced an artifact.
+    fn for_source_identity(
+        canonical: Arc<str>,
+        content_hash: Hash16,
+        source: &str,
+        file_language_id: FileLanguage,
+        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
+        parse_env_hash: Hash16,
+    ) -> Option<Self>;
+}
+
+impl FileArtifactKeySource for FileArtifactKey {
+    /// Builds the exact key for an already-materialized artifact.
+    fn for_indexed(canonical: Arc<str>, indexed: &IndexedReady, parse_env_hash: Hash16) -> Self {
+        Self::for_source_identity(
+            canonical,
+            indexed.whole_hash,
+            indexed.raw_source.as_ref(),
+            indexed.file_language.clone(),
+            indexed.framework_parse.as_deref(),
+            parse_env_hash,
+        )
+        .expect("IndexedReady retains a compatible runtime language and parse artifact")
+    }
+
+    /// Builds an exact key from the source-stage identity that produced an artifact.
+    fn for_source_identity(
+        canonical: Arc<str>,
+        content_hash: Hash16,
+        source: &str,
+        file_language_id: FileLanguage,
+        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
+        parse_env_hash: Hash16,
+    ) -> Option<Self> {
+        let parse_key = verter_session_query::source::framework_parse::exact_source_parse_key(
+            source,
+            &file_language_id,
+            framework_parse.map(|artifact| {
+                verter_session_query::source::framework_parse::CarrierParseKey {
+                    adapter_id: artifact.adapter_id(),
+                    language_id: artifact.language_id(),
+                    parse_key: artifact.parse_key(),
+                }
+            }),
+        )?;
+        Some(Self {
+            canonical,
+            content_hash,
+            parse_env_hash,
+            parse_key,
+            build_toolchain_fingerprint:
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
+            file_language_id,
+        })
+    }
+}

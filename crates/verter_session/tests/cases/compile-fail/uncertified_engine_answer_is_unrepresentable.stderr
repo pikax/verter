@@ -1,0 +1,73 @@
+error[E0053]: method `publish_snapshot` has an incompatible type for trait
+  --> tests/cases/compile-fail/uncertified_engine_answer_is_unrepresentable.rs:32:19
+   |
+32 |         _project: &BoundProject,
+   |                   ^^^^^^^^^^^^^ expected `CertifiedTypeEngineBinding`, found `BoundProject`
+   |
+   = note: expected signature `fn(&Seam, &CertifiedTypeEngineBinding, PublishSnapshot) -> std::result::Result<(), EngineError>`
+              found signature `fn(&Seam, &BoundProject, PublishSnapshot) -> std::result::Result<(), EngineError>`
+help: change the parameter type to match the trait
+   |
+32 -         _project: &BoundProject,
+32 +         _project: &CertifiedTypeEngineBinding,
+   |
+
+error[E0053]: method `query` has an incompatible type for trait
+  --> tests/cases/compile-fail/uncertified_engine_answer_is_unrepresentable.rs:38:31
+   |
+38 |     fn query(&self, _project: &BoundProject, _query: Query) -> Result<QueryOutcome, EngineError> {
+   |                               ^^^^^^^^^^^^^ expected `CertifiedTypeEngineBinding`, found `BoundProject`
+   |
+   = note: expected signature `fn(&Seam, &CertifiedTypeEngineBinding, Query) -> std::result::Result<QueryOutcome, EngineError>`
+              found signature `fn(&Seam, &BoundProject, Query) -> std::result::Result<QueryOutcome, EngineError>`
+help: change the parameter type to match the trait
+   |
+38 -     fn query(&self, _project: &BoundProject, _query: Query) -> Result<QueryOutcome, EngineError> {
+38 +     fn query(&self, _project: &CertifiedTypeEngineBinding, _query: Query) -> Result<QueryOutcome, EngineError> {
+   |
+
+error[E0053]: method `diagnostics` has an incompatible type for trait
+  --> tests/cases/compile-fail/uncertified_engine_answer_is_unrepresentable.rs:44:19
+   |
+44 |         _project: &BoundProject,
+   |                   ^^^^^^^^^^^^^ expected `CertifiedTypeEngineBinding`, found `BoundProject`
+   |
+   = note: expected signature `fn(&Seam, &CertifiedTypeEngineBinding, Diagnostics) -> std::result::Result<DiagnosticsOutcome, EngineError>`
+              found signature `fn(&Seam, &BoundProject, Diagnostics) -> std::result::Result<DiagnosticsOutcome, EngineError>`
+help: change the parameter type to match the trait
+   |
+44 -         _project: &BoundProject,
+44 +         _project: &CertifiedTypeEngineBinding,
+   |
+
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/uncertified_engine_answer_is_unrepresentable.rs:75:9
+   |
+74 |     Seam.publish_snapshot(
+   |          ---------------- arguments to this method are incorrect
+75 |         bound,
+   |         ^^^^^ expected `&CertifiedTypeEngineBinding`, found `&BoundProject`
+   |
+   = note: expected reference `&CertifiedTypeEngineBinding`
+              found reference `&BoundProject`
+note: method defined here
+  --> src/external_ts/engine.rs
+   |
+   |     fn publish_snapshot(
+   |        ^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/uncertified_engine_answer_is_unrepresentable.rs:88:9
+   |
+87 |     Seam.query(
+   |          ----- arguments to this method are incorrect
+88 |         bound,
+   |         ^^^^^ expected `&CertifiedTypeEngineBinding`, found `&BoundProject`
+   |
+   = note: expected reference `&CertifiedTypeEngineBinding`
+              found reference `&BoundProject`
+note: method defined here
+  --> src/external_ts/engine.rs
+   |
+   |     fn query(
+   |        ^^^^^

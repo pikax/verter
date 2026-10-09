@@ -17,19 +17,15 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::facts::registry::SymbolSpace;
+use verter_session_query::facts::registry::SymbolSpace;
 
-use crate::file_artifact_store::{AugmentationTargetKind, ProjectIdentity};
+use crate::file_artifact_store::ProjectIdentity;
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
-use crate::resolver_core::{
-    FactVersionRef, ResolverContext, SingleflightGroup, SingleflightRole, SingleflightRunResult,
-    StoreView, ValidatedFactCache,
-};
-use crate::types::Hash16;
-
-#[path = "route_db_singleflight.rs"]
-mod singleflight_inner;
+use crate::resolver_core::{SingleflightGroup, ValidatedFactCache};
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Substrate version for the route/barrel resolution algorithm. A bump
 /// invalidates every `RouteNameKey` / `BarrelSurfaceKey` slot by changing
@@ -126,51 +122,6 @@ impl BarrelSurfaceKey {
     }
 }
 
-/// Build the parse-domain `FactKey::ModuleAugmentationIndexShape`
-/// payload an augmentation-index consumer observes for the queried
-/// target — the sole `RouteSurface` fact shape. The parallel optional
-/// fields hold the concrete target value; the `target_kind_tag`
-/// discriminates.
-pub(crate) fn build_module_augmentation_index_shape_fact_key(
-    target: &AugmentationTargetKind,
-) -> verter_semantic::facts::FactKey {
-    use verter_semantic::facts::registry::AugmentationTargetKindTag;
-    match target {
-        AugmentationTargetKind::ExternalSpecifier(spec) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
-                external_specifier: Some(spec.clone()),
-                resolved_relative_canonical: None,
-                wildcard_pattern: None,
-            }
-        }
-        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ResolvedRelativeCanonical,
-                external_specifier: None,
-                resolved_relative_canonical: Some(Arc::clone(canon)),
-                wildcard_pattern: None,
-            }
-        }
-        AugmentationTargetKind::WildcardAmbient(pat) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::WildcardAmbient,
-                external_specifier: None,
-                resolved_relative_canonical: None,
-                wildcard_pattern: Some(pat.clone()),
-            }
-        }
-        AugmentationTargetKind::GlobalAugmentation => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
-                external_specifier: None,
-                resolved_relative_canonical: None,
-                wildcard_pattern: None,
-            }
-        }
-    }
-}
-
 /// Result of resolving a named export route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteResult {
@@ -241,9 +192,9 @@ pub struct BarrelRouteSurface {
 /// own request; the by-value `admitted` bit is what lets a committed
 /// follower detect that and re-resolve against fresh state.
 #[derive(Debug)]
-struct RouteFlightOutcome {
-    route: Arc<RouteResult>,
-    admitted: bool,
+pub(crate) struct RouteFlightOutcome {
+    pub(crate) route: Arc<RouteResult>,
+    pub(crate) admitted: bool,
 }
 
 /// Shared DB for canonical export routing facts.
@@ -253,8 +204,8 @@ pub struct RouteDb {
     /// axes (R21) so a route resolved under one project/env never
     /// satisfies a lookup under another; value-side fact validation
     /// carries content freshness (R6).
-    routes: ValidatedFactCache<RouteNameKey, RouteResult>,
-    route_singleflight: SingleflightGroup<RouteNameKey, RouteFlightOutcome, ()>,
+    pub(crate) routes: ValidatedFactCache<RouteNameKey, RouteResult>,
+    pub(crate) route_singleflight: SingleflightGroup<RouteNameKey, RouteFlightOutcome, ()>,
     /// [`BarrelSurfaceKey`] → full wildcard route surface (lazy, built once).
     barrel_surfaces: ValidatedFactCache<BarrelSurfaceKey, BarrelRouteSurface>,
     barrel_singleflight: SingleflightGroup<BarrelSurfaceKey, Arc<BarrelRouteSurface>, ()>,
@@ -264,21 +215,21 @@ pub struct RouteDb {
     /// with the cold + coalesced counters so tests can discriminate
     /// which branch satisfied a consumer call.
     #[cfg(any(test, feature = "test-support"))]
-    route_warm_fact_bubble_emissions: std::sync::atomic::AtomicU64,
+    pub(crate) route_warm_fact_bubble_emissions: std::sync::atomic::AtomicU64,
     /// Test-only provenance counter — bumped when
     /// [`Self::get_or_resolve_route_observing_facts`] returned through
     /// the singleflight leader branch (this thread won the cold
     /// resolve and admitted the entry). The freshly-stored facts are
     /// re-read from the validated cache before this counter advances.
     #[cfg(any(test, feature = "test-support"))]
-    route_cold_fact_bubble_emissions: std::sync::atomic::AtomicU64,
+    pub(crate) route_cold_fact_bubble_emissions: std::sync::atomic::AtomicU64,
     /// Test-only provenance counter — bumped when
     /// [`Self::get_or_resolve_route_observing_facts`] returned through
     /// the singleflight follower branch (another thread won the
     /// cold resolve, this thread joined and re-read the just-admitted
     /// facts). Discriminates the coalesced-join path from leader.
     #[cfg(any(test, feature = "test-support"))]
-    route_coalesced_fact_bubble_emissions: std::sync::atomic::AtomicU64,
+    pub(crate) route_coalesced_fact_bubble_emissions: std::sync::atomic::AtomicU64,
 }
 
 impl RouteDb {
@@ -337,7 +288,7 @@ impl RouteDb {
         view: &V,
     ) -> Option<Arc<RouteResult>> {
         let result = self.routes.get_if_valid(key, view);
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -357,7 +308,7 @@ impl RouteDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn get_route_any(&self, key: &RouteNameKey) -> Option<Arc<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -386,46 +337,8 @@ impl RouteDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        self.get_or_resolve_route_with_facts_with_context(key, view, host, resolve)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn get_or_resolve_route_with_facts_with_context<V, F>(
-        &self,
-        key: RouteNameKey,
-        view: &V,
-        ctx: &dyn ResolverContext,
-        resolve: F,
-    ) -> Option<Arc<RouteResult>>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
-    {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-            |probe| self.get_or_resolve_route_with_facts_in_scope(key, view, probe, resolve),
-        )
-        .0
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    fn get_or_resolve_route_with_facts_in_scope<V, F>(
-        &self,
-        key: RouteNameKey,
-        view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
-        resolve: F,
-    ) -> Option<Arc<RouteResult>>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
-    {
-        if let Some(result) = self.routes.get_if_valid(&key, view) {
-            return Some(result);
-        }
-
-        let run_result = self.resolve_route_singleflight_inner(key, view, probe, resolve)?;
-        Some(Arc::clone(&run_result.value.route))
+        crate::host_manage::source_request::RouteRequestDriver::new(self)
+            .get_or_resolve_route_with_facts_with_context(key, view, host, resolve)
     }
 
     /// **Test-only.** Strong-reference count of the in-flight route
@@ -507,7 +420,7 @@ impl RouteDb {
     /// into any active tracer on the current thread.
     ///
     /// On a warm hit the cached fact-dep signature is fanned out via
-    /// [`crate::fact_signature_helpers::observe_fact_signature`] before
+    /// [`verter_type_engine::fact_signature_helpers::observe_fact_signature`] before
     /// returning. On a cold miss the inner `resolve` closure is invoked
     /// inside a singleflight group; after resolution the freshly-stored
     /// facts are read back and also fanned out. When a concurrent thread
@@ -533,75 +446,8 @@ impl RouteDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        self.get_or_resolve_route_observing_facts_with_context(key, view, host, resolve)
-    }
-
-    pub(crate) fn get_or_resolve_route_observing_facts_with_context<V, F>(
-        &self,
-        key: RouteNameKey,
-        view: &V,
-        ctx: &dyn ResolverContext,
-        resolve: F,
-    ) -> Option<Arc<RouteResult>>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
-    {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-            |probe| self.get_or_resolve_route_observing_facts_in_scope(key, view, probe, resolve),
-        )
-        .0
-    }
-
-    fn get_or_resolve_route_observing_facts_in_scope<V, F>(
-        &self,
-        key: RouteNameKey,
-        view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
-        resolve: F,
-    ) -> Option<Arc<RouteResult>>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
-    {
-        // Warm-hit fast path: validated cache lookup with fact bubbling.
-        if let Some((value, facts)) = self.get_route_with_facts(&key, view) {
-            crate::fact_signature_helpers::observe_fact_signature(&facts);
-            #[cfg(any(test, feature = "test-support"))]
-            self.route_warm_fact_bubble_emissions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Some(value);
-        }
-
-        // Cold path: delegate to the shared singleflight helper, then
-        // observe the leader / follower role and bump the matching
-        // provenance counter on the post-admission re-read.
-        let run_result =
-            self.resolve_route_singleflight_inner(key.clone(), view, probe, resolve)?;
-
-        // Post-admission re-read: fan the just-stored facts into the
-        // current thread's tracer stack. Leader: the closure ran here
-        // and admitted; the re-read finds the freshly-stored entry.
-        // Follower: another thread won the singleflight and admitted;
-        // this thread's re-read picks up the admitted entry and the
-        // bubble fans the leader's facts into this thread's outer
-        // tracer scope.
-        if let Some((_value, facts)) = self.get_route_with_facts(&key, view) {
-            crate::fact_signature_helpers::observe_fact_signature(&facts);
-            #[cfg(any(test, feature = "test-support"))]
-            match run_result.role {
-                SingleflightRole::Leader => {
-                    self.route_cold_fact_bubble_emissions
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                SingleflightRole::Follower => {
-                    self.route_coalesced_fact_bubble_emissions
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-        Some(Arc::clone(&run_result.value.route))
+        crate::host_manage::source_request::RouteRequestDriver::new(self)
+            .get_or_resolve_route_observing_facts_with_context(key, view, host, resolve)
     }
 
     /// Test-only: drive [`Self::get_or_resolve_route_with_facts`] the way a
@@ -719,19 +565,23 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
             |probe| self.get_or_build_barrel_surface_in_scope(key, view, probe, build),
         )
         .0
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn get_or_build_barrel_surface_in_scope<V, F>(
+    fn get_or_build_barrel_surface_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: BarrelSurfaceKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         build: F,
     ) -> Option<Arc<BarrelRouteSurface>>
     where
@@ -865,7 +715,7 @@ impl Default for RouteDb {
 /// route admission. Silent no-op when no audit accumulator is
 /// installed on the active thread. `Miss` results never emit —
 /// only resolved routes carry an attribution.
-fn emit_export_route_resolved_event(
+pub(crate) fn emit_export_route_resolved_event(
     provider_canonical: &str,
     exported_name: &str,
     result: &RouteResult,
@@ -877,7 +727,7 @@ fn emit_export_route_resolved_event(
         ..
     } = result
     {
-        crate::host_manage::push_structured_event(
+        verter_type_engine::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::ExportRouteResolved {
                 provider_canonical: Arc::<str>::from(provider_canonical),
                 exported_name: Arc::<str>::from(exported_name),
@@ -889,20 +739,20 @@ fn emit_export_route_resolved_event(
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for RouteDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for RouteDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ResolverState, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.clear();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for RouteDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for RouteDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         // Routes are keyed on (resolver_owner_canonical, specifier);
         // a content edit on a provider canonical evicts every route
@@ -926,7 +776,8 @@ fn test_host() -> &'static crate::VerterHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{FactVersionRef, StoreView, StoreViewCompatToken};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
     #[derive(Debug)]
     struct TestView {

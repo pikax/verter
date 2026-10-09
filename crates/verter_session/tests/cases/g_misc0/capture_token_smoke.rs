@@ -12,12 +12,12 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{
+use verter_type_engine::capture_token::{
     assert_no_stack_overflow, with_active_capture, CaptureToken, EdgeIdentity, KeyFamily,
 };
 
 // Re-export the shared semantic types the harness consumes.
-use verter_session::semantic_query::{
+use verter_type_engine::semantic_query::{
     DeclIdentity, OriginEdgeKind, ProjectionMode, ResolveDeclKey, ScopeId, SemanticNodeId,
     SemanticQueryKey,
 };
@@ -34,7 +34,7 @@ fn synthetic_instantiate_key(name: &str, mode: ProjectionMode) -> SemanticQueryK
         &host,
         DeclIdentity::synthetic(name).to_type_slot_unscoped(),
         Arc::new([]),
-        verter_session::semantic_query::ProjectionReductionContext::published(mode),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
     )
 }
 
@@ -189,7 +189,7 @@ fn key_family_matches_resolve_decl_for_resolved_name() {
             canonical_id: Arc::from("/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -259,7 +259,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     // `context.projection_reduction.mode == Expanded` and reject
     // `Skeleton` / `Shallow` for the same name, plus reject other names
     // entirely.
-    use verter_session::semantic_query::ProjectionMode;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     // mode == Expanded → matches when name matches.
     let key_expanded = synthetic_instantiate_key("UIMessage", ProjectionMode::Expanded);
@@ -287,7 +287,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
             canonical_id: Arc::from("/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },

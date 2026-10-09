@@ -10,6 +10,16 @@ publish = false
 description = "Benchmarks and examples for verter_compiler"
 
 [features]
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "verter_compiler/semantic-observe",
+  "verter_workspace/semantic-observe",
+  "verter_semantic/semantic-observe",
+  "verter_session/semantic-observe",
+  "attribution",
+  "currency_probe",
+  "hotpath",
+]
 hotpath = [
   "verter_compiler/hotpath",
   "verter_session/hotpath",
@@ -36,10 +46,12 @@ verter_compiler = { path = "../verter_compiler", features = ["bench"] }
 verter_css_syntax = { path = "../verter_css_syntax" }
 verter_parser = { path = "../verter_parser" }
 verter_session = { path = "../verter_session" }
+verter_type_engine = { path = "../verter_type_engine" }
 verter_workspace = { path = "../verter_workspace" }
 verter_audit = { path = "../verter_audit" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_semantic = { path = "../verter_semantic" }
+verter_semantic_source = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_type_expr = { workspace = true }
 blake3 = { workspace = true }
@@ -64,6 +76,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 libc = "0.2"
 
 [dev-dependencies]
+verter_session_query = { workspace = true }
 # Activates `test-support` on `verter_compiler` for THIS crate's own
 # bench/example targets only — `real_world_compile_bench.rs` and the
 # `new_impl_check`/`profile_ast`/`vapor_check` examples measure the raw
@@ -210,6 +223,13 @@ path = "examples/profile_public_api_batch.rs"
 [[example]]
 name = "currency_phase_probe"
 path = "examples/currency_phase_probe.rs"
+
+[[example]]
+# Per-request resolver-context port call counts; the counters exist only
+# under `semantic-observe`, so an unmeasured build is a hard build error.
+name = "resolver_dispatch_profile"
+path = "examples/resolver_dispatch_profile.rs"
+required-features = ["semantic-observe"]
 
 [[example]]
 name = "route_overhead_baseline"

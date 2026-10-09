@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
-use super::{classify_module_kind, is_automatic_lib_canonical, ContributorOrigin, FileModuleKind};
-use crate::file_artifact_store::{
-    AugmentationTargetKind, FileArtifactStore, GLOBAL_AUGMENTATION_TAG,
-};
+use super::classify_module_kind;
+use crate::file_artifact_store::{AugmentationTargetKind, FileArtifactStore};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::ShallowFileState;
+use verter_session_query::inputs::contributors::{
+    is_automatic_lib_canonical, ContributorOrigin, FileModuleKind,
+};
+use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
 
 fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
     let state = ShallowFileState::service_backed_for_test_at(canonical, source);
@@ -22,7 +24,10 @@ fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
     store.insert(Arc::from(canonical), indexed);
 }
 
-fn lookup_global(store: &FileArtifactStore, name: &str) -> super::SymbolContributors {
+fn lookup_global(
+    store: &FileArtifactStore,
+    name: &str,
+) -> verter_session_query::inputs::contributors::SymbolContributors {
     store.global_contributor_index().snapshot().lookup(
         &AugmentationTargetKind::GlobalAugmentation,
         name,
@@ -285,14 +290,14 @@ fn type_and_namespace_spaces_have_distinct_fingerprints() {
         "N",
         None,
         true,
-        verter_semantic::facts::SymbolSpace::Type,
+        verter_session_query::facts::SymbolSpace::Type,
     );
     let namespaces = store.global_contributor_index().snapshot().lookup_in_space(
         &AugmentationTargetKind::GlobalAugmentation,
         "N",
         None,
         true,
-        verter_semantic::facts::SymbolSpace::Namespace,
+        verter_session_query::facts::SymbolSpace::Namespace,
     );
     assert_eq!(types.entries.len(), 1);
     assert_eq!(namespaces.entries.len(), 1);

@@ -16,7 +16,9 @@ import {
   CLASSES,
 } from "./analyze.mjs";
 import { canonicalDigest } from "./canonical.mjs";
-import { interpretMeasurement } from "./reference.mjs";
+import { interpretMeasurement, RESOURCE_CODES } from "./reference.mjs";
+import { requiredStateComparison, summarizeSessions } from "./session-analyze.mjs";
+import { allSessions } from "./sessions.mjs";
 
 const referenceCache = new Map();
 /** The interpreted reference of one (scenario, setting), or null. */
@@ -142,10 +144,19 @@ function probeArmSummary(arm, invs, ctx) {
     out.coldAllocatedBytes = stats(metrics.map((x) => x?.allocations?.[1]));
   }
   if (arm === "verter") out.retention = metrics[0]?.retention ?? null;
+  // Every completed measurement's retained state: the observe build must
+  // retain the production build's REQUIRED state.
+  if (arm === "verter" || arm === "verter-observe")
+    out.retentions = metrics.map((m) => m?.retention ?? null);
   out.invocationWallMs = stats(measured.map((i) => i.supervisor?.wallMs));
   out.invocationTreePeakBytes = stats(measured.map((i) => i.supervisor?.peakBytes));
   return out;
 }
+
+const CLI_ENGINE_PEAK_METRICS = new Map([
+  ["windows-job-object", "job-peak-commit-charge"],
+  ["macos-phys-footprint", "sampled-tree-phys-footprint-sum"],
+]);
 
 function cliArmSummary(invs, limits) {
   const budgetBytes = limits.budgetBytes;
@@ -159,9 +170,21 @@ function cliArmSummary(invs, limits) {
   ];
   const completed = measured.filter((i) => invocationEnd(i, limits).kind === "exited");
   const measuredParsed = completed.map((i) => parseCli(i.cliStdout ?? ""));
-  const overBudget = completed.filter(
+  // Cgroup peaks include cache and kernel charges; they are containment telemetry,
+  // not the CLI engine's memory. Only known backend/metric pairs are attributable.
+  const memory = completed.filter(
+    (i) =>
+      CLI_ENGINE_PEAK_METRICS.has(i.supervisor?.backend) &&
+      CLI_ENGINE_PEAK_METRICS.get(i.supervisor?.backend) === i.supervisor?.peakMetric &&
+      ["hard", "sampled"].includes(i.supervisor?.containment),
+  );
+  const overBudget = memory.filter(
     (i) => typeof i.supervisor?.peakBytes === "number" && i.supervisor.peakBytes > budgetBytes,
   ).length;
+  // A statistic over the attributable subset is not the cell's engine memory:
+  // unless every completed invocation is attributable, the cell refuses to
+  // publish one (peak bytes, peak metric and the budget verdict alike).
+  const attributable = memory.length === completed.length;
   const killed = invs.filter((i) =>
     ["killed", "unattributed-kill"].includes(invocationEnd(i, limits).kind),
   );
@@ -173,7 +196,7 @@ function cliArmSummary(invs, limits) {
         ? `killed (${invocationEnd(killed[0], limits).detail})`
         : killed.length
           ? "inconsistent"
-          : overBudget
+          : attributable && overBudget
             ? "over the engine budget"
             : "completed",
     ends: [...new Set(ends.map((e) => e.kind))],
@@ -185,8 +208,11 @@ function cliArmSummary(invs, limits) {
         .filter((i) => invocationEnd(i, limits).kind === "killed" && !i.skipped)
         .map((i) => i.supervisor?.wallMs),
     ),
-    peakBytes: stats(completed.map((i) => i.supervisor?.peakBytes)),
-    peakMetric: completed[0]?.supervisor?.peakMetric ?? null,
+    peakBytes: attributable ? stats(memory.map((i) => i.supervisor?.peakBytes)) : null,
+    peakMetric: attributable ? (memory[0]?.supervisor?.peakMetric ?? null) : null,
+    memoryUnavailable: attributable
+      ? null
+      : "supervisor accounting is not attributable to the engine",
     cpuMs: stats(
       completed.map((i) => (i.supervisor?.cpuUserMs ?? NaN) + (i.supervisor?.cpuKernelMs ?? NaN)),
     ),
@@ -272,8 +298,48 @@ function comparison(verterInvs, tscInvs, resolution) {
   return out;
 }
 
-/** Summarise a run against the measured reference. */
-export function summarize(run, expected, scenarios) {
+/**
+ * The Capacity row of one cell: each arm's outcome at the engine budget —
+ * its class or status, its engine peak and time when it completed, and for
+ * the invocations the supervisor killed, the tree's peak at the kill and the
+ * time to it (with whether the kill is attributed to the engine). The
+ * memory cap stays the machine's protection: nothing here raises it.
+ */
+function capacityRow(cell, armInvs, limits) {
+  const arm = (name) => {
+    const s = cell.arms[name];
+    if (!s) return null;
+    const kills = (armInvs[name] ?? []).filter(
+      (i) => !i.skipped && ["killed", "unattributed-kill"].includes(invocationEnd(i, limits).kind),
+    );
+    return {
+      outcome: s.class ?? s.status,
+      peakBytes: s.metrics?.peakBytes ?? s.peakBytes ?? null,
+      timeMs: s.metrics?.firstTypeMs ?? s.wallMs ?? null,
+      memoryUnavailable: s.memoryUnavailable ?? null,
+      kills: kills.length,
+      attributedKills: kills.filter((i) => invocationEnd(i, limits).kind === "killed").length,
+      killedBy: [...new Set(kills.map((i) => i.supervisor?.killedBy))].sort(),
+      peakAtKillBytes: stats(kills.map((i) => i.supervisor?.peakBytes)),
+      peakAtKillMetric: kills[0]
+        ? `${kills[0].supervisor?.backend}:${kills[0].supervisor?.peakMetric}`
+        : null,
+      timeToKillMs: stats(kills.map((i) => i.supervisor?.wallMs)),
+    };
+  };
+  return {
+    key: cell.key,
+    budgetBytes: limits.budgetBytes,
+    tscLimitCodes: (cell.reference?.codes ?? []).filter((c) => RESOURCE_CODES.includes(c)),
+    verter: arm("verter"),
+    tscApi: arm("tsc-api"),
+    tscCli: arm("tsc-cli"),
+    tscCliSingle: arm("tsc-cli-1"),
+  };
+}
+
+/** Summarise a run against the measured reference (and its sessions against their constructed answers). */
+export function summarize(run, expected, scenarios, sessions = allSessions()) {
   const byId = new Map(scenarios.map((s) => [s.id, s]));
   const limits = runLimits(run.meta?.options ?? {});
   const budgetBytes = limits.budgetBytes;
@@ -340,6 +406,22 @@ export function summarize(run, expected, scenarios) {
             ),
           }
         : null;
+    const observeBuild =
+      armInvs.verter && armInvs["verter-observe"]
+        ? {
+            coldMs: verdict(
+              armInvs.verter.filter((i) => !i.warmup).map((i) => probeMetrics(i)?.coldMs),
+              armInvs["verter-observe"]
+                .filter((i) => !i.warmup)
+                .map((i) => probeMetrics(i)?.coldMs),
+              resolution.single,
+            ),
+            requiredState: requiredStateComparison(
+              arms.verter.retentions ?? [],
+              arms["verter-observe"].retentions ?? [],
+            ),
+          }
+        : null;
     cells.push({
       key,
       scenario: meta.id,
@@ -360,12 +442,16 @@ export function summarize(run, expected, scenarios) {
       arms,
       headline,
       obsCost,
+      observeBuild,
     });
+    cells.at(-1).capacity = capacityRow(cells.at(-1), armInvs, limits);
   }
   const counts = {};
   for (const cell of cells) {
     const c = cell.arms.verter?.class ?? "not-run";
     counts[c] = (counts[c] ?? 0) + 1;
   }
-  return { cells, verterClassCounts: counts, resolution };
+  const out = { cells, verterClassCounts: counts, resolution };
+  if (run.meta?.sessions) out.sessions = summarizeSessions(run, sessions, resolution);
+  return out;
 }

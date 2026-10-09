@@ -426,7 +426,7 @@ pub(crate) fn classify_source_root(body: &TypeExpr) -> SourceRootShape {
             name,
             type_arguments,
         } if type_arguments.len() == 1
-            && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
+            && verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name)
                 .is_some()
             && is_carve_out_arg_shape(&type_arguments[0]) =>
         {
@@ -584,7 +584,7 @@ pub(crate) fn carve_out_root_locator(body: &TypeExpr) -> Option<(&str, SymbolSpa
             name,
             type_arguments,
         } if type_arguments.len() == 1
-            && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
+            && verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name)
                 .is_some() =>
         {
             match &type_arguments[0] {

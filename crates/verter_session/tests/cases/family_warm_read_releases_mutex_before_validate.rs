@@ -27,13 +27,14 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use verter_session::for_tests::{
-    ReadSetSignature, SemanticGraphStore, VALIDATE_RUNNING_PROBE_TEST_LOCK,
-};
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
 };
-use verter_session::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query_memo::{
+    SemanticGraphStore, VALIDATE_RUNNING_PROBE_TEST_LOCK,
+};
 
 /// The warm-read fast path snapshots candidates under `entries`,
 /// releases the lock, and ONLY THEN calls `MemoEntry::validate` on each
@@ -50,7 +51,7 @@ fn warm_read_validates_outside_entries_mutex() {
     let canonical = "/warm_read_lock_test/owner.ts";
     let key = verter_session::for_tests::instantiate_key_for_tests(
         &host,
-        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
@@ -59,7 +60,7 @@ fn warm_read_validates_outside_entries_mutex() {
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
     let value = graph.intern_node(SemanticNodeData::Primitive(
-        verter_session::semantic_query::PrimitiveKind::Boolean,
+        verter_type_engine::semantic_query::PrimitiveKind::Boolean,
     ));
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),
@@ -129,8 +130,11 @@ fn warm_read_validates_outside_entries_mutex() {
         *worker_thread_id_for_worker.lock().unwrap() = Some(thread::current().id());
         // Drive the warm-read path via the concrete VerterHost —
         // mirrors the production `try_warm_hit_fast_path` callers.
-        let _ = graph_for_worker
-            .get_validated_with_host_for_tests(&key_for_worker, host_for_worker.as_ref());
+        let _ = verter_session::for_tests::get_validated_with_host(
+            &graph_for_worker,
+            &key_for_worker,
+            host_for_worker.as_ref(),
+        );
         worker_done_clone.store(true, Ordering::SeqCst);
     });
 

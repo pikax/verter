@@ -49,11 +49,11 @@ pub const HOT_PATH_DENYLIST: &[(&str, &str)] = &[
     // begins a claim (the warm lookup) and cold ones claim a producer, so
     // each dispatch is a hot iteration of both.
     (
-        "verter_session",
+        "verter_type_engine",
         "semantic_query_memo::producer::SemanticGraphStore::begin_query_claim",
     ),
     (
-        "verter_session",
+        "verter_type_engine",
         "semantic_query_memo::producer::SemanticGraphStore::claim_query",
     ),
 ];

@@ -194,20 +194,17 @@ test("the committed allowlist is exactly the known standalone targets", () => {
   const actual = entries.map((e) => `${e.package}::${e.target}::${e.src_path}`).sort();
   const expected = [
     "verter_compiler::allocator_canaries::crates/verter_compiler/tests/allocator_canaries.rs",
-    "verter_compiler::compile_type_info_routes::crates/verter_compiler/tests/compile_type_info_routes.rs",
     "verter_lsp::lsp_audit_trace_out_env_var::crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs",
-    "verter_semantic::allocator_canaries::crates/verter_semantic/tests/allocator_canaries.rs",
-    "verter_semantic::type_info_non_flow::crates/verter_semantic/tests/type_info_non_flow.rs",
-    "verter_semantic::type_info_privacy::crates/verter_semantic/tests/ui/type_info_privacy.rs",
     "verter_session::allocator_canaries::crates/verter_session/tests/allocator_canaries.rs",
-    "verter_session::c2_continuation_mutations::crates/verter_session/tests/c2_continuation_mutations.rs",
-    "verter_session::c2_continuation_revalidation::crates/verter_session/tests/c2_continuation_revalidation.rs",
+    "verter_session_query::allocator_canaries::crates/verter_session_query/tests/allocator_canaries.rs",
+    "verter_type_engine::allocator_canaries::crates/verter_type_engine/tests/allocator_canaries.rs",
+    "verter_type_expr::allocator_canaries::crates/verter_type_expr/tests/allocator_canaries.rs",
   ];
   assert.deepEqual(
     actual,
     expected,
     "the integration-test-layout allowlist drifted from the known standalone targets " +
-      "(allocator_canaries x3 + lsp_audit_trace_out_env_var + the five C2 charter-pinned homes). " +
+      "(allocator_canaries x5 + lsp_audit_trace_out_env_var). " +
       "Adding/removing an exception is an architecture decision: update this pin AND " +
       "scripts/integration-test-layout-allowlist.json, and justify the standalone target.",
   );

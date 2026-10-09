@@ -16,23 +16,23 @@ use crate::resolver_core::{
     component_meta_type_registry as resolver_component_meta_type_registry,
 };
 #[cfg(test)]
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 #[cfg(test)]
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedSurfaceCompleteness, FallthroughSurface, RootReachability,
 };
 #[cfg(test)]
-use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
 #[cfg(test)]
 use verter_type_expr::{ObjectMember, TypeExpr};
 
-use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
+use verter_type_engine::component_meta_trace_custom;
 
 /// Project one registered carrier into its content-free ordered structure.
 pub fn ordered_sfc_structure_projection(
     structure: &crate::carrier_publication_store::RegisteredFileStructure,
-) -> verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+) -> verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis {
     crate::host_resolve::ordered_sfc_structure_analysis(structure)
 }
 
@@ -98,12 +98,12 @@ impl From<crate::meta::MetaError> for ComponentMetaHostError {
     }
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for ComponentMetaHostError {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for ComponentMetaHostError {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         match abort {
-            crate::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
-            crate::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
-            crate::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
+            verter_type_engine::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
+            verter_type_engine::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
+            verter_type_engine::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
         }
     }
 }
@@ -205,7 +205,35 @@ impl ComponentMetaHost {
         Ok(())
     }
 
-    /// Access the underlying host.
+    /// Build a component-meta host over a host the caller constructed and
+    /// still holds a shared handle to. The whole host is NOT re-exported
+    /// from the meta host: a caller that needs its own host surface keeps
+    /// its own construction handle, and the meta host consumes the same
+    /// single instance.
+    pub fn new_shared_host(host: Arc<VerterHost>) -> Self {
+        Self {
+            inner: Arc::new(ComponentMetaHostInner {
+                project: crate::meta::MetaProject::from_shared_host(host),
+                generation: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// The project host's language-classification authority: which carrier
+    /// languages and adapters this composition admits. A narrow read that
+    /// replaces whole-host access for admission questions.
+    pub fn language_classifier(&self) -> &crate::framework::HostLanguageClassifier {
+        self.inner.project.host().language_classifier()
+    }
+
+    /// The whole host behind this meta host — the test-support seam ONLY:
+    /// visible to this crate's own test code (the consolidated
+    /// integration-test binary links the crate as a non-test dependency)
+    /// and a COMPILE-ABSENT item in every production build. Production
+    /// callers keep their own construction handle
+    /// (see [`Self::new_shared_host`]); the meta host re-exports no
+    /// whole-host route.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn host(&self) -> &VerterHost {
         self.inner.project.host()
     }
@@ -286,7 +314,7 @@ impl ComponentMetaHost {
     /// Configure project-scoped path aliases.
     pub fn configure_projects(
         &self,
-        configs: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
+        configs: Vec<verter_session_query::resolution::IdeProjectConfig>,
     ) -> Result<(), ComponentMetaHostError> {
         self.check_alive()?;
         self.inner
@@ -380,7 +408,7 @@ impl ComponentMetaSession {
         &self,
         canonical_or_alias: &str,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
         component_meta_trace_custom!("component_meta_session_query", canonical_or_alias);
@@ -430,7 +458,7 @@ impl ComponentMetaSession {
     ) -> Result<
         Vec<
             Result<
-                Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+                Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
                 ComponentMetaHostError,
             >,
         >,
@@ -506,12 +534,16 @@ impl ComponentMetaSession {
     ///   holds a cheap default-filled record so the always-a-record
     ///   contract holds.
     /// - `Err(ComponentMetaHostError)` — a genuine request fault
-    ///   (`AuditNotEnabled` when the host config does not enable
-    ///   `audit_enabled` + `footprint_capture`, or `AuditRecordMissing`
+    ///   (`Host("session is closed")` / `Shutdown` when the session or its
+    ///   project no longer owns a lifetime — checked FIRST, before any
+    ///   capture-config check;
+    ///   `AuditNotEnabled` when the host config does not enable
+    ///   `audit_enabled` + `footprint_capture`; or `AuditRecordMissing`
     ///   when the bounded store evicted the record before retrieval).
-    ///   The carrier carries a cheap default-filled record marked
-    ///   `AuditDisabled` / `FilteredNoop` respectively so a consumer can
-    ///   still read `audit` regardless of outcome.
+    ///   The carrier carries a cheap default-filled record so a consumer
+    ///   can still read `audit` regardless of outcome: `AuditDisabled`
+    ///   whenever host capture is off (including a closed-session refusal
+    ///   on an unaudited host), `FilteredNoop` otherwise.
     pub fn get_component_meta_with_audit(
         &self,
         canonical_or_alias: &str,
@@ -519,8 +551,27 @@ impl ComponentMetaSession {
         Option<crate::meta_resolve::ComponentMetaOutput>,
         ComponentMetaHostError,
     > {
-        let host = self.inner.host();
-        if !host.config.audit_enabled || !host.config.footprint_capture {
+        // Session liveness gates the audited lane FIRST: a closed session
+        // (or a shut-down project) must refuse BEFORE the host-level path
+        // runs — no resolution, no request id, no audit publication may
+        // happen under a session that no longer owns a lifetime. The
+        // refusal carries the cheap default-filled record like every other
+        // pre-capture refusal (nothing was captured because nothing ran),
+        // marked with the HOST's capture state: `AuditDisabled` when the
+        // host config turns capture off, never a label claiming audit ran.
+        let capture_enabled = self.inner.audit_capture_enabled();
+        if let Err(error) = self.inner.check_alive() {
+            let capture_state = if capture_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
+            return verter_audit::AuditedResult::err(
+                ComponentMetaHostError::from(error),
+                cheap_component_meta_record(canonical_or_alias, capture_state),
+            );
+        }
+        if !capture_enabled {
             // No audit record is produced when capture is off — carry
             // the cheap default-filled record marked `AuditDisabled`
             // so the carrier's always-a-record contract still holds.
@@ -543,15 +594,16 @@ impl ComponentMetaSession {
         // resolution published — audited identically to success; the cheap
         // fallback applies only when no record was produced or the bounded
         // store evicted it.
-        let (output, request_id) = match host
-            .get_component_meta_output_with_resolution(canonical_or_alias)
+        let (output, request_id) = match self
+            .inner
+            .component_meta_output_with_resolution(canonical_or_alias)
         {
             Ok((Some(output), request_id)) => (output, request_id),
             Ok((None, request_id)) => {
                 // No analysis behind the request: a non-fault miss rides
                 // `Ok(None)`. Drain the real record when the resolution
                 // published one; otherwise carry the cheap default.
-                let record = host.take_audit_record(request_id).unwrap_or_else(|| {
+                let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
                     cheap_component_meta_record(
                         canonical_or_alias,
                         verter_audit::AuditCaptureState::FilteredNoop,
@@ -566,7 +618,7 @@ impl ComponentMetaSession {
                 // record before materialization failed: drain and return
                 // THAT record (never a fabricated zero-id stand-in, and
                 // never an orphan left in the store).
-                let record = host.take_audit_record(request_id).unwrap_or_else(|| {
+                let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
                     cheap_component_meta_record(
                         canonical_or_alias,
                         verter_audit::AuditCaptureState::FilteredNoop,
@@ -575,7 +627,7 @@ impl ComponentMetaSession {
                 return verter_audit::AuditedResult::err(ComponentMetaHostError::from(err), record);
             }
         };
-        match host.take_audit_record(request_id) {
+        match self.inner.take_audit_record(request_id) {
             Some(record) => verter_audit::AuditedResult::ok(Some(output), record),
             None => verter_audit::AuditedResult::err(
                 ComponentMetaHostError::AuditRecordMissing { request_id },
@@ -594,7 +646,7 @@ impl ComponentMetaSession {
         canonical_or_alias: &str,
     ) -> Result<
         Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         ComponentMetaHostError,
@@ -679,7 +731,10 @@ impl ComponentMetaSession {
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<crate::types::FileAnalysisSnapshot>, ComponentMetaHostError> {
+    ) -> Result<
+        Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
+        ComponentMetaHostError,
+    > {
         self.inner
             .get_analysis(canonical_or_alias)
             .map_err(ComponentMetaHostError::from)
@@ -688,7 +743,7 @@ impl ComponentMetaSession {
     /// Get provenance counters for observability.
     pub fn get_provenance(
         &self,
-    ) -> Result<crate::types::MetaProvenanceSnapshot, ComponentMetaHostError> {
+    ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, ComponentMetaHostError> {
         self.inner
             .get_provenance()
             .map_err(ComponentMetaHostError::from)
@@ -733,7 +788,7 @@ fn cheap_component_meta_record(
             canonical_id,
         )),
         kind: verter_audit::RequestKind::ComponentMeta,
-        parent_request_id: verter_scheduler::request_context::current_request_id()
+        parent_request_id: verter_execution::request_context::current_request_id()
             .map(|id| id.to_string()),
         from_cache: false,
         timings: crate::component_meta_audit::RequestTimingAudit::default(),
@@ -754,22 +809,27 @@ fn cheap_component_meta_record(
 #[cfg(test)]
 fn extract_component_meta_from_resolved_with_evaluated(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     canonical_id: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
 ) -> ComponentMetaAnalysis {
+    let dispatch =
+        &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
     // Macro-DTO surface reads through the same request-bound `ctx` as
     // `extract_component_meta_from_resolved`.
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
+        dispatch,
         canonical_id,
         resolved.snapshot.macros.as_ref(),
     );
     let resolved_binding_reactivity =
         crate::host_manage::component_meta_extract::resolved_binding_reactivity(
             ctx,
+            dispatch,
             &resolved.snapshot,
         );
     let resolved_type_registry =
@@ -780,7 +840,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
         imports: &resolved.snapshot.imports,
         template: resolved.snapshot.template.as_deref(),
         options_api: resolved.snapshot.options_api.as_ref(),
-        analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+        analysis_flags: verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
             resolved.snapshot.script_flags,
         ),
         styles: &resolved.snapshot.styles,
@@ -802,6 +862,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
             None,
             &mut visiting,
             ctx,
+            dispatch,
         ) {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
@@ -810,10 +871,12 @@ fn extract_component_meta_from_resolved_with_evaluated(
         } else {
             meta.accepted_surface_completeness = AcceptedSurfaceCompleteness::LowerBound;
             meta.root_reachability = RootReachability::NoFallthrough {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             };
             meta.fallthrough_surface = FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             };
         }
     }

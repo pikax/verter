@@ -10,9 +10,9 @@
 //! DISTINCT memo slots), the DEDICATED non-aliasing family mapping (`Relate` →
 //! `FamilyKey::Relate`, never `FamilyKey::IndexedAccess`), the value-domain
 //! mapping (`Relate` → `Relation`, never `TypeNode`), and the shape of the
-//! forward-declared [`RelationPayload`] carrier (public three-valued outcome +
-//! inference bindings + an opaque [`RelationProofId`] into the payload-side
-//! [`RelationProofTable`]; budget folded into the outcome; no public `Unknown`).
+//! [`RelationPayload`] carrier (public three-valued outcome + inference
+//! bindings + recursion footprint, naming no explanation; budget folded into
+//! the outcome; no public `Unknown`).
 //!
 //! Each warm-hit guard is DISCRIMINATING against the retired bare-pair key: a
 //! relation memo keyed on `(source, target)` would collapse every variant in a
@@ -21,21 +21,21 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{
-    family_key_size_for_tests, family_variant_label_for_tests, ReadSetSignature,
-};
-use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
-use verter_session::semantic_query::{
-    BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, DerivationTree, FreshnessKey,
-    IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey,
-    InferencePassKind, NoInferMask, OverloadSelectionPolicy, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext,
-    RelationFailureCode, RelationKind, RelationOutcome, RelationPayload, RelationPolicy,
-    RelationProof, RelationProofId, RelationProofTable, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag,
-    SubRelationPosition, SubRelationRef, SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
-};
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::query_key_spec::semantic_query_key_specs;
+use verter_type_engine::semantic_query::{
+    BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, FreshnessKey, IndexKey,
+    InferableParamSetId, InferenceCandidatePriority, InferenceContextKey, InferencePassKind,
+    NoInferMask, OverloadSelectionPolicy, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, RelateMemoKey, RelationContext, RelationKind, RelationOutcome,
+    RelationPayload, RelationPolicy, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag, SubstitutionCanonicalHash,
+    VariancePhase, VariancePolicy,
+};
+use verter_type_engine::semantic_query_memo::{
+    family_key_size_for_tests, family_variant_label_for_tests,
+};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -242,7 +242,7 @@ pub(crate) fn relate_key_covers_relation_kind_policy_freshness_and_context() {
             None,
             RelationContext {
                 projection_reduction:
-                    verter_session::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                 ..relation_context(0, 0, 0, 0)
@@ -670,8 +670,10 @@ fn inferable_param_set_id_is_order_insensitive_set() {
 
 // ---------------------------------------------------------------------------
 // (4) The `Relation` value-domain payload carries the public relation outcome,
-//     the inference bindings, and an opaque `RelationProofId` into the
-//     payload-side proof table. The budget state is FOLDED into the outcome
+//     the inference bindings and the recursion footprint — and names no
+//     explanation: the struct literal below lists every field, so a
+//     re-added proof id or embedded proof fails to compile. The budget state
+//     is FOLDED into the outcome
 //     (`BudgetExceeded`), NOT a separate field. The public outcome is EXACTLY
 //     three-valued — no `Unknown` / `Holds` / `DoesNotHold`. DISCRIMINATES
 //     against the retired tri-state enum + the retired embedded `proof:
@@ -681,7 +683,7 @@ fn inferable_param_set_id_is_order_insensitive_set() {
 
 #[test]
 pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
-    let binding = verter_session::semantic_query::InferBinding {
+    let binding = verter_type_engine::semantic_query::InferBinding {
         name: Arc::from("T"),
         param: SemanticNodeId(2),
         bound: SemanticNodeId(3),
@@ -691,9 +693,6 @@ pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
         // `budget_state` field (the old field would fail to compile here).
         outcome: RelationOutcome::BudgetExceeded(BudgetExceededKind::RelationBudget),
         bindings: Arc::from(vec![binding].into_boxed_slice()),
-        // Proof rides the payload-side table BY OPAQUE ID — there is no embedded
-        // `proof: CoinductiveProof` field (the old field would fail to compile).
-        relation_proof: RelationProofId(7),
         recursion: Default::default(),
     };
 
@@ -705,11 +704,6 @@ pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
         "the payload must carry the budget state FOLDED into the outcome"
     );
     assert_eq!(
-        payload.relation_proof,
-        RelationProofId(7),
-        "the payload must carry the opaque payload-side proof id"
-    );
-    assert_eq!(
         payload.bindings.len(),
         1,
         "the payload carries the bindings"
@@ -719,7 +713,7 @@ pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
     // Compile-time proof: the public outcome is EXACTLY `Assignable |
     // NotAssignable | BudgetExceeded(_)`. This exhaustive match (no wildcard
     // arm) is impossible to write if `Unknown` / `Holds` / `DoesNotHold` still
-    // exist. `NotAssignable` is FIELD-LESS (Decision 4) — a unit-variant match
+    // exist. `NotAssignable` is FIELD-LESS — a unit-variant match
     // arm, not a struct pattern; re-adding `primary_reason` / `secondary_reasons`
     // to the outcome (the superseded enriched-outcome shape) would break this arm.
     let token = match &payload.outcome {
@@ -741,105 +735,6 @@ pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
         SemanticQueryValueTag::TypeNode,
         "the Relation payload must NOT tag as TypeNode"
     );
-}
-
-// ---------------------------------------------------------------------------
-// (4b) The proof witness lives in a payload-side `RelationProofTable` holding
-//      the four `RelationProof` shapes; the payload references one entry by
-//      opaque `RelationProofId`. The coinductive cycle stores opaque
-//      `RelateKeyId`s, NOT `RelateMemoKey` directly. DISCRIMINATES against an
-//      embedded proof enum on the payload and against a `RelateMemoKey`-typed
-//      cycle witness.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn relation_payload_uses_payload_side_relation_proofs_table() {
-    let sub = SubRelationRef {
-        source: SemanticNodeId(1),
-        target: SemanticNodeId(2),
-        position: SubRelationPosition::Member(Arc::from("next")),
-    };
-    let table = RelationProofTable {
-        proofs: Arc::from(
-            vec![
-                RelationProof::Assignable {
-                    witness: DerivationTree {
-                        sub_derivations: Arc::from(vec![sub.clone()].into_boxed_slice()),
-                    },
-                },
-                RelationProof::NotAssignable {
-                    reason: RelationFailureCode::PrimitiveKindMismatch,
-                    failing_sub: sub.clone(),
-                },
-                RelationProof::BudgetExceeded {
-                    cap: RecursionOrBudgetCap {
-                        kind: BudgetExceededKind::RelationBudget,
-                        limit: 64,
-                    },
-                },
-                // The cycle stores OPAQUE `RelateKeyId`s — a `RelateMemoKey`
-                // here would fail to compile, pinning the opaque-id contract.
-                RelationProof::CoinductiveCycle {
-                    keys: Arc::from(vec![RelateKeyId(0), RelateKeyId(1)].into_boxed_slice()),
-                },
-            ]
-            .into_boxed_slice(),
-        ),
-    };
-    assert_eq!(
-        table.proofs.len(),
-        4,
-        "all four RelationProof shapes coexist in the payload-side table"
-    );
-
-    // The payload references a proof BY OPAQUE ID into the table — the proof
-    // enum is NOT embedded on the payload. The outcome is FIELD-LESS
-    // `NotAssignable` (Decision 4): the failure reason rides ONLY the
-    // payload-side proof entry, NEVER the outcome. Constructing `NotAssignable`
-    // with no fields here would fail to compile against the superseded
-    // enriched-outcome shape (which carried `primary_reason` / `secondary_reasons`).
-    let payload = RelationPayload {
-        outcome: RelationOutcome::NotAssignable,
-        bindings: Arc::from(
-            Vec::<verter_session::semantic_query::InferBinding>::new().into_boxed_slice(),
-        ),
-        relation_proof: RelationProofId(1),
-        recursion: Default::default(),
-    };
-    let RelationProofId(idx) = payload.relation_proof;
-    assert!(
-        matches!(
-            &table.proofs[idx as usize],
-            RelationProof::NotAssignable {
-                reason: RelationFailureCode::PrimitiveKindMismatch,
-                ..
-            }
-        ),
-        "the payload's RelationProofId must index the payload-side proof table"
-    );
-
-    // DISCRIMINATING: the failure REASON is reachable ONLY through the
-    // payload-side `RelationProof::NotAssignable { reason: RelationFailureCode,
-    // .. }` entry — the `RelationOutcome::NotAssignable` outcome itself carries
-    // NO reason. A static scan of the value-domain source pins this: the
-    // superseded `primary_reason` / `secondary_reasons` outcome fields must
-    // be absent from the source entirely (they are the enriched-outcome shape).
-    let qvd_src = include_str!("../../../src/semantic_query.rs");
-    assert!(
-        !qvd_src.contains("primary_reason") && !qvd_src.contains("secondary_reasons"),
-        "RelationOutcome::NotAssignable must be field-less — the reason rides the \
-         payload-side RelationProof table, never the outcome (superseded enriched-outcome shape)"
-    );
-
-    // The coinductive cycle entry stores opaque `RelateKeyId`s.
-    match &table.proofs[3] {
-        RelationProof::CoinductiveCycle { keys } => {
-            assert_eq!(keys.len(), 2);
-            assert_eq!(keys[0], RelateKeyId(0));
-            assert_eq!(keys[1], RelateKeyId(1));
-        }
-        other => panic!("expected CoinductiveCycle at index 3, got {other:?}"),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -869,7 +764,7 @@ fn relation_public_outcome_has_no_unknown_display() {
 
     // Static scan of the display renderer: it must NOT reference a public
     // `RelationOutcome::Unknown` arm, and MUST cover the three public arms.
-    let display_src = include_str!("../../../src/semantic_query/display.rs");
+    let display_src = include_str!("../../../../verter_type_engine/src/semantic_query/display.rs");
     assert!(
         !display_src.contains("RelationOutcome::Unknown"),
         "display_relation must not match a public `RelationOutcome::Unknown` arm"

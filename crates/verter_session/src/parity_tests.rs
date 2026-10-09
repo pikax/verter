@@ -30,7 +30,7 @@ use std::sync::Arc;
 use crate::meta::MetaProject;
 use crate::types::HostConfig;
 use crate::VerterHost;
-use verter_semantic::analysis::component_meta::PropAnalysis;
+use verter_session_query::analysis::component_meta::PropAnalysis;
 
 fn make_project() -> Arc<MetaProject> {
     let host = VerterHost::new_standalone(HostConfig {
@@ -41,7 +41,7 @@ fn make_project() -> Arc<MetaProject> {
 }
 
 fn prop_by_name<'a>(
-    meta: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &'a verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) -> &'a PropAnalysis {
     meta.props

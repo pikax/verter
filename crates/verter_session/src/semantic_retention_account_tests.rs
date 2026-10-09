@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
-use super::semantic_retention_account::{
+use verter_session_query::retention::{
     ChargeClass, RetainedFootprint, RetentionAdmission, RetentionCharge, RetentionLimits,
     RetentionRefusal, SemanticRetentionAccount,
 };
@@ -337,8 +337,8 @@ fn exhausted_active_work_reports_the_active_resource_outcome() {
 /// poison an enclosing derivation that consumed it.
 #[test]
 fn every_refusal_maps_to_a_locally_confined_non_admission_reason() {
-    use crate::cache_runtime::admission::non_admission_propagation;
-    use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+    use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
+    use verter_type_engine::cache_runtime::admission::non_admission_propagation;
     for refusal in [
         RetentionRefusal::Oversized {
             requested: 2,
@@ -520,7 +520,8 @@ fn the_project_store_charges_its_interned_identities() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_retained_parse_snapshot_charges_its_pin_once_per_snapshot() {
-    use crate::decl_lowering::{DeclLoweringService, SnapshotKey};
+    use verter_semantic_source::decl_lowering::DeclLoweringService;
+    use verter_session_query::source::snapshot::SnapshotKey;
 
     let account = account(usize::MAX, usize::MAX, usize::MAX);
     // ONE worker, so every job is serviced in submission order on a single
@@ -595,17 +596,19 @@ fn a_retained_parse_snapshot_charges_its_pin_once_per_snapshot() {
 #[test]
 fn the_result_entry_footprint_scales_with_the_entry() {
     fn entry(facts: usize) -> crate::component_meta_result_db::ComponentMetaResultEntry<u32> {
-        let facts: Vec<crate::resolver_core::FactVersionRef> = (0..facts)
-            .map(|i| crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: format!("/src/dep{i}.ts"),
-                hash: [1u8; 16],
-            })
+        let facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> = (0..facts)
+            .map(
+                |i| verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: format!("/src/dep{i}.ts"),
+                    hash: [1u8; 16],
+                },
+            )
             .collect();
         crate::component_meta_result_db::ComponentMetaResultEntry {
             payload: Arc::new(0u32),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
-                facts,
-            )),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                Arc::from(facts),
+            ),
             validated_at_generation: 0,
         }
     }
@@ -633,12 +636,14 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
     fn entry(value: u32) -> ComponentMetaResultEntry<u32> {
         ComponentMetaResultEntry {
             payload: Arc::new(value),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
-                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/src/Owner.vue".to_string(),
-                    hash: [1u8; 16],
-                }],
-            )),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                Arc::from(vec![
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: "/src/Owner.vue".to_string(),
+                        hash: [1u8; 16],
+                    },
+                ]),
+            ),
             validated_at_generation: 0,
         }
     }
@@ -701,7 +706,7 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
 fn no_reachable_candidate_store_retains_off_the_aggregate_account() {
     let process_local = SemanticRetentionAccount::process_local();
 
-    let memo = crate::semantic_query_memo::SemanticGraphStore::new();
+    let memo = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
     assert!(
         Arc::ptr_eq(memo.retention_account(), &process_local),
         "a memo store built without an explicit account must charge the one \

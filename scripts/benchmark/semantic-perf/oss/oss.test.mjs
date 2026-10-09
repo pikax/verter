@@ -161,7 +161,7 @@ test("--oss and --biome are opt-in: a default run's options are unchanged", () =
   const noTsc = parseArgs(["--tier", "stress", "--oss", "--allow-sampled", "--no-tsc"]);
   assert.deepEqual(
     [noTsc.arms, noTsc.oss, noTsc.biome, noTsc.noTsc],
-    [["verter", "verter-obs", "verter-counted"], [], true, true],
+    [["verter", "verter-obs", "verter-observe", "verter-counted"], [], true, true],
   );
   assert.throws(() => parseArgs(["--no-tsc", "--arms", "verter,tsc-cli"]), /excludes.*tsc-cli/);
   // --no-demand skips the demand section; --only-oss / --only-biome are --oss / --biome with it.

@@ -10,10 +10,15 @@
 //! export-graph resolution helpers. Public surface remains rooted at
 //! `crate::host_manage::*`; this file contributes a continuation
 //! `impl VerterHost { … }` block.
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::Hash16;
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
@@ -28,10 +33,8 @@ use crate::types::*;
 use crate::VerterHost;
 use verter_language::FileLanguage;
 
-use super::{
-    component_meta_debug, component_meta_debug_enabled,
-    exact_resolution_uses_type_preferred_target, HostExportGraphResolver,
-};
+use super::{exact_resolution_uses_type_preferred_target, HostExportGraphResolver};
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 /// Test-visible record of which resolver context the template-class lane bound
 /// for one invocation of [`VerterHost::build_template_class_semantic_facts`].
@@ -47,7 +50,7 @@ pub(crate) struct TemplateClassLaneBinding {
     /// `true` when the lane took the indexed-present / base-publishable
     /// branch, `false` when it took the cold-seed session branch.
     pub(crate) indexed_present: bool,
-    /// [`crate::resolver_core::ResolverContext::is_request_bound`] of the
+    /// [`verter_type_engine::resolver_core::ResolverContext::is_request_bound`] of the
     /// context handed to the resolver-tier builder.
     pub(crate) request_bound: bool,
 }
@@ -129,15 +132,12 @@ impl VerterHost {
     pub(crate) fn build_template_class_semantic_facts(
         &self,
         canonical: &str,
-        whole_hash: verter_semantic::analysis::Hash16,
+        whole_hash: verter_session_query::analysis::types::Hash16,
         source: Arc<str>,
-        script: crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs<
-            '_,
-        >,
+        script: crate::host_manage::template_class_facts::TemplateClassScriptInputs<'_>,
         raw: &verter_compiler::compile::template_data::RawTemplateData,
-        scope: crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope,
-    ) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts
-    {
+        scope: crate::host_manage::template_class_facts::TemplateClassPublicationScope,
+    ) -> crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts {
         let current_key = self.authoritative_current_artifact_key(canonical);
         if scope.is_base_publishable()
             && current_key.as_ref().is_some_and(|key| {
@@ -159,19 +159,13 @@ impl VerterHost {
                 crate::resolver_core::HostResolverContext::from_cold_seed(self, &base, overlay);
             #[cfg(any(test, feature = "test-support"))]
             {
-                use crate::resolver_core::ResolverContext;
                 record_template_class_lane_binding(TemplateClassLaneBinding {
                     indexed_present: true,
                     request_bound: ctx.is_request_bound(),
                 });
             }
-            return crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
-                &ctx,
-                canonical,
-                whole_hash,
-                script,
-                raw,
-                scope,
+            return crate::host_manage::template_class_facts::build_template_class_semantic_facts(
+                &ctx, canonical, whole_hash, script, raw, scope,
             );
         }
 
@@ -192,13 +186,12 @@ impl VerterHost {
         );
         #[cfg(any(test, feature = "test-support"))]
         {
-            use crate::resolver_core::ResolverContext as _;
             record_template_class_lane_binding(TemplateClassLaneBinding {
                 indexed_present: false,
                 request_bound: ctx.is_request_bound(),
             });
         }
-        crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
+        crate::host_manage::template_class_facts::build_template_class_semantic_facts(
             &ctx, canonical, whole_hash, script, raw, scope,
         )
     }
@@ -207,14 +200,14 @@ impl VerterHost {
     pub(super) fn build_template_analysis(
         &self,
         canonical: &str,
-        whole_hash: verter_semantic::analysis::Hash16,
+        whole_hash: verter_session_query::analysis::types::Hash16,
         file_language: &FileLanguage,
         source: &Arc<str>,
         framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
-        script_analysis: &verter_semantic::analysis::types::ScriptAnalysisSnapshot,
-    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+        script_analysis: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
+    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
         let imports = &script_analysis.imports;
         let macros = &script_analysis.macros;
         let bindings = &script_analysis.bindings;
@@ -234,7 +227,7 @@ impl VerterHost {
             canonical,
             whole_hash,
             Arc::clone(source),
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+            crate::host_manage::template_class_facts::TemplateClassScriptInputs {
                 macros: &script_analysis.macros,
                 bindings: &script_analysis.bindings,
             },
@@ -242,8 +235,8 @@ impl VerterHost {
             // This builder's only caller is the content-override lane
             // (`compute_override_template_analysis`): the bytes are a
             // compile-profile override layer the store never published.
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
-                crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::SessionOverlay,
+            crate::host_manage::template_class_facts::TemplateClassPublicationScope::Fenced(
+                crate::host_manage::template_class_facts::TemplateClassFenceReason::SessionOverlay,
             ),
         );
         let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
@@ -273,9 +266,9 @@ impl VerterHost {
     /// on the caller's snapshot unconditionally; whether it ALSO persists into
     /// the shared raw-template slot is decided by the slot's write authority
     /// ([`Self::persist_raw_template_analysis`] →
-    /// [`crate::types::RawTemplateSlotAdmission::admitted_generation`]), to
+    /// [`crate::types::RawTemplateSlotAdmission::admitted_version`]), to
     /// which this lane only attests its facts (threaded `store_published` and
-    /// `source_generation`, its own src-block inventory, default extraction —
+    /// `source_version`, its own src-block inventory, default extraction —
     /// this lane compiles with default `CodegenOptions`).
     ///
     /// Source acquisition is caller-threaded ONLY: `inputs` carry the
@@ -295,7 +288,7 @@ impl VerterHost {
     ///
     /// * the configured [`verter_semantic::analysis::AnalysisScope`] carries a
     ///   template flag — the standing, host-wide answer;
-    /// * a [`crate::request_context::RootTemplateDemandScope`] is active on this
+    /// * a [`verter_type_engine::request_context::RootTemplateDemandScope`] is active on this
     ///   thread — the REQUEST-SCOPED answer used by the public-API carrier
     ///   render, whose parent-facing props type is projected from the
     ///   inheritance resolver's root reachability.
@@ -306,7 +299,7 @@ impl VerterHost {
     /// fact the carrier actually reads.
     pub(crate) fn template_analysis_required(&self) -> bool {
         self.config.effective_scope().needs_template_analysis()
-            || crate::request_context::root_template_analysis_demanded()
+            || verter_type_engine::request_context::root_template_analysis_demanded()
     }
 
     pub(crate) fn compute_template_analysis_if_missing(
@@ -324,7 +317,7 @@ impl VerterHost {
             whole_hash,
             framework_parse,
             store_published,
-            source_generation,
+            source_version,
         } = inputs;
 
         // The file's resolved carrier row — template-data ingestion is gated on
@@ -376,7 +369,7 @@ impl VerterHost {
                 canonical,
                 whole_hash,
                 Arc::clone(&source),
-                crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                crate::host_manage::template_class_facts::TemplateClassScriptInputs {
                     macros: &snapshot.macros,
                     bindings: &snapshot.bindings,
                 },
@@ -387,10 +380,10 @@ impl VerterHost {
                 // point attests `false` for its own overlay bytes. The
                 // seed-currentness half is composed inside the wrapper.
                 if store_published {
-                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable
+                    crate::host_manage::template_class_facts::TemplateClassPublicationScope::BasePublishable
                 } else {
-                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
-                        crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::SessionOverlay,
+                    crate::host_manage::template_class_facts::TemplateClassPublicationScope::Fenced(
+                        crate::host_manage::template_class_facts::TemplateClassFenceReason::SessionOverlay,
                     )
                 },
             );
@@ -424,12 +417,15 @@ impl VerterHost {
                 tpl_arc,
                 crate::types::RawTemplateSlotAdmission {
                     store_published,
-                    source_generation,
+                    source_version,
                     has_src_blocks: !src_blocks.is_empty(),
                     // This lane compiles with default `CodegenOptions`
                     // — no parse-affecting profile options reach it.
                     default_extraction: true,
-                    template_class_signature: crate::project_semantic_dispatch::template_class_facts::complete_dependency_signature(&facts),
+                    template_class_signature:
+                        crate::host_manage::template_class_facts::complete_dependency_signature(
+                            &facts,
+                        ),
                 },
             );
         }
@@ -444,17 +440,17 @@ impl VerterHost {
     /// structural write authority
     /// ([`crate::types::DerivedRawState::install_raw_template_analysis`]
     /// gating via
-    /// [`crate::types::RawTemplateSlotAdmission::admitted_generation`])
+    /// [`crate::types::RawTemplateSlotAdmission::admitted_version`])
     /// — the slot field is module-private, so no writer can exist
     /// outside that gate. The pre-check below only avoids creating a
     /// `DerivedRawState` entry for a statement the gate would decline.
     pub(crate) fn persist_raw_template_analysis(
         &self,
         canonical: &str,
-        template: Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         admission: crate::types::RawTemplateSlotAdmission,
     ) {
-        if admission.admitted_generation().is_none() {
+        if admission.admitted_version().is_none() {
             return;
         }
         // raw_template_analysis lives on DerivedRawState (D48 split).
@@ -482,15 +478,15 @@ impl VerterHost {
     pub(crate) fn validated_raw_template_analysis(
         &self,
         canonical: &str,
-        source_generation: u64,
-    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+        source_version: verter_scheduler::node::SourceVersion,
+    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
         // Cheap map short-circuits first; the shard guard ends with this
         // block. `ReadSetSignature` is an `Arc<[FactVersionRef]>` carrier,
         // so cloning it out is a refcount bump, not a fact-set copy.
         let (template, signature) = {
             let derived = self.derived_raw_cache().get(canonical)?;
             let entry = derived.raw_template_analysis()?;
-            if entry.source_generation != source_generation {
+            if entry.source_version != source_version {
                 return None;
             }
             (
@@ -499,7 +495,7 @@ impl VerterHost {
             )
         };
         let current = self.resolver_store_view_read().current()?;
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         // The view is borrowed ONCE for the whole signature. Re-borrowing
         // it per fact opened the widest straddle window in the tree: a
         // concurrent writer could move state between two facts of the
@@ -508,7 +504,7 @@ impl VerterHost {
         if !current.view().validates_fact_signature(&signature.facts) {
             return None;
         }
-        crate::fact_signature_helpers::observe_fact_signature(&signature.facts);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(&signature.facts);
         Some(template)
     }
 
@@ -589,7 +585,13 @@ impl VerterHost {
             let source = source_snap.source.clone();
             let framework_parse = hd.framework_parse.clone();
             let scope = self.config.effective_scope();
-            if file_language.is_vue()
+            // The narrowed-scope serve is ADAPTER-DECLARED registry data:
+            // only a carrier with the template-analysis surface serves its
+            // stored snapshot with template inputs under a narrowed scope —
+            // the host never branches on a framework identity here.
+            if self
+                .framework_registry()
+                .carries_template_analysis_inputs(&file_language)
                 && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
             {
                 #[cfg(test)]
@@ -607,7 +609,7 @@ impl VerterHost {
                     framework_parse: framework_parse.clone(),
                     // Live scheduler read — store-authoritative.
                     store_published: true,
-                    source_generation: Some(source_snap.generation),
+                    source_version: Some(source_snap.version()),
                 });
                 // This branch builds an OWNED, mutated snapshot (it calls
                 // `mark_bindings_used_in_style` and moves fields out), so it
@@ -624,18 +626,19 @@ impl VerterHost {
                 // generation's products.
                 let stored_styles = Arc::new(hd.parse.style_analyses.clone());
                 let stored_markup_tokens = Arc::new(hd.parse.markup_class_tokens.clone());
-                // Generation rail: accept the persisted template only
-                // at THIS branch's own source generation — a late
-                // persist stamped with a superseded generation must
-                // not serve as current.
+                // Version rail: accept the persisted template only at
+                // THIS branch's own source version — a late persist
+                // stamped with a superseded version, including one from
+                // a removed or reset node object, must not serve as
+                // current.
                 let template =
-                    self.validated_raw_template_analysis(canonical, source_snap.generation);
+                    self.validated_raw_template_analysis(canonical, source_snap.version());
                 let export_sigs = hd.parse.export_signatures.clone();
                 // The exact bytes this branch's analyzer observes, taken from
                 // the SAME held source read (`whole_hash` is already
                 // `hash_16` of the whole file — no re-hash here).
                 let anchor_revision =
-                    crate::types::AnalysisSourceRevision::from_whole_hash(hd.parse.whole_hash);
+                    verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(hd.parse.whole_hash);
                 let structure = hd.structure.clone();
                 drop(source_snap);
 
@@ -755,7 +758,7 @@ impl VerterHost {
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<FileAnalysisSnapshot> {
-        verter_workspace::probe_scope!(GET_ANALYSIS);
+        verter_session_query::probe_scope!(GET_ANALYSIS);
         self.provenance
             .get_analysis_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -825,7 +828,9 @@ impl VerterHost {
                     whole_hash: parse.whole_hash,
                     framework_parse: Some(parsed),
                     store_published: false,
-                    source_generation: Some(structure.envelope().source().generation().get()),
+                    // An overlay registration is not a scheduler node
+                    // version; the computed template never persists.
+                    source_version: None,
                 };
                 let mut snapshot = self.finalize_analysis_snapshot(
                     canonical.as_str(),
@@ -887,7 +892,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes> {
+    ) -> Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes> {
         self.provenance
             .evaluate_types_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -908,7 +913,7 @@ impl VerterHost {
 
         let resolved = self.resolve_component_meta_with_view(
             canonical_or_alias,
-            crate::types::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view,
         )?;
         resolved.evaluated_types
@@ -997,7 +1002,7 @@ impl VerterHost {
     pub(crate) fn authoritative_current_artifact_key(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         if self
@@ -1013,22 +1018,22 @@ impl VerterHost {
         // every artifact read.
         if let (None, Some(parse_key)) = (state.framework_parse.as_ref(), state.script_parse_key) {
             return Some(
-                crate::file_artifact_store::FileArtifactKey::for_script_parse_identity(
+                verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
                     Arc::from(analysis_canonical),
                     state.whole_hash,
                     parse_key,
                     state.file_language,
-                    crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+                    verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
                 ),
             );
         }
-        crate::file_artifact_store::FileArtifactKey::for_source_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
             Arc::from(analysis_canonical),
             state.whole_hash,
             state.source.as_ref(),
             state.file_language,
             state.framework_parse.as_deref(),
-            crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+            verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         )
     }
 
@@ -1498,7 +1503,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         indexed: &Arc<crate::project_type_store::IndexedReady>,
-    ) -> Option<crate::resolver_core::ParseFactRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
         if !indexed.shallow_state.has_resolvable_surface() {
             return None;
         }
@@ -1508,17 +1513,17 @@ impl VerterHost {
         }
         let fact = artifacts
             .facts
-            .lookup(&verter_semantic::facts::FactKey::SyntacticRouteInterface)?;
-        Some(crate::resolver_core::ParseFactRef {
+            .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
+        Some(verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: canonical.to_string(),
-            key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
-            lane: verter_semantic::facts::FactLane::Semantic,
+            key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
+            lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,
         })
     }
 
     /// Establish ONE tear-free
-    /// [`crate::resolver_core::MaterializeScopeObservation`] for a
+    /// [`verter_type_engine::resolver_core::MaterializeScopeObservation`] for a
     /// materialize-memo scope canonical (base-host path).
     ///
     /// Pins the scope to a single `Arc<IndexedReady>` whose `whole_hash`
@@ -1548,40 +1553,50 @@ impl VerterHost {
     /// admission while still returning the freshly-computed value; it
     /// never lowers under a fabricated all-zero scope hash.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn observe_materialize_scope(
         &self,
         canonical: &str,
-    ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
+    ) -> Option<verter_type_engine::resolver_core::MaterializeScopeObservation> {
         self.with_base_resolver_context(|ctx| {
             self.observe_materialize_scope_with_context(ctx, canonical)
         })
     }
 
-    /// Context-threaded core of [`Self::observe_materialize_scope`].
-    /// Request-bound callers reuse their captured view and fact tracer instead
+    /// Context-threaded core of the base-context observation. Request-bound
+    /// callers reuse their captured view and fact tracer instead
     /// of constructing a second base context inside the observation.
+    ///
+    /// This is the production entry: every port implementation routes here.
+    /// The no-context wrapper above it is the test / test-support convenience
+    /// form and is compiled out of a shipped build.
     pub(crate) fn observe_materialize_scope_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
-    ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
+    ) -> Option<verter_type_engine::resolver_core::MaterializeScopeObservation> {
         let indexed = self
             .current_content_pinned_indexed(canonical)
             .or_else(|| self.artifact_current_indexed(canonical))?;
         let observed_whole_hash = indexed.whole_hash;
         let syntactic_export_set =
-            crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                 ctx,
                 canonical,
                 observed_whole_hash,
-                verter_semantic::facts::FactKey::SyntacticExportSet,
-                verter_semantic::facts::FactLane::Semantic,
+                verter_session_query::facts::FactKey::SyntacticExportSet,
+                verter_session_query::facts::FactLane::Semantic,
             );
-        Some(crate::resolver_core::MaterializeScopeObservation {
-            canonical_id: Arc::from(canonical),
-            indexed,
-            syntactic_export_set,
-        })
+        Some(
+            verter_type_engine::resolver_core::MaterializeScopeObservation {
+                canonical_id: Arc::from(canonical),
+                observed_whole_hash: indexed.whole_hash,
+                observed_shallow_hash: indexed.shallow_state.whole_hash,
+                syntactic_export_set,
+            },
+        )
     }
 
     /// Return the scheduler's authoritative [`oxc_span::SourceType`] for a loaded
@@ -1778,7 +1793,7 @@ impl VerterHost {
         let template_inputs = self
             .scheduler
             .try_get_source(canonical)
-            .filter(|source_snap| source_snap.generation == analysis_snap.generation)
+            .filter(|source_snap| source_snap.version() == analysis_snap.version())
             .and_then(|source_snap| {
                 let hd = source_snap.downcast_data::<HostSourceData>()?;
                 // Template-data ingestion is gated on whether the file's adapter
@@ -1795,7 +1810,7 @@ impl VerterHost {
                     // Live scheduler reads at one generation —
                     // store-authoritative.
                     store_published: true,
-                    source_generation: Some(source_snap.generation),
+                    source_version: Some(source_snap.version()),
                 })
             });
         Some((snapshot, template_inputs))
@@ -1810,26 +1825,25 @@ impl VerterHost {
 
         let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
-        // Generation rail: accept the persisted template only at the
-        // analysis snapshot's own generation (analysis snapshots are
-        // generation-coherent with their source) — a late persist
-        // stamped with a superseded generation must not serve as
-        // current.
-        let template = self.validated_raw_template_analysis(canonical, analysis_snap.generation);
+        // Version rail: accept the persisted template only at the
+        // analysis snapshot's own source version (analysis snapshots are
+        // version-coherent with their source) — a late persist stamped
+        // with a superseded version must not serve as current.
+        let template = self.validated_raw_template_analysis(canonical, analysis_snap.version());
 
-        // Same generation rail for the anchor revision: the identity is the
+        // Same version rail for the anchor revision: the identity is the
         // source node's own `parse.whole_hash` (already `hash_16` of the whole
         // file bytes — no re-hash here), accepted ONLY at this analysis
-        // snapshot's generation. A torn join leaves the revision UNSTAMPED, and
+        // snapshot's version. A torn join leaves the revision UNSTAMPED, and
         // an unstamped revision matches no live buffer, so an anchor consumer
         // fails closed rather than editing from unpaired geometry.
         let anchor_revision = self
             .scheduler
             .try_get_source(canonical)
-            .filter(|source_snap| source_snap.generation == analysis_snap.generation)
+            .filter(|source_snap| source_snap.version() == analysis_snap.version())
             .and_then(|source_snap| {
                 let hd = source_snap.downcast_data::<crate::host_executor::HostSourceData>()?;
-                Some(crate::types::AnalysisSourceRevision::from_whole_hash(
+                Some(verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(
                     hd.parse.whole_hash,
                 ))
             })
@@ -1895,7 +1909,7 @@ impl VerterHost {
         let dep_id = match self.resolve_loaded_dependency_canonical(
             owner_canonical,
             specifier,
-            verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+            verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 match admitted.into_result() {
@@ -1903,7 +1917,7 @@ impl VerterHost {
                     None => match self.resolve_loaded_dependency_canonical(
                         owner_canonical,
                         specifier,
-                        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                        verter_session_query::resolution::ResolveRequestKind::EsmImport,
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
@@ -1933,7 +1947,7 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
-        verter_workspace::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
+        verter_session_query::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
         // Establish the owner's canonical post-parse artifact FIRST. The
         // snapshot being enriched here is the owner's, and its authored
         // import inventory is that artifact's shallow surface — so the
@@ -1964,12 +1978,12 @@ impl VerterHost {
                 let resolved = if authoritative.is_some() {
                     authoritative
                 } else {
-                    let ctx = verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    let ctx = verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                         kind: if import.is_type_only {
-                            verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                            verter_session_query::resolution::ResolveRequestKind::TypeImport
                         } else {
-                            verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                            verter_session_query::resolution::ResolveRequestKind::EsmImport
                         },
                     };
                     match self.resolve_via_vfs(parent_canonical_id, &import.source, ctx) {
@@ -1995,7 +2009,7 @@ impl VerterHost {
     /// match binding names to field names and replace `MaybeRef` with the
     /// field's actual `ReactivityKind`.
     pub(crate) fn enrich_destructured_bindings(&self, snapshot: &mut FileAnalysisSnapshot) {
-        use verter_semantic::analysis::types::{
+        use verter_session_query::analysis::types::{
             BindingInitializer, ComposableReturn, ReactivityKind,
         };
 
@@ -2164,7 +2178,8 @@ impl VerterHost {
         // split). The compile-output slots are cleared through the
         // typed session node.
         if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut cc);
         }
         if let Some(mut derived) = self.derived_raw_cache().get_mut(&canonical) {
@@ -2212,7 +2227,7 @@ impl VerterHost {
         for owner in &dependents {
             if let Some(mut cc) = self.compile_cache().get_mut(owner) {
                 let session_node =
-                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                 session_node.clear_compile_outputs_for_file(&mut cc);
             }
             if let Some(mut derived) = self.derived_raw_cache().get_mut(owner) {
@@ -2305,7 +2320,7 @@ impl VerterHost {
             };
             let mut exact_summaries = Vec::new();
 
-            use verter_semantic::resolver_core::{ResolvePhase as P, ResolveRequestKind as K};
+            use verter_session_query::resolution::{ResolvePhase as P, ResolveRequestKind as K};
             for (phase, kind) in [
                 (P::CodegenBlocker, K::EsmImport),
                 (P::CodegenBlocker, K::TypeImport),
@@ -2537,7 +2552,7 @@ impl VerterHost {
     pub(crate) fn raw_template_analysis_for_file(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
         {
             if self.is_canonical_evicted(canonical) {
                 return None;
@@ -2641,8 +2656,8 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Option<(
         FileLanguage,
-        Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-        Vec<verter_semantic::analysis::ExportSignature>,
+        Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
+        Vec<verter_session_query::analysis::types::ExportSignature>,
     )> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
@@ -2721,7 +2736,7 @@ impl VerterHost {
             let analysis_snap = self.scheduler.try_get_analysis(&canonical)?;
             let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
 
-            Self::find_export_span(
+            self.find_export_span(
                 &file_language,
                 &ad.script_analysis,
                 &ad.export_signatures,
@@ -2732,9 +2747,10 @@ impl VerterHost {
 
     /// Shared logic for finding an export span from analysis data.
     pub(super) fn find_export_span(
+        &self,
         file_language: &FileLanguage,
-        script_analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
-        export_signatures: &[verter_semantic::analysis::ExportSignature],
+        script_analysis: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
+        export_signatures: &[verter_session_query::analysis::types::ExportSignature],
         binding_name: &str,
     ) -> Option<(u32, u32)> {
         // Framework component files (Vue included) synthesize one semantic
@@ -2746,7 +2762,15 @@ impl VerterHost {
             return Some((0, 0));
         }
 
-        if file_language.is_vue() {
+        // The export-anchor policy is ADAPTER-DECLARED registry data: a
+        // carrier whose script-setup bindings ARE its authored exports
+        // anchors export spans at those bindings and macros; every other
+        // file anchors at its export signatures. The host never branches
+        // on a framework identity here.
+        if self
+            .framework_registry()
+            .anchors_exports_at_script_setup(file_language)
+        {
             if let Some(binding) = script_analysis
                 .bindings
                 .iter()
@@ -2811,9 +2835,9 @@ impl VerterHost {
         if self.is_canonical_evicted(&canonical_parent) {
             return None;
         }
-        let ctx = verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        let ctx = verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         };
         match self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),

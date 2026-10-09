@@ -15,6 +15,10 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = "1"
+toml = "1.1"
+walkdir = "2.5"
 serde_json = { workspace = true }
 static_assertions = "1.1.0"
 tempfile = "3.27"
@@ -25,6 +29,7 @@ tempfile = "3.27"
 # crate exists for — Surface 2/3 select by PACKAGE, not by dependency graph.
 verter_no_typeexpr = { workspace = true }
 verter_session = { path = "../verter_session", features = ["test-support"] }
+verter_type_engine = { path = "../verter_type_engine" }
 verter_span = { path = "../verter_span" }
 verter_type_expr = { workspace = true }
 verter_workspace = { path = "../verter_workspace" }

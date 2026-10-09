@@ -46,6 +46,7 @@ use verter_workspace::{
 };
 
 use crate::documents::DocumentRegistry;
+use crate::external_ts::carrier_publish_store::CARRIER_STORE_WIRE_PIN;
 use crate::external_ts::{
     resolve_carrier_ownership_over_vfs, CarrierCompanion, CarrierPublishCoordinator,
     PendingProviderReady, ProviderReadyReceipt, ReconcileOutcome, ReconcileReason,
@@ -56,7 +57,7 @@ use crate::provider_sync::{
     ProviderSyncState, ProviderSyncTransition,
 };
 use crate::server::block_in_place_guarded as block_in_place_if_available;
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
 
 /// How the semantic provider receives carrier companions after durable editor
 /// membership has been reconciled.
@@ -132,21 +133,10 @@ pub(crate) struct CarrierSyncRequest<'a> {
     /// no live document to pin against (a closed carrier, or a call site that
     /// never compiles against an open buffer).
     ///
-    /// UNTESTED-BY-DESIGN for the tsserver `Published` branch specifically:
-    /// from wherever the caller compiled `ide` through to
-    /// `record_and_version_carrier_companions` inside this function's
-    /// `Published` arm, there is no `.await` — `capture_carrier_ownership`,
-    /// `prepare_sync_transition`, `get_public_api` (via `block_in_place`), and
-    /// `build_carrier_companions` are all synchronous. A same-task `did_change`
-    /// therefore cannot interleave there via cooperative yielding (the
-    /// mechanism `sync_coordinator_tests.rs`'s `block_after_ide_compile`-based
-    /// tests exploit); only literal concurrent OS-thread execution racing the
-    /// SAME few statements could matter, which a `Notify`-pause test cannot
-    /// force deterministically without an explicit yield point this branch
-    /// does not have. `open_pin` still closes the same class of bug here
-    /// (narrows the window to true multi-thread races the sync stretch cannot
-    /// avoid regardless), it is simply not independently exercised by a new
-    /// deterministic test the way the `DirectOpen` branch is.
+    /// The window is real on every engine: an edit can land on another thread
+    /// at any point between the caller's pin and the fenced record, the
+    /// compile itself included. When the fence refuses the record, the pass
+    /// publishes nothing and stays queued (see the gateway's record step).
     pub open_pin: Option<(
         &'a tower_lsp_server::ls_types::Uri,
         &'a crate::documents::DocumentSnapshotIdentity,
@@ -262,6 +252,11 @@ enum NotOwnedReason {
     /// [`CarrierPublishError::Retract`](super::publish_coordinator::CarrierPublishError::Retract)
     /// ("PROPAGATED rather than swallowed").
     RetractFailed,
+    /// The open document moved after the compile's pin, so the pass published
+    /// nothing: its companions describe a revision the editor no longer holds.
+    /// Requeued like [`NotOwnedReason::Pending`]; a distinct class so a caller
+    /// that drives its own retry treats it as the superseded transaction it is.
+    Superseded,
 }
 
 /// A NON-OWNED carrier-sync outcome whose disposition is owned by the coordinator.
@@ -306,6 +301,13 @@ impl CarrierNotOwned {
             reason: NotOwnedReason::RetractFailed,
         }
     }
+    /// The SUPERSEDED non-owned outcome: the document moved after the pin, so
+    /// nothing was published this pass.
+    fn superseded() -> Self {
+        Self {
+            reason: NotOwnedReason::Superseded,
+        }
+    }
 }
 
 /// The classified disposition [`CarrierTransactionCoordinator::settle`] hands back after it
@@ -328,6 +330,10 @@ pub(crate) enum SettleClass {
     /// DISTINCT class so the fail-closed durability breach is never reported as a clean
     /// "nothing advertised" pass.
     RetractFailed,
+    /// The document moved after the compile's pin and nothing was published:
+    /// requeued and local state preserved exactly like [`SettleClass::Pending`].
+    /// A caller that reports its own retry reports this pass as superseded.
+    Superseded,
 }
 
 impl SettleClass {
@@ -444,7 +450,7 @@ pub(crate) fn project_ownership_diagnostics_for(
     host: &VerterHost,
     canonical_id: &str,
 ) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
-    if !verter_semantic::resolver_core::path_is_carrier(canonical_id) {
+    if !verter_session_query::resolution::path_is_carrier(canonical_id) {
         return Vec::new();
     }
     let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(
@@ -679,14 +685,16 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         // that a newer edit supersedes carries an OLDER revision than the newer pass and
         // is refused by the admission gate's compare-and-swap. (tsgo companion versions are
         // recorded post-open, so they are not a stable open-time revision.)
-        let source_revision = carrier_source_revision(req.host, req.canonical_id);
+        let (source_revision, source_evidence) =
+            held_carrier_source_revision(req.host, req.canonical_id);
         let pending = PendingProviderReady::authorize(
             &binding,
             source_revision,
             intent_epoch,
             "tsgo",
             &companions,
-        );
+        )
+        .holding_source_evidence(source_evidence);
         return CarrierSyncDecision::DirectOpen {
             transition,
             pending,
@@ -854,14 +862,26 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     // freshly-recorded generation, so navigation span-classification carries both
     // roles' content/map identity AND the IDE companion's `getScriptVersion` advances
     // on edits. The single publish-time recording+versioning path.
-    crate::provider_surface_store::record_and_version_carrier_companions(
+    //
+    // A refused IDE record means the open document moved after this compile's
+    // pin: the companions hold a revision the editor no longer has. Publish
+    // nothing. The store is the provider's view, while the LSP-side records
+    // still describe the live revision; writing the stale content would leave
+    // the two disagreeing, and an edit that returns the document to the
+    // already-committed text (insert then undo) would find nothing to
+    // republish. The live revision is requeued and publishes on its own pass.
+    if crate::provider_surface_store::record_and_version_carrier_companions(
         req.provider_surfaces,
         req.documents,
         req.host,
         req.canonical_id,
         &mut companions,
         req.open_pin,
-    );
+    )
+    .is_err()
+    {
+        return CarrierSyncDecision::NotOwned(CarrierNotOwned::superseded());
+    }
 
     match membership
         .coordinator
@@ -916,7 +936,9 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                     // currency witness: the store publication — not a direct
                     // buffer this state would have to track — owns what tsserver
                     // holds, and the witness exists for the direct-open route
-                    // that opens the API companion itself.
+                    // that opens the API companion itself. WHICH API bytes the
+                    // publication carries is the receipt's API fingerprint, which
+                    // the admission gate stamps as the committed API surface.
                     if committed_state.api_path.is_some() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
                     }
@@ -933,14 +955,16 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                     // still requires direct companion buffers. Its independent
                     // receipt is minted only after those opens succeed and
                     // attests the exact provider-specialized IDE bytes.
-                    let source_revision = carrier_source_revision(req.host, req.canonical_id);
+                    let (source_revision, source_evidence) =
+                        held_carrier_source_revision(req.host, req.canonical_id);
                     let pending = PendingProviderReady::authorize(
                         &binding,
                         source_revision,
                         intent_epoch,
                         "tsgo",
                         &companions,
-                    );
+                    )
+                    .holding_source_evidence(source_evidence);
                     CarrierSyncDecision::DirectOpen {
                         transition,
                         pending,
@@ -971,6 +995,18 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
 /// `NotReady` and no owned commit is minted).
 fn carrier_source_revision(host: &VerterHost, canonical_id: &str) -> u64 {
     host.last_content_transition_generation(canonical_id)
+}
+
+/// [`carrier_source_revision`] together with the source's freshness lease,
+/// taken FIRST so the revision is read from evidence the caller owns: while
+/// the lease lives, retiring unrelated workspace history never moves it, so
+/// the drain's equality recheck refuses only a transition of this source.
+fn held_carrier_source_revision(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> (u64, Option<verter_workspace::CanonicalFreshnessLease>) {
+    let evidence = host.lease_content_transition(canonical_id);
+    (carrier_source_revision(host, canonical_id), evidence)
 }
 
 /// Whether the owning configured project EXCLUDES the carrier's generated units
@@ -1138,7 +1174,7 @@ fn published_structure_stamp(
         .collect();
     let token = structure.public_artifact_token();
     Some(verter_session::external_ts::SnapshotStructureStamp {
-        schema_version: 1,
+        schema_version: CARRIER_STORE_WIRE_PIN as u32,
         artifact_token: Arc::from(token.as_str()),
         script_content_ranges,
         markup_opening_ranges,
@@ -1226,12 +1262,23 @@ pub struct CarrierTransactionCoordinator {
     /// own exhaustion record — the chain instead yields to it (skips the
     /// record, so the cleared budget stands and a fresh chain follows).
     pending_redrive_signal_generation: std::sync::atomic::AtomicU64,
+    /// Completed drain passes wake the existing post-scan completion gate.
+    /// This carries progress only; the server still checks the live queue and generation.
+    pending_sync_progress: tokio::sync::watch::Sender<()>,
 }
 
 impl CarrierTransactionCoordinator {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn subscribe_pending_sync_progress(&self) -> tokio::sync::watch::Receiver<()> {
+        self.pending_sync_progress.subscribe()
+    }
+
+    pub(crate) fn note_pending_sync_progress(&self) {
+        self.pending_sync_progress.send_replace(());
     }
 
     /// Begin a pending-snapshot re-drive chain: `true` only for the one
@@ -1360,10 +1407,36 @@ impl CarrierTransactionCoordinator {
         state.owner_binding = ProviderOwnerBinding::Unresolved;
         state.commit_stamp = None;
         state.committed_ide_surface = None;
+        state.committed_api_surface = None;
+    }
+
+    /// [`Self::convert_to_unresolved`] applied to the LIVE state in `states` (created
+    /// empty when absent), then `update` on that same entry — one in-place conversion
+    /// that never overwrites concurrent writes to the entry's other fields. The barrier
+    /// entry is taken BEFORE the states entry, the same barrier→states nesting
+    /// [`Self::admit_owned`] uses, so the advance decision is read from the live token and
+    /// no owned commit can interleave between the advance and the clear. No `.await` is
+    /// held across the guards.
+    pub(crate) fn convert_live_to_unresolved(
+        &self,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
+        update: impl FnOnce(&mut ProviderSyncState),
+    ) {
+        let mut barrier = self.barriers.entry(source.to_string()).or_default();
+        let mut state = states.entry(source.to_string()).or_default();
+        if state.commit_stamp.is_some() {
+            barrier.intent_epoch = barrier.intent_epoch.saturating_add(1);
+        }
+        state.owner_binding = ProviderOwnerBinding::Unresolved;
+        state.commit_stamp = None;
+        state.committed_ide_surface = None;
+        state.committed_api_surface = None;
+        update(&mut state);
     }
 
     /// THE carrier provider-state admission gate — the sole RECEIPT-GATED owned-state
-    /// installer of the committed IDE-surface stamp ([`CommittedCarrierIdeSurface`]) and the
+    /// installer of the committed IDE-surface stamp ([`CommittedCarrierSurface`]) and the
     /// commit stamp ([`CarrierCommitStamp`]) for the PRIMARY carrier-sync paths. It is NOT
     /// the sole mutator of the whole [`ProviderSyncState`]: the declaration-overlay lifecycle
     /// mutates the `Decl` kind outside this gate (it must never touch the IDE stamp / commit
@@ -1412,8 +1485,78 @@ impl CarrierTransactionCoordinator {
         host: &VerterHost,
         states: &DashMap<String, ProviderSyncState>,
         source: &str,
+        state: ProviderSyncState,
+        receipt: &ProviderReadyReceipt,
+    ) -> AdmitOutcome {
+        self.admit_owned_inner(host, states, source, state, receipt, false)
+    }
+
+    /// Fence state admission against the same document revision that produced
+    /// the delivered surface. No registry lookup occurs inside admission itself.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "admission includes its document identity fence"
+    )]
+    pub(crate) fn admit_owned_fenced(
+        &self,
+        host: &VerterHost,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
+        state: ProviderSyncState,
+        receipt: &ProviderReadyReceipt,
+        documents: Option<&crate::documents::DocumentRegistry>,
+        open_pin: Option<(
+            &tower_lsp_server::ls_types::Uri,
+            &crate::documents::DocumentSnapshotIdentity,
+        )>,
+    ) -> AdmitOutcome {
+        match (documents, open_pin) {
+            (Some(documents), Some((uri, identity))) => documents
+                .with_current_snapshot_identity(uri, identity, |_| {
+                    self.admit_owned(host, states, source, state, receipt)
+                })
+                .unwrap_or(AdmitOutcome::Superseded),
+            (Some(documents), None) if documents.canonical_id_to_uri(source).is_some() => {
+                AdmitOutcome::Superseded
+            }
+            (_, Some(_)) => AdmitOutcome::Superseded,
+            (_, None) => self.admit_owned(host, states, source, state, receipt),
+        }
+    }
+
+    /// API-only admission patches the live map entry so IDE or declaration
+    /// work completed during API I/O cannot be overwritten by the old capture.
+    pub(crate) fn admit_api_owned(
+        &self,
+        host: &VerterHost,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
+        state: ProviderSyncState,
+        receipt: &ProviderReadyReceipt,
+    ) -> AdmitOutcome {
+        if receipt.companions().is_empty()
+            || receipt
+                .companions()
+                .iter()
+                .any(|c| c.role != SnapshotRole::CarrierApi)
+        {
+            return AdmitOutcome::Superseded;
+        }
+        self.admit_owned_inner(host, states, source, state, receipt, true)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "admission chooses a complete state or an API-only patch under the same entry lock"
+    )]
+    fn admit_owned_inner(
+        &self,
+        host: &VerterHost,
+        states: &DashMap<String, ProviderSyncState>,
+        source: &str,
         mut state: ProviderSyncState,
         receipt: &ProviderReadyReceipt,
+        api_only: bool,
     ) -> AdmitOutcome {
         // OWNER admission (reads the receipt/state only — no map access).
         if let Some(owner_key) = state.owner_binding.owner_key() {
@@ -1452,6 +1595,14 @@ impl CarrierTransactionCoordinator {
         use dashmap::mapref::entry::Entry;
         match states.entry(source.to_string()) {
             Entry::Occupied(mut occupied) => {
+                if api_only {
+                    crate::provider_sync::revert_unsynced_kinds(
+                        &mut state,
+                        Some(occupied.get()),
+                        &[ProviderPathKind::Api],
+                    );
+                }
+
                 let current_stamp = occupied.get().commit_stamp;
                 let prior_ide_surface = occupied.get().committed_ide_surface.clone();
                 // Whether this commit keeps the SAME committed IDE path. The equal-key
@@ -1511,13 +1662,25 @@ impl CarrierTransactionCoordinator {
                         return AdmitOutcome::Superseded;
                     }
                 }
+                state.committed_api_surface =
+                    committed_api_surface_for_commit(Some(occupied.get()), &state, receipt);
                 state.committed_ide_surface = next_ide_surface;
                 state.commit_stamp = Some(incoming);
                 occupied.insert(state);
             }
             Entry::Vacant(vacant) => {
+                if api_only {
+                    crate::provider_sync::revert_unsynced_kinds(
+                        &mut state,
+                        None,
+                        &[ProviderPathKind::Api],
+                    );
+                }
+
                 state.committed_ide_surface =
                     committed_ide_surface_for_commit(None, &state, receipt);
+                state.committed_api_surface =
+                    committed_api_surface_for_commit(None, &state, receipt);
                 state.commit_stamp = Some(incoming);
                 vacant.insert(state);
             }
@@ -1572,6 +1735,12 @@ impl CarrierTransactionCoordinator {
                 }
                 SettleClass::RetractFailed
             }
+            NotOwnedReason::Superseded => {
+                if let Some(set) = requeue {
+                    set.insert(source.to_string());
+                }
+                SettleClass::Superseded
+            }
         }
     }
 }
@@ -1592,7 +1761,7 @@ fn committed_ide_surface_for_commit(
     prior: Option<&ProviderSyncState>,
     state: &ProviderSyncState,
     receipt: &ProviderReadyReceipt,
-) -> Option<crate::provider_sync::CommittedCarrierIdeSurface> {
+) -> Option<crate::provider_sync::CommittedCarrierSurface> {
     let ide_path = state.ide_path.as_deref()?;
     // This commit (re)published the IDE surface at the committed path ⇒ stamp its
     // receipt-attested content/map identity (the exact bytes the provider serves).
@@ -1602,21 +1771,52 @@ fn committed_ide_surface_for_commit(
         .find(|companion| {
             companion.role == SnapshotRole::CarrierIde && companion.uri.as_ref() == ide_path
         })
-        .map(
-            |companion| crate::provider_sync::CommittedCarrierIdeSurface {
-                content_hash: companion.content_hash,
-                map_hash: companion.map_hash,
-            },
-        )
+        .map(|companion| crate::provider_sync::CommittedCarrierSurface {
+            content_hash: companion.content_hash,
+            map_hash: companion.map_hash,
+        })
     {
         return Some(stamp);
     }
     // This commit did not re-advertise the IDE surface at `ide_path` (an api-only refresh,
     // or a partial open where the IDE buffer failed): preserve the prior committed IDE
-    // stamp iff the live path is unchanged.
+    // stamp iff the live path and owner are unchanged.
     let prior = prior?;
-    if prior.ide_path.as_deref() == Some(ide_path) {
+    if prior.ide_path.as_deref() == Some(ide_path) && prior.owner_binding == state.owner_binding {
         prior.committed_ide_surface.clone()
+    } else {
+        None
+    }
+}
+
+/// The receipt-attested PUBLIC-API surface identity an owned commit installs — the
+/// API twin of [`committed_ide_surface_for_commit`]. A commit whose receipt attests
+/// the API companion at the committed `api_path` stamps that exact publication; one
+/// that did not re-advertise it (an IDE-only refresh) keeps the prior stamp only
+/// while the path and owner are unchanged. A receipt is the only source: path
+/// liveness alone never says which API bytes the engine reads.
+fn committed_api_surface_for_commit(
+    prior: Option<&ProviderSyncState>,
+    state: &ProviderSyncState,
+    receipt: &ProviderReadyReceipt,
+) -> Option<crate::provider_sync::CommittedCarrierSurface> {
+    let api_path = state.api_path.as_deref()?;
+    if let Some(stamp) = receipt
+        .companions()
+        .iter()
+        .find(|companion| {
+            companion.role == SnapshotRole::CarrierApi && companion.uri.as_ref() == api_path
+        })
+        .map(|companion| crate::provider_sync::CommittedCarrierSurface {
+            content_hash: companion.content_hash,
+            map_hash: companion.map_hash,
+        })
+    {
+        return Some(stamp);
+    }
+    let prior = prior?;
+    if prior.api_path.as_deref() == Some(api_path) && prior.owner_binding == state.owner_binding {
+        prior.committed_api_surface.clone()
     } else {
         None
     }
@@ -1650,6 +1850,7 @@ fn carrier_owned_sync_state(
         shadow_background_loaded: false,
         // Stamped by `commit_carrier_provider_state` from the receipt at commit time.
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -1686,6 +1887,7 @@ pub(crate) fn carrier_close_target(
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,

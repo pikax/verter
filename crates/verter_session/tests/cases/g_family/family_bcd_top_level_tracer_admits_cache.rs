@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use verter_session::for_tests::app_config_no_override_proof_get_or_compute_for_tests;
-use verter_session::resolver_core::FactVersionRef;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 fn make_host_with_file(canonical: &str, source: &str) -> Arc<VerterHost> {

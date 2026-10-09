@@ -72,6 +72,28 @@ pub(super) enum DesiredMutation {
 }
 
 impl DesiredMutation {
+    /// Open, load, or update bytes a successful forward commits.
+    pub(super) fn committed_file(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Open { path, content }
+            | Self::Load { path, content }
+            | Self::Update { path, content } => Some((path, content)),
+            Self::RegisterCarrier {
+                companion_path,
+                content,
+                ..
+            } => Some((companion_path, content)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn closed_path(&self) -> Option<&str> {
+        match self {
+            Self::Close { path } => Some(path),
+            _ => None,
+        }
+    }
+
     /// The paths whose crash attribution a successful application invalidates:
     /// the same position against NEW content is a new request.
     pub(super) fn touched_paths(&self) -> Vec<String> {
@@ -391,10 +413,17 @@ impl DesiredState {
     /// order on each file's recorded lane and access mode, then carrier
     /// registrations (CONTENTLESS). Any failure fails the replay: an engine
     /// that did not accept the complete desired state is never installed.
-    pub(super) async fn replay_into<P>(&self, provider: &P) -> Result<(), TypeProviderError>
+    pub(super) async fn replay_into<P>(
+        &self,
+        shared: &super::Shared<P>,
+        serving: &super::Serving<P>,
+    ) -> Result<HashSet<String>, TypeProviderError>
     where
         P: TypeProvider + ?Sized,
     {
+        let provider = serving.provider.as_ref();
+        let mut admissions = Vec::new();
+        let mut refused_paths = HashSet::new();
         if !self.workspace_folders.is_empty() {
             provider
                 .update_workspace_folders(self.workspace_folders.clone(), Vec::new())
@@ -412,6 +441,21 @@ impl DesiredState {
             if !self.replay_admitted(path) {
                 continue;
             }
+            let admission = match super::admission::generated_request(
+                shared,
+                Some(serving),
+                path,
+                None,
+                None,
+            ) {
+                Ok(admission) => admission,
+                // Held bytes are still desired, but excluded/unavailable units
+                // never reach this incarnation or become applied receipts.
+                Err(_) => {
+                    refused_paths.insert(path.clone());
+                    continue;
+                }
+            };
             let replayed = match (file.mode, file.lane) {
                 (FileMode::Open, Lane::Foreground) => provider.open_file(path, &file.content),
                 (FileMode::Open, Lane::Normal) => provider.open_file_normal(path, &file.content),
@@ -427,6 +471,11 @@ impl DesiredState {
             replayed.await.map_err(|error| {
                 TypeProviderError::new(format!("replay of {path} failed: {error}"))
             })?;
+            if let Some(mut admission) = admission {
+                super::admission::refresh_replay_request(shared, serving, path, &mut admission)
+                    .map_err(TypeProviderError::admission)?;
+                admissions.push((path.as_str(), admission));
+            }
         }
 
         // Carriers replay in two passes, mirroring the live publication →
@@ -444,6 +493,23 @@ impl DesiredState {
             if !self.replay_admitted(companion_path) {
                 continue;
             }
+            let mutation = DesiredMutation::RegisterCarrierMetadata {
+                source_path: carrier.source_path.clone(),
+                companion_path: companion_path.clone(),
+                content: String::new(),
+                project_file_name: carrier.project_file_name.clone(),
+            };
+            let requests = match super::admission::generated_mutation_requests(
+                shared,
+                Some(serving),
+                &mutation,
+            ) {
+                Ok(requests) => requests,
+                Err(_) => {
+                    refused_paths.insert(companion_path.clone());
+                    continue;
+                }
+            };
             let registration = if carrier.active && carrier.script_kind.is_none() {
                 provider.register_carrier_member(
                     &carrier.source_path,
@@ -464,6 +530,16 @@ impl DesiredState {
                     "carrier replay of {companion_path} failed: {error}"
                 ))
             })?;
+            for mut request in requests {
+                super::admission::refresh_replay_request(
+                    shared,
+                    serving,
+                    companion_path,
+                    &mut request,
+                )
+                .map_err(TypeProviderError::admission)?;
+                admissions.push((companion_path.as_str(), request));
+            }
             if let Some(script_kind) = carrier.script_kind {
                 activations.push(CarrierActivation {
                     source_path: carrier.source_path.clone(),
@@ -474,6 +550,7 @@ impl DesiredState {
             }
         }
         if !activations.is_empty() {
+            check_replay_admissions(shared, serving, &mut admissions)?;
             provider
                 .activate_carrier_members(&activations)
                 .await
@@ -481,8 +558,48 @@ impl DesiredState {
                     TypeProviderError::new(format!("carrier activation replay failed: {error}"))
                 })?;
         }
-        Ok(())
+        check_replay_admissions(shared, serving, &mut admissions)?;
+        Ok(refused_paths)
     }
+
+    /// Files a completed replay left on the engine: admitted overlays were
+    /// discarded and are not serving content.
+    pub(super) fn serving_file_contents(&self) -> Vec<(String, std::sync::Arc<str>)> {
+        self.files
+            .iter()
+            .map(|(path, file)| {
+                (
+                    path.clone(),
+                    std::sync::Arc::<str>::from(file.content.as_str()),
+                )
+            })
+            .chain(self.carriers.iter().map(|(path, carrier)| {
+                (
+                    path.clone(),
+                    std::sync::Arc::<str>::from(carrier.content.as_str()),
+                )
+            }))
+            .collect()
+    }
+}
+
+fn check_replay_admissions<P: ?Sized>(
+    shared: &super::Shared<P>,
+    serving: &super::Serving<P>,
+    admissions: &mut [(&str, AdmittedRequest)],
+) -> Result<(), TypeProviderError> {
+    for (path, request) in admissions.iter_mut() {
+        super::admission::refresh_replay_request(shared, serving, path, request)
+            .map_err(TypeProviderError::admission)?;
+    }
+    // A later refresh can observe another content edit and evict an earlier
+    // warm binding. Installation needs unchanged membership of replayed bytes,
+    // not simultaneous content freshness across independent workspace reads.
+    for (_, request) in admissions {
+        super::admission::check_replay_membership_for_serving(shared, serving, request)
+            .map_err(TypeProviderError::admission)?;
+    }
+    Ok(())
 }
 
 fn folder_uri(folder: &serde_json::Value) -> Option<&str> {

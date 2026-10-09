@@ -1,0 +1,45 @@
+error[E0599]: no method named `surface_claims` found for reference `&Arc<ProjectTypeStore>` in the current scope
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:22:39
+   |
+22 |     let _ = host.project_type_store().surface_claims();
+   |                                       ^^^^^^^^^^^^^^ method not found in `&Arc<ProjectTypeStore>`
+
+error[E0624]: associated function `mint` is private
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:27:42
+   |
+27 |     let _minted = SurfaceClaimAuthority::mint();
+   |                                          ^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
+   |
+   |     pub(crate) fn mint() -> Self {
+   |     ---------------------------- private associated function defined here
+
+error[E0277]: the trait bound `SurfaceClaimAuthority: std::default::Default` is not satisfied
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:28:45
+   |
+28 |     let _defaulted: SurfaceClaimAuthority = Default::default();
+   |                                             ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `SurfaceClaimAuthority`
+
+error[E0277]: the trait bound `SurfaceClaimAuthority: Clone` is not satisfied
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:30:10
+   |
+30 |         <SurfaceClaimAuthority as Clone>::clone(authority)
+   |          ^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `SurfaceClaimAuthority`
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:32:19
+   |
+32 |     let _forged = SurfaceClaimAuthority(());
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
+   |
+   | pub struct SurfaceClaimAuthority(());
+   |                                  ^^ private field
+help: you might have meant to use the `mint` associated function
+   |
+32 -     let _forged = SurfaceClaimAuthority(());
+32 +     let _forged = SurfaceClaimAuthority::mint();
+   |

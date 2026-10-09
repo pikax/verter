@@ -2607,7 +2607,7 @@ pub struct ObjectShapeFact {
 /// (see `format_enum_number` in `verter_semantic::analysis::type_eval_build`),
 /// never a raw `f64` (which would break `Eq`/`Hash` identity) and never the
 /// verbatim source spelling. The fingerprint producer
-/// (`scalar_to_type_expr` in `verter_semantic::facts::hashing`) parses the
+/// (`scalar_to_type_expr` in `verter_session_query::facts::hashing`) parses the
 /// string back to the exact same bits, so string-identity dedup on this fact
 /// is equivalent to `f64::to_bits` dedup and the byte-parity contract between
 /// the parse-time and lowering-time emitters holds.

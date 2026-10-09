@@ -73,7 +73,9 @@ struct WasmAuditBundleForWalker {
 
 /// Parse a 32-char lowercase hex string into `Hash16`. WASM-error
 /// variant of the NAPI helper with the same name.
-fn parse_hash16_hex_wasm(hex: &str) -> Result<host::Hash16, JsValue> {
+fn parse_hash16_hex_wasm(
+    hex: &str,
+) -> Result<verter_session_query::analysis::types::Hash16, JsValue> {
     if hex.len() != 32 {
         return Err(JsValue::from_str(&format!(
             "args_fingerprint_hex must be 32 hex chars (16 bytes), got {} chars",
@@ -184,6 +186,60 @@ struct WasmDependencyResolution {
     possible_canonical_ids: Option<Vec<String>>,
 }
 
+/// The WASM carrier's host-config wire form: the shared FFI fields plus
+/// the typed framework admission, parsed from one config object.
+///
+/// `FfiHostConfig` does not deny unknown fields, so the flattened form
+/// accepts exactly the object the FFI carrier accepts and reads the
+/// additional `frameworks` key without a second deserialization pass.
+#[derive(serde::Deserialize, Default)]
+struct WasmHostConfigWire {
+    #[serde(flatten)]
+    ffi: FfiHostConfig,
+    frameworks: Option<Vec<String>>,
+}
+
+/// Apply the WASM `frameworks` option onto a converted host config —
+/// the typed-options half of this carrier's construction.
+///
+/// `None` keeps the default admission (every composed vertical). `Some`
+/// validates through the ONE shared session validator
+/// ([`host::framework::FrameworkOptions::admitting_names`]), so this
+/// carrier accepts exactly the names, defaults, and rejections the
+/// native and NAPI carriers do; the diagnostic travels as the error
+/// string verbatim.
+fn apply_framework_names(
+    host_config: &mut host::HostConfig,
+    frameworks: Option<Vec<String>>,
+) -> Result<(), String> {
+    if let Some(names) = frameworks {
+        host_config.framework =
+            host::framework::FrameworkOptions::admitting_names(names).map_err(|error| {
+                format!("Invalid host input: framework admission rejected: {error}")
+            })?;
+    }
+    Ok(())
+}
+
+/// Convert a WASM constructor's config value into a host config,
+/// applying the typed framework admission from the same object.
+fn wasm_host_config(config: JsValue) -> Result<host::HostConfig, JsValue> {
+    let wire: WasmHostConfigWire = if config.is_undefined() || config.is_null() {
+        WasmHostConfigWire::default()
+    } else {
+        parse_wasm_input(config)?
+    };
+    host_config_from_wire(wire).map_err(|error| JsValue::from_str(&error))
+}
+
+/// The decoded half of [`wasm_host_config`]: the shared FFI conversion
+/// followed by the typed framework admission read off the same object.
+fn host_config_from_wire(wire: WasmHostConfigWire) -> Result<host::HostConfig, String> {
+    let mut host_config = ffi_config_to_host(wire.ffi).map_err(|error| error.to_string())?;
+    apply_framework_names(&mut host_config, wire.frameworks)?;
+    Ok(host_config)
+}
+
 /// Run a closure, converting any panic into a `JsValue` error.
 /// Prevents Rust panics from crashing the WASM runtime and poisoning
 /// RefCell borrow state.
@@ -213,22 +269,30 @@ fn host_err(err: host::HostError) -> JsValue {
 
 fn ffi_module_reference_syntax_from_str(
     syntax: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSyntax, JsValue> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSyntax, JsValue> {
     match syntax {
-        "staticImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::StaticImport),
-        "exportFrom" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom),
-        "dynamicImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport),
-        "requireCall" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::RequireCall),
+        "staticImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport)
+        }
+        "exportFrom" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom)
+        }
+        "dynamicImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport)
+        }
+        "requireCall" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::RequireCall)
+        }
         other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
     }
 }
 
 fn ffi_module_reference_semantics_from_str(
     semantics: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSemantics, JsValue> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSemantics, JsValue> {
     match semantics {
-        "import" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Import),
-        "require" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Require),
+        "import" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Require),
         other => Err(ffi_err(format!(
             "unknown module reference semantics: {other}"
         ))),
@@ -237,12 +301,14 @@ fn ffi_module_reference_semantics_from_str(
 
 fn ffi_module_reference_analyzability_from_str(
     analyzability: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceAnalyzability, JsValue> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceAnalyzability, JsValue> {
     match analyzability {
-        "exact" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::Exact),
-        "finiteSet" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "exact" => Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet)
+        }
         "unknownDynamic" => {
-            Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic)
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic)
         }
         other => Err(ffi_err(format!(
             "unknown module reference analyzability: {other}"
@@ -252,35 +318,21 @@ fn ffi_module_reference_analyzability_from_str(
 
 fn ffi_module_reference_to_analysis(
     input: FfiModuleReference,
-) -> Result<verter_semantic::analysis::AnalyzedModuleReference, JsValue> {
-    Ok(verter_semantic::analysis::AnalyzedModuleReference {
-        syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
-        semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
-        is_type_only: input.is_type_only,
-        span: verter_span::Span::new(input.span_start, input.span_end),
-        expr_span: verter_span::Span::new(input.expr_span_start, input.expr_span_end),
-        raw_text: input.raw_text,
-        literal_specifier: input.literal_specifier,
-        finite_specifiers: input.finite_specifiers,
-        static_prefix: input.static_prefix,
-        analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
-    })
-}
-
-fn default_known_dependency_extensions() -> Vec<String> {
-    vec![
-        "".to_string(),
-        ".ts".to_string(),
-        ".tsx".to_string(),
-        ".js".to_string(),
-        ".jsx".to_string(),
-        ".mts".to_string(),
-        ".mjs".to_string(),
-        ".cts".to_string(),
-        ".cjs".to_string(),
-        ".vue".to_string(),
-        ".svelte".to_string(),
-    ]
+) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference, JsValue> {
+    Ok(
+        verter_session_query::analysis::types::AnalyzedModuleReference {
+            syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
+            semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
+            is_type_only: input.is_type_only,
+            span: verter_span::Span::new(input.span_start, input.span_end),
+            expr_span: verter_span::Span::new(input.expr_span_start, input.expr_span_end),
+            raw_text: input.raw_text,
+            literal_specifier: input.literal_specifier,
+            finite_specifiers: input.finite_specifiers,
+            static_prefix: input.static_prefix,
+            analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
+        },
+    )
 }
 
 // =============================================================================
@@ -541,15 +593,9 @@ impl WasmVerterHost {
     /// unrecognised `compileErrorPolicy` string).
     #[wasm_bindgen(constructor)]
     pub fn new(config: JsValue) -> Result<WasmVerterHost, JsValue> {
-        let ffi_config = if config.is_undefined() || config.is_null() {
-            FfiHostConfig::default()
-        } else {
-            parse_wasm_input::<FfiHostConfig>(config)?
-        };
+        let host_config = wasm_host_config(config)?;
         Ok(Self {
-            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
-                ffi_config_to_host(ffi_config).map_err(ffi_err)?,
-            )),
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(host_config)),
             input_snapshots: std::sync::Mutex::new(input_snapshot::InputSnapshotStore::new()),
         })
     }
@@ -804,9 +850,7 @@ impl WasmVerterHost {
             .map(ffi_module_reference_to_analysis)
             .collect::<Result<Vec<_>, _>>()?;
         let specifiers =
-            verter_semantic::resolver_core::collect_resolvable_module_reference_specifiers(
-                &module_references,
-            );
+            verter_resolution::collect_resolvable_module_reference_specifiers(&module_references);
         to_wasm_value(&specifiers)
     }
 
@@ -826,11 +870,11 @@ impl WasmVerterHost {
             .collect::<Result<Vec<_>, _>>()?;
         let known_ids: Vec<String> = parse_wasm_input(known_ids)?;
         let extensions = if extensions.is_undefined() || extensions.is_null() {
-            default_known_dependency_extensions()
+            self.inner.known_dependency_extensions()
         } else {
             parse_wasm_input::<Vec<String>>(extensions)?
         };
-        let resolved = verter_semantic::resolver_core::resolve_known_module_reference_dependencies(
+        let resolved = verter_resolution::resolve_known_module_reference_dependencies(
             owner_id,
             &module_references,
             &known_ids,
@@ -953,10 +997,15 @@ impl WasmVerterHost {
                 let mut seen = std::collections::HashSet::new();
                 actions.retain(|a| seen.insert(a.title.clone()));
 
-                actions
-                    .iter()
-                    .map(|a| code_action_to_ffi(a, source))
-                    .collect::<Vec<_>>()
+                if actions.is_empty() {
+                    Vec::new()
+                } else {
+                    let index = verter_ffi::convert::OffsetIndex::new(source);
+                    actions
+                        .iter()
+                        .map(|a| code_action_to_ffi(a, &index))
+                        .collect::<Vec<_>>()
+                }
             }
             _ => Vec::new(),
         };
@@ -1032,7 +1081,7 @@ impl WasmVerterHost {
         canonical_id: &str,
         decl_name: &str,
     ) -> Result<JsValue, JsValue> {
-        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+        use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
         let host = std::sync::Arc::clone(&self.inner);
         let canonical_id_owned = canonical_id.to_string();
         let decl_name_owned = decl_name.to_string();
@@ -1562,15 +1611,15 @@ fn input_snapshot_observation(
 /// Extracts all script-related fields, preserving `vue_api_calls` and
 /// `dom_query_calls` from the snapshot (fixes zeroed-fields bug).
 fn build_script_snapshot(
-    snapshot: &host::FileAnalysisSnapshot,
-) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
-    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
+    verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
         module_references: snapshot.module_references.to_vec(),
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.to_vec(),
         macro_type_deps: snapshot.macro_type_deps.to_vec(),
-        flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+        flags: verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
             snapshot.script_flags,
         ),
         exported_functions: Vec::new(),
@@ -1611,9 +1660,11 @@ mod symbol_kind {
 ///
 /// Generates a hierarchical tree of SFC blocks → children.
 fn build_document_symbols_from_analysis(
-    snapshot: &host::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiDocumentSymbol> {
+    // One index per source, shared by every symbol span.
+    let index = verter_ffi::convert::OffsetIndex::new(source);
     let mut symbols = Vec::new();
 
     // Script block with bindings/imports/macros
@@ -1640,21 +1691,23 @@ fn build_document_symbols_from_analysis(
 
         for binding in &snapshot.bindings {
             let kind = match binding.kind {
-                verter_semantic::analysis::AnalyzedBindingKind::Function
-                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function
+                | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
                     symbol_kind::FUNCTION
                 }
-                verter_semantic::analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    symbol_kind::CLASS
+                }
                 _ => symbol_kind::VARIABLE,
             };
             children.push(FfiDocumentSymbol {
                 name: binding.name.clone(),
                 detail: binding.type_annotation.clone(),
                 kind,
-                span_start: byte_offset_to_utf16_safe(source, binding.span.start),
-                span_end: byte_offset_to_utf16_safe(source, binding.span.end),
-                selection_start: byte_offset_to_utf16_safe(source, binding.span.start),
-                selection_end: byte_offset_to_utf16_safe(source, binding.span.end),
+                span_start: index.to_utf16(binding.span.start),
+                span_end: index.to_utf16(binding.span.end),
+                selection_start: index.to_utf16(binding.span.start),
+                selection_end: index.to_utf16(binding.span.end),
                 children: Vec::new(),
             });
         }
@@ -1701,10 +1754,10 @@ fn build_document_symbols_from_analysis(
                 name: comp.name.clone(),
                 detail: Some(format!("{} prop(s)", comp.props.len())),
                 kind: symbol_kind::CLASS,
-                span_start: byte_offset_to_utf16_safe(source, comp.span.start),
-                span_end: byte_offset_to_utf16_safe(source, comp.span.end),
-                selection_start: byte_offset_to_utf16_safe(source, comp.span.start),
-                selection_end: byte_offset_to_utf16_safe(source, comp.span.end),
+                span_start: index.to_utf16(comp.span.start),
+                span_end: index.to_utf16(comp.span.end),
+                selection_start: index.to_utf16(comp.span.start),
+                selection_end: index.to_utf16(comp.span.end),
                 children: Vec::new(),
             });
         }
@@ -1714,7 +1767,7 @@ fn build_document_symbols_from_analysis(
             detail: Some(format!("{} component(s)", template.components.len())),
             kind: symbol_kind::STRUCT,
             span_start: 0,
-            span_end: source.encode_utf16().count() as u32,
+            span_end: index.to_utf16(source.len() as u32),
             selection_start: 0,
             selection_end: 0,
             children,
@@ -1731,10 +1784,10 @@ fn build_document_symbols_from_analysis(
                     name: format!(".{}", class.name),
                     detail: None,
                     kind: symbol_kind::PROPERTY,
-                    span_start: byte_offset_to_utf16_safe(source, class.span.start),
-                    span_end: byte_offset_to_utf16_safe(source, class.span.end),
-                    selection_start: byte_offset_to_utf16_safe(source, class.span.start),
-                    selection_end: byte_offset_to_utf16_safe(source, class.span.end),
+                    span_start: index.to_utf16(class.span.start),
+                    span_end: index.to_utf16(class.span.end),
+                    selection_start: index.to_utf16(class.span.start),
+                    selection_end: index.to_utf16(class.span.end),
                     children: Vec::new(),
                 });
             }
@@ -1763,14 +1816,9 @@ fn build_document_symbols_from_analysis(
     symbols
 }
 
-/// Safe UTF-16 conversion that handles 0 as identity.
-fn byte_offset_to_utf16_safe(source: &str, byte_offset: u32) -> u32 {
-    verter_ffi::convert::byte_offset_to_utf16(source, byte_offset)
-}
-
 /// Build CSS selector match results for visualization.
 pub fn build_selector_match_results(
-    snapshot: &host::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiSelectorMatchResult> {
     let template = match &snapshot.template {
@@ -1778,6 +1826,8 @@ pub fn build_selector_match_results(
         None => return Vec::new(),
     };
 
+    // One index per source, shared by every selector and element span.
+    let index = verter_ffi::convert::OffsetIndex::new(source);
     let mut results = Vec::new();
 
     for style in snapshot.styles.iter() {
@@ -1801,8 +1851,8 @@ pub fn build_selector_match_results(
                 );
                 matches.push(FfiElementMatch {
                     tag: element.tag.clone(),
-                    span_start: byte_offset_to_utf16_safe(source, element.span.start),
-                    span_end: byte_offset_to_utf16_safe(source, element.span.end),
+                    span_start: index.to_utf16(element.span.start),
+                    span_end: index.to_utf16(element.span.end),
                     result: match result {
                         verter_semantic::analysis::selector_match::MatchResult::Matches => {
                             "match".to_string()
@@ -1819,8 +1869,8 @@ pub fn build_selector_match_results(
 
             results.push(FfiSelectorMatchResult {
                 selector_text: selector.text.clone(),
-                selector_start: byte_offset_to_utf16_safe(source, selector.span.start),
-                selector_end: byte_offset_to_utf16_safe(source, selector.span.end),
+                selector_start: index.to_utf16(selector.span.start),
+                selector_end: index.to_utf16(selector.span.end),
                 matches,
             });
         }
@@ -1831,24 +1881,12 @@ pub fn build_selector_match_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_known_dependency_extensions, lint_diagnostics_to_utf16};
+    use super::lint_diagnostics_to_utf16;
     use super::{host, FfiConversionError, PublicApiProjectionSubject, WasmVerterHost};
     #[cfg(target_arch = "wasm32")]
     use super::{
         public_api_to_wasm_value, FfiPublicApiProjectionError, FfiPublicApiResult, FfiTscResponse,
     };
-
-    #[test]
-    fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
-        let extensions = default_known_dependency_extensions();
-        assert_eq!(
-            extensions
-                .iter()
-                .filter(|ext| ext.as_str() == ".svelte")
-                .count(),
-            1
-        );
-    }
 
     /// A WASM host preloaded with a Vue SFC whose props type lives in a
     /// sibling `.ts` file — the same fixture shape the verter_session
@@ -2278,12 +2316,7 @@ impl WasmMetaProject {
     #[wasm_bindgen(constructor)]
     pub fn new(config: JsValue) -> Result<WasmMetaProject, JsValue> {
         catch_panic(AssertUnwindSafe(|| {
-            let ffi_config: FfiHostConfig = if config.is_null() || config.is_undefined() {
-                FfiHostConfig::default()
-            } else {
-                parse_wasm_input(config)?
-            };
-            let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+            let host_config = wasm_host_config(config)?;
             Ok(WasmMetaProject {
                 inner: std::sync::Arc::new(
                     host::component_meta_host::ComponentMetaHost::new_standalone(host_config),
@@ -2553,5 +2586,121 @@ impl WasmMetaSession {
         self.inner
             .as_ref()
             .is_none_or(|session| session.is_closed())
+    }
+}
+
+/// The WASM carrier's `frameworks` option, decoded from the same config
+/// object the constructors receive: the key is read off the flattened FFI
+/// config and funnelled through the ONE shared session validator, so this
+/// carrier narrows and rejects exactly like the native and NAPI carriers.
+#[cfg(test)]
+mod framework_options_carrier_tests {
+    use super::*;
+
+    fn host_over(config: serde_json::Value) -> std::result::Result<host::VerterHost, String> {
+        let wire: WasmHostConfigWire =
+            serde_json::from_value(config).map_err(|error| error.to_string())?;
+        Ok(host::VerterHost::new_standalone(host_config_from_wire(
+            wire,
+        )?))
+    }
+
+    fn sorted_carrier_extensions(host: &host::VerterHost) -> Vec<String> {
+        let mut extensions: Vec<String> = host
+            .language_classifier()
+            .carrier_extensions()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        extensions.sort_unstable();
+        extensions
+    }
+
+    #[test]
+    fn wasm_frameworks_key_narrows_the_constructed_host() {
+        let host = host_over(serde_json::json!({ "frameworks": ["vue"], "devMode": true }))
+            .expect("the Vue vertical is composed");
+        assert_eq!(sorted_carrier_extensions(&host), vec!["vue"]);
+        assert!(
+            host.config().dev_mode,
+            "the shared FFI fields still decode beside the frameworks key"
+        );
+    }
+
+    #[test]
+    fn wasm_frameworks_key_rejects_unknown_names_with_the_shared_diagnostic() {
+        let Err(error) = host_over(serde_json::json!({ "frameworks": ["react"] })) else {
+            panic!("react is not a composed vertical");
+        };
+        assert!(
+            error.contains("'react'") && error.contains("svelte, vue"),
+            "the carrier surfaces the shared diagnostic verbatim: {error}"
+        );
+    }
+
+    #[test]
+    fn wasm_config_without_frameworks_keeps_the_default_admission() {
+        let host = host_over(serde_json::json!({})).expect("default construction");
+        assert_eq!(sorted_carrier_extensions(&host), vec!["svelte", "vue"]);
+    }
+}
+
+/// The same option reached the way a browser reaches it: a plain JS config
+/// object handed to the generated constructors, so the JS-to-WASM decode
+/// and each constructor's use of it are what is exercised.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod framework_options_js_constructor_tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    fn js_config(json: &str) -> JsValue {
+        js_sys::JSON::parse(json).expect("the fixture is valid JSON")
+    }
+
+    fn sorted_carrier_extensions(
+        classifier: &host::framework::HostLanguageClassifier,
+    ) -> Vec<String> {
+        let mut extensions: Vec<String> = classifier
+            .carrier_extensions()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        extensions.sort_unstable();
+        extensions
+    }
+
+    #[wasm_bindgen_test]
+    fn host_constructor_narrows_with_the_js_frameworks_key() {
+        let host = WasmVerterHost::new(js_config(r#"{"frameworks":["vue"]}"#))
+            .expect("the Vue vertical is composed");
+        assert_eq!(
+            sorted_carrier_extensions(host.inner.language_classifier()),
+            vec!["vue"]
+        );
+
+        let default_host = WasmVerterHost::new(js_config("{}")).expect("default construction");
+        assert_eq!(
+            sorted_carrier_extensions(default_host.inner.language_classifier()),
+            vec!["svelte", "vue"]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn host_constructor_rejects_an_unknown_js_framework_name() {
+        let Err(error) = WasmVerterHost::new(js_config(r#"{"frameworks":["react"]}"#)) else {
+            panic!("react is not a composed vertical");
+        };
+        let error = error.as_string().expect("the rejection is a string");
+        assert!(error.contains("'react'"), "{error}");
+    }
+
+    #[wasm_bindgen_test]
+    fn meta_project_constructor_narrows_with_the_js_frameworks_key() {
+        let project = WasmMetaProject::new(js_config(r#"{"frameworks":["svelte"]}"#))
+            .expect("the Svelte vertical is composed");
+        assert_eq!(
+            sorted_carrier_extensions(project.inner.language_classifier()),
+            vec!["svelte"]
+        );
     }
 }

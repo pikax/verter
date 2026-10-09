@@ -2,7 +2,7 @@ use super::*;
 use crate::changes::WorkspaceChange;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{ExactResolution, ParsedEdge};
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 /// The temp directory's REAL path, for filesystem operations.
 ///
@@ -30,7 +30,7 @@ fn canonical_temp_root(dir: &tempfile::TempDir) -> std::path::PathBuf {
 /// and the drive case, and a bare `canonicalize_path` never resolves the
 /// symlink. Every temp-derived id in this file goes through here.
 fn temp_canonical_id(path: &std::path::Path) -> String {
-    verter_semantic::resolver_core::normalize_canonical_id(&path.to_string_lossy())
+    verter_session_query::resolution::normalize_canonical_id(&path.to_string_lossy())
 }
 
 /// Discrimination for [`temp_canonical_id`] on the platform whose spelling
@@ -181,11 +181,11 @@ fn frozen_resolution_revalidation_bypasses_probe_and_directory_caches() {
     let recorder = FilesystemResolutionRecorder::new(&workspace, published);
     assert_eq!(
         WorkspaceRead::probe_path(&recorder, &existing),
-        verter_semantic::resolver_core::PathProbe::File
+        verter_session_query::resolution::PathProbe::File
     );
     assert_eq!(
         WorkspaceRead::probe_path(&recorder, &appearing),
-        verter_semantic::resolver_core::PathProbe::Absent
+        verter_session_query::resolution::PathProbe::Absent
     );
     let frozen = recorder.freeze();
 
@@ -952,13 +952,13 @@ fn bounded_resolution_preflight_never_enumerates_or_retains_native_directory_ent
     let workspace = FilesystemWorkspace::new(FilesystemOptions::default());
     workspace.reset_vfs_provenance();
 
-    let keys = vec![verter_semantic::resolver_core::InputKey::PathProbe {
+    let keys = vec![verter_session_query::resolution::InputKey::PathProbe {
         path: target.clone().into(),
     }];
     let reservation = WorkspaceRead::preflight_resolution_inputs_bounded(
         &workspace,
         &keys,
-        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder(),
+        verter_session_query::resolution::ResolutionBasis::unbound_placeholder(),
     )
     .expect("metadata-only native preflight");
 
@@ -968,7 +968,7 @@ fn bounded_resolution_preflight_never_enumerates_or_retains_native_directory_ent
     assert!(matches!(
         reservation.entries(),
         [crate::resolver::ResolutionInputReservation::PathProbe {
-            value: verter_semantic::resolver_core::PathProbe::File,
+            value: verter_session_query::resolution::PathProbe::File,
             directories,
             ..
         }] if directories.is_empty()
@@ -976,7 +976,7 @@ fn bounded_resolution_preflight_never_enumerates_or_retains_native_directory_ent
 
     assert_eq!(
         WorkspaceRead::probe_path(&workspace, &target),
-        verter_semantic::resolver_core::PathProbe::File
+        verter_session_query::resolution::PathProbe::File
     );
     assert_eq!(
         workspace
@@ -1248,7 +1248,7 @@ fn package_tsconfig_membership_does_not_claim_sibling_package_files() {
     use crate::snapshot_builder::configured_membership_from_raw;
     use crate::CanonicalPath;
     use crate::ProjectMembership;
-    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+    use verter_session_query::resolution::IdeProjectCompilerOptions;
 
     let root = "/repo/packages/code-highlight";
     // MatchAll (no files/include) → defaults under THIS root only
@@ -1297,7 +1297,7 @@ fn alias_onto_file_directory_probe_is_stable_admissible_evidence() {
         root.clone(),
         Some(format!("{root}/tsconfig.json")),
     );
-    config.compiler_options = verter_semantic::resolver_core::IdeProjectCompilerOptions {
+    config.compiler_options = verter_session_query::resolution::IdeProjectCompilerOptions {
         base_url: Some(root.clone()),
         paths: vec![("@dep/child".to_string(), vec!["src/Child.vue".to_string()])],
         ..Default::default()
@@ -1364,7 +1364,7 @@ fn filesystem_package_fixture(
     let root = temp_canonical_id(&root_path);
     let importer = format!("{root}/src/main.ts");
     let manifest = format!("{root}/node_modules/pkg/package.json");
-    let budgets = verter_semantic::resolver_core::InputResolutionBudgets::try_tightened(
+    let budgets = verter_session_query::resolution::InputResolutionBudgets::try_tightened(
         32, 128, 32_768, 16, churn,
     )
     .expect("test policy");
@@ -1450,7 +1450,7 @@ fn assert_filesystem_import_churn_limit_is_typed_and_cold(with_overlay: bool) {
                 phase: ResolvePhase::ProviderGraph,
                 kind: ResolveRequestKind::EsmImport,
             },
-            verter_semantic::resolver_core::ResolutionPopulation::Base,
+            verter_session_query::resolution::ResolutionPopulation::Base,
         ),
         0
     );
@@ -1473,7 +1473,7 @@ fn assert_filesystem_import_churn_limit_is_typed_and_cold(with_overlay: bool) {
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].meter,
-        verter_semantic::resolver_core::InputResolutionBudgetMeter::Churn
+        verter_session_query::resolution::InputResolutionBudgetMeter::Churn
     );
     assert_eq!((events[0].consumed, events[0].prospective), (1, 2));
 
@@ -2327,7 +2327,7 @@ fn a_first_observation_advances_no_fact_and_republishes_no_world_root() {
         workspace
             .engine
             .capture_published_resolution_world(
-                verter_semantic::resolver_core::ResolutionPopulation::Base,
+                verter_session_query::resolution::ResolutionPopulation::Base,
             )
             .expect("a settled resolution world")
     };
@@ -2346,27 +2346,27 @@ fn a_first_observation_advances_no_fact_and_republishes_no_world_root() {
             "PathProbe",
             crate::resolution_currency::ResolutionFactKey::PathProbe {
                 canonical: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
-                population: verter_semantic::resolver_core::ResolutionPopulation::Base,
+                population: verter_session_query::resolution::ResolutionPopulation::Base,
             },
         ),
         (
             "Realpath",
             crate::resolution_currency::ResolutionFactKey::Realpath {
                 requested: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
-                population: verter_semantic::resolver_core::ResolutionPopulation::Base,
+                population: verter_session_query::resolution::ResolutionPopulation::Base,
             },
         ),
         (
             "Manifest",
             crate::resolution_currency::ResolutionFactKey::Manifest {
                 canonical: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
-                population: verter_semantic::resolver_core::ResolutionPopulation::Base,
+                population: verter_session_query::resolution::ResolutionPopulation::Base,
             },
         ),
     ] {
         assert_eq!(
             workspace.engine.resolution_fact_version_for_test(
-                verter_semantic::resolver_core::ResolutionPopulation::Base,
+                verter_session_query::resolution::ResolutionPopulation::Base,
                 &key
             ),
             crate::resolution_currency::ResolutionFactVersion::INITIAL,
@@ -2392,7 +2392,7 @@ fn a_first_observation_advances_no_fact_and_republishes_no_world_root() {
     );
     assert_eq!(
         base_world().base.path_probes.get(&dep),
-        Some(&verter_semantic::resolver_core::PathProbe::File),
+        Some(&verter_session_query::resolution::PathProbe::File),
         "the filled baseline must still be RECORDED. A fill that is discarded \
          leaves the family permanently unrecorded, and an unrecorded family \
          can never detect a change: every observation of it is a first \
@@ -2875,7 +2875,7 @@ fn freeze_and_refresh_agree_on_the_realpath_family() {
         realpath: Some(
             recorded_realpath
                 .as_deref()
-                .map(verter_semantic::resolver_core::normalize_canonical_id),
+                .map(verter_session_query::resolution::normalize_canonical_id),
         ),
         manifest: None,
     }
@@ -3164,4 +3164,68 @@ fn twelve_sibling_publications_never_refuse_a_route() {
         outcome.non_admission_reason()
     );
     assert_eq!(restarts, 0, "compatible siblings cost no restart");
+}
+
+/// A recursive disk deletion records every importer it removes as absent,
+/// as a per-file deletion does: a bare-import demand from one of them that
+/// is in flight across the deletion — an answer that reads nothing under
+/// the deleted directory — is served complete at its fence, but takes no
+/// slot, decision or dependency edge that nothing would ever retire.
+///
+/// Mutation recipe: drop the absence recording from
+/// `remove_importers_under_in_world`. The parked demand then admits a slot
+/// owned by the deleted importer.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_demand_in_flight_across_its_directory_deletion_is_served_but_not_retained() {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let (_temp, root, importer, _manifest, workspace) = filesystem_package_fixture(8);
+    let workspace = Arc::new(workspace);
+    let target = |outcome: &crate::resolution_currency::ResolutionOutcome| {
+        outcome.result().map(|result| result.source_id.clone())
+    };
+    let b = format!("{root}/node_modules/pkg/b.d.ts");
+    let a = format!("{root}/node_modules/pkg/a.d.ts");
+
+    let owned =
+        WorkspaceRead::resolve_import_outcome(workspace.as_ref(), &importer, "pkg/b", CONTEXT);
+    assert_eq!(target(&owned), Some(b), "fixture invariant: a deep import");
+    assert!(
+        owned.is_cacheable(),
+        "fixture invariant: the importer owns a slot"
+    );
+    assert_eq!(
+        WorkspaceRead::resource_snapshot(workspace.as_ref())
+            .resolution
+            .owners,
+        1,
+        "fixture invariant: the importer is the lane's one owner"
+    );
+
+    let deleter = Arc::clone(&workspace);
+    let source = format!("{root}/src");
+    let parked = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            WorkspaceAccess::delete_dir_all(deleter.as_ref(), &source).expect("subtree deletion");
+        },
+        || WorkspaceRead::resolve_import_outcome(workspace.as_ref(), &importer, "pkg", CONTEXT),
+    );
+    assert_eq!(
+        target(&parked),
+        Some(a.clone()),
+        "the answer is served complete"
+    );
+
+    let residency = WorkspaceRead::resource_snapshot(workspace.as_ref()).resolution;
+    assert_eq!(residency.slots, 0, "{residency:?}");
+    assert_eq!(residency.owners, 0, "{residency:?}");
+    assert!(
+        !WorkspaceRead::reverse_deps_for(workspace.as_ref(), &a).contains(&importer),
+        "a deleted importer records no dependency edge"
+    );
 }

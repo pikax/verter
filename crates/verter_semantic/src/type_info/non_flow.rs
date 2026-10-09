@@ -15,8 +15,8 @@ use verter_macro_dto::{
 };
 use verter_span::Span;
 
-use crate::analysis::{AnalyzedMacro, AnalyzedMacroKind};
-use crate::resolver_core::ResolutionBasis;
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_session_query::resolution::ResolutionBasis;
 use verter_type_expr::DeclBindingKey;
 
 use super::core::{
@@ -210,8 +210,8 @@ impl NonFlowOperation {
 /// order, bound to the resolution basis the retry runs under.
 ///
 /// Deliberately NOT the resolver's
-/// [`LoadSet`](crate::resolver_core::LoadSet): that envelope's
-/// [`InputKey`](crate::resolver_core::InputKey) taxonomy names I/O
+/// [`LoadSet`](verter_session_query::resolution::LoadSet): that envelope's
+/// [`InputKey`](verter_session_query::resolution::InputKey) taxonomy names I/O
 /// shapes (file content, declaration bodies, path probes) — none of
 /// them can name a staged observation slot, so reusing it would force
 /// fabricated I/O identities the gateway never reads and the staging
@@ -271,7 +271,7 @@ pub enum NonFlowTerminal {
 
 /// The outcome of one non-flow gateway attempt: the C2-typed retry
 /// envelope. Same closed `Complete`/`NeedInputs`/`Terminal` vocabulary
-/// as [`AttemptOutcome`](crate::resolver_core::AttemptOutcome), but the
+/// as [`AttemptOutcome`](verter_session_query::resolution::AttemptOutcome), but the
 /// `NeedInputs` payload is a [`NonFlowLoadSet`] so the demand names the
 /// observation slots the kernel actually misses — never a resolver I/O
 /// identity the gateway cannot consume — and the `Terminal` payload is

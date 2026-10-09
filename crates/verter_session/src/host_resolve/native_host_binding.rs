@@ -43,12 +43,13 @@ use verter_compiler::framework_common::{
     VueHostIntegrationBackend,
 };
 use verter_language::{FrameworkAdapterId, LanguageId};
-use verter_scheduler::node::SourceSnapshot;
+use verter_scheduler::node::{SourceSnapshot, SourceVersion};
 
 use crate::types::{
-    CompileCacheMode, CompileFailure, DiagnosticsSnapshot, Hash16, HostDiagnostic, HostSeverity,
+    CompileCacheMode, CompileFailure, DiagnosticsSnapshot, HostDiagnostic, HostSeverity,
 };
 use crate::HostError;
+use verter_session_query::analysis::types::Hash16;
 
 // The binding is request-scoped and consumed exactly once by value: it
 // must never be duplicated (Clone/Copy) nor round-tripped through a
@@ -72,7 +73,7 @@ static_assertions::assert_not_impl_any!(
 pub struct BoundSourceSnapshotIdentity {
     canonical_id: Arc<str>,
     whole_hash: Hash16,
-    source_generation: u64,
+    source_version: SourceVersion,
 }
 
 impl BoundSourceSnapshotIdentity {
@@ -88,10 +89,11 @@ impl BoundSourceSnapshotIdentity {
         &self.whole_hash
     }
 
-    /// Scheduler generation the bound snapshot was committed at.
+    /// Scheduler version (node incarnation and generation) the bound
+    /// snapshot was committed at.
     #[must_use]
-    pub fn source_generation(&self) -> u64 {
-        self.source_generation
+    pub fn source_version(&self) -> SourceVersion {
+        self.source_version
     }
 }
 
@@ -256,16 +258,17 @@ pub enum NativeHostBindingUnavailable {
         /// The carrier language the caller supplied.
         requested: LanguageId,
     },
-    /// The supplied snapshot is no longer the live source generation for
-    /// its canonical file; a binding over it would attribute and consume
-    /// superseded bytes.
+    /// The supplied snapshot is no longer the live source version for its
+    /// canonical file — a newer generation of the same node, or a node a
+    /// removal, reset or re-home replaced — so a binding over it would
+    /// attribute and consume superseded bytes.
     StaleSnapshot {
         /// Canonical file identity of the stale snapshot.
         canonical_id: Arc<str>,
-        /// Generation the snapshot was committed at.
-        snapshot_generation: u64,
-        /// The live source generation observed at bind time.
-        live_generation: u64,
+        /// Version the snapshot was committed at.
+        snapshot_version: SourceVersion,
+        /// The live source version observed at bind time.
+        live_version: SourceVersion,
     },
 }
 
@@ -276,24 +279,28 @@ impl BoundNativeHostRequest {
     /// host-integration catalog: the row selected by the EXACT
     /// `adapter_id` × `framework_epoch` × `HostE` host-epoch triple
     /// chooses the variant and must carry the caller's carrier language.
-    /// The snapshot witness must still be the live source generation.
+    /// The snapshot must still be the live source version: same node
+    /// incarnation AND same generation. A generation alone names a version
+    /// only within one node object, so a snapshot held across a
+    /// remove/re-add or reset that restarted at the same generation is
+    /// still refused.
     ///
     /// Caller-input obligations. `adapter_id`, `carrier_language_id`, and
     /// `framework_epoch` must come from a REGISTERED identity row — the
     /// parse artifact's `adapter_id()`/`language_id()`/`epoch()` or the
     /// registered `FileLanguage` row — never from path text, extension
     /// sniffing, or a lane flag. `canonical_id`, `snapshot`, and
-    /// `live_source_generation` must all be read from ONE request
+    /// `live_source_version` must all be read from ONE request
     /// context: the constructor cannot detect a canonical id paired with
-    /// another file's snapshot, and `live_source_generation` must be
+    /// another file's snapshot, and `live_source_version` must be
     /// sourced from the scheduler/store authority at bind time, never a
     /// lane-computed value.
     ///
     /// The staleness check here is a best-effort bind-time witness: a
-    /// supersession may still land between observing the live generation
+    /// supersession may still land between observing the live version
     /// and publishing. The durable fail-closed rail remains the
     /// publish-time completion fence, which revalidates against the
-    /// carried `(canonical_id, whole_hash, source_generation)` witness.
+    /// carried `(canonical_id, whole_hash, source_version)` witness.
     ///
     /// Guard order is deterministic: catalog identity first (unregistered
     /// → host-epoch mismatch → framework-epoch mismatch → registration
@@ -308,7 +315,7 @@ impl BoundNativeHostRequest {
         framework_epoch: &FrameworkEpochId,
         canonical_id: &str,
         snapshot: &SourceSnapshot,
-        live_source_generation: u64,
+        live_source_version: SourceVersion,
     ) -> Result<Self, NativeHostBindingUnavailable> {
         Self::bind_in_catalog::<HostE>(
             built_in_host_integration_catalog(),
@@ -317,7 +324,7 @@ impl BoundNativeHostRequest {
             framework_epoch,
             canonical_id,
             snapshot,
-            live_source_generation,
+            live_source_version,
         )
     }
 
@@ -338,7 +345,7 @@ impl BoundNativeHostRequest {
         framework_epoch: &FrameworkEpochId,
         canonical_id: &str,
         snapshot: &SourceSnapshot,
-        live_source_generation: u64,
+        live_source_version: SourceVersion,
     ) -> Result<Self, NativeHostBindingUnavailable> {
         record_binding_construction_attempt();
 
@@ -404,11 +411,11 @@ impl BoundNativeHostRequest {
                 requested: carrier_language_id.clone(),
             });
         }
-        if snapshot.generation != live_source_generation {
+        if snapshot.version() != live_source_version {
             return Err(NativeHostBindingUnavailable::StaleSnapshot {
                 canonical_id: Arc::from(canonical_id),
-                snapshot_generation: snapshot.generation,
-                live_generation: live_source_generation,
+                snapshot_version: snapshot.version(),
+                live_version: live_source_version,
             });
         }
 
@@ -417,7 +424,7 @@ impl BoundNativeHostRequest {
             snapshot: BoundSourceSnapshotIdentity {
                 canonical_id: Arc::from(canonical_id),
                 whole_hash: snapshot.whole_hash,
-                source_generation: snapshot.generation,
+                source_version: snapshot.version(),
             },
         };
         Ok(match installed {
@@ -456,7 +463,7 @@ impl crate::VerterHost {
     /// through the host-integration catalog — never from path text or
     /// language classification. `canonical_id` and the source snapshot come from
     /// the request's ONE coherent scheduler read; the live source
-    /// generation is re-read from the scheduler authority at bind time (a
+    /// version is re-read from the scheduler authority at bind time (a
     /// best-effort staleness witness — the durable rail stays the
     /// publish-time completion fence).
     ///
@@ -493,7 +500,7 @@ impl crate::VerterHost {
             artifact.epoch(),
             canonical_id,
             source_snap,
-            live.generation,
+            live.version(),
         ) {
             Ok(bound) => Ok(Some(bound)),
             Err(NativeHostBindingUnavailable::StaleSnapshot { .. }) => Err(HostError::Superseded),
@@ -551,7 +558,15 @@ mod tests {
             whole_hash: [7; 16],
             semantic_hash: [8; 16],
             generation,
+            incarnation: 0,
             data: Arc::new(EmptyData),
+        }
+    }
+
+    fn version(generation: u64) -> SourceVersion {
+        SourceVersion {
+            incarnation: 0,
+            generation,
         }
     }
 
@@ -576,7 +591,7 @@ mod tests {
 
     fn bind_vue(
         snapshot: &SourceSnapshot,
-        live: u64,
+        live: SourceVersion,
     ) -> Result<BoundNativeHostRequest, NativeHostBindingUnavailable> {
         BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::vue(),
@@ -594,7 +609,7 @@ mod tests {
     #[test]
     fn vue_identity_binds_the_vue_variant_from_the_catalog_row() {
         let snap = snapshot(3);
-        let bound = bind_vue(&snap, 3).expect("registered current Vue identity binds");
+        let bound = bind_vue(&snap, version(3)).expect("registered current Vue identity binds");
         let BoundNativeHostRequest::Vue(vue) = bound else {
             panic!("the Vue catalog arm must select the Vue variant");
         };
@@ -614,7 +629,7 @@ mod tests {
         let snap_id = attribution.snapshot();
         assert_eq!(snap_id.canonical_id(), CANONICAL);
         assert_eq!(snap_id.whole_hash(), &[7; 16]);
-        assert_eq!(snap_id.source_generation(), 3);
+        assert_eq!(snap_id.source_version(), version(3));
     }
 
     /// The registered Svelte identity binds the Svelte arm: the variant
@@ -629,7 +644,7 @@ mod tests {
             svelte_epoch(),
             "/src/App.svelte",
             &snap,
-            1,
+            version(1),
         )
         .expect("registered current Svelte identity binds");
         assert!(
@@ -651,7 +666,7 @@ mod tests {
             svelte_epoch(),
             "/src/Confusing.vue",
             &snap,
-            1,
+            version(1),
         )
         .expect("the registered Svelte identity binds regardless of path text");
         assert!(
@@ -672,7 +687,7 @@ mod tests {
             vue_epoch(),
             CANONICAL,
             &snap,
-            0,
+            version(0),
         )
         .expect_err("an unregistered adapter must not bind");
         assert_eq!(
@@ -694,7 +709,7 @@ mod tests {
             vue_epoch(),
             CANONICAL,
             &snap,
-            0,
+            version(0),
         )
         .expect_err("a host epoch with no registered row must not bind");
         assert_eq!(
@@ -718,7 +733,7 @@ mod tests {
             svelte_epoch(),
             CANONICAL,
             &snap,
-            0,
+            version(0),
         )
         .expect_err("a framework epoch with no registered Vue row must not bind");
         assert_eq!(
@@ -824,7 +839,7 @@ mod tests {
                 epoch,
                 CANONICAL,
                 &snap,
-                1,
+                version(1),
             )
             .expect("an exact-epoch match must bind, not refuse as ambiguous");
             assert_eq!(
@@ -847,7 +862,7 @@ mod tests {
             vue_epoch(),
             CANONICAL,
             &snap,
-            0,
+            version(0),
         )
         .expect_err("a carrier-language mismatch must not bind");
         assert_eq!(
@@ -864,13 +879,34 @@ mod tests {
     #[test]
     fn stale_snapshot_fails_closed_typed() {
         let snap = snapshot(3);
-        let err = bind_vue(&snap, 4).expect_err("a superseded snapshot must not bind");
+        let err = bind_vue(&snap, version(4)).expect_err("a superseded snapshot must not bind");
         assert_eq!(
             err,
             NativeHostBindingUnavailable::StaleSnapshot {
                 canonical_id: Arc::from(CANONICAL),
-                snapshot_generation: 3,
-                live_generation: 4,
+                snapshot_version: version(3),
+                live_version: version(4),
+            }
+        );
+    }
+
+    /// A snapshot from a replaced node object is stale even at the same
+    /// generation: a successor started by a removal or reset restarts its
+    /// generation sequence, so only the incarnation tells them apart.
+    #[test]
+    fn same_generation_from_a_replaced_node_fails_closed_typed() {
+        let snap = snapshot(1);
+        let successor = SourceVersion {
+            incarnation: 1,
+            generation: 1,
+        };
+        let err = bind_vue(&snap, successor).expect_err("a replaced node's snapshot must not bind");
+        assert_eq!(
+            err,
+            NativeHostBindingUnavailable::StaleSnapshot {
+                canonical_id: Arc::from(CANONICAL),
+                snapshot_version: version(1),
+                live_version: successor,
             }
         );
     }
@@ -888,7 +924,7 @@ mod tests {
             vue_epoch(),
             CANONICAL,
             &snap,
-            4,
+            version(4),
         )
         .expect_err("neither guard admits this bind");
         assert!(matches!(
@@ -1031,6 +1067,50 @@ mod tests {
         );
     }
 
+    /// Fail-closed across a remove/re-add: the successor node restarts its
+    /// generation sequence, so a snapshot held from the removed node can
+    /// share the live generation. The bind still refuses it as
+    /// superseded, because the live version names a different node.
+    #[test]
+    fn request_snapshot_from_a_removed_node_fails_closed_as_superseded() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        upsert_vue(&host, VUE_SRC);
+        let stale_snap = host
+            .scheduler
+            .try_get_source(CANONICAL)
+            .expect("the upserted source is live");
+        let efs = host
+            .effective_file_state_from_snapshot(&stale_snap, CANONICAL, None)
+            .expect("the upserted source carries host data");
+        host.remove(CANONICAL).expect("the canonical is tracked");
+        upsert_vue(
+            &host,
+            "<script setup lang=\"ts\">const c: number = 2</script>\n<template><div>{{ c }}</div></template>",
+        );
+        let live = host
+            .scheduler
+            .try_get_source(CANONICAL)
+            .expect("the re-added source is live");
+        assert_eq!(
+            live.generation, stale_snap.generation,
+            "the successor node reaches the removed node's generation"
+        );
+        assert_ne!(live.version(), stale_snap.version());
+        let err = host
+            .bind_native_host_compile_attempt(
+                efs.framework_parse.as_deref(),
+                CANONICAL,
+                stale_snap.source.len() as u32,
+                &stale_snap,
+                crate::types::CompileCacheMode::Session,
+            )
+            .expect_err("a removed node's request snapshot must not bind");
+        assert!(
+            matches!(err, crate::HostError::Superseded),
+            "a stale bind must surface as the typed Superseded host error, got: {err:?}"
+        );
+    }
+
     /// Fail-closed at the common production binding point: a registered
     /// artifact whose framework epoch has no installed host-integration
     /// row refuses the bind with the typed HOST_NATIVE_BINDING_UNAVAILABLE
@@ -1149,12 +1229,12 @@ mod tests {
     #[test]
     fn consumption_is_by_value_and_yields_backend_plus_attribution() {
         let snap = snapshot(9);
-        let bound = bind_vue(&snap, 9).expect("current Vue identity binds");
+        let bound = bind_vue(&snap, version(9)).expect("current Vue identity binds");
         let BoundNativeHostRequest::Vue(vue) = bound else {
             panic!("Vue identity selects the Vue arm");
         };
         let (_backend, attribution) = vue.into_host_backend();
-        assert_eq!(attribution.snapshot().source_generation(), 9);
+        assert_eq!(attribution.snapshot().source_version(), version(9));
         assert_eq!(attribution.snapshot().canonical_id(), CANONICAL);
     }
 }

@@ -37,6 +37,7 @@ mod registry;
 pub mod carrier_grammar;
 pub mod carrier_versions;
 pub mod registered_source_authority;
+pub mod svelte_rune_ambient;
 
 pub use ids::{CapabilityId, FrameworkAdapterId, LanguageId};
 pub use language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};

@@ -124,9 +124,9 @@ async fn fixture_for_carrier(
     let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = vfs_workspace.clone();
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
     let host_for_server = Arc::clone(&host);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             crate::LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: type_provider.clone(),
@@ -140,6 +140,7 @@ async fn fixture_for_carrier(
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while futures_util::StreamExt::next(&mut socket).await.is_some() {}
@@ -1443,6 +1444,7 @@ async fn prepare_rename_handshake_offers_the_instance_member_then_renames_only_p
     let caps = crate::capabilities::server_capabilities(
         &tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
         false,
+        &verter_session::framework::HostLanguageClassifier::default(),
     );
     match caps.rename_provider {
         Some(tower_lsp_server::ls_types::OneOf::Right(options)) => assert_eq!(
@@ -2996,6 +2998,10 @@ impl RenameErrorProvider {
 }
 
 impl crate::TypeProvider for RenameErrorProvider {
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        crate::TypeProvider::applied_content(self.inner.as_ref(), path)
+    }
+
     fn provider_id(&self) -> &'static str {
         self.inner.provider_id()
     }

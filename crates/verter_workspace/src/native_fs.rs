@@ -142,9 +142,9 @@ impl NativeFs {
 
     /// Typed metadata probe used by resolution. In particular, permission and
     /// transient I/O failures are never reported as a stable absence.
-    pub fn probe_path(&self, path: &str) -> verter_semantic::resolver_core::PathProbe {
+    pub fn probe_path(&self, path: &str) -> verter_session_query::resolution::PathProbe {
         self.probe_path_live(path)
-            .unwrap_or(verter_semantic::resolver_core::PathProbe::Unknown)
+            .unwrap_or(verter_session_query::resolution::PathProbe::Unknown)
     }
 
     /// Probe current metadata without consulting or populating a directory
@@ -154,26 +154,26 @@ impl NativeFs {
     pub(crate) fn probe_path_live(
         &self,
         path: &str,
-    ) -> std::io::Result<verter_semantic::resolver_core::PathProbe> {
+    ) -> std::io::Result<verter_session_query::resolution::PathProbe> {
         let os_path = to_os_path(path);
         match std::fs::metadata(&os_path) {
             Ok(metadata) if metadata.is_file() => {
-                Ok(verter_semantic::resolver_core::PathProbe::File)
+                Ok(verter_session_query::resolution::PathProbe::File)
             }
             Ok(metadata) if metadata.is_dir() => {
-                Ok(verter_semantic::resolver_core::PathProbe::Directory)
+                Ok(verter_session_query::resolution::PathProbe::Directory)
             }
-            Ok(_) => Ok(verter_semantic::resolver_core::PathProbe::Unknown),
+            Ok(_) => Ok(verter_session_query::resolution::PathProbe::Unknown),
             Err(error)
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                Ok(verter_semantic::resolver_core::PathProbe::Absent)
+                Ok(verter_session_query::resolution::PathProbe::Absent)
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                Ok(verter_semantic::resolver_core::PathProbe::Inaccessible)
+                Ok(verter_session_query::resolution::PathProbe::Inaccessible)
             }
             Err(error) => Err(error),
         }
@@ -787,7 +787,7 @@ mod tests {
 
         assert_eq!(
             NativeFs::new().probe_path(&canonical),
-            verter_semantic::resolver_core::PathProbe::Absent,
+            verter_session_query::resolution::PathProbe::Absent,
             "ENOTDIR is stable absence, not transient filesystem uncertainty"
         );
     }

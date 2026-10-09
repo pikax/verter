@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{FactVersionRef, ProgramAnalysisFactRef, StoreView};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ProgramAnalysisFactRef};
+use verter_session_query::facts::store_view::StoreView;
 
 const FLOW_SOURCE: &str = "export function alpha(n: number) {\n\
      \x20 if (n <= 0) return 0;\n\
@@ -30,22 +31,26 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
     });
 }
 
-fn alpha_fact(host: &VerterHost, canonical_id: &str, hash: crate::types::Hash16) -> FactVersionRef {
+fn alpha_fact(
+    host: &VerterHost,
+    canonical_id: &str,
+    hash: verter_session_query::analysis::types::Hash16,
+) -> FactVersionRef {
     alpha_fact_at(host, canonical_id, hash, 0)
 }
 
 fn alpha_fact_at(
     _host: &VerterHost,
     canonical_id: &str,
-    hash: crate::types::Hash16,
+    hash: verter_session_query::analysis::types::Hash16,
     overload_ordinal: u32,
 ) -> FactVersionRef {
     FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
-        function: crate::resolver_core::ProgramAnalysisFunctionRef {
+        function: verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
             canonical_id: Arc::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             merged_symbol_name: Arc::from("alpha"),
-            symbol_space: verter_semantic::facts::SymbolSpace::Value,
+            symbol_space: verter_session_query::facts::SymbolSpace::Value,
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal,
         },
@@ -53,12 +58,16 @@ fn alpha_fact_at(
     })
 }
 
-fn live_alpha_hash(host: &VerterHost, canonical_id: &str) -> crate::types::Hash16 {
+fn live_alpha_hash(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     host.ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .shallow_state
         .decl_bodies()
         .function_program_index()
+        .value
         .value_function(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "alpha",
@@ -67,7 +76,7 @@ fn live_alpha_hash(host: &VerterHost, canonical_id: &str) -> crate::types::Hash1
         )
         .expect("alpha is indexed")
         .entry()
-        .flow_body_stable_hash
+        .flow_body_stable_hash()
 }
 
 #[test]
@@ -153,7 +162,11 @@ fn flow_body_fact_identity_discriminates_overload_ordinals() {
     let indexed = host
         .ensure_indexed_ready("/ws/flow.ts")
         .expect("indexed ready");
-    let index = indexed.shallow_state.decl_bodies().function_program_index();
+    let index = indexed
+        .shallow_state
+        .decl_bodies()
+        .function_program_index()
+        .value;
     let entry = index
         .value_function(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -168,10 +181,10 @@ fn flow_body_fact_identity_discriminates_overload_ordinals() {
     assert!(view.validates(&alpha_fact_at(
         &host,
         "/ws/flow.ts",
-        entry.flow_body_stable_hash,
+        entry.flow_body_stable_hash(),
         1,
     )));
-    let mut wrong_ordinal = alpha_fact_at(&host, "/ws/flow.ts", entry.flow_body_stable_hash, 1);
+    let mut wrong_ordinal = alpha_fact_at(&host, "/ws/flow.ts", entry.flow_body_stable_hash(), 1);
     let FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { function, .. }) =
         &mut wrong_ordinal
     else {

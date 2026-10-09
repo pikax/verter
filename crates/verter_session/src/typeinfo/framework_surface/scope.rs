@@ -9,7 +9,6 @@
 use verter_type_expr::TypeExprScope;
 
 use crate::typeinfo::surface::TypeInfoSurfaceMember;
-use crate::VerterHost;
 
 /// The scope a surface member's raised `*_expr` should bind to — the member's
 /// VALUE-NODE scope (`node_scope(member.value)` → file), falling back to the
@@ -32,13 +31,15 @@ use crate::VerterHost;
 /// JSDoc deliberately uses the declaration_origin instead (the two axes
 /// intentionally use different files).
 #[must_use]
-pub(crate) fn member_value_expr_scope(
-    host: &VerterHost,
+pub(crate) fn member_value_expr_scope<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
     owner_fallback: &str,
 ) -> TypeExprScope {
-    host.project_type_store()
-        .semantic_graph()
+    dispatch
+        .graph()
         .node_scope(member.value)
         .and_then(|scope| scope.canonical_file())
         .map(|canonical| TypeExprScope::new(canonical.as_ref()))

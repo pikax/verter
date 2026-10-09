@@ -9,10 +9,12 @@
 // reader, not even transiently.
 
 import { describe, expect, it, afterEach } from "vitest";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   goldenManifestPath,
@@ -31,6 +33,41 @@ function freshRoot() {
   const d = mkdtempSync(path.join(tmpdir(), "bf2-goldenset-"));
   dirs.push(d);
   return d;
+}
+
+/** Child loads golden-store with the first `anchor` occurrence replaced. */
+function publishWithStorePatch(root, anchor, replacement) {
+  const storePath = path.join(HARNESS_ROOT, "src/golden-store.mjs");
+  const script = `
+    import { registerHooks } from "node:module";
+    import { pathToFileURL } from "node:url";
+    const storeUrl = pathToFileURL(${JSON.stringify(storePath)}).href;
+    const anchor = ${JSON.stringify(anchor)};
+    const replacement = ${JSON.stringify(replacement)};
+    registerHooks({
+      load(url, context, nextLoad) {
+        const result = nextLoad(url, context);
+        if (!String(url).includes("/src/golden-store.mjs")) return result;
+        const source = String(result.source);
+        const index = source.indexOf(anchor);
+        if (index < 0) throw new Error("anchor missing");
+        return { ...result, source: source.slice(0, index) + replacement + source.slice(index + anchor.length) };
+      },
+    });
+    const { publishGoldenSet } = await import(storeUrl);
+    const root = process.argv[1];
+    try {
+      publishGoldenSet(root, [{ name: "vue/a", record: { code: "export default 2;" } }]);
+      console.log("PUBLISHED");
+    } catch (error) {
+      console.error(error && error.code ? error.code : "");
+      console.error(error && error.stack ? error.stack : String(error));
+      process.exitCode = 1;
+    }
+  `;
+  return spawnSync(process.execPath, ["--input-type=module", "-e", script, root], {
+    encoding: "utf8",
+  });
 }
 
 /** A record whose serialization THROWS — simulates the Nth write failing. */
@@ -230,7 +267,7 @@ describe("atomic golden-set publication", () => {
     const root = freshRoot();
     const writerScript = `
       const { publishGoldenSet } = await import(${JSON.stringify(
-        path.join(HARNESS_ROOT, "src/golden-store.mjs"),
+        pathToFileURL(path.join(HARNESS_ROOT, "src/golden-store.mjs")).href,
       )});
       const root = process.argv[1];
       for (let i = 0; i < 20; i += 1) {
@@ -271,6 +308,83 @@ describe("atomic golden-set publication", () => {
     expect([...set.keys()].sort()).toEqual(["vue/a", "vue/b"]);
     expect(set.get("vue/a").code).toBe("export default 1;");
     expect(set.get("vue/b").code).toBe("export default 2;");
+  });
+
+  it("post-commit GC collects unreferenced digest files and leaves in-flight temp names", () => {
+    const root = freshRoot();
+    publishGoldenSet(root, [{ name: "vue/a", record: { case: "a1" } }]);
+    const live = readGoldenManifest(root).entries["vue/a"];
+    const records = path.join(root, "records");
+    const orphan = path.join(records, `${"ab".repeat(32)}.json`);
+    writeFileSync(orphan, "{}\n");
+    const inflight = path.join(records, `${live}.json.tmp-4242`);
+    writeFileSync(inflight, "partial");
+    publishGoldenSet(root, [{ name: "vue/a", record: { case: "a1" } }]);
+    expect(existsSync(orphan)).toBe(false);
+    expect(existsSync(inflight)).toBe(true);
+    expect(existsSync(path.join(records, `${live}.json`))).toBe(true);
+  });
+
+  it("exhausted replace retries leave the previous manifest in place and throw", () => {
+    const root = freshRoot();
+    publishGoldenSet(root, [{ name: "vue/a", record: { code: "export default 1;" } }]);
+    const before = readFileSync(goldenManifestPath(root), "utf8");
+    const result = publishWithStorePatch(
+      root,
+      "renameSync(tmp, target);",
+      `{
+        const error = new Error("sharing violation");
+        error.code = "EPERM";
+        throw error;
+      }`,
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).not.toContain("PUBLISHED");
+    expect(result.stderr).toContain("sharing violation");
+    expect(readFileSync(goldenManifestPath(root), "utf8")).toBe(before);
+    expect(readdirSync(root).some((name) => name.includes(".aside-"))).toBe(false);
+    expect(readGoldenManifest(root).generation).toBe(1);
+  });
+
+  it("one ENOENT while reading the manifest is not a first publish", () => {
+    const root = freshRoot();
+    publishGoldenSet(root, [{ name: "vue/a", record: { code: "export default 1;" } }]);
+    const previous = readGoldenManifest(root);
+    const result = publishWithStorePatch(
+      root,
+      'return readFileSync(target, "utf8");',
+      `globalThis.__bf2ManifestReads = (globalThis.__bf2ManifestReads ?? 0) + 1;
+      if (globalThis.__bf2ManifestReads === 1) {
+        const error = new Error("transient manifest gap");
+        error.code = "ENOENT";
+        throw error;
+      }
+      return readFileSync(target, "utf8");`,
+    );
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const manifest = readGoldenManifest(root);
+    expect(manifest.generation).toBe(2);
+    expect(manifest.graceEntries["vue/a"]).toBe(previous.entries["vue/a"]);
+    expect(readGoldenSet(root).get("vue/a").code).toBe("export default 2;");
+    expect(existsSync(path.join(root, "records", `${previous.entries["vue/a"]}.json`))).toBe(true);
+  });
+
+  it("a non-ENOENT manifest read error aborts the publish and keeps the previous commit", () => {
+    const root = freshRoot();
+    publishGoldenSet(root, [{ name: "vue/a", record: { code: "export default 1;" } }]);
+    const before = readFileSync(goldenManifestPath(root), "utf8");
+    const result = publishWithStorePatch(
+      root,
+      'return readFileSync(target, "utf8");',
+      `const error = new Error("manifest unreadable");
+      error.code = "EIO";
+      throw error;`,
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).not.toContain("PUBLISHED");
+    expect(result.stderr).toContain("EIO");
+    expect(readFileSync(goldenManifestPath(root), "utf8")).toBe(before);
   });
 
   it("the COMMITTED golden set is complete, manifest-resolvable, and digest-consistent", () => {

@@ -206,7 +206,7 @@ impl MetaSession {
         // paths, so this single install covers both (a per-job install on a
         // batch pool thread is correct — `RequestContext` is thread-local RAII).
         let _payload_request_ctx_guard = host.install_request_budget_context_if_none(
-            crate::meta_resolve::next_component_meta_audit_request_id(),
+            host.next_request_id(),
             canonical.as_str(),
             host.config.audit_timing_capture && host.config.audit_enabled,
         );
@@ -216,7 +216,7 @@ impl MetaSession {
             let (executor_view, captured_fp) = fixed.executor_fixed_view();
             host.resolve_component_meta_with_view_and_fixed_admission(
                 canonical.as_str(),
-                crate::types::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 view,
                 Some((executor_view, captured_fp, fixed.current_view().is_some())),
             )
@@ -237,7 +237,9 @@ impl MetaSession {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let crate::host_manage::ComponentMetaExtractOutcome {
             analysis,
             fallthrough_fact_versions,
@@ -247,10 +249,11 @@ impl MetaSession {
             canonical.as_str(),
             &resolved,
             ctx,
+            dispatch,
         );
         host.merge_extraction_facts_into_admitted_resolved_meta(
             canonical.as_str(),
-            crate::types::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view.fingerprint(),
             &mut resolved,
             fallthrough_fact_versions.as_deref(),
@@ -274,9 +277,9 @@ impl MetaSession {
         }
 
         // An aborted computation publishes nothing.
-        if let Some(abort) =
-            crate::semantic_query::ExecutionAbort::observed_in(final_completeness.get())
-        {
+        if let Some(abort) = verter_type_engine::semantic_query::ExecutionAbort::observed_in(
+            final_completeness.get(),
+        ) {
             return Err(MetaError::Aborted(abort));
         }
         if let Some(err) =
@@ -303,10 +306,11 @@ impl MetaSession {
         // on the owning SFC — the macro hot mirror, member-path, or callable-
         // params replay) therefore observes the same view as extraction.
         let (output_result, output_read_set) =
-            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx).with_fact_tracer(
-                || {
+            verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                .with_fact_tracer(|| {
                     crate::meta_resolve::projectors::build_component_meta_output(
                         ctx,
+                        dispatch,
                         canonical.as_str(),
                         analysis,
                         Some(seed),
@@ -318,8 +322,7 @@ impl MetaSession {
                         // declines to warm it.
                         final_completeness,
                     )
-                },
-            );
+                });
         let output = output_result?;
         // Snapshot the output-materialization tracer's non-cacheability bit
         // BEFORE `finalise` consumes the read-set below. A fenced (ReturnOnly,
@@ -347,9 +350,10 @@ impl MetaSession {
         // misses the warm payload read. A signature overflow refuses payload
         // admission (ReturnOnly) — the payload is still returned.
         let output_facts_admissible = match output_read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(output_facts) => {
-                let mut seen: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
-                    facts.iter().cloned().collect();
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(output_facts) => {
+                let mut seen: rustc_hash::FxHashSet<
+                    verter_session_query::facts::fact_cache::FactVersionRef,
+                > = facts.iter().cloned().collect();
                 for fact in output_facts.iter() {
                     if seen.insert(fact.clone()) {
                         facts.push(fact.clone());
@@ -357,12 +361,16 @@ impl MetaSession {
                 }
                 true
             }
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => false,
-            crate::resolver_core::FactReadSetFinalise::Overflow => false,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+                false
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => false,
             // A compaction domain moved mid-scope: the observation set
             // cannot be merged into the output signature, so the output
             // facts are inadmissible exactly as an overflow's are.
-            crate::resolver_core::FactReadSetFinalise::MutationUnstable => false,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                false
+            }
         };
         // Conjunctive rails: the token fence (external supersession /
         // currentness) AND the output-materialization non-cacheability rail

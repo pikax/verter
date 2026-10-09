@@ -22,6 +22,7 @@ import {
   restartParityReady,
 } from "./parityHarness";
 import type { MatrixCase } from "./matrixCases";
+import { sequenceParent } from "./timeouts";
 
 async function runCase(c: MatrixCase): Promise<void> {
   switch (c.kind) {
@@ -106,8 +107,12 @@ export function registerMatrixSuite(options: {
 
   suite(options.title, function () {
     suiteSetup(async function () {
-      this.timeout(60_000);
-      await restartParityReady(options.entry);
+      // The matrix carries closed-file `references` cases: the server answers
+      // those only once its project frontier is complete (level 2).
+      this.timeout(sequenceParent("restartedWorkspaceSuiteSetup"));
+      await restartParityReady(options.entry, {
+        workspaceWide: "matrix closed-file references need the complete project frontier",
+      });
     });
 
     for (const c of options.cases) {

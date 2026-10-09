@@ -48,12 +48,13 @@ use verter_protocol::verter::v1::{
 };
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
-use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
 use crate::typeinfo::framework_surface::results;
 use crate::typeinfo::framework_surface::results::{
     MacroSurfaceDtos, NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface,
     NormalizedSurfaces, OriginHop, ResolvedOutcome,
 };
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 /// The bounded shallow encoder's traversal depth budget. The member value
 /// vocabulary is one-level — a member's value is a leaf node (primitive /
@@ -966,7 +967,7 @@ fn interned_diagnostic(message_name_id: u32) -> wire::Diagnostic {
 mod tests {
     use super::*;
     use crate::typeinfo::framework_surface::results::{PropsSurface, ResolvedOutcome};
-    use verter_semantic::analysis::types::AnalyzedPropField;
+    use verter_session_query::analysis::types::AnalyzedPropField;
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
     /// A named prop field. The prop's typed body is now an on-demand payload
@@ -985,7 +986,7 @@ mod tests {
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
-            resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+            resolution_source: verter_session_query::analysis::types::TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: true,
             constructor_bindings: Vec::new(),
@@ -1208,7 +1209,7 @@ mod tests {
         // the named-member wire shape) must NOT claim ExactResolved — it
         // downgrades to PARTIAL with a diagnostic whose message id indexes a
         // real string-table entry.
-        use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
+        use verter_session_query::analysis::type_expand::ExpandedIndexSignature;
         let normalized = NormalizedSurfaces {
             surfaces: vec![NormalizedSurface {
                 kind: FrameworkSurfaceKind::Props,

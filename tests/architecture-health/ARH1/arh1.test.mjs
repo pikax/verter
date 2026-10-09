@@ -23,10 +23,10 @@ const cloneProducts = () => structuredClone(clean);
 const hotspot = (dirty, path) =>
   dirty["dependency-contracts"].hotspots.find((h) => h.path === path);
 const SCHEDULER = "crates/verter_scheduler/src/scheduler.rs";
-const FLOW_RETURN = "crates/verter_session/src/project_semantic_dispatch/flow_return.rs";
-const PSD_BUILD = "crates/verter_session/src/project_semantic_dispatch/build.rs";
-const SEMANTIC_QUERY = "crates/verter_session/src/semantic_query.rs";
-const FLOW_SLICE = "crates/verter_session/src/flow_slice_content.rs";
+const FLOW_RETURN = "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs";
+const PSD_BUILD = "crates/verter_type_engine/src/project_semantic_dispatch/build.rs";
+const SEMANTIC_QUERY = "crates/verter_type_engine/src/semantic_query.rs";
+const FLOW_SLICE = "crates/verter_semantic_source/src/flow_slice_content.rs";
 
 test("ARH1-ratification: clean products validate and cover every mandatory case surface", () => {
   const result = validate(clean, loadManifest(), arh0);
@@ -72,7 +72,7 @@ test("ARH1-hotspot-coverage dirty twin: an ARH0 hotspot without a contract is re
 test("ARH1-hotspot-coverage dirty twin: a contract row the inventory does not carry is rejected (AC1)", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SEMANTIC_QUERY);
-  row.path = "crates/verter_session/src/semantic_query_memo/arena.rs";
+  row.path = "crates/verter_type_engine/src/semantic_query_memo/arena.rs";
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(
@@ -338,10 +338,35 @@ test("ARH1-surface dirty twin: a retained item that is not a live declaration is
   );
 });
 
+test("ARH1-surface dirty twin: a retained method owner must be a wired child of a retained type", () => {
+  for (const owner of [
+    { path: "crates/verter_scheduler/src/node.rs", type: "Scheduler" },
+    { path: "crates/verter_scheduler/src/scheduler/lifecycle.rs", type: "FileNode" },
+  ]) {
+    const dirty = cloneProducts();
+    hotspot(dirty, SCHEDULER).minimalPublicSurface.retainedFnOwners = { remove: owner };
+    const result = validate(dirty, loadManifest(), arh0);
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some((e) => e.code === "surface-owner-invalid"),
+      JSON.stringify(result.errors),
+    );
+  }
+  const dirty = cloneProducts();
+  hotspot(dirty, SCHEDULER).minimalPublicSurface.retainedFnOwners.remove.path =
+    "crates/verter_scheduler/src/scheduler/admission.rs";
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.code === "surface-item-missing" && e.detail.endsWith("fn remove")),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH1-surface dirty twin: narrowing to an invented visibility or naming absent consumers is rejected", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).minimalPublicSurface.narrow.find(
-    (n) => n.item === "tombstones",
+    (n) => n.item === "deferred_blocker_ids",
   );
   row.to = "pub"; // widening is not a narrowing disposition
   let result = validate(dirty, loadManifest(), arh0);
@@ -630,7 +655,7 @@ test("ARH1-import-direction: inline crate:: paths name their crate-internal root
     [
       "use crate::dag::Thing;",
       "#[cfg(test)]",
-      "mod t { fn g() { crate::pool::SchedulerCpuPool::wrap(); } }",
+      "mod t { fn g() { crate::execution::pool::SchedulerCpuPool::wrap(); } }",
       "fn h() { crate::cache_id::SchedulerCacheId::new(); }",
     ].join("\n"),
   );
@@ -640,7 +665,7 @@ test("ARH1-import-direction: inline crate:: paths name their crate-internal root
 test("ARH1-import-direction dirty twin: undeclaring a production inline crate-internal root is rejected", () => {
   const dirty = cloneProducts();
   const aid = hotspot(dirty, SCHEDULER).allowedImportDirection;
-  aid.crateInternal = aid.crateInternal.filter((v) => v !== "pool"); // live constructor params
+  aid.crateInternal = aid.crateInternal.filter((v) => v !== "execution"); // live constructor params
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(
@@ -648,7 +673,7 @@ test("ARH1-import-direction dirty twin: undeclaring a production inline crate-in
       (e) =>
         e.caseId === "ARH1-import-direction" &&
         e.code === "import-drift" &&
-        e.detail.includes("crate-internal import pool is not declared"),
+        e.detail.includes("crate-internal import execution is not declared"),
     ),
     JSON.stringify(result.errors),
   );
@@ -1053,7 +1078,7 @@ test("ARH1-state-lifetimes dirty twin: an unrelated file mentioning the state in
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).stateLifetimes.find((s) => s.state === "Scheduler.nodes");
   // semantic_query.rs mentions "nodes" in prose/comments; it declares none.
-  row.soleOwner = "crates/verter_session/src/semantic_query.rs";
+  row.soleOwner = "crates/verter_type_engine/src/semantic_query.rs";
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(
@@ -1202,10 +1227,9 @@ test("ARH1-import-direction: inline paths are measured and noise is not", () => 
 test("ARH1-surface dirty twin: a recorded field consumer without qualified use is rejected", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).minimalPublicSurface.narrow.find(
-    (n) => n.item === "tombstones",
+    (n) => n.item === "deferred_blocker_ids",
   );
-  // host_construction.rs hits "tombstones" in neither Scheduler-qualified
-  // form (SessionOverlayRoot owns the ambiguous mentions).
+  // host_construction.rs uses constructors, not the retained scheduler field.
   row.consumersAffected.push("crates/verter_session/src/host_construction.rs");
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
@@ -1214,7 +1238,7 @@ test("ARH1-surface dirty twin: a recorded field consumer without qualified use i
       (e) =>
         e.caseId === "ARH1-surface" &&
         e.code === "narrow-consumer-without-reference" &&
-        e.detail.includes("Scheduler.tombstones"),
+        e.detail.includes("Scheduler.deferred_blocker_ids"),
     ),
     JSON.stringify(result.errors),
   );
@@ -1240,8 +1264,12 @@ test("ARH1-surface: field use forms are type-qualified", () => {
   // An unambiguous field name: a bare receiver access outside the crate is
   // the owning type's consumer.
   assert.equal(
-    fieldUseForms("let g = sched.generation_floors.len();", "Scheduler", "generation_floors", true)
-      .receiver,
+    fieldUseForms(
+      "let g = sched.deferred_blocker_ids.len();",
+      "Scheduler",
+      "deferred_blocker_ids",
+      true,
+    ).receiver,
     true,
   );
 });
@@ -1275,7 +1303,7 @@ test("ARH1-hotspot-coverage dirty twin: an authority owner that is not a cohesiv
   const a2 = hotspot(wrongResponsibility, SCHEDULER).authority.find(
     (x) => x.responsibility === "batch coordination",
   );
-  a2.survivingOwner = "crates/verter_scheduler/src/cancellation.rs";
+  a2.survivingOwner = "crates/verter_execution/src/cancellation.rs";
   result = validate(wrongResponsibility, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(

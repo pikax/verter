@@ -180,7 +180,8 @@ impl Sha256 {
 
 /// A reviewed representative family of cases with its minimum coverage.
 ///
-/// `pattern` is a `*`-glob over a case's file name (the last path segment).
+/// `pattern` is a `*`-glob over a case's file name, or over its corpus-relative
+/// path when the pattern contains `/`.
 /// Each case belongs to the first stratum, in declaration order, whose
 /// pattern matches it, so a trailing `*` stratum collects the remainder.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,10 +189,21 @@ impl Sha256 {
 pub struct Stratum {
     /// Durable lower-kebab id.
     pub id: String,
-    /// `*`-glob over the case file name.
+    /// `*`-glob over the file name, or corpus-relative path if it contains `/`.
     pub pattern: String,
     /// The minimum number of inventory cases the stratum must hold.
     pub min_cases: u32,
+}
+
+impl Stratum {
+    fn matches(&self, case_id: &str) -> bool {
+        let target = if self.pattern.contains('/') {
+            case_id.split_once('/').map_or(case_id, |(_, path)| path)
+        } else {
+            case_id.rsplit('/').next().unwrap_or_default()
+        };
+        glob_matches(&self.pattern, target)
+    }
 }
 
 /// One ratified case of the pinned corpus.
@@ -655,10 +667,10 @@ fn valid_relative_path(path: &str) -> bool {
 }
 
 fn valid_pattern(pattern: &str) -> bool {
-    !pattern.is_empty()
+    valid_relative_path(pattern)
         && pattern
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'*' | b'.' | b'_' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'*' | b'.' | b'_' | b'-' | b'/'))
 }
 
 /// `*`-glob match; `*` matches any run of characters.
@@ -734,8 +746,9 @@ impl ProbeStateManifest {
         inapplicable.then_some(reason)
     }
 
-    /// Check that an observation reports [`Terminal::NotApplicable`] exactly
-    /// where this manifest declares a dimension inapplicable. A driver that
+    /// Check that an observation reports [`Terminal::NotApplicable`] where
+    /// this manifest declares a dimension inapplicable, except Structural
+    /// harness/reference failure when the required reference protocol breaks. A driver that
     /// reports inapplicability for a declared-applicable dimension has failed
     /// that dimension; it must be classified as a failure, never accepted as
     /// not applicable, so a missing producer, executor, or validator cannot
@@ -750,7 +763,16 @@ impl ProbeStateManifest {
                 Terminal::NotApplicable { reason } => Some(*reason),
                 Terminal::Class { .. } | Terminal::NotRun { .. } => None,
             };
-            if declared != observed {
+            // Protocol completion is required even without a comparator. A
+            // missing reference frame is evidence of harness/reference failure,
+            // not a claim that this framework's product was compared.
+            let protocol_failure = dimension == Dimension::Structural
+                && declared == Some(NotApplicableReason::ComparatorAbsent)
+                && matches!(
+                    observation.terminal(dimension).class(),
+                    Some(ProbeOutcomeClass::HarnessFailure | ProbeOutcomeClass::ReferenceFailure)
+                );
+            if declared != observed && !protocol_failure {
                 return Err(InvalidObservation::ApplicabilityMismatch {
                     dimension,
                     declared,
@@ -831,11 +853,10 @@ impl ProbeStateManifest {
         }
         let mut matched = vec![0usize; self.strata.len()];
         for case in &self.inventory {
-            let file_name = case.case_id.rsplit('/').next().unwrap_or_default();
             if let Some(index) = self
                 .strata
                 .iter()
-                .position(|stratum| glob_matches(&stratum.pattern, file_name))
+                .position(|stratum| stratum.matches(&case.case_id))
             {
                 matched[index] += 1;
             }
@@ -855,17 +876,16 @@ impl ProbeStateManifest {
     /// derive: within each stratum, in declaration order, the lexicographic
     /// first `min_cases` inventory cases that fall into it.
     ///
-    /// A case belongs to the FIRST stratum whose pattern matches its file
-    /// name, exactly as the stratum-coverage check assigns it, so the two can
+    /// A case belongs to the FIRST stratum whose pattern matches it,
+    /// exactly as the stratum-coverage check assigns it, so the two can
     /// never disagree about which family a case counts towards.
     pub fn derived_smoke_slice(&self) -> Vec<String> {
         let mut buckets: Vec<Vec<&str>> = vec![Vec::new(); self.strata.len()];
         for case in &self.inventory {
-            let file_name = case.case_id.rsplit('/').next().unwrap_or_default();
             if let Some(index) = self
                 .strata
                 .iter()
-                .position(|stratum| glob_matches(&stratum.pattern, file_name))
+                .position(|stratum| stratum.matches(&case.case_id))
             {
                 buckets[index].push(case.case_id.as_str());
             }

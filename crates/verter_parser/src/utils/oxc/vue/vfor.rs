@@ -16,7 +16,7 @@ use rustc_hash::FxHashSet;
 use super::span::{adjust_diagnostics_spans, adjust_expression_spans};
 use crate::common::Span;
 use crate::utils::oxc::bindings::{
-    collect_expression_free_refs, collect_expression_reference_spans,
+    collect_expression_free_refs, collect_expression_reference_spans, EnclosingScope,
 };
 
 /// Result of parsing a v-for expression.
@@ -169,7 +169,7 @@ impl<'a> VForWithBindings<'a> {
 fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) {
     match expr {
         Expression::Identifier(ident) => {
-            locals.push(ident.span.into());
+            locals.push(verter_span::Span::new(ident.span.start, ident.span.end));
         }
         Expression::ObjectExpression(obj) => {
             for prop in &obj.properties {
@@ -179,7 +179,8 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
                         // For non-shorthand: { foo: bar } → bar is the binding
                         if p.shorthand {
                             if let PropertyKey::StaticIdentifier(ident) = &p.key {
-                                locals.push(ident.span.into());
+                                locals
+                                    .push(verter_span::Span::new(ident.span.start, ident.span.end));
                             }
                         } else {
                             collect_vfor_left_local_spans(&p.value, locals);
@@ -218,11 +219,11 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
             // Handle default values like `item = defaultValue`
             use oxc_ast::ast::{AssignmentTarget, SimpleAssignmentTarget};
             if let AssignmentTarget::AssignmentTargetIdentifier(id) = &assign.left {
-                locals.push(id.span.into());
+                locals.push(verter_span::Span::new(id.span.start, id.span.end));
             } else if let Some(SimpleAssignmentTarget::AssignmentTargetIdentifier(id)) =
                 assign.left.as_simple_assignment_target()
             {
-                locals.push(id.span.into());
+                locals.push(verter_span::Span::new(id.span.start, id.span.end));
             }
         }
         _ => {}
@@ -239,7 +240,7 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
 fn extract_vfor_bindings_internal(
     result: &VForParseResult<'_>,
     input: &str,
-    ignored_extra: &[&str],
+    enclosing: &dyn EnclosingScope,
 ) -> (Vec<Span>, Vec<Span>, Vec<String>, Vec<String>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
@@ -251,16 +252,10 @@ fn extract_vfor_bindings_internal(
 
     // Build ignored set from local names (need the actual strings to filter
     // references). The result's spans are file-relative, so they slice `input`.
-    let mut ignored: FxHashSet<&[u8]> = locals
-        .iter()
-        .map(|span| span.slice(input).as_bytes())
-        .collect();
-
-    if !ignored_extra.is_empty() {
-        for name in ignored_extra {
-            ignored.insert(name.as_bytes());
-        }
-    }
+    let own: FxHashSet<&str> = locals.iter().map(|span| span.slice(input)).collect();
+    // Enclosing template-scope names are queried in place from the shared
+    // table, never copied into this value's own set.
+    let ignored = |name: &str| own.contains(name) || enclosing.declares(name);
 
     // Extract reference spans from the right side (the iterable).
     // Note: we only collect runtime references, NOT TypeScript type references.
@@ -283,7 +278,7 @@ fn extract_vfor_bindings_internal(
         // names feed liveness, ignored (template-scope) names feed the
         // scope-local reference set for the slot-flag `hasScopeRef` decision.
         for name in collect_expression_free_refs(right, input) {
-            if ignored.contains(name.as_bytes()) {
+            if ignored(name) {
                 scope_local_reference_names.push(name.to_string());
             } else {
                 liveness_reference_names.push(name.to_string());
@@ -314,7 +309,7 @@ fn extract_vfor_bindings_internal(
 /// * `span` - The byte range within `input` containing the v-for expression
 /// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
-/// * `ignored` - Identifiers to ignore when collecting references
+/// * `enclosing` - Names declared by enclosing template scopes
 ///
 /// # Example
 /// ```ignore
@@ -492,7 +487,7 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
     span: Span,
     input: &'a str,
     source_type: SourceType,
-    ignored: &[&str],
+    enclosing: &dyn EnclosingScope,
 ) -> VForWithBindings<'a> {
     // `parse_vfor_sliced` returns file-relative spans for the left and right
     // expressions, so bindings are collected against `input` directly in a single
@@ -503,7 +498,7 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
         if result.has_left_errors() || result.has_right_errors() {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
-            extract_vfor_bindings_internal(&result, input, ignored)
+            extract_vfor_bindings_internal(&result, input, enclosing)
         };
 
     VForWithBindings {
@@ -530,14 +525,14 @@ pub fn parse_vfor_with_bindings<'a>(
     allocator: &'a Allocator,
     source: &'a str,
     source_type: SourceType,
-    ignored: &[&str],
+    enclosing: &dyn EnclosingScope,
 ) -> VForWithBindings<'a> {
     parse_vfor_with_bindings_sliced(
         allocator,
         Span::new(0, source.len() as u32),
         source,
         source_type,
-        ignored,
+        enclosing,
     )
 }
 

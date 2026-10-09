@@ -1,7 +1,7 @@
 // Call hierarchy: Vue-specific component and composable hierarchy.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -29,11 +29,13 @@ pub fn prepare_call_hierarchy(
             let start = line_index.offset_to_position(binding.span.start)?;
             let end = line_index.offset_to_position(binding.span.end)?;
             let kind = match &binding.kind {
-                verter_semantic::analysis::AnalyzedBindingKind::Function
-                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function
+                | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
                     SymbolKind::FUNCTION
                 }
-                verter_semantic::analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    SymbolKind::CLASS
+                }
                 _ => SymbolKind::VARIABLE,
             };
 
@@ -220,7 +222,12 @@ pub fn outgoing_calls(
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::*;
+
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateComponentUsage;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::ReactivityKind;
 
     #[test]
     fn test_prepare_on_binding() {

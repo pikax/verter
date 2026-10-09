@@ -50,7 +50,8 @@ fn workspace_host_with_svelte(
             extensions: vec![],
             workspace_root: "/workspace".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace"),
@@ -225,7 +226,9 @@ fn module_script_export_is_not_an_instance_member() {
 /// The synthesized BODY (`LoweredValueDecl`, fetched via
 /// `shallow_state.value_decl("default")`) carries the instance members on its
 /// annotation-borne synthesized source.
-fn instance_member_names(default_decl: &crate::decl_body_memo::LoweredValueDecl) -> Vec<String> {
+fn instance_member_names(
+    default_decl: &verter_semantic_source::decl_body_memo::LoweredValueDecl,
+) -> Vec<String> {
     match default_decl.type_annotation.annotation.as_ref() {
         Some(verter_type_expr::facts::SemanticTypeSource::Synthesized(
             verter_type_expr::facts::ResolvedLocalShape::Object(members),
@@ -522,6 +525,7 @@ fn partial_props_recovery_keeps_snippet_callable_role() {
     // incomplete claim with a usable subset; the recovered subset must keep
     // the role mapping.
     host.test_force
+        .engine
         .force_result_partial_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let recovered = host
@@ -531,6 +535,7 @@ fn partial_props_recovery_keeps_snippet_callable_role() {
         .into_parts()
         .0;
     host.test_force
+        .engine
         .force_result_partial_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
     let row = recovered
@@ -1124,17 +1129,17 @@ let { title }: Props = $props();
     overflow_host
         .get_component_meta("/Overflow.svelte")
         .expect("prime admitted analysis");
-    crate::host_test_force::arm_fact_tracer_overflow_once(
-        crate::host_test_force::TracerScope::ComponentMetaOutput,
-        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
+        verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaOutput,
+        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let overflow = overflow_host
         .get_public_api_projection("/Overflow.svelte")
         .expect("overflow projection request")
         .expect("overflow still returns the projection");
     assert_eq!(
-        crate::host_test_force::fact_tracer_overflow_claimed_by(),
-        Some(crate::host_test_force::TracerScope::ComponentMetaOutput),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        Some(verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaOutput),
         "the forced overflow must land on the separately-finalized output scope",
     );
     assert!(overflow.publication_witness.is_none());
@@ -1148,6 +1153,7 @@ let { title }: Props = $props();
         .expect("prime admitted analysis");
     noncacheable_host
         .test_force
+        .engine
         .force_fact_tracer_non_cacheable_read
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let noncacheable = noncacheable_host
@@ -1156,6 +1162,7 @@ let { title }: Props = $props();
         .expect("non-cacheable output still returns the projection");
     noncacheable_host
         .test_force
+        .engine
         .force_fact_tracer_non_cacheable_read
         .store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(noncacheable.publication_witness.is_none());
@@ -1832,7 +1839,7 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
         .deref_locator_body(&AuthoredBodyLocator::MacroPayload(type_arg));
     assert_eq!(
         deref.expect_err("the TypeArgument position keeps its sole hot producer"),
-        crate::decl_body_memo::LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer,
+        verter_session_query::source::deref::LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer,
         "the anchor-canonical gate (checked first) passes — never CanonicalMismatch"
     );
 
@@ -1877,8 +1884,9 @@ fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() 
         .decl_bodies()
         .deref_locator_body(&props_ref.locator)
         .expect("the absolute-anchored annotation payload derefs clean");
-    let crate::decl_body_memo::DerefedBodyShape::Single(verter_type_expr::TypeExpr::Object(obj)) =
-        &derefed.shape
+    let verter_session_query::source::deref::DerefedBodyShape::Single(
+        verter_type_expr::TypeExpr::Object(obj),
+    ) = &derefed.shape
     else {
         panic!(
             "the annotation payload derefs to its Single object body, got {:?}",

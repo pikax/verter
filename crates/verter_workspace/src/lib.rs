@@ -74,14 +74,12 @@ pub mod carrier_discovery;
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config;
-pub mod currency_probe;
 pub(crate) mod dir_index;
 pub mod env_hash;
 pub mod error;
 pub mod exact_resolution;
-pub mod fact_cache;
-pub mod fact_read_set;
 pub mod filesystem;
+pub mod freshness;
 pub mod generated_unit_admission;
 pub mod intrinsic_library;
 pub mod membership;
@@ -163,22 +161,13 @@ pub use engine::{
 };
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
-pub use fact_cache::{
-    compaction_domain, drop_subsumed_receipts, validates_through_receipts, AggregateBasisSeed,
-    AggregateGenerations, AggregatePopulation, AggregateStamp, CompactionDomain,
-    CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,
-    FactVersionRef, FactVersionValidator, LiveAggregateCounters, OverlayId, ParseEnvHash,
-    ParseFactRef, ProgramAnalysisFactRef, ProgramAnalysisFunctionRef, ReadSetSignature,
-    ReceiptWalk, RequestCompletion, ResolutionRootsStamp, ResolveImportsFactRef, ResultReceipt,
-    RouteSurfaceFactRef, RouteSurfaceStamp, SemanticImportsStamp, SessionOverlayFingerprint,
-    SignatureAdmission, StrictSelfRootWorld, ViewAggregateDomains, ViewPopulation,
-    ViewPopulationParent, CANDIDATE_CAP,
-};
-pub use fact_read_set::{
-    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation, ObservationMark,
-    FACT_DOMAIN_PRECISE_MAX, FACT_SIGNATURE_CAP,
-};
+
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
+#[cfg(feature = "semantic-observe")]
+pub use freshness::FreshnessObserveSnapshot;
+pub use freshness::{
+    CanonicalFreshnessLease, FreshnessReaders, FreshnessResidency, ViewFreshnessLease,
+};
 pub use generated_unit_admission::{
     decide_generated_unit_admission, decide_generated_unit_admission_with_basis,
     AdmittedGeneratedUnits, GeneratedUnitAdmission, GeneratedUnitAdmissionFingerprint,
@@ -195,12 +184,10 @@ pub use membership::{
 };
 pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
 pub use overlay::OverlayStore;
-pub use overlay_residency::{
-    OverlayAuthority, ResolutionRetentionAccount, ResolutionRetentionCharge,
-};
+pub use overlay_residency::OverlayAuthority;
 pub use package_index::PackageIndex;
 pub use project_key::project_stable_key_from_project;
-pub use published_state::{ProjectEnvHashArray, PublishedRoot};
+pub use published_state::{ProjectEnvHashArray, PublishedRoot, WorkspaceAuthority};
 pub use resolution_currency::{
     AdmittedResolution, CapturedResolutionWorld, ContentRevision, OverlayWorkCounts,
     ResolutionEpoch, ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome,
@@ -221,7 +208,7 @@ pub use traits::{
 pub use types::{
     ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, VfsProvenanceSnapshot,
 };
-pub use verter_semantic::resolver_core::InputResolutionBudgets;
+pub use verter_session_query::resolution::InputResolutionBudgets;
 #[cfg(not(target_arch = "wasm32"))]
 pub use virtual_config::{compute_virtual_config_identity, VirtualConfigIdentity};
 #[cfg(not(target_arch = "wasm32"))]
@@ -231,7 +218,7 @@ pub use vite_config::{
     ViteConfigAnalysis, ViteConfigOptions, ViteConfigTrustInfo,
 };
 pub use workspace_snapshot::{
-    ConfiguredOwnerResolution, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+    ConfiguredOwnerResolution, OwnershipProject, ProjectPayload, SnapshotGeneration,
     WorkspaceSnapshot,
 };
 

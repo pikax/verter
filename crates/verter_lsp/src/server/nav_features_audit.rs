@@ -198,7 +198,15 @@ pub(super) async fn handle_references_with_audit(
             verter_audit::payloads::tags::LspMethodTag::References,
             target_identity,
             Some(position),
-            async move { handle_references(server, params).await },
+            async move {
+                server
+                    .answer_repaired_foreground(
+                        crate::documents::ForegroundRoute::References,
+                        &uri,
+                        handle_references(server, params),
+                    )
+                    .await
+            },
             |payload, value| {
                 let count = value.as_ref().map(Vec::len).unwrap_or(0);
                 payload.num_references = Some(u32::try_from(count).unwrap_or(u32::MAX));
@@ -234,27 +242,47 @@ pub(super) async fn handle_rename_with_audit(
             verter_audit::payloads::tags::LspMethodTag::Rename,
             target_identity,
             Some(position),
-            async move { handle_rename(server, params).await },
+            async move {
+                server
+                    .answer_repaired_edit_foreground(
+                        crate::documents::ForegroundRoute::Rename,
+                        &uri,
+                        handle_rename(server, params),
+                    )
+                    .await
+            },
             |payload, value| {
-                let edit_count = value
-                    .as_ref()
-                    .and_then(|w| w.changes.as_ref())
-                    .map(|m| m.values().map(Vec::len).sum::<usize>())
-                    .unwrap_or(0);
+                let edit_count = value.as_ref().map_or(0, workspace_edit_count);
                 payload.response_size_bytes =
                     u32::try_from(edit_count.saturating_mul(96)).unwrap_or(u32::MAX);
             },
         ),
         |value| {
-            let edit_count = value
-                .as_ref()
-                .and_then(|w| w.changes.as_ref())
-                .map(|m| m.values().map(Vec::len).sum::<usize>())
-                .unwrap_or(0);
+            let edit_count = value.as_ref().map_or(0, workspace_edit_count);
             u32::try_from(edit_count.saturating_mul(96)).unwrap_or(u32::MAX)
         },
     )
     .await
+}
+
+/// Text edits a rename answer carries, in either delivery shape.
+fn workspace_edit_count(edit: &WorkspaceEdit) -> usize {
+    let changes = edit
+        .changes
+        .as_ref()
+        .map_or(0, |changes| changes.values().map(Vec::len).sum::<usize>());
+    let document_changes = match &edit.document_changes {
+        Some(DocumentChanges::Edits(edits)) => edits.iter().map(|edit| edit.edits.len()).sum(),
+        Some(DocumentChanges::Operations(operations)) => operations
+            .iter()
+            .map(|operation| match operation {
+                DocumentChangeOperation::Edit(edit) => edit.edits.len(),
+                DocumentChangeOperation::Op(_) => 0,
+            })
+            .sum(),
+        None => 0,
+    };
+    changes + document_changes
 }
 
 fn hover_response_size(hover: Option<&Hover>) -> u32 {
@@ -295,9 +323,9 @@ mod tests {
     ) {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
-        tower_lsp_server::LspService::new(move |client| {
+        tower_lsp_server::LspService::new(move |_client| {
             VerterLanguageServer::new(
-                client,
+                crate::outbound::Outbound::default(),
                 LspConfig {
                     host: Arc::clone(&host_for_server),
                     type_provider: None,

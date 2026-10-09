@@ -4,7 +4,7 @@
 // report. See docs/contributing/semantic-benchmark.md.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,6 @@ import {
   invocationEnd,
   runLimits,
   supervisorDeadlineMs,
-  compactCliStdout,
   warmRepeatsFor,
 } from "./analyze.mjs";
 import {
@@ -37,13 +36,21 @@ import {
 } from "./provenance.mjs";
 import { renderMarkdown } from "./report.mjs";
 import {
+  allScenarios,
   cliSource,
   scenariosForTier,
   SETTINGS,
-  selectScenarios,
   TIERS,
   tsconfigText,
 } from "./scenarios.mjs";
+import { sessionArmsOf, sessionInputs } from "./session-analyze.mjs";
+import {
+  INIT_ALIAS,
+  sessionProblems,
+  sessionScript,
+  sessionsFor,
+  sessionTsconfigText,
+} from "./sessions.mjs";
 import { summarize } from "./summary.mjs";
 import { resolveSupervisor, runSupervised } from "./supervisor.mjs";
 import { validateRun } from "./validate.mjs";
@@ -73,13 +80,14 @@ export const RESULTS_SCHEMA = 1;
  */
 export const TIER_DEFAULTS = {
   quick: {
-    arms: ["verter", "tsc-api", "verter-obs", "verter-counted"],
+    arms: ["verter", "tsc-api", "verter-obs", "verter-observe", "verter-counted"],
     repeat: 3,
     warmup: 1,
     warmRepeats: 3,
     timeoutMs: 60_000,
     startupAllowanceMs: 10_000,
-    estimate: "about 1-2 minutes (62 s on a Ryzen 9 7950X, 336 invocations)",
+    estimate:
+      "not yet measured with the session workloads and the observe build (62 s and 336 invocations on a Ryzen 9 7950X before them), plus a second release build",
   },
   standard: {
     arms: DEFAULT_ARMS,
@@ -112,7 +120,8 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           every tier: 1 warmup + 3 measured fresh processes per arm, 3 warm repeats in one
                           live process per arm; deadline 60 s (quick), 120 s (standard), 600 s (stress)
   --out <dir>             output directory (default: target/semantic-perf/<timestamp>)
-  --only <a,b>            only these scenarios (id or id prefix, from the whole catalog; overrides --tier)
+  --only <a,b>            only these scenarios and sessions (id or id prefix, from the whole catalog;
+                          overrides --tier)
   --settings <s>          strict (default) | all  (the four strictNullChecks x noImplicitAny settings)
   --arms <a,b>            arms to run (default: ${DEFAULT_ARMS.join(",")})
   --repeat <n>            measured invocations per arm (tier default 3; odd counts are balanced to within one)
@@ -153,7 +162,14 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           arms, the OSS section's tsc -p references, the Biome section's tsc arm):
                           every answer is still classified against the measured reference, but
                           nothing is timed against tsc (to skip only the demand section: --no-demand)
-  --help`;
+  --help
+
+Every tier also runs the session workloads (scripts/benchmark/semantic-perf/sessions.mjs): INCREMENTAL
+edits, an EDITOR SESSION over an InputMenu-equivalent Vue component and CONCURRENT demands, each one live
+process per invocation in the verter, verter-observe and tsc-api arms (tsc incremental: API snapshot reuse).
+The verter-observe arm is the probe built with semantic-observe (capture compiled in) in its own target
+directory; the production probe has it physically compiled out. --no-demand skips them with the demand
+section, and --no-tsc drops their tsc-api arm.`;
 
 export function parseArgs(argv) {
   const opts = {
@@ -559,6 +575,18 @@ function commandFor(arm, ctx, runBase) {
         ],
         probeOut,
       };
+    case "verter-observe":
+      return {
+        argv: [
+          binaries.observe.pinned,
+          "run",
+          "--job",
+          writeJob(`${runBase}.job.json`, { ...baseJob, observability: false }),
+          "--out",
+          probeOut,
+        ],
+        probeOut,
+      };
     case "verter-counted":
       return {
         argv: [
@@ -672,9 +700,31 @@ export async function main(argv) {
   };
   binaries.probe.identity = probeIdentity(binaries.probe.pinned);
   binaries.counted.identity = probeIdentity(binaries.counted.pinned);
+  // The observe arm's probe: the same source with optional capture compiled in.
+  let observeBuild = null;
+  if (opts.arms.includes("verter-observe")) {
+    log("semantic-perf: building the observe probe (semantic-observe compiled in)");
+    observeBuild = buildVerterProbes(ROOT, { inherit: opts.allowTuning, observe: true });
+    const observeProblems = buildProblems(observeBuild);
+    if (observeProblems.length)
+      throw new Error(
+        `the observe probe is not the observe build:\n  ${observeProblems.join("\n  ")}`,
+      );
+    binaries.observe = pinBinary(
+      observeBuild.executables.semantic_perf_probe,
+      binDir,
+      "semantic_perf_probe_observe",
+    );
+    binaries.observe.identity = probeIdentity(binaries.observe.pinned);
+  }
+  if (binaries.probe.identity.captureAvailable !== false)
+    throw new Error("the production probe has optional semantic capture compiled in");
+  if (binaries.observe && binaries.observe.identity.captureAvailable !== true)
+    throw new Error("the observe probe does not have optional semantic capture compiled in");
   for (const [name, bin] of [
     ["the Verter probe", binaries.probe],
     ["the counted probe", binaries.counted],
+    ...(binaries.observe ? [["the observe probe", binaries.observe]] : []),
   ]) {
     if (
       bin.identity.nativeArch !== bin.identity.targetArch ||
@@ -698,7 +748,17 @@ export async function main(argv) {
   const expected = loadExpected();
   const libText = readFileSync(LIB_FILE, "utf8");
   // --only picks from the whole catalog; otherwise the tier decides.
-  const scenarios = opts.only.length ? selectScenarios(opts.only) : scenariosForTier(opts.tier);
+  const scenarios = opts.only.length
+    ? allScenarios().filter((s) => opts.only.some((p) => s.id === p || s.id.startsWith(p)))
+    : scenariosForTier(opts.tier);
+  const sessions = sessionsFor(opts.tier, TIERS, opts.only);
+  if (!scenarios.length && !sessions.length)
+    throw new Error(`--only ${opts.only.join(",")} selects no scenario and no session`);
+  for (const session of sessions) {
+    const problems = sessionProblems(session);
+    if (problems.length)
+      throw new Error(`the session catalog is invalid:\n  ${problems.join("\n  ")}`);
+  }
   const settings = opts.settings === "all" ? SETTINGS : SETTINGS.filter((s) => s.id === "strict");
   const cells = new Map();
   for (const scenario of scenarios) {
@@ -790,7 +850,7 @@ export async function main(argv) {
     let cliStdout = null;
     if (!probeOut && result.record?.stdoutPath) {
       try {
-        cliStdout = compactCliStdout(readFileSync(result.record.stdoutPath, "utf8"));
+        cliStdout = readFileSync(result.record.stdoutPath, "utf8");
       } catch {
         cliStdout = null;
       }
@@ -834,6 +894,16 @@ export async function main(argv) {
     );
   }
 
+  const sessionRun = await runSessions(sessions, {
+    opts,
+    outDir,
+    libText,
+    binaries,
+    typescript,
+    runtimeEnv,
+    log,
+  });
+
   // The opt-in comparisons, each in its own counterbalanced schedule and
   // its own section, after the semantic run (which they never change).
   const tools = opts.oss || opts.biome ? loadTools() : null;
@@ -871,6 +941,7 @@ export async function main(argv) {
     : null;
 
   const binariesAfter = {
+    ...(binaries.observe ? { observe: sha256File(binaries.observe.pinned) } : {}),
     probe: sha256File(binaries.probe.pinned),
     counted: sha256File(binaries.counted.pinned),
     supervisor: sha256File(binaries.supervisor.pinned),
@@ -897,6 +968,7 @@ export async function main(argv) {
       environment: { runtime: envReceipt(runtimeEnv), inherited: opts.allowTuning, ignoredTuning },
       typescript,
       build,
+      observeBuild,
       binaries,
       binariesAfter,
       expected: {
@@ -919,11 +991,14 @@ export async function main(argv) {
         ]),
       ),
       plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
+      sessions: sessionRun.meta,
+      sessionPlan: sessionRun.plan,
     },
     invocations,
+    sessionInvocations: sessionRun.invocations,
   };
-  run.summary = summarize(run, expected, scenarios);
-  const validation = validateRun(run, expected, scenarios);
+  run.summary = summarize(run, expected, scenarios, sessions);
+  const validation = validateRun(run, expected, scenarios, { sessions });
   run.validation = validation;
   let ok = validation.ok;
   const extraFailures = [];
@@ -965,4 +1040,154 @@ export async function main(argv) {
     for (const failure of extraFailures.slice(0, 40)) log(`  - ${failure}`);
   }
   return ok ? 0 : 1;
+}
+
+/**
+ * Run the session workloads: each (session, arm) invocation is one fresh
+ * process running the whole script on its own copy of the project (an edit
+ * writes the copy), under the same supervisor, budget and deadline as every
+ * probe, in the counterbalanced schedule.
+ */
+export async function runSessions(
+  sessions,
+  { opts, outDir, libText, binaries, typescript, runtimeEnv, log },
+) {
+  const meta = {};
+  const templates = new Map();
+  for (const session of sessions) {
+    const dir = join(outDir, "sessions", session.id, "template");
+    mkdirSync(dir, { recursive: true });
+    const files = {
+      "lib.bench.d.ts": libText,
+      "tsconfig.json": sessionTsconfigText(session),
+      ...session.files,
+    };
+    for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, file), text);
+    templates.set(session.id, { dir, files: Object.keys(files) });
+    meta[session.id] = {
+      id: session.id,
+      family: session.family,
+      note: session.note,
+      dir,
+      inputs: sessionInputs(session, libText),
+    };
+  }
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const arms = sessionArmsOf(opts.arms);
+  const plan = schedule(
+    sessions.map((s) => s.id),
+    arms,
+    opts.repeat,
+    opts.warmup,
+  );
+  const invocations = [];
+  for (const [index, step] of plan.entries()) {
+    const session = byId.get(step.key);
+    const runDir = join(
+      outDir,
+      "sessions",
+      session.id,
+      step.arm,
+      `${step.warmup ? "warmup" : "rep"}-${step.rep}`,
+    );
+    const projectDir = join(runDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    const template = templates.get(session.id);
+    for (const file of template.files)
+      copyFileSync(join(template.dir, file), join(projectDir, file));
+    const job = {
+      schema: 1,
+      dir: projectDir,
+      tsconfig: "tsconfig.json",
+      lib: "lib.bench.d.ts",
+      libMode: opts.libMode,
+      files: Object.keys(session.files),
+      initFile: session.initFile,
+      initAlias: INIT_ALIAS,
+      steps: sessionScript(session),
+      observability: false,
+    };
+    const jobPath = join(runDir, "job.json");
+    const sessionOut = join(runDir, "session.json");
+    let command;
+    if (step.arm === "tsc-api") {
+      writeJob(jobPath, {
+        ...job,
+        tsPackageDir: typescript.packageDir,
+        tscExe: typescript.exe,
+        statsExe: binaries.probe.pinned,
+      });
+      command = [
+        process.execPath,
+        join(HERE, "tsc-session-probe.mjs"),
+        "--job",
+        jobPath,
+        "--out",
+        sessionOut,
+      ];
+    } else {
+      writeJob(jobPath, job);
+      const exe = step.arm === "verter-observe" ? binaries.observe.pinned : binaries.probe.pinned;
+      command = [exe, "session", "--job", jobPath, "--out", sessionOut];
+    }
+    const supOut = join(runDir, "sup.json");
+    const t0 = Date.now();
+    const spawnedAtMs = Date.now();
+    const result = await runSupervised(binaries.supervisor.pinned, {
+      memMb: opts.memMb + opts.infraMb,
+      timeoutMs: supervisorDeadlineMs(opts),
+      out: supOut,
+      env: runtimeEnv,
+      cwd: projectDir,
+      argv: command,
+      allowSampled: opts.allowSampled,
+    });
+    let marker = null;
+    try {
+      marker = JSON.parse(readFileSync(`${sessionOut}.phase`, "utf8"));
+    } catch {
+      marker = null;
+    }
+    let record = null;
+    let sessionReadError = null;
+    try {
+      record = JSON.parse(readFileSync(sessionOut, "utf8"));
+    } catch (err) {
+      sessionReadError = String(err.message ?? err);
+    }
+    const supervisor = result.record
+      ? { ...result.record, samples: undefined, sampleCount: result.record.samples?.length ?? 0 }
+      : null;
+    invocations.push({
+      index,
+      sessionId: session.id,
+      arm: step.arm,
+      rep: step.rep,
+      warmup: step.warmup,
+      command,
+      projectDir: projectDir.replace(/\\/g, "/"),
+      supervisorOut: supOut,
+      supervisorExit: result.supervisorExit,
+      supervisorSignal: result.supervisorSignal ?? null,
+      supervisorReadError: result.readError ?? result.spawnError ?? null,
+      supervisor,
+      sessionOut,
+      spawnedAtMs,
+      phase: marker?.phase ?? null,
+      phaseHistory: marker?.history ?? null,
+      session: record,
+      sessionReadError,
+    });
+    const end = supervisor?.killedBy
+      ? `killed:${supervisor.killedBy}`
+      : `exit ${supervisor?.exitCode ?? "?"}`;
+    log(
+      `[session ${index + 1}/${plan.length}] ${session.id} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: ${end} (${((Date.now() - t0) / 1000).toFixed(1)} s)`,
+    );
+  }
+  return {
+    meta,
+    plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
+    invocations,
+  };
 }

@@ -9,9 +9,10 @@
 // - DOM query selector strings → matching template elements (with CSS rule fallback)
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
 use verter_semantic::analysis::{match_selector, MatchResult};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
+use verter_session_query::analysis::types::DomQueryKind;
 
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 
@@ -45,6 +46,7 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 /// letting the type provider handle it (it can navigate to the exact symbol).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn definition_at_position(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     position: &Position,
     source: &str,
     blocks: &[CarrierBlockView],
@@ -194,7 +196,10 @@ pub fn definition_at_position(
                         }
                         // Default import of .vue file: the local name won't match script
                         // bindings, so retry with "default" which handles Vue SFC exports.
-                        if crate::server::is_default_export_component_carrier(canonical_id) {
+                        if crate::server::is_default_export_component_carrier(
+                            classifier,
+                            canonical_id,
+                        ) {
                             if let Some(result) = try_precise_cross_file(
                                 canonical_id,
                                 "default",
@@ -215,7 +220,8 @@ pub fn definition_at_position(
                         ) {
                             return Some(result);
                         }
-                        if crate::server::is_default_export_component_carrier(&resolved) {
+                        if crate::server::is_default_export_component_carrier(classifier, &resolved)
+                        {
                             if let Some(result) = try_precise_cross_file(
                                 &resolved,
                                 "default",
@@ -239,9 +245,15 @@ pub fn definition_at_position(
         if in_template {
             // Navigate $props → defineProps, $emit → defineEmits, $slots → defineSlots
             let macro_kind = match word.as_str() {
-                "$props" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineProps),
-                "$emit" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineEmits),
-                "$slots" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineSlots),
+                "$props" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
+                }
+                "$emit" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits)
+                }
+                "$slots" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots)
+                }
                 _ => None,
             };
             if let Some(kind) = macro_kind {
@@ -368,7 +380,9 @@ pub fn definition_at_position(
                                         ) {
                                             return Some(result);
                                         }
-                                        if crate::server::is_default_export_component_carrier(cid) {
+                                        if crate::server::is_default_export_component_carrier(
+                                            classifier, cid,
+                                        ) {
                                             if let Some(result) = try_precise_cross_file(
                                                 cid,
                                                 "default",
@@ -391,7 +405,7 @@ pub fn definition_at_position(
                                             return Some(result);
                                         }
                                         if crate::server::is_default_export_component_carrier(
-                                            &resolved,
+                                            classifier, &resolved,
                                         ) {
                                             if let Some(result) = try_precise_cross_file(
                                                 &resolved,
@@ -460,7 +474,10 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if crate::server::is_default_export_component_carrier(canonical_id) {
+                            if crate::server::is_default_export_component_carrier(
+                                classifier,
+                                canonical_id,
+                            ) {
                                 if let Some(result) = try_precise_cross_file(
                                     canonical_id,
                                     "default",
@@ -482,7 +499,9 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if crate::server::is_default_export_component_carrier(&resolved) {
+                            if crate::server::is_default_export_component_carrier(
+                                classifier, &resolved,
+                            ) {
                                 if let Some(result) = try_precise_cross_file(
                                     &resolved,
                                     "default",
@@ -720,7 +739,7 @@ fn css_rule_definition(
     target: &CssRefTarget,
     element: Option<(
         usize,
-        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     )>,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
@@ -788,11 +807,11 @@ fn css_rule_definition(
 /// 2 = no derivable structure / no element context,
 /// 3 = structurally cannot match.
 pub(crate) fn class_rule_match_rank(
-    cls: &verter_semantic::analysis::style::AnalyzedCssClass,
-    css: &verter_semantic::analysis::style::CssAnalysis,
+    cls: &verter_session_query::analysis::style::AnalyzedCssClass,
+    css: &verter_session_query::analysis::style::CssAnalysis,
     element: Option<(
         usize,
-        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     )>,
 ) -> u8 {
     let Some((element_idx, template)) = element else {

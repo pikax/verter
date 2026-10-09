@@ -18,7 +18,7 @@ fn capture_with_module_region(
 ) -> SvelteScriptCandidates {
     let alloc = Allocator::default();
     let program = Parser::new(&alloc, src, SourceType::ts()).parse().program;
-    let owners = crate::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
+    let owners = verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
         program.body.len(),
         program.body.iter().map(|statement| {
             if statement_in_module(statement.span().start, module_region) {
@@ -148,7 +148,7 @@ fn captured_macro_payload_owner_is_instance_and_module_address_is_rejected() {
 
     with_program(src, |program| {
         let owners =
-            crate::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
+            verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
                 program.body.len(),
                 std::iter::repeat_n(TopLevelOwnerId::instance(0), program.body.len()),
             )
@@ -2037,7 +2037,7 @@ fn deref_accessor_absent_positions_are_typed_misses() {
 fn provider_capture(src: &str) -> ExactFrameworkScriptCandidates {
     let alloc = Allocator::default();
     let program = Parser::new(&alloc, src, SourceType::ts()).parse().program;
-    let owners = crate::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
+    let owners = verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
         program.body.len(),
         std::iter::repeat_n(
             verter_type_expr::TopLevelOwnerId::instance(0),

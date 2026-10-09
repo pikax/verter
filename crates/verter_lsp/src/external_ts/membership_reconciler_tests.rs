@@ -14,7 +14,7 @@ use verter_session::file_artifact_store::ProjectIdentity;
 
 use super::{
     CarrierMembershipCommitter, CommitFuture, MembershipReconciler, ReconcileErr, ReconcileOutcome,
-    ReconcileReason,
+    ReconcileReason, SourceGates, SOURCE_GATE_SLOT_FLOOR,
 };
 use crate::external_ts::membership_ledger::{
     AbsentReason, CanonicalSource, LedgerCompanion, MembershipLedger, MembershipRecord, ProjectUri,
@@ -123,7 +123,7 @@ fn test_binding(project: &str) -> ProjectBinding {
         "5.9.0",
         env_dims,
         Vec::new(),
-        verter_workspace::ProjectId(0),
+        verter_session_query::resolution::ProjectId(0),
         verter_workspace::SnapshotGeneration(1),
     )
 }
@@ -164,11 +164,12 @@ fn ide(provider_uri: &str) -> CarrierCompanion {
     companion(provider_uri, SnapshotRole::CarrierIde, ScriptKind::Tsx)
 }
 
-/// A fresh, empty per-source membership-gate map for a standalone test reconciler.
-/// Production shares ONE map via the coordinator; a test reconciler used once (or
-/// concurrently as a single shared instance) is correctly served by its own map.
-fn fresh_source_gates() -> Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>> {
-    Arc::new(dashmap::DashMap::new())
+/// A fresh, empty per-source membership-gate registry for a standalone test
+/// reconciler. Production shares ONE registry via the coordinator; a test reconciler
+/// used once (or concurrently as a single shared instance) is correctly served by its
+/// own registry.
+fn fresh_source_gates() -> Arc<SourceGates> {
+    Arc::new(SourceGates::new())
 }
 
 /// Build a reconciler over a fresh ledger and the given provider, returning the
@@ -1742,4 +1743,266 @@ async fn distinct_source_membership_transitions_run_concurrently() {
         .await
         .expect("join task 2")
         .expect("task 2 reconcile succeeds");
+}
+
+// ── Participant-owned gate lifetime ──────────────────────────────────────────
+
+/// Spawn `transition` and return, beside its handle, a signal that fires the first
+/// time its task parks (a poll returns `Pending`). A transition's first statement
+/// registers on the source's gate and polls the gate's FIFO mutex in that same poll,
+/// so once the signal fires — and the gate's participant count includes it — the
+/// transition is queued on the mutex, not merely registered. The barrier tests admit
+/// the next participant only after that, so arrival order is pinned, not scheduled.
+fn spawn_parked<F>(
+    transition: F,
+) -> (
+    tokio::task::JoinHandle<F::Output>,
+    tokio::sync::oneshot::Receiver<()>,
+)
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let mut transition = std::pin::pin!(transition);
+        let mut parked_tx = Some(parked_tx);
+        std::future::poll_fn(|cx| {
+            let poll = transition.as_mut().poll(cx);
+            if poll.is_pending() {
+                if let Some(parked_tx) = parked_tx.take() {
+                    let _ = parked_tx.send(());
+                }
+            }
+            poll
+        })
+        .await
+    });
+    (handle, parked_rx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn holder_waiter_removal_and_entrant_share_one_gate_that_retires_with_the_last() {
+    // A holder parks in the committer; a waiter, then a removal, queue behind it; the
+    // holder leaves while both still wait; the gate must stay the ONE live authority
+    // (no second gate for the entrants), serve them in arrival order, and retire only
+    // when the last participant leaves — after which a re-entrant installs a fresh one.
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let committer = Arc::new(SerializingCommitter {
+        entered_tx,
+        release: Arc::clone(&release),
+    });
+    let ledger = Arc::new(MembershipLedger::with_initial_session());
+    let gates = fresh_source_gates();
+    let reconciler = Arc::new(MembershipReconciler::new(
+        Arc::clone(&ledger),
+        Arc::new(MockTypeProvider::new()),
+        Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
+        Arc::clone(&gates),
+    ));
+    let source = "/proj/src/Raced.vue";
+    let publish = |reconciler: Arc<MembershipReconciler>| {
+        spawn_parked(async move {
+            reconciler
+                .reconcile_source_membership(
+                    &CanonicalSource::from(source),
+                    bound("/proj/tsconfig.json"),
+                    vec![ide("/proj/src/Raced.vue.tsx")],
+                    ReconcileReason::SourceSynced,
+                )
+                .await
+        })
+    };
+
+    // Holder: inside the committer, owning the gate.
+    let (holder, _) = publish(Arc::clone(&reconciler));
+    entered_rx
+        .recv()
+        .await
+        .expect("the holder reaches the committer");
+    assert_eq!((gates.live_gates(), gates.participants(source)), (1, 1));
+
+    // Waiter, then a removal entrant, each queued on the held gate before the next
+    // is admitted.
+    let (waiter, waiter_parked) = publish(Arc::clone(&reconciler));
+    waiter_parked.await.expect("the waiter parks");
+    assert_eq!(
+        (gates.live_gates(), gates.participants(source)),
+        (1, 2),
+        "the waiter queued on the holder's gate"
+    );
+    let (removal, removal_parked) = {
+        let reconciler = Arc::clone(&reconciler);
+        spawn_parked(async move {
+            reconciler
+                .remove_source_membership(&CanonicalSource::from(source), AbsentReason::Deleted)
+                .await
+        })
+    };
+    removal_parked.await.expect("the removal parks");
+    assert_eq!(
+        (gates.live_gates(), gates.participants(source)),
+        (1, 3),
+        "the removal queued on the same live gate"
+    );
+    assert!(
+        matches!(entered_rx.try_recv(), Err(TryRecvError::Empty)),
+        "a queued participant entered the committer while the holder held the gate"
+    );
+
+    // The holder leaves while both entrants are still queued: the gate stays live.
+    release.add_permits(1);
+    let _ = holder
+        .await
+        .expect("join holder")
+        .expect("holder publishes");
+    entered_rx
+        .recv()
+        .await
+        .expect("the waiter reaches the committer next");
+    assert_eq!((gates.live_gates(), gates.participants(source)), (1, 2));
+    assert!(
+        !removal.is_finished(),
+        "the removal overtook the waiter that queued before it"
+    );
+
+    release.add_permits(1);
+    let _ = waiter
+        .await
+        .expect("join waiter")
+        .expect("waiter publishes");
+    let _ = removal
+        .await
+        .expect("join removal")
+        .expect("removal retracts");
+    assert!(
+        !ledger.is_advertised(&CanonicalSource::from(source)),
+        "the removal queued last must be the last transition applied"
+    );
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "the gate retires with its last participant"
+    );
+
+    // Re-entry after retirement installs exactly one fresh gate.
+    let (reentrant, _) = publish(Arc::clone(&reconciler));
+    entered_rx
+        .recv()
+        .await
+        .expect("the re-entrant reaches the committer");
+    assert_eq!((gates.live_gates(), gates.participants(source)), (1, 1));
+    release.add_permits(1);
+    let _ = reentrant
+        .await
+        .expect("join re-entrant")
+        .expect("re-entrant publishes");
+    assert_eq!(gates.live_gates(), 0);
+}
+
+#[tokio::test]
+async fn a_cancelled_waiter_leaves_the_gate_it_was_queued_on() {
+    let gates = fresh_source_gates();
+    let source = "/proj/src/Cancelled.vue";
+    let holder = SourceGates::join(&gates, source).hold().await;
+
+    let (waiter, waiter_parked) = {
+        let gates = Arc::clone(&gates);
+        spawn_parked(async move {
+            let _held = SourceGates::join(&gates, source).hold().await;
+        })
+    };
+    waiter_parked.await.expect("the waiter parks");
+    assert_eq!(gates.participants(source), 2, "the waiter queued");
+    waiter.abort();
+    assert!(waiter.await.expect_err("aborted").is_cancelled());
+    assert_eq!(
+        gates.participants(source),
+        1,
+        "a cancelled waiter must stop owning the gate"
+    );
+
+    drop(holder);
+    assert_eq!(gates.live_gates(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_retirement_and_reentry_never_admit_two_holders() {
+    // Few sources, many participants, random cancellation: the retire-vs-re-enter edge
+    // is hit constantly. Two live gates for one source would let two holders inside
+    // the critical section at once.
+    use std::sync::atomic::AtomicUsize;
+
+    const SOURCES: usize = 3;
+    let gates = fresh_source_gates();
+    let inside: Arc<Vec<AtomicUsize>> =
+        Arc::new((0..SOURCES).map(|_| AtomicUsize::new(0)).collect());
+    let mut tasks = Vec::new();
+    for task in 0..32u64 {
+        let gates = Arc::clone(&gates);
+        let inside = Arc::clone(&inside);
+        tasks.push(tokio::spawn(async move {
+            let mut state = lcg_seed(task);
+            for _ in 0..200 {
+                let index = (lcg_next(&mut state) as usize) % SOURCES;
+                let source = format!("/proj/src/Hot{index}.vue");
+                let participant = SourceGates::join(&gates, &source);
+                if lcg_next(&mut state).is_multiple_of(4) {
+                    // Cancelled before (or while) waiting.
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::ZERO, participant.hold()).await;
+                    continue;
+                }
+                let _held = participant.hold().await;
+                assert_eq!(
+                    inside[index].fetch_add(1, Ordering::SeqCst),
+                    0,
+                    "two holders inside one source's gate"
+                );
+                tokio::task::yield_now().await;
+                inside[index].fetch_sub(1, Ordering::SeqCst);
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("participant task");
+    }
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "every gate retires once its sources go quiet"
+    );
+}
+
+#[tokio::test]
+async fn source_churn_returns_gate_population_and_capacity_to_baseline() {
+    // Thousands of distinct sources, each with a holder and a cancelled waiter, all
+    // live at once; releasing them must drain the population and give the backing
+    // capacity back, with no global clear — and a second wave must not ratchet it.
+    const SOURCES: usize = 5_000;
+    let gates = fresh_source_gates();
+    for wave in 0..2 {
+        let mut holders = Vec::with_capacity(SOURCES);
+        for index in 0..SOURCES {
+            let source = format!("/proj/src/wave{wave}/Churn{index}.vue");
+            holders.push(SourceGates::join(&gates, &source).hold().await);
+            let waiter = SourceGates::join(&gates, &source);
+            let _ = tokio::time::timeout(std::time::Duration::ZERO, waiter.hold()).await;
+            assert_eq!(gates.participants(&source), 1, "the cancelled waiter left");
+        }
+        assert_eq!(gates.live_gates(), SOURCES);
+        assert!(gates.backing_capacity() >= SOURCES);
+
+        drop(holders);
+        assert_eq!(gates.live_gates(), 0, "wave {wave}: the population drains");
+        // The drained baseline is the retained floor, not a fresh registry's zero.
+        assert!(
+            gates.backing_capacity() <= 4 * SOURCE_GATE_SLOT_FLOOR,
+            "wave {wave}: the drained registry still retains {} slots",
+            gates.backing_capacity()
+        );
+    }
 }

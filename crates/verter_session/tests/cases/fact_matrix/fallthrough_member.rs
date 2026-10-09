@@ -10,9 +10,11 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_semantic::facts::registry::{InternedName, SymbolSpace};
-use verter_semantic::facts::{FactKey, FactLane};
-use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
+use verter_session::resolver_core::PermissiveStoreView;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+use verter_session_query::facts::registry::{InternedName, SymbolSpace};
+use verter_session_query::facts::store_view::StoreView;
+use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -33,7 +35,9 @@ fn fallthrough_signature_carries_member() {
         .expect("CachedFallthroughEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
+        window.contains(
+            "fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>"
+        ),
         "fallthrough matrix slice: `CachedFallthroughEntry` \
          MUST carry `fact_versions: Arc<[FactVersionRef]>`. Window:\n{window}"
     );

@@ -2,12 +2,13 @@
 //!
 //! Establishment, crash recovery, desired-state replay and the serving epoch
 //! live in `verter_type_runtime::provider_hub`; this module only supplies how
-//! one tsserver engine is spawned and the LSP `Client` bridge.
+//! one tsserver engine is spawned and the LSP outbound bridge.
 
 use std::sync::Arc;
 
-use tokio::sync::{Notify, OnceCell};
-use tower_lsp_server::Client;
+use tokio::sync::Notify;
+
+use crate::outbound::Outbound;
 
 use crate::resilient_provider::{
     EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
@@ -106,7 +107,7 @@ impl ProviderEstablisher<dyn TypeProvider> for TsserverBackend {
 /// replacement gap are re-driven the moment the fresh epoch serves.
 pub(crate) fn hub(
     inputs: TsserverEngineInputs,
-    client: Arc<OnceCell<Client>>,
+    client: Outbound,
     max_restarts: u32,
     admitted_state_rearm: Option<crate::resilient_provider::AdmittedStateRearm>,
     restart_pulse: Arc<tokio::sync::Notify>,

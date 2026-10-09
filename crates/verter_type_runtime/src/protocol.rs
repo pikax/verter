@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeProviderError {
     pub message: String,
+    #[serde(skip)]
+    pub admission_refusal: Option<crate::provider_hub::AdmissionRefusal>,
 }
 
 impl std::fmt::Display for TypeProviderError {
@@ -27,6 +29,14 @@ impl TypeProviderError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            admission_refusal: None,
+        }
+    }
+
+    pub fn admission(reason: crate::provider_hub::AdmissionRefusal) -> Self {
+        Self {
+            message: format!("generated-unit admission refused: {reason:?}"),
+            admission_refusal: Some(reason),
         }
     }
 }

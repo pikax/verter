@@ -36,7 +36,7 @@ use rustc_hash::FxHashMap;
 use verter_audit::{AuditConfig, RequestAuditRecord};
 
 use crate::component_meta_audit::AuditRecordsStore;
-use crate::request_context::RequestContext;
+use verter_type_engine::request_context::RequestContext;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
@@ -124,13 +124,17 @@ mod owner_release_proof {
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 pub use owner_release_proof::OwnerReleaseEntered;
 
-/// Host-owned audit-runtime concrete type. Wraps the records store,
+/// Host-owned audit-runtime concrete type. Owns the host's records store,
 /// the audit-config snapshot, and the active-request registry.
 ///
-/// The records store is consumer-visible via
-/// [`Self::take_record`], [`Self::insert_record`], and
-/// [`Self::audit_records_store`]. The active-request registry is
-/// strictly behind crate-private surface methods so the
+/// The runtime mints its records store at construction and is the only
+/// holder of it: the host keeps no second handle, so every publish and
+/// every drain reaches the one store through this runtime. Consumers
+/// drain with [`Self::take_record`] and read with
+/// [`Self::audit_records_store`]; producers publish through an
+/// [`AuditRequestRegistration`] or, outside an audited entry-point,
+/// through the crate-private `publish_record`. The active-request
+/// registry is strictly behind crate-private surface methods so the
 /// `AuditRequestRegistration` lifecycle remains the single
 /// authority for inserts and removes.
 ///
@@ -208,14 +212,22 @@ impl std::fmt::Debug for HostAuditRuntime {
 }
 
 impl HostAuditRuntime {
-    /// Construct a new runtime. Each `VerterHost` owns one independent
-    /// runtime; multiple hosts in one process do NOT share audit state.
+    /// Construct a new runtime with its own empty records store. Each
+    /// `VerterHost` owns one independent runtime; multiple hosts in one
+    /// process do NOT share audit state.
     /// The host-owned sampler thread does NOT spawn here — it spawns
     /// lazily on the first `AuditRequestRegistration::new` call when
     /// `audit_timing_capture` is enabled, so a host that never runs an
     /// audited request never spends a thread.
     #[must_use]
-    pub fn new(config: AuditConfig, records: Arc<AuditRecordsStore>) -> Self {
+    pub fn new(config: AuditConfig) -> Self {
+        Self::with_records(config, Arc::new(AuditRecordsStore::default()))
+    }
+
+    /// Construct a runtime over an existing records store. Private: only
+    /// a runtime replacing its own predecessor hands its store on, so a
+    /// host never holds two stores.
+    fn with_records(config: AuditConfig, records: Arc<AuditRecordsStore>) -> Self {
         Self {
             config: Arc::new(config),
             records,
@@ -331,8 +343,8 @@ impl HostAuditRuntime {
     }
 
     /// Borrow the underlying records store. Consumers (NAPI / WASM /
-    /// LSP) read records through this accessor; producers insert via
-    /// [`Self::finalize_active_request`].
+    /// LSP) read records through this accessor; producers publish via an
+    /// [`AuditRequestRegistration`] or `publish_record`.
     #[must_use]
     pub fn audit_records_store(&self) -> &Arc<AuditRecordsStore> {
         &self.records
@@ -365,6 +377,23 @@ impl HostAuditRuntime {
     #[must_use]
     pub fn take_record(&self, request_id: u64) -> Option<RequestAuditRecord> {
         self.records.take(request_id)
+    }
+
+    /// Crate-private. Publish a finished record for the request running
+    /// on this thread. When the active request context carries an
+    /// [`AuditRequestRegistration`] the record is finalised through it,
+    /// which also releases the in-flight slot; otherwise (a read that
+    /// did not enter through an audited entry-point) the record goes
+    /// straight into this runtime's store. Either way the record lands
+    /// in the one store [`Self::take_record`] drains.
+    pub(crate) fn publish_record(&self, record: RequestAuditRecord) {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+            if let Some(registration) = ctx.audit_registration.get() {
+                registration.finalize(record);
+                return;
+            }
+        }
+        self.records.insert(record);
     }
 
     /// Crate-private. Called ONLY by `AuditRequestRegistration::new`
@@ -618,6 +647,12 @@ pub enum AuditRequestRegistration {
     Noop,
 }
 
+impl verter_type_engine::request_context::RequestAuditFinalization for AuditRequestRegistration {
+    fn finalize(&self, record: RequestAuditRecord) -> bool {
+        AuditRequestRegistration::finalize(self, record)
+    }
+}
+
 impl AuditRequestRegistration {
     /// Construct a new registration. Reads the audit-config filter
     /// ONCE; if the filter rejects the request's kind, returns the
@@ -733,14 +768,14 @@ impl crate::VerterHost {
     /// `HostAuditRuntime::active_requests`.
     ///
     /// Allocates a fresh `Arc<HostAuditRuntime>` carrying the new
-    /// config and swaps the host's slot. The previous runtime's
-    /// records-store `Arc` is reused so existing records survive
-    /// the swap, but the new runtime starts with an empty
+    /// config and swaps the host's slot. The new runtime takes over
+    /// the previous runtime's records store, so existing records
+    /// survive the swap, but it starts with an empty
     /// active-request map — callers MUST call this before driving
     /// any audited request.
     pub fn replace_host_audit_runtime_for_test(&mut self, config: AuditConfig) {
         let store = Arc::clone(self.host_audit_runtime.audit_records_store());
-        self.host_audit_runtime = Arc::new(HostAuditRuntime::new(config, store));
+        self.host_audit_runtime = Arc::new(HostAuditRuntime::with_records(config, store));
     }
 }
 
@@ -885,13 +920,10 @@ mod seed_tests {
         // If `register_active_request` failed to seed, the slot would
         // stay at exactly 0 and the `> 0` assertion would fail; the seed
         // writes the start-of-request RSS, so `> 0` passes.
-        let runtime = HostAuditRuntime::new(
-            AuditConfig {
-                audit_timing_capture: true,
-                ..AuditConfig::default()
-            },
-            Arc::new(AuditRecordsStore::default()),
-        );
+        let runtime = HostAuditRuntime::new(AuditConfig {
+            audit_timing_capture: true,
+            ..AuditConfig::default()
+        });
         let ctx = fresh_ctx(1);
         assert_eq!(
             ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
@@ -927,13 +959,10 @@ mod seed_tests {
         // `memory_peak_rss_zero_when_flag_off` integration test). This
         // pins the gate so a future change that seeds unconditionally
         // (which would regress that contract) fails here.
-        let runtime = HostAuditRuntime::new(
-            AuditConfig {
-                audit_timing_capture: false,
-                ..AuditConfig::default()
-            },
-            Arc::new(AuditRecordsStore::default()),
-        );
+        let runtime = HostAuditRuntime::new(AuditConfig {
+            audit_timing_capture: false,
+            ..AuditConfig::default()
+        });
         let ctx = fresh_ctx(2);
 
         runtime.register_active_request(ctx.request_id, &ctx);

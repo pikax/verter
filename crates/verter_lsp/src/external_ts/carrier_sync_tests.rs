@@ -12,13 +12,14 @@ use crate::provider_sync::{
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, EnvDims, ExternalTsProjectResolver, ProjectBinding,
     WorkspaceProjectResolver,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_session::{CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::ProjectId;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -29,7 +30,7 @@ use verter_workspace::snapshot_builder::{
     build_workspace_snapshot_simple, membership_to_spec, supported_extensions_for,
 };
 use verter_workspace::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 
 use crate::external_ts::tsserver_backend::TsserverEngineBackend;
@@ -40,7 +41,7 @@ use crate::external_ts::{
 use crate::provider_surface_store::ProviderSurfaceStore;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::workspace_scanner::{classify_from_snapshot, Tier};
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
 
 fn owned_carrier_state() -> ProviderSyncState {
     ProviderSyncState {
@@ -54,6 +55,7 @@ fn owned_carrier_state() -> ProviderSyncState {
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -176,6 +178,69 @@ fn carrier_source_revision_tracks_the_host_content_authority() {
     assert!(
         carrier_source_revision(&host, canonical) > first,
         "a subsequent edit must mint a strictly newer carrier receipt"
+    );
+}
+
+/// The drain refuses a pending tsgo receipt whose captured source revision no
+/// longer equals the live rail. Unrelated churn that retires workspace history
+/// must not read as a transition of the source while the pending is held, or
+/// an otherwise unchanged delivery is refused; an edit to the source still is.
+#[test]
+fn a_held_carrier_source_revision_ignores_unrelated_history_retirement() {
+    use verter_workspace::{WorkspaceAccess, WorkspaceRead};
+
+    let canonical = "/workspace/src/App.vue";
+    let unrelated = "/workspace/src/Other.vue";
+    let memory = Arc::new(MemoryWorkspace::new(MemoryOptions {
+        roots: vec!["/workspace".to_string()],
+        default_resolve_extensions: None,
+    }));
+    let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = memory.clone();
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    host.notify_upsert(
+        canonical,
+        Arc::<str>::from("<script>let count = 1;</script>"),
+    );
+
+    let (revision, evidence) = held_carrier_source_revision(&host, canonical);
+    let pending = PendingProviderReady::authorize(
+        &test_binding("/workspace/tsconfig.json"),
+        revision,
+        0,
+        "tsgo",
+        &[],
+    )
+    .holding_source_evidence(evidence);
+    let unrelated_before = memory.last_content_transition_generation(unrelated);
+
+    let churn: Vec<(String, Arc<str>)> = (0..verter_workspace::freshness::DEFAULT_RETIRE_TRIGGER
+        + 64)
+        .map(|index| {
+            (
+                format!("/workspace/churn/{index}.ts"),
+                Arc::from("export {};"),
+            )
+        })
+        .collect();
+    memory.notify_upsert_many(&churn);
+    assert!(
+        memory.last_content_transition_generation(unrelated) > unrelated_before,
+        "the churn must have retired history past the trigger for this test to \
+         prove anything"
+    );
+    assert_eq!(
+        host.last_content_transition_generation(canonical),
+        pending.source_revision(),
+        "unrelated retirement must not move a held source revision"
+    );
+
+    host.notify_upsert(
+        canonical,
+        Arc::<str>::from("<script>let count = 2;</script>"),
+    );
+    assert!(
+        host.last_content_transition_generation(canonical) > pending.source_revision(),
+        "an edit to the held source must still read as its transition"
     );
 }
 
@@ -546,7 +611,8 @@ fn recorded_ide_surface_hash_equals_the_receipt_stamped_committed_surface() {
         canonical,
         &mut companions,
         None,
-    );
+    )
+    .expect("an unpinned record is never superseded");
 
     let receipt = PendingProviderReady::authorize(
         &test_binding("/workspace/tsconfig.json"),
@@ -648,11 +714,11 @@ async fn direct_open_receipt_attests_the_exact_provider_specialized_ide_surface(
         crate::ProjectSyncMode::FullProject,
         crate::TypeProviderKind::Tsgo,
     );
-    sync.open_tsx(&ide_path, compiler_surface)
-        .await
-        .expect("provider open succeeds");
     let exact_surface = sync
-        .synced_tsx_surface(&ide_path)
+        .open_tsx_fenced(&ide_path, compiler_surface, &|| true)
+        .await
+        .expect("provider open succeeds")
+        .ide_surface()
         .expect("successful open mints exact surface evidence");
     assert_ne!(
         exact_surface.content().as_ref(),
@@ -699,6 +765,171 @@ async fn direct_open_receipt_attests_the_exact_provider_specialized_ide_surface(
     assert!(
         !committed.authorizes_carrier_ide_capture(compiler_hash, [0; 16]),
         "the pre-adaptation compiler surface is not misreported as provider authority"
+    );
+}
+
+/// On the membership-only topology the engine reads the public-API companion
+/// from the committed publication, so the publication — not the path or its
+/// liveness flag — is the delivery evidence for API bytes. The gateway records
+/// a new API surface before its publication commits; until a receipt attesting
+/// exactly those bytes is admitted, the engine still serves the previous API
+/// surface at the same live path, and mapping its offsets through the newly
+/// recorded one would be wrong.
+#[test]
+fn an_api_surface_recorded_ahead_of_its_publication_is_not_delivered() {
+    use crate::provider_surface_store::SurfaceDelivery;
+    let canonical = "/workspace/src/App.vue";
+    let api_path = "/workspace/src/App.vue.verter.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from("<script setup lang=\"ts\">\ndefineProps<{ a: string }>();\n</script>\n"),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+    let states: Arc<DashMap<String, ProviderSyncState>> = Arc::new(DashMap::new());
+    store.bind_delivery_witness(Arc::new(
+        crate::provider_sync::ProviderSyncDeliveryWitness::new(
+            crate::type_provider::project_sync::ProjectSync::new_with_kind(
+                Arc::new(MockTypeProvider::new()),
+                crate::ProjectSyncMode::FullProject,
+                crate::TypeProviderKind::Tsserver,
+            ),
+            Arc::clone(&states),
+        ),
+    ));
+    let coordinator = CarrierTransactionCoordinator::new();
+    let record_api = |bytes: &str| {
+        let mut companions = vec![CarrierCompanion::verbatim(
+            Arc::from(api_path),
+            Arc::from(bytes),
+            None,
+            verter_session::external_ts::SnapshotRole::CarrierApi,
+            verter_session::external_ts::ScriptKind::Ts,
+        )];
+        crate::provider_surface_store::record_and_version_carrier_companions(
+            &store,
+            None,
+            &host,
+            canonical,
+            &mut companions,
+            None,
+        )
+        .expect("an unpinned record is never superseded");
+        let snapshot = store
+            .current_snapshot(api_path)
+            .expect("the publish path records the API surface");
+        (companions, snapshot)
+    };
+    let commit = |companions: &[CarrierCompanion], revision: u64| {
+        let receipt = PendingProviderReady::authorize(
+            &test_binding("/workspace/tsconfig.json"),
+            revision,
+            0,
+            "tsserver",
+            companions,
+        )
+        .confirm_opened(&[ProviderPathKind::Api]);
+        assert_eq!(
+            coordinator.admit_owned(&host, &states, canonical, owned_carrier_state(), &receipt),
+            AdmitOutcome::Admitted
+        );
+    };
+
+    let (published_a, a) = record_api("export declare const api: { a: string };\n");
+    assert_eq!(
+        store.delivery_of(&a),
+        SurfaceDelivery::AwaitingDelivery,
+        "recorded, never published"
+    );
+    commit(&published_a, 1);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    assert!(store.captured_surface_is_current(&a));
+
+    // The record of B runs ahead of its publication: the path is still live and
+    // still loaded, but the committed publication carries A's bytes.
+    let (published_b, b) = record_api("export declare const api: { b: number };\n");
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::AwaitingDelivery);
+    assert!(
+        !store.captured_surface_is_current(&b),
+        "the engine still serves A at this path; B's offsets would mis-map its answers"
+    );
+
+    // Once the publication of exactly B commits, B is the delivered surface.
+    commit(&published_b, 2);
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::Delivered);
+    assert!(store.captured_surface_is_current(&b));
+}
+
+/// On the membership-only topology an UNRESOLVED carrier is never published to
+/// the engine: it has no receipt, so nothing fingerprints the IDE bytes the
+/// engine reads at its path. A live, background-loaded committed path with a
+/// recorded IDE surface is path liveness only, and never delivery evidence.
+#[test]
+fn an_unresolved_carriers_live_ide_path_is_not_membership_delivery() {
+    use crate::provider_surface_store::SurfaceDelivery;
+    let canonical = "/workspace/src/App.vue";
+    let ide_path = "/workspace/src/App.vue.tsx";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from("<script setup lang=\"ts\">\nconst a = 1;\n</script>\n"),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+    let states: Arc<DashMap<String, ProviderSyncState>> = Arc::new(DashMap::new());
+    store.bind_delivery_witness(Arc::new(
+        crate::provider_sync::ProviderSyncDeliveryWitness::new(
+            crate::type_provider::project_sync::ProjectSync::new_with_kind(
+                Arc::new(MockTypeProvider::new()),
+                crate::ProjectSyncMode::FullProject,
+                crate::TypeProviderKind::Tsserver,
+            ),
+            Arc::clone(&states),
+        ),
+    ));
+    let mut companions = vec![CarrierCompanion::carrier_ide(
+        Arc::from(ide_path),
+        crate::carrier_provider_projection::expect_admitted(
+            crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                None,
+                canonical,
+                "const a = 1;\n",
+                tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            ),
+            "no workspace resolution is needed",
+        ),
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+    )];
+    crate::provider_surface_store::record_and_version_carrier_companions(
+        &store,
+        None,
+        &host,
+        canonical,
+        &mut companions,
+        None,
+    )
+    .expect("an unpinned record is never superseded");
+    let surface = store
+        .current_snapshot(ide_path)
+        .expect("the publish path records the IDE surface");
+    let mut unresolved = ProviderSyncState::unresolved(ide_path.to_string());
+    unresolved.ide_background_loaded = true;
+    assert!(unresolved.is_unresolved());
+    states.insert(canonical.to_string(), unresolved);
+
+    assert_eq!(
+        store.delivery_of(&surface),
+        SurfaceDelivery::AwaitingDelivery
+    );
+    assert!(
+        !store.captured_surface_is_current(&surface),
+        "no receipt attests the IDE bytes the engine reads at this live path"
     );
 }
 
@@ -1059,13 +1290,12 @@ fn carrier_close_target_returns_companion_paths_owner_independent() {
     // buffers must be closable regardless of its ownership state (e.g. after an owner
     // loss). A carrier path yields both companion paths under an `Unresolved` binding;
     // a non-carrier path yields `None` (the single carrier-vs-not gate).
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+        )]);
 
     let target = carrier_close_target(&resolver, "/workspace/src/App.vue", false, None)
         .expect("a carrier has provider paths to close");
@@ -1123,24 +1353,14 @@ fn unique_ws_root() -> String {
 /// that laundering is exactly what must not reach an assertion.
 fn read_store_manifest_strict(ws_root: &str) -> Result<Option<Manifest>, String> {
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    let path = store.manifest_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
-            .map(Some)
-            .map_err(|e| {
-                format!(
-                    "carrier manifest at {} is present but unparseable: {e}",
-                    path.display()
-                )
-            }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!(
-            "carrier manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
-            path.display(),
+    store.read_published().map_err(|e| {
+        format!(
+            "carrier store at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            store.workspace_dir().display(),
             e.kind(),
             e.raw_os_error()
-        )),
-    }
+        )
+    })
 }
 
 /// The synthetic workspace root this suite derives must be unique across concurrent
@@ -1216,7 +1436,7 @@ fn store_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
     let corrupt_root = unique_ws_root();
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
     std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
-    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+    std::fs::write(store.head_path(), b"{ this manifest is truncated")
         .expect("write a corrupt manifest");
 
     // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
@@ -1709,7 +1929,7 @@ async fn narrowing_the_include_retracts_a_previously_admitted_carrier() {
 /// and Linux.
 fn break_carrier_store_writes(ws_root: &str) {
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    std::fs::write(store.manifest_path(), b"{ this manifest is not valid json")
+    std::fs::write(store.head_path(), b"{ this manifest is not valid json")
         .expect("the store dir exists after the initial publish");
 }
 
@@ -2559,6 +2779,168 @@ async fn a_cold_ide_cache_never_shrinks_the_advertised_companion_set() {
     assert!(
         carrier_ready_in_store(&ws_root, &tsconfig, &ide_path),
         "the IDE companion must be advertised even though the caller had no IDE output in hand"
+    );
+}
+
+/// The ready row the store publishes for `provider` under `tsconfig` — the
+/// bytes, version and map the cross-process plugin serves for that path.
+fn ready_row(
+    ws_root: &str,
+    tsconfig: &str,
+    provider: &str,
+) -> Option<crate::external_ts::carrier_publish_store::ReadyFile> {
+    let manifest = read_store_manifest_strict(ws_root)
+        .unwrap_or_else(|detail| panic!("the store oracle must read the manifest: {detail}"))?;
+    manifest
+        .projects
+        .get(tsconfig)?
+        .ready_files
+        .get(provider)
+        .cloned()
+}
+
+/// An edit that lands between an open carrier's compile pin and the fenced IDE
+/// record makes the compiled companions belong to a revision the editor no
+/// longer holds. The pass must publish NOTHING to the store: the refused record
+/// leaves every LSP-side record on the previous revision, so a stale store row
+/// (the moved revision's carrier geometry under a regressed version) would
+/// disagree with them, and an edit back to the committed text (insert then
+/// undo) would find the carrier "already published" and never repair it — the
+/// provider would keep serving the moved revision's bytes under the live
+/// revision's source map.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compile_of_a_moved_revision_publishes_nothing_to_the_store() {
+    use tower_lsp_server::ls_types::{TextDocumentItem, Uri};
+
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str = " <script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec![ws_root.clone()],
+            default_resolve_extensions: None,
+        }));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs));
+    let documents = crate::documents::DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = format!("file:///{source}").parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SOURCE_A.to_string(),
+    });
+    assert!(
+        documents.canonical_id_to_uri(&source).is_some(),
+        "precondition: the carrier is open under its canonical id"
+    );
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let (_ws, snap) = ws_and_snapshot(
+        &ws_root,
+        &[(tsconfig.as_str(), r#"["**/*"]"#)],
+        &[source.as_str()],
+    );
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let membership = || CarrierMembershipCtx {
+        coordinator: &coord,
+        provider_delivery: CarrierProviderDelivery::StoreBacked,
+        activate_provider_member: false,
+    };
+
+    // 1. Revision A publishes under a pin that is still current.
+    let (pin_uri, pin_revision) = documents.open_compile_pin(&source);
+    let (pin_uri, pin_revision) = (
+        pin_uri.expect("the open carrier has a uri"),
+        pin_revision.expect("the open carrier has a revision"),
+    );
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: documents.provider_surfaces(),
+        documents: Some(&documents),
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        open_pin: Some((&pin_uri, &pin_revision)),
+        membership: Some(membership()),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::Published {
+        committed_state, ..
+    } = decision
+    else {
+        panic!("revision A, compiled under a current pin, publishes");
+    };
+    let ide_path = committed_state
+        .ide_path
+        .expect("the carrier has an IDE path");
+    let published_a = ready_row(&ws_root, &tsconfig, &ide_path)
+        .expect("revision A's IDE companion is a ready row");
+
+    // 2. A compile pins revision A again, then an edit to revision B lands
+    //    before the record: the pin no longer matches the live document.
+    let (stale_uri, stale_revision) = documents.open_compile_pin(&source);
+    let (stale_uri, stale_revision) = (stale_uri.unwrap(), stale_revision.unwrap());
+    let _ = documents.did_change(&uri, 2, SOURCE_B);
+    assert!(
+        !documents.compile_pin_is_current(&source, Some((&stale_uri, &stale_revision))),
+        "precondition: the interleaved edit moved the document past the pin"
+    );
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: documents.provider_surfaces(),
+        documents: Some(&documents),
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        open_pin: Some((&stale_uri, &stale_revision)),
+        membership: Some(membership()),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("a compile of a moved revision must not publish");
+    };
+    assert_eq!(
+        admission.settle(not_owned, &source, None),
+        SettleClass::Superseded,
+        "the moved revision is a superseded pass, queued so the live one publishes on its own"
+    );
+    assert_eq!(
+        ready_row(&ws_root, &tsconfig, &ide_path),
+        Some(published_a),
+        "the store must keep serving the last revision the LSP recorded; a refused \
+         IDE record that still reaches the store leaves the provider on bytes no \
+         LSP-side record describes"
     );
 }
 
@@ -3472,4 +3854,84 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
         AdmitOutcome::Superseded,
         "a late owned token captured before the owned→unresolved conversion is refused"
     );
+}
+
+#[test]
+fn api_only_admission_merges_the_live_ide_and_declaration_legs() {
+    let host = test_host();
+    let source = "/workspace/src/App.vue";
+    let states = DashMap::new();
+    let coordinator = CarrierTransactionCoordinator::new();
+    let mut live = owned_carrier_state();
+    live.ide_path = Some("/workspace/src/App.vue.jsx".into());
+    live.decl_path = Some("/workspace/src/App.vue.d.ts".into());
+    live.decl_background_loaded = true;
+    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierSurface {
+        content_hash: [1; 16],
+        map_hash: [2; 16],
+    });
+    states.insert(source.into(), live.clone());
+    let captured = owned_carrier_state();
+    let api = verter_session::TscResponse::new(
+        Arc::from("declare const App: unknown\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::JavaScript,
+        None,
+    );
+    let companions =
+        build_carrier_companions(&host, &captured, None, Some(&api), None, source, None).unwrap();
+    let receipt = PendingProviderReady::authorize(
+        &test_binding_gen("/workspace/tsconfig.json", 1),
+        2,
+        0,
+        "tsgo",
+        &companions,
+    )
+    .confirm_opened(&[ProviderPathKind::Api]);
+    assert_eq!(
+        coordinator.admit_api_owned(&host, &states, source, captured, &receipt),
+        AdmitOutcome::Admitted
+    );
+    let committed = states.get(source).unwrap();
+    assert_eq!(committed.ide_path, live.ide_path);
+    assert_eq!(committed.decl_path, live.decl_path);
+    assert_eq!(committed.committed_ide_surface, live.committed_ide_surface);
+    assert!(committed.decl_background_loaded);
+}
+
+#[test]
+fn api_only_owner_change_cannot_reauthorize_the_old_ide_surface() {
+    let host = test_host();
+    let source = "/workspace/src/App.vue";
+    let states = DashMap::new();
+    let coordinator = CarrierTransactionCoordinator::new();
+    let mut live = owned_carrier_state();
+    live.committed_ide_surface = Some(crate::provider_sync::CommittedCarrierSurface {
+        content_hash: [1; 16],
+        map_hash: [2; 16],
+    });
+    states.insert(source.into(), live);
+    let mut next = owned_carrier_state();
+    next.owner_binding = ProviderOwnerBinding::Owned("/workspace/tsconfig.next.json".into());
+    let api = verter_session::TscResponse::new(
+        Arc::from("declare const App: unknown\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::JavaScript,
+        None,
+    );
+    let companions =
+        build_carrier_companions(&host, &next, None, Some(&api), None, source, None).unwrap();
+    let receipt = PendingProviderReady::authorize(
+        &test_binding_gen("/workspace/tsconfig.next.json", 2),
+        2,
+        0,
+        "tsgo",
+        &companions,
+    )
+    .confirm_opened(&[ProviderPathKind::Api]);
+    assert_eq!(
+        coordinator.admit_api_owned(&host, &states, source, next, &receipt),
+        AdmitOutcome::Admitted
+    );
+    assert!(states.get(source).unwrap().committed_ide_surface.is_none());
 }

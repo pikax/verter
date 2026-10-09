@@ -6,10 +6,10 @@
 use serde::{Deserialize, Serialize};
 use verter_span::Span;
 
-use crate::facts::binding::BindingDeclaration;
-use crate::facts::reactivity::ReactivityFact;
-use crate::facts::route::SsrReadinessStatus;
-use crate::facts::symbol::FileImportGraph;
+use verter_session_query::facts::binding::BindingDeclaration;
+use verter_session_query::facts::reactivity::ReactivityFact;
+use verter_session_query::facts::route::SsrReadinessStatus;
+use verter_session_query::facts::symbol::FileImportGraph;
 
 /// Known browser-only globals that break SSR.
 const BROWSER_ONLY_GLOBALS: &[&str] = &[
@@ -99,7 +99,7 @@ fn is_browser_only_import(specifier: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facts::binding::BindingKind;
+    use verter_session_query::facts::binding::BindingKind;
 
     fn make_binding(name: &str) -> (BindingDeclaration, ReactivityFact) {
         (

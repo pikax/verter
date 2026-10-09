@@ -21,77 +21,54 @@
 //! does not enter it and serves such a field as a position of its own,
 //! which reads the receiver whatever the callback's body does. A nested
 //! `function` or class has a `this` of its own.
+use verter_session_query::declarations::class_fields::{ClassFieldValueSource, ClassFieldValues};
 
 use oxc_ast::ast::{Class, ClassElement, Expression, PropertyDefinition, PropertyKey};
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
-use rustc_hash::{FxHashMap, FxHashSet};
 
-/// Where a class field's synthetic value is read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ClassFieldValueSource {
-    /// The initializer's type derives from a call: the indexed program
-    /// expression at the initializer.
-    Call,
-    /// The initializer reads `this`, or holds a callback that may: a served
-    /// position of its own, whose frame reads the receiver.
-    Initializer,
+/// Classify `prop`, a field of `class`, and record the answer in `values`.
+pub fn classify_class_field(
+    values: &mut ClassFieldValues,
+    class: &Class<'_>,
+    prop: &PropertyDefinition<'_>,
+    source: &str,
+) -> Option<ClassFieldValueSource> {
+    values.record_class(class.span.start);
+    let classified = classify_field(prop, source);
+    if let (Some(kind), Some(value)) = (classified, prop.value.as_ref()) {
+        values.record_field(value.span().start, kind);
+    }
+    classified
 }
 
-/// The classification of every field of the classes one header walk
-/// indexed, by initializer offset.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ClassFieldValues {
-    /// The classes classified here, by span start.
-    classes: FxHashSet<u32>,
-    /// The fields read through a synthetic value, by initializer offset.
-    fields: FxHashMap<u32, ClassFieldValueSource>,
+/// Record every field of `class` ([`classify_class_field`]).
+pub fn classify_class_fields(values: &mut ClassFieldValues, class: &Class<'_>, source: &str) {
+    values.record_class(class.span.start);
+    for element in &class.body.body {
+        if let ClassElement::PropertyDefinition(prop) = element {
+            classify_class_field(values, class, prop, source);
+        }
+    }
 }
 
-impl ClassFieldValues {
-    /// Classify `prop`, a field of `class`, and record the answer.
-    pub fn classify(
-        &mut self,
-        class: &Class<'_>,
-        prop: &PropertyDefinition<'_>,
-        source: &str,
-    ) -> Option<ClassFieldValueSource> {
-        self.classes.insert(class.span.start);
-        let classified = classify_field(prop, source);
-        if let (Some(kind), Some(value)) = (classified, prop.value.as_ref()) {
-            self.fields.insert(value.span().start, kind);
-        }
-        classified
+/// The classification of `prop`, a field of `class`: the recorded one
+/// when `values` classified the class, else classified here (a class the
+/// header walk does not index).
+#[must_use]
+pub fn class_field_value(
+    values: &ClassFieldValues,
+    class: &Class<'_>,
+    prop: &PropertyDefinition<'_>,
+    source: &str,
+) -> Option<ClassFieldValueSource> {
+    if values.classified_class(class.span.start) {
+        return prop
+            .value
+            .as_ref()
+            .and_then(|value| values.recorded_field(value.span().start));
     }
-
-    /// Record every field of `class` ([`Self::classify`]).
-    pub fn classify_class(&mut self, class: &Class<'_>, source: &str) {
-        self.classes.insert(class.span.start);
-        for element in &class.body.body {
-            if let ClassElement::PropertyDefinition(prop) = element {
-                self.classify(class, prop, source);
-            }
-        }
-    }
-
-    /// The classification of `prop`, a field of `class`: the recorded one
-    /// when this table classified the class, else classified here (a class
-    /// the header walk does not index).
-    #[must_use]
-    pub fn field(
-        &self,
-        class: &Class<'_>,
-        prop: &PropertyDefinition<'_>,
-        source: &str,
-    ) -> Option<ClassFieldValueSource> {
-        if self.classes.contains(&class.span.start) {
-            return prop
-                .value
-                .as_ref()
-                .and_then(|value| self.fields.get(&value.span().start).copied());
-        }
-        classify_field(prop, source)
-    }
+    classify_field(prop, source)
 }
 
 /// Classify one field's initializer (see the module documentation). `None`

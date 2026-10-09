@@ -19,7 +19,7 @@ Where this skill and the contract disagree, the contract wins.
 
 ## 1. Module map
 
-`crates/verter_session/src/signature_kernel/` (crate-private; its single
+`crates/verter_type_engine/src/signature_kernel/` (crate-private; its single
 consumer is `project_semantic_dispatch/signature_discovery.rs`):
 
 | Module | Owns |
@@ -154,6 +154,45 @@ is `SemanticRetentionAccount` (see `/type-cache-architecture` → Aggregate
 retention account). A retained parse snapshot is a `Pinned` charge — charged
 unconditionally, never refused.
 
+### Semantic identity records are owned by their handles
+
+Intersection recipes, semantic contexts, order domains and the large family-key
+payloads (`RelateMemoKey`, `ResolveCallKey`) are NOT ordinals into process-owned
+tables. `semantic_query_memo/intern_table.rs` owns the substrate:
+
+* `Interned<T>` is one owning `Arc` pointer. `IntersectionInputId`,
+  `SemanticContextId` and `OrderDomainId` wrap one; they are `Clone`, not
+  `Copy`, and expose the value (`recipe()`, `context()`) — there is no `as_u32`,
+  no `lookup_*`, and no raw slot number another index could also mint.
+* Each kind declares itself with `intern_domain!`, which gives it a private
+  `WeakInternTable` reached as `InternDomain::index()`. The index only
+  DEDUPLICATES (digest → `Weak`); it owns no record. A record's destructor
+  forgets its entry, and a surviving collision bucket and the index both shrink
+  their backing capacity once drained.
+* Identity is exact value equality behind the digest: equal handles share a
+  record, or match digest AND value. A digest collision never aliases.
+* **Retained children:** a record owns exactly what its value owns. An
+  `OrderedSteps` recipe's `EvaluateSubgroup` recipes are its only same-kind
+  children; a held parent keeps them valid. A kind with same-kind children
+  overrides `InternDomain::take_children`, so a released chain is reclaimed
+  iteratively — nesting depth never becomes destructor stack depth, including
+  when a step slice is still watched by a `Weak` (the children are handed to
+  the worklist by clone before the slice is released).
+* `IntersectionInputId`'s `Debug` prints the recipe digest and top-level shape
+  only; a nested subgroup is never expanded, so formatting a key is O(1) in
+  nesting depth and sharing.
+* `WeakInternTable::occupancy` / `IdentityIndexSnapshot::capture` are the
+  always-compiled lifetime counts (records, digests, digest-map and spilled
+  collision capacity), surfaced as `HostRetentionSnapshot::identity_indexes`.
+* Walk recipe operands only through `IntersectionInputRef::for_each_operand`:
+  iterative, and each distinct subgroup recipe is walked once however many
+  parents share it (the family release sweep runs it under the memo lock).
+* Lock discipline: never drop something that can destroy a same-kind record
+  while holding that kind's index lock.
+* `SemanticContextId::production()` is the one permanent record.
+  `SemanticPolicySetId` is the policy set's own value (`SemanticPolicySet::id()`),
+  so it needs no table.
+
 ---
 
 ## 5. Evidence
@@ -175,7 +214,7 @@ Executable homes:
 | `crates/verter_session/src/signature_corpus_tests.rs` | The corpus driver and the **flip law**: a `MatchesChecker` row fails when the live answer stops matching, and an owed/degraded row fails when the live answer STARTS matching. Both directions are proven by `signature_corpus_flip_law_fires_in_both_directions`. A verdict can only move by a deliberate re-pin. |
 | `crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs` | The §5.9 perturbation matrix and the §5.4 stable-key table, each enumerated against its authority and consumed by replay drivers. Every comparison runs on TWO bases: the stable-text completed observation AND the generated-bytes digest. |
 | `crates/verter_session/tests/allocator_canaries.rs` | `signature_kernel_warm_positional::warm_positional_read_does_not_allocate_or_lock` — the §12 Empty/One gate, in a separate test binary because it installs a counting `#[global_allocator]`. |
-| `crates/verter_session/src/signature_kernel/*_tests.rs` | Per-module unit coverage (lifetime, storage, substitution, positional, provenance, discovery, read view). |
+| `crates/verter_type_engine/src/signature_kernel/*_tests.rs` | Per-module unit coverage (lifetime, storage, substitution, positional, provenance, discovery, read view). |
 
 **Re-locking the contract digest.** `docs/arch/signature-kernel.md` is byte-locked
 by `manifest.json` → `contract.sha256`, checked by

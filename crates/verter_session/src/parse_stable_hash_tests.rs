@@ -18,11 +18,11 @@ use std::sync::Arc;
 use oxc_span::SourceType;
 
 use super::compute_parse_stable_hash;
-use crate::decl_body_memo::DeclBodyMemo;
-use crate::decl_lowering::{DeclLoweringService, SnapshotKey};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::ShallowFileState;
-use crate::types::MetaProvenance;
+use verter_semantic_source::decl_body_memo::DeclBodyMemo;
+use verter_semantic_source::decl_lowering::DeclLoweringService;
+use verter_session_query::source::snapshot::SnapshotKey;
 
 /// Build the canonical `IndexedReady` for `source` through the REAL
 /// header walk, so the shallow inventory carries real member/type-param
@@ -49,12 +49,14 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
         None,
         SourceType::ts(),
         Arc::new(
-            verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(parsed.program.body.len()),
+            verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                parsed.program.body.len(),
+            ),
         ),
         false,
         Arc::new(DeclLoweringService::new()),
         header_index,
-        Arc::new(MetaProvenance::default()),
+        Arc::default(),
         None,
     );
     let shallow =

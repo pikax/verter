@@ -38,7 +38,7 @@ use super::canary_harness::{
 fn evaluated_prop(
     host: &verter_session::VerterHost,
     owner: &str,
-    types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    types: &verter_session_query::analysis::type_expand::ExpandedComponentTypes,
     name: &str,
 ) -> TypeExpr {
     let field = types
@@ -60,7 +60,7 @@ fn evaluated_prop(
 fn demand_prop_type(
     host: &verter_session::VerterHost,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> TypeExpr {
     let source = prop
         .publication

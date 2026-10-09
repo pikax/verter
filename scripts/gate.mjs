@@ -356,10 +356,10 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_semantic/src/analysis/style.rs",
   "crates/verter_semantic/src/analysis/template.rs",
   "crates/verter_semantic/src/analysis/type_eval_build.rs",
-  "crates/verter_semantic/src/analysis/type_solver/prepared.rs",
-  "crates/verter_semantic/src/analysis/types.rs",
+  "crates/verter_session_query/src/type_solver/prepared.rs",
+  "crates/verter_session_query/src/analysis/script_snapshot.rs",
   "crates/verter_session/src/component_meta_audit/mod.rs",
-  "crates/verter_session/src/component_meta_caches.rs",
+  "crates/verter_type_engine/src/component_meta_caches.rs",
   "crates/verter_session/src/component_meta_materialize.rs",
   "crates/verter_session/src/file_artifact_store.rs",
   "crates/verter_session/src/host_manage.rs",
@@ -374,13 +374,13 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
   "crates/verter_session/src/meta_resolve/projectors/mod.rs",
   "crates/verter_session/src/parse.rs",
-  "crates/verter_session/src/request_context.rs",
-  "crates/verter_session/src/project_semantic_dispatch/build.rs",
-  "crates/verter_session/src/project_semantic_dispatch/lower.rs",
-  "crates/verter_session/src/project_semantic_dispatch/mod.rs",
-  "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+  "crates/verter_type_engine/src/request_context.rs",
+  "crates/verter_type_engine/src/project_semantic_dispatch/build.rs",
+  "crates/verter_type_engine/src/project_semantic_dispatch/lower.rs",
+  "crates/verter_type_engine/src/project_semantic_dispatch/mod.rs",
+  "crates/verter_type_engine/src/project_semantic_dispatch/raise.rs",
   "crates/verter_session/src/project_type_store.rs",
-  "crates/verter_session/src/decl_body_memo.rs",
+  "crates/verter_semantic_source/src/decl_body_memo.rs",
   "crates/verter_session/src/host_manage/eval_env.rs",
   "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
   "crates/verter_type_expr/src/facts.rs",
@@ -389,21 +389,21 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_session/src/resolver_core/external_type_frontier.rs",
   "crates/verter_session/src/resolver_core/fallthrough.rs",
   "crates/verter_session/src/resolver_core/shallow_file_state.rs",
-  "crates/verter_session/src/semantic_query.rs",
-  "crates/verter_session/src/semantic_query_memo/mod.rs",
-  "crates/verter_session/src/semantic_query_memo/arena.rs",
-  "crates/verter_session/src/semantic_query_memo/derivation.rs",
-  "crates/verter_session/src/semantic_query_memo/family.rs",
-  "crates/verter_session/src/semantic_query_memo/inflight.rs",
-  "crates/verter_session/src/semantic_query_memo/interner.rs",
-  "crates/verter_session/src/semantic_query_memo/stats.rs",
-  "crates/verter_session/src/semantic_query_memo/tests.rs",
+  "crates/verter_type_engine/src/semantic_query.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/mod.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/arena.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/derivation.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/family.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/inflight.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/interner.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/stats.rs",
+  "crates/verter_type_engine/src/semantic_query_memo/tests.rs",
   "crates/verter_session/src/types.rs",
   "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_catalog.rs",
   "crates/verter_tsc/src/checker.rs",
   "crates/verter_type_runtime/src/tsgo/ipc.rs",
   "crates/verter_type_runtime/src/tsserver/ipc.rs",
-  "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+  "crates/verter_type_engine/src/project_semantic_dispatch/walk.rs",
   "crates/verter_wasm/src/lib.rs",
 ]);
 
@@ -2126,6 +2126,34 @@ async function runHarnessSmokeChecks(ctx) {
 //      `verter_shipped_cfg_contract`. NOT a second workspace archive.
 //   5. Reduce fixed receipt slots; tolerated-only complete Surface 1 coverage => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
+// Rust tests start TypeScript through node_modules/.bin/tsc(.cmd), which finds `node` on the PATH they
+// inherit, not this process's execPath. A host whose PATH lacks node fails those tests as though the
+// commit were wrong (2026-10-02: three svelte_assets tests panicked because tsc.cmd could not spawn node,
+// on the candidate and on its baseline alike). That is a MISSING BUILD PREREQUISITE (exit 127), never a
+// Surface 1 verdict.
+function checkNodeOnTestPath(ctx) {
+  const probe = spawnSync("node", ["--version"], {
+    env: ctx.cargoEnv,
+    encoding: "utf8",
+    timeout: 60_000,
+    windowsHide: true,
+  });
+  const version = String(probe.stdout ?? "").trim();
+  if (probe.status === 0 && /^v\d+/u.test(version)) {
+    log(`node prerequisite: ${version} starts from the test PATH`);
+    return true;
+  }
+  const why = probe.error
+    ? (probe.error.code ?? probe.error.message)
+    : `exit ${probe.status ?? probe.signal}`;
+  err(
+    `MISSING BUILD PREREQUISITE: \`node\` cannot be started from the PATH the tests inherit (${why}); ` +
+      "tests that run TypeScript through node_modules/.bin would fail for this host, not for the commit. " +
+      "Put node on PATH and rerun.",
+  );
+  return false;
+}
+
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
 
@@ -2135,6 +2163,9 @@ async function runGate(opts, ctx) {
   // integration-test binary must fail the gate before compilation balloons it.
   const layoutResult = await runIntegrationTestLayoutCheck(ctx);
   if (layoutResult !== EXIT_PASS) return layoutResult;
+
+  // ---------- NODE ON THE TEST PATH ----------
+  if (!checkNodeOnTestPath(ctx)) return EXIT_USAGE;
 
   // ---------- REAL CONFORMANCE-HARNESS SMOKES ----------
   // These smokes exercise the two broader runtime boundaries before Cargo pays to build the Rust universe:

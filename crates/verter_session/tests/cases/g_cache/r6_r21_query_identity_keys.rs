@@ -366,9 +366,9 @@ fn route_db_does_not_key_routes_or_barrels_on_bare_strings() {
 /// exhaustive destructure pins the field set.
 #[test]
 fn route_keys_env_axes_discriminate() {
-    use verter_semantic::facts::registry::SymbolSpace;
     use verter_session::file_artifact_store::ProjectIdentity;
     use verter_session::resolver_core::{BarrelSurfaceKey, RouteNameKey};
+    use verter_session_query::facts::registry::SymbolSpace;
 
     let route = RouteNameKey {
         provider_canonical: Arc::from("/w/index.ts"),
@@ -450,7 +450,7 @@ fn route_keys_env_axes_discriminate() {
 /// value's `ReadSetSignature.facts` + observed self-roots.
 #[test]
 fn materialization_cycle_gate_key_is_content_free_slot_keyed() {
-    let source = read_file("crates/verter_session/src/semantic_query.rs");
+    let source = read_file("crates/verter_type_engine/src/semantic_query.rs");
     let body = extract_brace_block(&source, "pub struct MaterializationCycleGateKey {").expect(
         "R6 GUARD: could not locate `pub struct MaterializationCycleGateKey` body in          semantic_query.rs — the cycle gate key must be a content-free slot key",
     );
@@ -486,7 +486,9 @@ fn materialization_cycle_gate_key_is_content_free_slot_keyed() {
 /// embedded `DeclIdentity`, no generation, no algorithm version).
 #[test]
 fn materialization_cycle_gate_key_is_content_free_and_env_discriminating() {
-    use verter_session::semantic_query::{MaterializationCycleGateKey, ResolvedDeclSlotIdentity};
+    use verter_type_engine::semantic_query::{
+        MaterializationCycleGateKey, ResolvedDeclSlotIdentity,
+    };
 
     let slot = || {
         ResolvedDeclSlotIdentity::type_slot_unscoped(
@@ -563,7 +565,9 @@ fn materialization_cycle_gate_key_is_content_free_and_env_discriminating() {
 /// false-hit across envs.
 #[test]
 fn materialization_cycle_gate_key_slot_env_axes_discriminate() {
-    use verter_session::semantic_query::{MaterializationCycleGateKey, ResolvedDeclSlotIdentity};
+    use verter_type_engine::semantic_query::{
+        MaterializationCycleGateKey, ResolvedDeclSlotIdentity,
+    };
 
     let slot = |project: u32, t: [u8; 16], l: [u8; 16]| {
         ResolvedDeclSlotIdentity::type_slot(
@@ -1452,7 +1456,7 @@ fn no_unsanctioned_semantic_node_id_in_shape_key() {
     // mentioning a forbidden marker, `SemanticNodeId`, or
     // `MemberShapeNodeSubject` can never satisfy or trip a check.
     let caches = strip_comments(&read_file(
-        "crates/verter_session/src/component_meta_caches.rs",
+        "crates/verter_type_engine/src/component_meta_caches.rs",
     ));
 
     // The production sources must be non-empty AND must actually contain

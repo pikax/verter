@@ -26,9 +26,9 @@
 //! ## The shared discipline
 //!
 //! Every producer here opens a CACHEABILITY TRACER SCOPE
-//! ([`crate::fact_signature_helpers::with_cacheability_scope`]) as the
+//! ([`verter_type_engine::fact_signature_helpers::with_cacheability_scope`]) as the
 //! OUTERMOST bracket of its cold path and hands the scope's
-//! [`CacheabilityProbe`](crate::fact_signature_helpers::CacheabilityProbe) to
+//! [`CacheabilityProbe`](verter_type_engine::fact_signature_helpers::CacheabilityProbe) to
 //! the cache funnel, which consults it AFTER the compute returns. Two
 //! consequences, both structural:
 //!
@@ -77,7 +77,7 @@ use super::helpers::{
 };
 use super::registry_decl::prepared_decl_authored_body_locator;
 use super::{engine_fact_signature_for_exported_type, ComponentMetaQueryEngine};
-use crate::component_meta_caches::ComputedEntry;
+use verter_type_engine::component_meta_caches::ComputedEntry;
 
 impl ComponentMetaQueryEngine<'_> {
     pub fn resolve_imported_registry_symbol(
@@ -85,7 +85,7 @@ impl ComponentMetaQueryEngine<'_> {
         canonical_id: &str,
         source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,
-    ) -> Option<super::ResolvedImportedRegistrySymbol> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol> {
         let key = (
             canonical_id.to_string(),
             source_owner,
@@ -119,8 +119,9 @@ impl ComponentMetaQueryEngine<'_> {
         // admission call below borrow `self` only through its `RefCell`
         // fields, never through the `ctx` field.
         let ctx = self.ctx;
-        let host_db = ctx.project_type_store().imported_registry_db();
-        if let Some(opt_arc) = host_db.peek(&arc_key, ctx) {
+        let read = self.dispatch.imported_registry_read();
+        let publish = self.dispatch.imported_registry_publish();
+        if let Some(opt_arc) = read.peek(&arc_key) {
             let cached = opt_arc.as_deref().cloned();
             // Per-request audit attribution: imported-registry-symbol served
             // from a host-cache peek. Differentiate warm positive from warm
@@ -148,9 +149,8 @@ impl ComponentMetaQueryEngine<'_> {
         // The DB owns the OUTERMOST cacheability scope. Its preparation closure
         // covers the lazy load and observed-hash read that feed the entry's root;
         // its compute closure covers the route walk that produces the value.
-        let host_value = host_db.get_or_compute_admit(
+        let host_value = publish.get_or_compute_admit(
             &arc_key,
-            ctx,
             || {
             // Lazy first-time loading BEFORE the content observation: the
             // imported canonical may not have been loaded yet when this
@@ -185,7 +185,7 @@ impl ComponentMetaQueryEngine<'_> {
             #[cfg(test)]
             super::INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| {
                 if let Some(symbol) = slot.borrow().clone() {
-                    if let crate::cache_runtime::SignatureAdmission::Cacheable(sig) =
+                    if let verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) =
                         engine_fact_signature_for_exported_type(
                             ctx,
                             canonical_id,
@@ -195,18 +195,16 @@ impl ComponentMetaQueryEngine<'_> {
                             ),
                         )
                     {
-                        host_db.insert_for_test(
+                        publish.inject_concurrent_publish_for_test(
                             arc_key.clone(),
                             std::sync::Arc::new(
-                                crate::component_meta_caches::ImportedRegistryEntry {
+                                verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                                     value: Some(std::sync::Arc::new(symbol)),
                                     fact_dep_signature: sig.facts,
                                     // A simulated concurrent publish stamps the
                                     // live project generation, exactly as the
                                     // real cold-compute path does.
-                                    validated_at_generation: ctx
-                                        .project_type_store()
-                                        .current_project_generation(),
+                                    validated_at_generation: ctx.request_flags().current_project_generation(),
                                 },
                             ),
                         );
@@ -255,14 +253,20 @@ impl ComponentMetaQueryEngine<'_> {
     /// gate, so the rail cannot be dropped by a producer that forgets.
     fn resolve_imported_registry_symbol_admission(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical_id: &str,
         source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,
-        observed_keyed_hash: Option<crate::types::Hash16>,
-    ) -> crate::cache_runtime::singleflight::ComputeAdmission<
-        Option<std::sync::Arc<super::ResolvedImportedRegistrySymbol>>,
-        crate::component_meta_caches::ImportedRegistryEntry,
+        observed_keyed_hash: Option<verter_session_query::analysis::types::Hash16>,
+    ) -> verter_type_engine::cache_runtime::singleflight::ComputeAdmission<
+        Option<
+            std::sync::Arc<
+                verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
+            >,
+        >,
+        verter_type_engine::component_meta_caches::ImportedRegistryEntry,
     > {
         #[cfg(test)]
         super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
@@ -291,34 +295,35 @@ impl ComponentMetaQueryEngine<'_> {
         // / workspace-folder change) bumps no file content, so the entry carries
         // its compute-time generation explicitly. The read-side gates reject the
         // entry once the live generation moves past this snapshot.
-        let validated_at_generation = ctx.project_type_store().current_project_generation();
+        let validated_at_generation = ctx.request_flags().current_project_generation();
         // The single, side-effecting resolution: the wildcard-route fuse is
         // consumed here at most once per key.
-        let resolved: Option<super::ResolvedImportedRegistrySymbol> =
-            match resolve_imported_registry_symbol_with_budget(
-                ctx,
-                canonical_id,
-                source_owner,
-                exported_name,
-                || self.allow_wildcard_route(),
-            ) {
-                ImportedRegistrySymbolResolution::Resolved(opt) => opt,
-                ImportedRegistrySymbolResolution::FuseTripped => {
-                    // The wildcard route was needed but the per-request fuse was
-                    // exhausted, so the symbol was NEVER looked up. This `None`
-                    // is a GENUINE PARTIAL — admitting it as a warm negative
-                    // would poison subsequent identical requests that DO have
-                    // budget. Mark the request partial sticky so the whole
-                    // component-meta result refuses to warm, and route the
-                    // absent value through `ReturnOnly(None)` (NOT a cacheable
-                    // negative).
-                    crate::request_context::mark_request_result_partial();
-                    return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
-                        value: None,
-                        reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
-                    };
-                }
-            };
+        let resolved: Option<
+            verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
+        > = match resolve_imported_registry_symbol_with_budget(
+            ctx,
+            canonical_id,
+            source_owner,
+            exported_name,
+            || self.allow_wildcard_route(),
+        ) {
+            ImportedRegistrySymbolResolution::Resolved(opt) => opt,
+            ImportedRegistrySymbolResolution::FuseTripped => {
+                // The wildcard route was needed but the per-request fuse was
+                // exhausted, so the symbol was NEVER looked up. This `None`
+                // is a GENUINE PARTIAL — admitting it as a warm negative
+                // would poison subsequent identical requests that DO have
+                // budget. Mark the request partial sticky so the whole
+                // component-meta result refuses to warm, and route the
+                // absent value through `ReturnOnly(None)` (NOT a cacheable
+                // negative).
+                verter_type_engine::request_context::mark_request_result_partial();
+                return verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                    value: None,
+                    reason: verter_audit::NonAdmissionReason::PartialResult,
+                };
+            }
+        };
         let resolved_value = resolved.map(std::sync::Arc::new);
         #[cfg(test)]
         if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
@@ -327,9 +332,9 @@ impl ComponentMetaQueryEngine<'_> {
             // discriminating test can drive the refused-admission path without
             // manufacturing a stale observed hash. The freshly-resolved value is
             // still returned to the winner via `ReturnOnly`.
-            return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+            return verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
                 value: resolved_value,
-                reason: crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
+                reason: verter_audit::NonAdmissionReason::ForcedTestRefusal,
             };
         }
         let Some(observed) = observed_keyed_hash else {
@@ -338,23 +343,23 @@ impl ComponentMetaQueryEngine<'_> {
             // via `ReturnOnly`. The missing current-content read means the
             // provenance could not be rooted to a self-root canonical, so a
             // cross-view joiner could never view-validate it.
-            return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+            return verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
                 value: resolved_value,
-                reason: crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                reason: verter_audit::NonAdmissionReason::UnresolvedProvenance,
             };
         };
         match engine_fact_signature_for_exported_type(ctx, canonical_id, exported_name, observed) {
-            crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    crate::component_meta_caches::ImportedRegistryEntry {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                         value: resolved_value,
                         fact_dep_signature: sig.facts,
                         validated_at_generation,
                     },
                 )
             }
-            crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(reason) => {
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
                     value: resolved_value,
                     reason,
                 }
@@ -368,8 +373,14 @@ impl ComponentMetaQueryEngine<'_> {
     fn finish_imported_registry_lookup(
         &mut self,
         key: (String, verter_type_expr::TopLevelOwnerId, String),
-        host_value: Option<Option<std::sync::Arc<super::ResolvedImportedRegistrySymbol>>>,
-    ) -> Option<super::ResolvedImportedRegistrySymbol> {
+        host_value: Option<
+            Option<
+                std::sync::Arc<
+                    verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
+                >,
+            >,
+        >,
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol> {
         let result = match host_value {
             Some(cached) => cached.as_deref().cloned(),
             None => None,
@@ -395,7 +406,7 @@ impl ComponentMetaQueryEngine<'_> {
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> super::ResolvedTypeDeclaration {
+    ) -> verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
         let key = (
             canonical_source.to_string(),
             owner,
@@ -409,7 +420,8 @@ impl ComponentMetaQueryEngine<'_> {
             owner,
             std::sync::Arc::<str>::from(requested_name),
         );
-        let host_db = self.ctx.project_type_store().declaration_db();
+
+        let publish = self.dispatch.declaration_publish();
         let declaration = {
             // Observe the keyed canonical's content version ONCE, before the
             // value is computed, through the view-aware
@@ -432,47 +444,46 @@ impl ComponentMetaQueryEngine<'_> {
             // computed declaration back through `ReturnOnly`, so THAT refusal
             // costs no second resolution. It is not the funnel's only
             // post-compute verdict — see the `None` arm below.
-            let host_value =
-                host_db.get_or_compute(&arc_key, self.ctx, prepare, |observed_keyed_hash| {
-                    let computed = self
-                        .resolve_direct_prepared_type_declaration(
+            let host_value = publish.get_or_compute(&arc_key, prepare, |observed_keyed_hash| {
+                let computed = self
+                    .resolve_direct_prepared_type_declaration(
+                        canonical_source,
+                        owner,
+                        requested_name,
+                    )
+                    .unwrap_or_else(|| {
+                        self.ctx.resolve_type_declaration_for_dep(
                             canonical_source,
                             owner,
                             requested_name,
                         )
-                        .unwrap_or_else(|| {
-                            self.ctx.resolve_type_declaration_for_dep(
-                                canonical_source,
-                                owner,
-                                requested_name,
-                            )
-                        });
-                    // Every arm below KEEPS the freshly-resolved declaration:
-                    // returning a bare `None` would discard it and force the arm
-                    // after the funnel to re-run the whole resolution, with no
-                    // guarantee the second run reproduces the first.
-                    let Some(observed) = observed_keyed_hash else {
-                        // No observable content version for the keyed canonical —
-                        // nothing to root the entry on.
-                        return ComputedEntry::Unrooted(
-                            computed,
-                            crate::cache_runtime::NonAdmissionReason::EmptySignature,
-                        );
-                    };
-                    match engine_fact_signature_for_exported_type(
-                        self.ctx,
-                        canonical_source,
-                        requested_name,
-                        observed,
-                    ) {
-                        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                            ComputedEntry::Rooted(computed, sig.facts)
-                        }
-                        crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                            ComputedEntry::Unrooted(computed, reason)
-                        }
+                    });
+                // Every arm below KEEPS the freshly-resolved declaration:
+                // returning a bare `None` would discard it and force the arm
+                // after the funnel to re-run the whole resolution, with no
+                // guarantee the second run reproduces the first.
+                let Some(observed) = observed_keyed_hash else {
+                    // No observable content version for the keyed canonical —
+                    // nothing to root the entry on.
+                    return ComputedEntry::Unrooted(
+                        computed,
+                        verter_audit::NonAdmissionReason::EmptySignature,
+                    );
+                };
+                match engine_fact_signature_for_exported_type(
+                    self.ctx,
+                    canonical_source,
+                    requested_name,
+                    observed,
+                ) {
+                    verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                        ComputedEntry::Rooted(computed, sig.facts)
                     }
-                });
+                    verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                        reason,
+                    ) => ComputedEntry::Unrooted(computed, reason),
+                }
+            });
             match host_value {
                 Some(arc_decl) => arc_decl.as_ref().clone(),
                 // `None` is a genuine compute failure, or a post-compute
@@ -539,7 +550,8 @@ impl ComponentMetaQueryEngine<'_> {
             source_owner,
             std::sync::Arc::<str>::from(exported_name),
         );
-        let host_db = self.ctx.project_type_store().resolvable_db();
+
+        let publish = self.dispatch.resolvability_publish();
         let resolved = {
             // Observed once, before the value is computed and inside the scope —
             // it feeds the entry's root (see `resolve_type_declaration`).
@@ -551,48 +563,47 @@ impl ComponentMetaQueryEngine<'_> {
             // basis the live view cannot re-check, while the entry's signature
             // validates against that live view. The funnel's CACHEABILITY verdict
             // refuses the write and returns the computed bool.
-            let host_value =
-                host_db.get_or_compute(&arc_key, self.ctx, prepare, |observed_keyed_hash| {
-                    let computed = self
-                        .resolve_imported_registry_symbol(source_key, source_owner, exported_name)
-                        .is_some();
-                    // If the imported-registry resolution above tripped the
-                    // wildcard-route fuse (which marked the request-result
-                    // completeness partial), the derived `false` is NOT an
-                    // authoritative "unresolvable" verdict — the symbol was never
-                    // looked up. Refuse to admit it; the caller still receives the
-                    // bool so it never sees a spurious cached `false`. The
-                    // `ResolvabilityDb` rail has no per-value partial flag, so it
-                    // supplies the request-result completeness (one request resolves
-                    // one component's meta) to the pure gate.
-                    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                        crate::request_context::current_request_result_is_partial(),
-                    ) {
-                        return ComputedEntry::Unrooted(
-                            computed,
-                            crate::cache_runtime::NonAdmissionReason::PartialResult,
-                        );
+            let host_value = publish.get_or_compute(&arc_key, prepare, |observed_keyed_hash| {
+                let computed = self
+                    .resolve_imported_registry_symbol(source_key, source_owner, exported_name)
+                    .is_some();
+                // If the imported-registry resolution above tripped the
+                // wildcard-route fuse (which marked the request-result
+                // completeness partial), the derived `false` is NOT an
+                // authoritative "unresolvable" verdict — the symbol was never
+                // looked up. Refuse to admit it; the caller still receives the
+                // bool so it never sees a spurious cached `false`. The
+                // `ResolvabilityDb` rail has no per-value partial flag, so it
+                // supplies the request-result completeness (one request resolves
+                // one component's meta) to the pure gate.
+                if verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+                    verter_type_engine::request_context::current_request_result_is_partial(),
+                ) {
+                    return ComputedEntry::Unrooted(
+                        computed,
+                        verter_audit::NonAdmissionReason::PartialResult,
+                    );
+                }
+                let Some(observed) = observed_keyed_hash else {
+                    return ComputedEntry::Unrooted(
+                        computed,
+                        verter_audit::NonAdmissionReason::EmptySignature,
+                    );
+                };
+                match engine_fact_signature_for_exported_type(
+                    self.ctx,
+                    source_key,
+                    exported_name,
+                    observed,
+                ) {
+                    verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                        ComputedEntry::Rooted(computed, sig.facts)
                     }
-                    let Some(observed) = observed_keyed_hash else {
-                        return ComputedEntry::Unrooted(
-                            computed,
-                            crate::cache_runtime::NonAdmissionReason::EmptySignature,
-                        );
-                    };
-                    match engine_fact_signature_for_exported_type(
-                        self.ctx,
-                        source_key,
-                        exported_name,
-                        observed,
-                    ) {
-                        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                            ComputedEntry::Rooted(computed, sig.facts)
-                        }
-                        crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                            ComputedEntry::Unrooted(computed, reason)
-                        }
-                    }
-                });
+                    verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                        reason,
+                    ) => ComputedEntry::Unrooted(computed, reason),
+                }
+            });
             match host_value {
                 Some(value) => value,
                 // A `None` host-value is a post-compute REVALIDATION reject (the
@@ -644,7 +655,8 @@ impl ComponentMetaQueryEngine<'_> {
             std::sync::Arc::<str>::from(name),
         );
         let ctx = self.ctx;
-        let host_db = ctx.project_type_store().owner_collection_db();
+
+        let publish = self.dispatch.owner_collection_publish();
         let body = {
             // Observe the owner canonical's prepared decl AND the content
             // version it was materialised from from ONE prepared-decl bundle.
@@ -656,7 +668,7 @@ impl ComponentMetaQueryEngine<'_> {
             // accessor). This read is INSIDE the scope: it is the lease-miss
             // consumption point (see the method docs).
             let prepare = || self.observed_prepared_type_decl(owner_canonical, owner, name);
-            let host_value = host_db.get_or_compute(&arc_key, ctx, prepare, |observed| {
+            let host_value = publish.get_or_compute(&arc_key, prepare, |observed| {
                 // No prepared-decl bundle at all: there is no value to serve and
                 // none to publish.
                 let Some(observed) = observed.as_ref() else {
@@ -678,12 +690,12 @@ impl ComponentMetaQueryEngine<'_> {
                     name,
                     observed.whole_hash,
                 ) {
-                    crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
                         ComputedEntry::Rooted(computed, sig.facts)
                     }
-                    crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                        ComputedEntry::Unrooted(computed, reason)
-                    }
+                    verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                        reason,
+                    ) => ComputedEntry::Unrooted(computed, reason),
                 }
             });
             match host_value {
@@ -716,7 +728,7 @@ impl ComponentMetaQueryEngine<'_> {
     /// publish-race window admit a stale value under a fresh signature.
     ///
     /// This accessor fetches `canonical_id`'s prepared-decl bundle once through
-    /// [`crate::resolver_core::ResolverContext::prepared_decl_bundle`] — which,
+    /// [`verter_type_engine::resolver_core::ResolverContext::prepared_decl_bundle`] — which,
     /// under a `SessionResolverContext`, routes to the view-aware
     /// `prepared_decl_bundle_with_context` so an overlay-bearing session
     /// observes the overlay's bundle. The returned `decl` is the bundle's
@@ -752,31 +764,36 @@ impl ComponentMetaQueryEngine<'_> {
         symbol_name: &str,
     ) -> Option<super::ObservedPreparedTypeDecl> {
         let bundle = self.ctx.prepared_decl_bundle(canonical_id)?;
-        let whole_hash = bundle.prepared_type_decls.defining_content_hash();
+        let whole_hash = bundle.owner_whole_hash;
         // The bundle read runs inside its OWN cacheability scope so this
         // producer can tell a degraded `None` (a broken decl-body lease —
         // `LeaseMiss`) from an honest absence. The nested scope observes only:
         // the mark still fans out to every enclosing tracer, so the producer's
         // outer scope keeps refusing the shared-cache write.
-        let (decl_result, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
-            |_probe| {
-                let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
-                if let Err(failure) = &result {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+        let (decl_result, non_cacheable) =
+            verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(
+                    self.ctx,
+                ),
+                |_probe| {
+                    let result = self
+                        .ctx
+                        .prepared_type_from_input(&bundle, owner, symbol_name);
+                    if let Err(failure) = &result {
+                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                     );
-                    tracing::error!(
+                        tracing::error!(
                         canonical_id,
                         ?owner,
                         symbol_name,
                         ?failure,
                         "prepared type declaration observation failed; refusing cache admission"
                     );
-                }
-                result
-            },
-        );
+                    }
+                    result
+                },
+            );
         let Ok(decl) = decl_result else {
             return None;
         };

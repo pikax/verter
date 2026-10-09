@@ -1,7 +1,7 @@
 use crate::provider_surface_store::ContentHash;
 use dashmap::DashMap;
-use verter_semantic::analysis::types::Hash16;
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
+use verter_session_query::analysis::types::Hash16;
 use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,25 +396,25 @@ impl ProviderOwnerBinding {
     }
 }
 
-/// The receipt-attested identity of the carrier IDE provider surface that was
-/// actually committed (published to the store / opened as a direct buffer) for a
-/// source.
+/// The receipt-attested identity of one carrier companion surface (the IDE or the
+/// public-API companion) that was actually committed (published to the store / opened
+/// as a direct buffer) for a source.
 ///
 /// Stamped onto the committed [`ProviderSyncState`] ONLY by
 /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state),
 /// which is gated by a validated
 /// [`ProviderReadyReceipt`](crate::external_ts::ProviderReadyReceipt); the identity is
-/// the receipt's `CarrierIde` companion fingerprint (its content + source-map hashes),
+/// the receipt's companion fingerprint for that role (its content + source-map hashes),
 /// i.e. the EXACT bytes the provider serves. A later capture requires the store's
-/// CURRENT IDE surface to be this exact committed one — a surface RECORDED for a
+/// CURRENT surface to be this exact committed one — a surface RECORDED for a
 /// publish that FAILED or never committed carries a different content/map identity and
 /// is refused, so a provider offset (produced against the last successfully published
 /// content) is never mapped through newer, uncommitted content/map.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommittedCarrierIdeSurface {
-    /// Content-addressed hash (`Hash16`) of the committed IDE companion bytes.
+pub struct CommittedCarrierSurface {
+    /// Content-addressed hash (`Hash16`) of the committed companion bytes.
     pub content_hash: Hash16,
-    /// Content-addressed hash (`Hash16`) of the committed IDE companion's source-map
+    /// Content-addressed hash (`Hash16`) of the committed companion's source-map
     /// JSON (`[0; 16]` when the surface carries no map).
     pub map_hash: Hash16,
 }
@@ -480,7 +480,15 @@ pub struct ProviderSyncState {
     /// `None` for an UNRESOLVED editor-liveness carrier and for non-carrier / self-file
     /// commits (which record their surface only AFTER a successful direct sync and need
     /// no membership stamp). See [`Self::authorizes_carrier_ide_capture`].
-    pub committed_ide_surface: Option<CommittedCarrierIdeSurface>,
+    pub committed_ide_surface: Option<CommittedCarrierSurface>,
+    /// The receipt-attested identity of the committed carrier PUBLIC-API surface at
+    /// `api_path` (set only by the receipt-gated
+    /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
+    /// The membership publication's proof of WHICH API bytes the engine reads: the
+    /// path and its liveness flag say only that some API buffer is published. `None`
+    /// until a commit's receipt attests the API companion at `api_path`. See
+    /// [`Self::attests_committed_api_surface`].
+    pub committed_api_surface: Option<CommittedCarrierSurface>,
     /// The monotonic identity of the readiness receipt this state was last committed
     /// under (set only by the receipt-gated
     /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
@@ -649,6 +657,26 @@ impl ProviderSyncState {
         }
     }
 
+    /// Whether the committed publication attests a carrier IDE surface with the given
+    /// content / source-map identity: the exact IDE bytes the last receipt-gated commit
+    /// published at `ide_path`. Unlike [`Self::authorizes_carrier_ide_capture`], an
+    /// UNRESOLVED carrier attests nothing — it carries no receipt fingerprint.
+    pub fn attests_committed_ide_surface(&self, content_hash: Hash16, map_hash: Hash16) -> bool {
+        self.committed_ide_surface
+            .as_ref()
+            .is_some_and(|stamp| stamp.content_hash == content_hash && stamp.map_hash == map_hash)
+    }
+
+    /// Whether the committed publication attests a carrier public-API surface with the
+    /// given content / source-map identity: the exact API bytes the last receipt-gated
+    /// commit published at `api_path`. A surface recorded ahead of its publication, or
+    /// for a publication that failed, carries a different identity and is not attested.
+    pub fn attests_committed_api_surface(&self, content_hash: Hash16, map_hash: Hash16) -> bool {
+        self.committed_api_surface
+            .as_ref()
+            .is_some_and(|stamp| stamp.content_hash == content_hash && stamp.map_hash == map_hash)
+    }
+
     /// Create an unresolved (no committed owner) IDE-only sync state for a
     /// given IDE path.
     pub fn unresolved(ide_path: String) -> Self {
@@ -663,6 +691,7 @@ impl ProviderSyncState {
             decl_background_loaded: false,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -776,6 +805,261 @@ pub fn committed_binding_matches_current(
     committed.owner_binding == *current
 }
 
+/// The full basis an IDE-companion leg is current against: what one provider-sync
+/// transaction is about to deliver for an OPEN document, under its document lane.
+///
+/// A leg whose basis is already current delivers and commits nothing, so one
+/// open or edit causes one IDE-companion application per revision however many
+/// writers (the interactive repair, the debounced tick, a drain) arrive for it.
+pub(crate) struct IdeLegBasis<'a> {
+    pub canonical_id: &'a str,
+    pub ide_path: &'a str,
+    /// The generated IDE bytes this transaction compiled from the live revision.
+    pub generated: &'a str,
+    /// The owner binding this transaction would commit.
+    pub owner_binding: &'a ProviderOwnerBinding,
+    /// The live open document's source — the revision the leg must describe.
+    pub live_source: &'a str,
+}
+
+impl IdeLegBasis<'_> {
+    /// Whether every part of the basis is already current: the committed state
+    /// owns this path under the same owner (ownership + projection path), the
+    /// serving engine incarnation holds exactly the bytes a fresh preparation of
+    /// `generated` produces (provider epoch + projection identity), and the
+    /// recorded surface for that path is the committed one and describes the
+    /// live source (revision). Any miss — including a leg another path delivered
+    /// but left uncommitted or unrecorded — leaves the leg owed.
+    pub(crate) fn is_current(
+        &self,
+        project_sync: &crate::type_provider::project_sync::ProjectSync,
+        provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+        committed: Option<&ProviderSyncState>,
+    ) -> bool {
+        let Some(committed) = committed else {
+            return false;
+        };
+        if !committed.ide_background_loaded
+            || committed.ide_path.as_deref() != Some(self.ide_path)
+            || committed.owner_binding != *self.owner_binding
+        {
+            return false;
+        }
+        let Some(applied) = project_sync.carrier_companion_applied(self.ide_path, self.generated)
+        else {
+            return false;
+        };
+        let Some(snapshot) = provider_surfaces.current_snapshot(self.ide_path) else {
+            return false;
+        };
+        snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
+            && snapshot.source_canonical.as_ref() == self.canonical_id
+            && snapshot.provider_content.as_ref() == applied.content().as_ref()
+            && committed.authorizes_carrier_ide_capture(
+                snapshot.stamp.content_hash.to_hash16(),
+                snapshot.stamp.map_hash,
+            )
+            && snapshot.source_hash == ContentHash::of(self.live_source)
+    }
+}
+
+/// Whether an API-companion (`.d.ts`) leg is already current: the committed state
+/// delivered exactly `api_code` under `dts_path` for the same owner, nothing has
+/// observed a different public API since, and the serving engine incarnation
+/// still holds those bytes. A restarted engine, an owner change or a moved public
+/// API leaves the leg owed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the API leg validates the full source and projection basis"
+)]
+pub(crate) fn api_leg_is_current(
+    project_sync: &crate::type_provider::project_sync::ProjectSync,
+    committed: Option<&ProviderSyncState>,
+    owner_binding: &ProviderOwnerBinding,
+    dts_path: &str,
+    api_code: &str,
+    source_map_json: Option<&str>,
+    canonical_id: &str,
+    documents: &crate::documents::DocumentRegistry,
+) -> bool {
+    let source = crate::provider_surface_store::resolve_carrier_source(
+        Some(documents),
+        &documents.host(),
+        canonical_id,
+    );
+    let snapshot = documents.provider_surfaces().current_snapshot(dts_path);
+    committed.is_some_and(|committed| {
+        committed.owner_binding == *owner_binding
+            && committed.api_path.as_deref() == Some(dts_path)
+            && committed.api_companion_is_live_and_current()
+            && committed.api_delivered_hash == Some(api_declaration_identity(api_code))
+    }) && project_sync.companion_applied_verbatim(dts_path, api_code)
+        && snapshot.zip(source).is_some_and(|(snapshot, source)| {
+            snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierApi
+                && snapshot.source_canonical.as_ref() == canonical_id
+                && snapshot.source_hash == ContentHash::of(&source)
+                && snapshot.provider_content.as_ref() == api_code
+                && snapshot.stamp.map_hash
+                    == source_map_json
+                        .map(|map| ContentHash::of(map).to_hash16())
+                        .unwrap_or([0; 16])
+        })
+}
+
+pub(crate) fn open_ide_leg_is_current(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    documents: &crate::documents::DocumentRegistry,
+    committed: Option<&ProviderSyncState>,
+    canonical_id: &str,
+    ide_path: &str,
+    generated: &str,
+    owner_binding: &ProviderOwnerBinding,
+) -> bool {
+    let Some(uri) = documents.canonical_id_to_uri(canonical_id) else {
+        return false;
+    };
+    documents.get(&uri).is_some_and(|document| {
+        IdeLegBasis {
+            canonical_id,
+            ide_path,
+            generated,
+            owner_binding,
+            live_source: &document.source,
+        }
+        .is_current(sync, documents.provider_surfaces(), committed)
+    }) && documents
+        .host()
+        .get_ide(canonical_id, &documents.tsx_profile.read())
+        .filter(|ide| ide.code.as_ref() == generated)
+        .zip(documents.provider_surfaces().current_snapshot(ide_path))
+        .is_some_and(|(ide, snapshot)| {
+            snapshot.stamp.map_hash
+                == ide
+                    .source_map
+                    .as_deref()
+                    .map(|map| ContentHash::of(map).to_hash16())
+                    .unwrap_or([0; 16])
+        })
+}
+
+/// Whether an OPEN carrier's store-published companions are already current in
+/// the membership-only topology (tsserver), where the carrier-sync gateway's
+/// publication IS the IDE-leg application: it records a new generation of every
+/// companion surface and bumps the version the engine re-reads.
+///
+/// That engine holds no buffer the application witness can certify, so its
+/// freshness basis is the committed state, the recorded surfaces and the store
+/// membership, all describing the same companions:
+/// - the committed state owns the IDE path the gateway would publish under
+///   `resolver`, under the owner it resolves, and its
+///   receipt-attested IDE fingerprint is the recorded surface's stamp;
+/// - the recorded IDE surface holds exactly the bytes a FRESH preparation of
+///   `generated` produces (a changed projection misses), with the compile's map,
+///   and describes the live source (revision);
+/// - every committed API companion's recorded surface holds the current public
+///   API projection for the live source;
+/// - the membership ledger advertises the source under the current session with
+///   those companions (a retraction or session change misses).
+///
+/// Anything else — another engine topology, an unresolved binding, a document
+/// that is not open — is not current here.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the witness covers committed state, recorded surfaces and membership together"
+)]
+pub(crate) fn published_carrier_is_current(
+    sync: &crate::type_provider::project_sync::ProjectSync,
+    documents: &crate::documents::DocumentRegistry,
+    ledger: Option<&crate::external_ts::MembershipLedger>,
+    committed: Option<&ProviderSyncState>,
+    resolver: &ModuleResolverCore,
+    canonical_id: &str,
+    is_jsx: bool,
+    generated: &str,
+    ide_map: Option<&str>,
+) -> bool {
+    let (Some(ledger), Some(committed)) = (ledger, committed) else {
+        return false;
+    };
+    if !sync.carrier_companion_open_suppressed() {
+        return false;
+    }
+    // The owner and IDE path the gateway would publish under right now.
+    let owner_binding = current_owner_binding_for_source(resolver, canonical_id);
+    let Some(ide_path) = resolver.provider_ide_id_for_source(canonical_id, is_jsx) else {
+        return false;
+    };
+    let ide_path = ide_path.as_str();
+    if owner_binding.is_unresolved()
+        || committed.owner_binding != owner_binding
+        || !committed.ide_background_loaded
+        || committed.ide_path.as_deref() != Some(ide_path)
+    {
+        return false;
+    }
+    let Some(live_source) = documents.canonical_id_to_uri(canonical_id).and_then(|uri| {
+        documents
+            .get(&uri)
+            .map(|document| std::sync::Arc::clone(&document.source))
+    }) else {
+        return false;
+    };
+    let live_source_hash = ContentHash::of(&live_source);
+    let map_hash = |map: Option<&str>| {
+        map.map(|map| ContentHash::of(map).to_hash16())
+            .unwrap_or([0; 16])
+    };
+    let surfaces = documents.provider_surfaces();
+    let Ok(prepared) = sync.carrier_provider_surface_for_publication(ide_path, generated) else {
+        return false;
+    };
+    let ide_current = surfaces.current_snapshot(ide_path).is_some_and(|snapshot| {
+        snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde
+            && snapshot.source_canonical.as_ref() == canonical_id
+            && snapshot.source_hash == live_source_hash
+            && snapshot.provider_content.as_ref() == prepared.content().as_ref()
+            && snapshot.stamp.map_hash == map_hash(ide_map)
+            && committed.authorizes_carrier_ide_capture(
+                snapshot.stamp.content_hash.to_hash16(),
+                snapshot.stamp.map_hash,
+            )
+    });
+    if !ide_current {
+        return false;
+    }
+    if let Some(api_path) = committed.api_path.as_deref() {
+        let Ok(Some(api)) = documents.host().get_public_api(canonical_id) else {
+            return false;
+        };
+        let api_code = api.code_for_companion_path(api_path);
+        let api_current = surfaces.current_snapshot(api_path).is_some_and(|snapshot| {
+            snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierApi
+                && snapshot.source_canonical.as_ref() == canonical_id
+                && snapshot.source_hash == live_source_hash
+                && *snapshot.provider_content == **api_code
+                && snapshot.stamp.map_hash == map_hash(api.source_map.as_deref())
+        });
+        if !api_current {
+            return false;
+        }
+    }
+    let source = crate::external_ts::CanonicalSource::new(canonical_id);
+    ledger.is_advertised(&source)
+        && ledger
+            .record_snapshot(&source)
+            .and_then(|record| {
+                record.advertised_companions().map(|companions| {
+                    let advertises = |path: &str| {
+                        companions
+                            .iter()
+                            .any(|companion| companion.provider_uri.as_ref() == path)
+                    };
+                    advertises(ide_path) && committed.api_path.as_deref().is_none_or(advertises)
+                })
+            })
+            .unwrap_or(false)
+}
+
 /// Resolve the [`verter_session::FileLanguage`] for a non-carrier
 /// provider-sync target.
 ///
@@ -816,6 +1100,7 @@ pub fn non_carrier_sync_state_for_source(
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -942,7 +1227,7 @@ pub fn open_unresolved_carrier_state(
     // single naming authority, so a `.svelte` carrier projects `.tsx` exactly
     // as the column dictates.
     let desired_ide_path =
-        verter_semantic::resolver_core::carrier_ide_provider_path(source_id, is_jsx);
+        verter_session_query::resolution::carrier_ide_provider_path(source_id, is_jsx);
     // Syncability hint: the desired path is already live ONLY when the prior IDE
     // path is the SAME desired-extension artifact AND was genuinely loaded. The
     // caller reads this to choose `sync_tsx` (update) vs `open_tsx` (first open).
@@ -963,6 +1248,7 @@ pub fn open_unresolved_carrier_state(
         decl_background_loaded: false,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -1177,6 +1463,7 @@ pub fn open_unresolved_carrier_commit(
             decl_background_loaded: false,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -1222,6 +1509,115 @@ pub fn open_unresolved_carrier_commit(
         committed,
         dropped_api,
         stale_ide_after_success,
+    }
+}
+
+/// Why a foreground request found no provider surface it may decode an answer
+/// through. Each reason is its own signal: an engine restart, an ownership
+/// exclusion and a failed or overtaken delivery are never read off the
+/// diagnostics pipeline, and none of them is content churn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSurfaceUnavailable {
+    /// No current surface of the document's projection is recorded for it.
+    NotRecorded,
+    /// The committed membership publication does not attest the recorded
+    /// surface: the carrier's owner binding moved, or its publication never
+    /// committed.
+    OwnershipExcluded,
+    /// The open document moved past the recorded surface.
+    SourceMoved,
+    /// The recorded surface is not the one the serving provider holds.
+    Delivery(crate::provider_surface_store::SurfaceDelivery),
+}
+
+/// The serving provider's delivery ledger, as the provider-surface store reads
+/// it: the active engine's per-incarnation application receipt for a buffer it
+/// holds, or — for the membership-only topology, whose engine reads carrier
+/// companions from the publication rather than from a delivered buffer — the
+/// committed publication that attests the surface.
+///
+/// Every answer is a local read of state this process already owns; none
+/// issues a provider request.
+pub struct ProviderSyncDeliveryWitness {
+    sync: crate::type_provider::project_sync::ProjectSync,
+    provider_sync_states: std::sync::Arc<DashMap<String, ProviderSyncState>>,
+}
+
+impl ProviderSyncDeliveryWitness {
+    pub fn new(
+        sync: crate::type_provider::project_sync::ProjectSync,
+        provider_sync_states: std::sync::Arc<DashMap<String, ProviderSyncState>>,
+    ) -> Self {
+        Self {
+            sync,
+            provider_sync_states,
+        }
+    }
+
+    /// Whether the committed publication of `surface`'s carrier attests it: the
+    /// path is one of the carrier's live committed companions, AND the receipt
+    /// that committed the publication fingerprinted exactly these bytes — the
+    /// receipt-stamped IDE surface for an IDE companion, the receipt-stamped API
+    /// surface for a public-API companion. A live path proves only that SOME
+    /// buffer is published there; a surface recorded ahead of its publication
+    /// (or for one that failed) shares the path but not the fingerprint.
+    fn publication_attests(
+        &self,
+        surface: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+    ) -> bool {
+        use crate::provider_surface_store::ProviderSurfaceKind;
+        let path = surface.stamp.provider_path.as_ref();
+        let content_hash = surface.stamp.content_hash.to_hash16();
+        let map_hash = surface.stamp.map_hash;
+        self.provider_sync_states
+            .get(surface.source_canonical.as_ref())
+            .is_some_and(|committed| {
+                let live = ALL_PATH_KINDS.into_iter().any(|kind| {
+                    committed.path_for_kind(kind) == Some(path)
+                        && committed.background_loaded_for_kind(kind)
+                });
+                live && match surface.kind {
+                    // Only the receipt's own fingerprint attests membership
+                    // content: an unresolved carrier has no receipt, so the
+                    // engine was never handed its IDE bytes through the
+                    // publication, however live its path is.
+                    ProviderSurfaceKind::CarrierIde => {
+                        committed.ide_path.as_deref() == Some(path)
+                            && committed.attests_committed_ide_surface(content_hash, map_hash)
+                    }
+                    ProviderSurfaceKind::CarrierApi => {
+                        committed.api_path.as_deref() == Some(path)
+                            && committed.attests_committed_api_surface(content_hash, map_hash)
+                    }
+                    ProviderSurfaceKind::Shadow | ProviderSurfaceKind::Real => false,
+                }
+            })
+    }
+}
+
+impl crate::provider_surface_store::ProviderDeliveryWitness for ProviderSyncDeliveryWitness {
+    fn serving_delivery(
+        &self,
+        surface: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+    ) -> crate::provider_surface_store::ServingDelivery {
+        use crate::provider_surface_store::{ProviderSurfaceKind, ServingDelivery};
+        use verter_type_runtime::traits::AppliedContent;
+        let membership_companion = matches!(
+            surface.kind,
+            ProviderSurfaceKind::CarrierIde | ProviderSurfaceKind::CarrierApi
+        ) && self.sync.carrier_companion_open_suppressed();
+        if membership_companion {
+            return if self.publication_attests(surface) {
+                ServingDelivery::Published
+            } else {
+                ServingDelivery::Unpublished
+            };
+        }
+        match self.sync.serving_content(&surface.stamp.provider_path) {
+            AppliedContent::Applied(bytes) => ServingDelivery::Applied(bytes),
+            AppliedContent::NotApplied => ServingDelivery::NotApplied,
+            AppliedContent::Uncertified => ServingDelivery::Uncertified,
+        }
     }
 }
 

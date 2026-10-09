@@ -20,6 +20,7 @@ use crate::utils::oxc::bindings::{
     collect_expression_free_refs, collect_expression_reference_spans,
     collect_pattern_default_free_ref_names, collect_pattern_local_spans,
     collect_pattern_reference_spans, collect_type_free_ref_names, collect_type_reference_spans,
+    EnclosingScope,
 };
 
 /// Result of parsing a v-slot expression.
@@ -139,7 +140,7 @@ fn extract_slot_bindings_internal(
     params: &FormalParameters<'_>,
     input: &str,
     file_offset: u32,
-    ignored_extra: &[&str],
+    enclosing: &dyn EnclosingScope,
 ) -> (Vec<Span>, Vec<Span>, Vec<String>, Vec<String>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
@@ -162,16 +163,10 @@ fn extract_slot_bindings_internal(
     }
 
     // Build ignored set from local names (need the actual strings to filter references)
-    let mut ignored: FxHashSet<&[u8]> = locals
-        .iter()
-        .map(|span| span.slice(input).as_bytes())
-        .collect();
-
-    if !ignored_extra.is_empty() {
-        for name in ignored_extra {
-            ignored.insert(name.as_bytes());
-        }
-    }
+    let own: FxHashSet<&str> = locals.iter().map(|span| span.slice(input)).collect();
+    // Enclosing template-scope names are queried in place from the shared
+    // table, never copied into this value's own set.
+    let ignored = |name: &str| own.contains(name) || enclosing.declares(name);
 
     // Type-annotation reference spans keep the wrapper prefix; collect them apart
     // and apply only the file shift so they land at their published position.
@@ -233,7 +228,7 @@ fn extract_slot_bindings_internal(
     let mut liveness_reference_names: Vec<String> = Vec::new();
     let mut scope_local_reference_names: Vec<String> = Vec::new();
     for name in liveness_names {
-        if ignored.contains(name.as_bytes()) {
+        if ignored(name) {
             scope_local_reference_names.push(name.to_string());
         } else {
             liveness_reference_names.push(name.to_string());
@@ -257,8 +252,7 @@ fn extract_slot_bindings_internal(
 /// * `span` - The byte range within `input` containing the v-slot expression
 /// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
-/// * `ignored` - Identifiers to ignore when collecting references
-/// * `ignored` - Identifiers to ignore when collecting references
+/// * `enclosing` - Names declared by enclosing template scopes
 ///
 /// # Example
 /// ```ignore
@@ -401,7 +395,7 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
     span: Option<Span>,
     input: &str,
     source_type: SourceType,
-    ignored: &[&str],
+    enclosing: &dyn EnclosingScope,
 ) -> VSlotWithBindings<'a> {
     let (source, offset) = match span {
         Some(s) if s.start < s.end => (&input[s.start as usize..s.end as usize], s.start),
@@ -422,7 +416,7 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
         if result.errors.is_some() {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else if let Some(params) = &result.params {
-            extract_slot_bindings_internal(params, input, offset, ignored)
+            extract_slot_bindings_internal(params, input, offset, enclosing)
         } else {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         };
@@ -451,14 +445,14 @@ pub fn parse_vslot_with_bindings<'a>(
     allocator: &'a Allocator,
     source: &str,
     source_type: SourceType,
-    ignored: &[&str],
+    enclosing: &dyn EnclosingScope,
 ) -> VSlotWithBindings<'a> {
     parse_vslot_with_bindings_sliced(
         allocator,
         Some(Span::new(0, source.len() as u32)),
         source,
         source_type,
-        ignored,
+        enclosing,
     )
 }
 

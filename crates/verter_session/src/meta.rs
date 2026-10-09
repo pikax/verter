@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::session_runtime::SessionRuntime;
 use crate::types::UpsertRequest;
 use crate::VerterHost;
 
@@ -49,11 +48,11 @@ pub enum MetaError {
     /// The computation was aborted (a cancelled request, a superseded view,
     /// a shut down host): it published nothing.
     #[error("request aborted: {0:?}")]
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for MetaError {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for MetaError {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         Self::Aborted(abort)
     }
 }
@@ -87,9 +86,9 @@ static PAYLOAD_ITEM_COMPLETENESS_PROBE: std::sync::Mutex<
 mod output_api;
 
 pub(crate) fn component_meta_expansion_budget_exceeded(
-    types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    types: &verter_session_query::analysis::type_expand::ExpandedComponentTypes,
 ) -> bool {
-    use verter_semantic::analysis::type_expand::ExpansionStopReason;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason;
 
     let is_budget = |reason: ExpansionStopReason| {
         matches!(
@@ -101,27 +100,28 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
         )
     };
 
-    let field_has_budget = |field: &verter_semantic::analysis::type_expand::ExpandedField| {
+    let field_has_budget = |field: &verter_session_query::analysis::type_expand::ExpandedField| {
         field
             .diagnostics
             .iter()
             .any(|diagnostic| is_budget(diagnostic.reason))
     };
     let macro_has_budget =
-        |shape: &verter_semantic::analysis::type_expand::ExpandedMacroObjectShape| {
+        |shape: &verter_session_query::analysis::type_expand::ExpandedMacroObjectShape| {
             shape
                 .result
                 .diagnostics
                 .iter()
                 .any(|diagnostic| is_budget(diagnostic.reason))
         };
-    let props_has_budget = |shape: &verter_semantic::analysis::type_expand::ExpandedMacroProps| {
-        shape
-            .result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| is_budget(diagnostic.reason))
-    };
+    let props_has_budget =
+        |shape: &verter_session_query::analysis::type_expand::ExpandedMacroProps| {
+            shape
+                .result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| is_budget(diagnostic.reason))
+        };
 
     types.props.iter().any(field_has_budget)
         || types.emits.iter().any(field_has_budget)
@@ -133,7 +133,7 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
 }
 
 fn component_meta_symbolic_budget_is_fatal(
-    analysis: Option<&verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+    analysis: Option<&verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
 ) -> bool {
     let Some(analysis) = analysis else {
         return true;
@@ -148,7 +148,7 @@ fn component_meta_symbolic_budget_is_fatal(
 
 fn component_meta_resolution_budget_error(
     canonical_or_alias: &str,
-    analysis: Option<&verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+    analysis: Option<&verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> Option<MetaError> {
     // Walker overflow is no longer meaningful — the solver path replaced
@@ -208,7 +208,7 @@ pub(crate) struct SessionState {
 /// concurrency is separated by the existing
 /// `StoreViewCompatToken`-keyed singleflight (R19).
 pub struct MetaProject {
-    host: VerterHost,
+    host: std::sync::Arc<VerterHost>,
     /// Cached base sources for overlay revert. Key = canonical ID.
     base_sources: parking_lot::RwLock<HashMap<String, Arc<str>>>,
     /// Set of canonical IDs in the base file index.
@@ -224,6 +224,14 @@ pub struct MetaProject {
 impl MetaProject {
     /// Create a new project wrapping the given host.
     pub fn new(host: VerterHost) -> Arc<Self> {
+        Self::from_shared_host(std::sync::Arc::new(host))
+    }
+
+    /// Create a new project over a host the caller constructed and still
+    /// holds a shared handle to. The caller's handle and the project's are
+    /// the same host instance — the explicit construction graph consumes
+    /// the single instance instead of minting a second owner.
+    pub fn from_shared_host(host: std::sync::Arc<VerterHost>) -> Arc<Self> {
         Arc::new(Self {
             host,
             base_sources: parking_lot::RwLock::new(HashMap::new()),
@@ -260,10 +268,11 @@ impl MetaProject {
         true
     }
 
-    // There is no overlay gate. Per-session isolation is structural via
-    // SessionRuntime's ArcSwap<SessionView> snapshots and session-scoped
-    // caches. Base-context operations (upsert_base, ensure_loaded, etc.)
-    // operate directly on the host without a gate.
+    // There is no overlay gate. Per-session isolation is structural: a
+    // session's overlays live on its `SessionState` and reach the resolver
+    // only through an explicit `SessionView`. Base-context operations
+    // (upsert_base, ensure_loaded, etc.) operate directly on the host
+    // without a gate.
 
     /// Load a file into the base project. This is the shared state that
     /// all sessions see when they don't have an overlay for the file.
@@ -328,7 +337,7 @@ impl MetaProject {
     /// Configure project-scoped path alias resolution.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
         // No overlay gate — base operations go directly to host.
@@ -373,13 +382,11 @@ impl MetaProject {
                 resolution_authority: verter_workspace::OverlayAuthority::new(),
             },
         );
-        let runtime = SessionRuntime::new(Arc::clone(self));
         Ok(MetaSession {
             id,
             project: Arc::clone(self),
             closed: AtomicBool::new(false),
             execution_mode,
-            runtime,
         })
     }
 
@@ -415,9 +422,27 @@ impl MetaProject {
         self.shutdown.load(Ordering::Acquire)
     }
 
-    /// Get a reference to the underlying host (for advanced use).
+    /// Get a reference to the underlying host. Crate-private: the project
+    /// owns the host, and the whole-host accessor is not part of the
+    /// session crate's public surface — external consumers reach their
+    /// own construction handle (see [`Self::from_shared_host`]) or a
+    /// narrow read instead.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn host(&self) -> &VerterHost {
+        self.host.as_ref()
+    }
+
+    /// The same whole-host read, visible ONLY to this crate's own test
+    /// code: the consolidated integration-test binary (which links the
+    /// crate as a non-test dependency) and the unit tests. The default-off
+    /// `test-support` feature — the crate's established seam for exactly
+    /// this — keeps it a COMPILE-ABSENT item in every production build,
+    /// so the production surface offers no catch-all route to the whole
+    /// host; a production consumer holds its own construction handle
+    /// (see [`Self::from_shared_host`]) instead.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn host(&self) -> &VerterHost {
-        &self.host
+        self.host.as_ref()
     }
 
     /// Returns the set of canonical IDs in the base file index.
@@ -446,11 +471,8 @@ impl MetaProject {
     /// Release a session: remove its state.
     ///
     /// Overlays never mutate the host, so closing a session is a
-    /// pure state removal (R17). The `_runtime` parameter remains
-    /// for symmetry with
-    /// the public surface; future stages may reattach overlay-
-    /// invalidation hooks through it.
-    fn release_session(&self, session_id: u64, _runtime: &SessionRuntime) {
+    /// pure state removal (R17).
+    fn release_session(&self, session_id: u64) {
         self.sessions.write().remove(&session_id);
     }
 }
@@ -508,14 +530,14 @@ pub struct MetaSession {
     /// request at a time without a batch coordinator.
     #[allow(dead_code)]
     execution_mode: MetaExecutionMode,
-    /// Session-owned runtime for overlay-sensitive request execution.
-    /// Owns session identity, overlay context lifecycle, and the
-    /// session-scoped resolved-meta cache.
-    runtime: SessionRuntime,
 }
 
 impl MetaSession {
-    fn check_alive(&self) -> Result<(), MetaError> {
+    /// Liveness for the session's own routes AND the host-seam routes the
+    /// component-meta host re-exports: a closed session must refuse BEFORE
+    /// any host operation (resolution, audit publication) runs under its
+    /// identity.
+    pub(crate) fn check_alive(&self) -> Result<(), MetaError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(MetaError::SessionClosed);
         }
@@ -528,42 +550,44 @@ impl MetaSession {
         self.id
     }
 
-    /// Access the project-level host. Needed by the audit-bundle path
-    /// to call `take_audit_record` after a
-    /// resolution completes.
-    pub fn host(&self) -> &VerterHost {
-        self.project.host()
+    /// Whether the project host captures per-request audit records
+    /// (`audit_enabled` + `footprint_capture`).
+    pub(crate) fn audit_capture_enabled(&self) -> bool {
+        let config = self.project.host().config();
+        config.audit_enabled && config.footprint_capture
+    }
+
+    /// The project host's audited output-bearing component-meta
+    /// resolution, with the request id its audit record was published
+    /// under. One of the three audited-lane operations a session lends
+    /// out instead of the host itself.
+    pub(crate) fn component_meta_output_with_resolution(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        (Option<crate::meta_resolve::ComponentMetaOutput>, u64),
+        (crate::meta_resolve::ComponentMetaFailure, u64),
+    > {
+        self.project
+            .host()
+            .get_component_meta_output_with_resolution(canonical_or_alias)
+    }
+
+    /// Drain the audit record a resolution published under `request_id`.
+    pub(crate) fn take_audit_record(
+        &self,
+        request_id: u64,
+    ) -> Option<crate::component_meta_audit::RequestAuditRecord> {
+        self.project
+            .host()
+            .host_audit_runtime()
+            .take_record(request_id)
     }
 
     /// This session's execution mode.
     #[allow(dead_code)]
     pub fn execution_mode(&self) -> MetaExecutionMode {
         self.execution_mode
-    }
-
-    /// Resolve an alias to its canonical ID inside this session's overlay view.
-    #[allow(dead_code)]
-    pub fn resolve_alias_or_canonical(
-        &self,
-        canonical_or_alias: &str,
-    ) -> Result<String, MetaError> {
-        self.check_alive()?;
-        self.with_session_runtime(canonical_or_alias, |runtime| {
-            runtime
-                .host()
-                .resolve_alias_or_canonical(canonical_or_alias)
-        })
-    }
-
-    /// Invalidate the session's runtime caches.
-    ///
-    /// Overlays never apply to the host, so there is no overlay
-    /// state to revert. The session's overlays remain stored on
-    /// `SessionState.overlays` for view-aware read paths. The
-    /// runtime's `invalidate_session_caches` is a no-op under the
-    /// host-immutable contract (R17).
-    fn invalidate_active_overlays(&self) {
-        self.runtime.invalidate_session_caches();
     }
 
     /// Store a file overlay in this session.
@@ -576,9 +600,6 @@ impl MetaSession {
             .overlays
             .insert(canonical_id.to_string(), SessionOverlay::Upsert { source });
         state.generation += 1;
-        drop(sessions);
-
-        self.invalidate_active_overlays();
         Ok(())
     }
 
@@ -592,9 +613,6 @@ impl MetaSession {
             .overlays
             .insert(canonical_id.to_string(), SessionOverlay::Delete);
         state.generation += 1;
-        drop(sessions);
-
-        self.invalidate_active_overlays();
         Ok(())
     }
 
@@ -602,18 +620,6 @@ impl MetaSession {
     /// state again.
     pub fn reset(&self, canonical_id: &str) -> Result<(), MetaError> {
         self.check_alive()?;
-
-        // Revert BEFORE removing overlay from state — the revert reads
-        // the overlay map to know which files to restore.
-        let has_overlay = self
-            .project
-            .sessions
-            .read()
-            .get(&self.id)
-            .is_some_and(|s| s.overlays.contains_key(canonical_id));
-        if has_overlay {
-            self.invalidate_active_overlays();
-        }
 
         let mut sessions = self.project.sessions.write();
         let state = sessions.get_mut(&self.id).ok_or(MetaError::SessionClosed)?;
@@ -638,7 +644,10 @@ impl MetaSession {
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
+    ) -> Result<
+        Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
+        MetaError,
+    > {
         self.check_alive()?;
         let host = self.project.host();
         // Route through the view-aware host entry point so overlayed
@@ -654,8 +663,10 @@ impl MetaSession {
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>, MetaError>
-    {
+    ) -> Result<
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+        MetaError,
+    > {
         self.check_alive()?;
         let host = self.project.host();
         // Route through the view-aware host entry point so overlayed
@@ -683,8 +694,10 @@ impl MetaSession {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
-    {
+    ) -> Result<
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
+        MetaError,
+    > {
         self.check_alive()?;
         let host = self.project.host();
         // Share the fixed-view fast path with the batch analysis surface
@@ -735,7 +748,7 @@ impl MetaSession {
     ) -> Result<
         Vec<
             Result<
-                Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+                Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
                 MetaError,
             >,
         >,
@@ -914,7 +927,7 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<
         Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         MetaError,
@@ -1104,7 +1117,9 @@ impl MetaSession {
     }
 
     /// Return provenance counters for this session's host.
-    pub fn get_provenance(&self) -> Result<crate::types::MetaProvenanceSnapshot, MetaError> {
+    pub fn get_provenance(
+        &self,
+    ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, MetaError> {
         self.check_alive()?;
         Ok(self.project.host.provenance_snapshot())
     }
@@ -1181,39 +1196,12 @@ impl MetaSession {
         {
             return; // Already closed
         }
-        self.project.release_session(self.id, &self.runtime);
+        self.project.release_session(self.id);
     }
 
     /// Whether this session has been closed.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-    }
-
-    // -----------------------------------------------------------------------
-    // Internal: run a closure against the session's runtime
-    // -----------------------------------------------------------------------
-
-    /// Run a closure with the session's runtime facade in scope.
-    ///
-    /// Overlay context is never applied via host mutation (R17).
-    /// The closure simply receives the runtime reference;
-    /// overlay-aware reads route through
-    /// [`SessionView`](crate::session_view::SessionView) when the
-    /// resolver consults view-aware read paths. Where the resolver
-    /// has not yet routed through the view substrate, sessions
-    /// transparently read base-host state — the
-    /// documented breaking period on the integration branch.
-    ///
-    /// The `_canonical_or_alias` parameter is kept on the signature
-    /// so callers do not need to be rewritten beyond the body
-    /// change; the value is unused today and reserved for future
-    /// per-canonical fast-path logic.
-    fn with_session_runtime<T>(
-        &self,
-        _canonical_or_alias: &str,
-        f: impl FnOnce(&SessionRuntime) -> T,
-    ) -> Result<T, MetaError> {
-        Ok(f(&self.runtime))
     }
 
     /// Run a closure with a borrowed
@@ -1236,8 +1224,10 @@ impl MetaSession {
     ) -> R {
         let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> =
             rustc_hash::FxHashMap::default();
-        let mut overlay_hashes: rustc_hash::FxHashMap<String, crate::types::Hash16> =
-            rustc_hash::FxHashMap::default();
+        let mut overlay_hashes: rustc_hash::FxHashMap<
+            String,
+            verter_session_query::analysis::types::Hash16,
+        > = rustc_hash::FxHashMap::default();
         let mut overlay_tombstones: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut resolution_authority = None;
@@ -1250,7 +1240,8 @@ impl MetaSession {
                     match overlay {
                         SessionOverlay::Upsert { source } => {
                             let body: Arc<str> = Arc::from(source.as_str());
-                            let hash = crate::hash::hash_16(body.as_bytes());
+                            let hash =
+                                verter_semantic_source::source_hash::hash_16(body.as_bytes());
                             overlays.insert(canonical.clone(), body);
                             overlay_hashes.insert(canonical.clone(), hash);
                         }
@@ -1283,7 +1274,7 @@ impl Drop for MetaSession {
 }
 
 #[cfg(test)]
-#[path = "meta_tests.rs"]
+#[path = "tests/meta/mod.rs"]
 mod meta_tests;
 
 #[cfg(test)]

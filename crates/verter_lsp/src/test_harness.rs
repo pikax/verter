@@ -322,8 +322,8 @@ impl TestSessionBuilder {
                 // production provider hub (the carrier path then runs through the
                 // hub, the real production seam). Otherwise the raw provider.
                 let spawned: Result<Arc<dyn TypeProvider>, _> = if self.resilient {
-                    // The notifier rides an empty client cell (logs only) — the
-                    // test never injects a real `Client`.
+                    // The notifier rides a transport with no client attached
+                    // (logs only).
                     let hub = crate::tsserver::resilient::hub(
                         crate::tsserver::resilient::TsserverEngineInputs {
                             node_path,
@@ -333,7 +333,7 @@ impl TestSessionBuilder {
                             carrier_store_dir,
                             plugin_response_remap: self.plugin_response_remap,
                         },
-                        Arc::new(tokio::sync::OnceCell::new()),
+                        crate::outbound::Outbound::default(),
                         3,
                         None,
                         Arc::new(tokio::sync::Notify::new()),
@@ -485,10 +485,10 @@ impl TestSessionBuilder {
         // `with_isolated_store_segment` holds the install lock across that synchronous
         // construction, so the LSP backend resolves the SAME isolated dir the spawn
         // above used and no concurrent session observes this session's segment.
-        let (service, socket) = with_isolated_store_segment(&store_segment, || {
-            tower_lsp_server::LspService::new(move |client| {
+        let (service, _socket) = with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |_client| {
                 VerterLanguageServer::new(
-                    client,
+                    crate::outbound::Outbound::default(),
                     LspConfig {
                         host: Arc::clone(&host_for_server),
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -505,6 +505,7 @@ impl TestSessionBuilder {
                 )
             })
         });
+        let socket = service.inner().outbound().wire();
 
         // Drain the client socket to prevent backpressure
         let drain_handle = tokio::spawn(async move {
@@ -946,8 +947,38 @@ impl RealProviderTestSession {
         }
     }
 
-    /// Get hover text at a position.
+    /// Get hover text at a position: `None` only when the server answered with
+    /// no hover.
+    ///
+    /// A failed request panics with its error instead. The RPC failures this
+    /// harness can see — its own request deadline elapsing, a
+    /// `ContentModified` — are not a server that answered without content, and
+    /// reporting them as `None` blames the feature under test for a request
+    /// that never produced an answer.
     pub(crate) async fn hover_text(&self, uri: &Uri, position: Position) -> Option<String> {
+        let started = std::time::Instant::now();
+        self.hover_result(uri, position)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "hover request at {}:{} in {} failed after {:?}: {error}",
+                    position.line,
+                    position.character,
+                    uri.as_str(),
+                    started.elapsed(),
+                )
+            })
+    }
+
+    /// Hover text at a position, or the RPC error the request answered with.
+    ///
+    /// For a caller that re-requests on `ContentModified` the way an editor
+    /// does; every other caller wants [`Self::hover_text`].
+    pub(crate) async fn hover_result(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> tower_lsp_server::jsonrpc::Result<Option<String>> {
         let params = HoverParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -955,28 +986,23 @@ impl RealProviderTestSession {
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
-        match self.server().hover(params).await {
-            Ok(Some(hover)) => match hover.contents {
-                HoverContents::Markup(m) => Some(m.value),
-                HoverContents::Scalar(MarkedString::String(s)) => Some(s),
-                HoverContents::Scalar(MarkedString::LanguageString(ls)) => Some(ls.value),
-                HoverContents::Array(items) => Some(
-                    items
-                        .into_iter()
-                        .map(|item| match item {
-                            MarkedString::String(s) => s,
-                            MarkedString::LanguageString(ls) => ls.value,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
-            },
-            Ok(None) => None,
-            Err(e) => {
-                eprintln!("hover error: {e}");
-                None
-            }
-        }
+        Ok(self
+            .server()
+            .hover(params)
+            .await?
+            .map(|hover| match hover.contents {
+                HoverContents::Markup(m) => m.value,
+                HoverContents::Scalar(MarkedString::String(s)) => s,
+                HoverContents::Scalar(MarkedString::LanguageString(ls)) => ls.value,
+                HoverContents::Array(items) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        MarkedString::String(s) => s,
+                        MarkedString::LanguageString(ls) => ls.value,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }))
     }
 
     /// Get signature help at a position (raw LSP `SignatureHelp`).
@@ -1008,6 +1034,9 @@ impl RealProviderTestSession {
         uri: &Uri,
         position: Position,
     ) -> Option<GotoDefinitionResponse> {
+        // Earlier native lookups can advance this document's generation.
+        // Semantic fixtures observe the completed publication, not a warm label.
+        self.server().test_settle_open_document(uri).await;
         let params = GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },

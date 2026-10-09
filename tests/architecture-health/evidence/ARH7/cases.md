@@ -6,7 +6,7 @@ The sole owning interface is `node tests/architecture-health/ARH7/verify.mjs` (v
 
 ## ARH7-ratification (accept)
 
-Clean products validate. Manifest cases, products and verify/test commands match the verifier. The candidate field is a 40-hex commit id used as a format pin, not git-ancestry proof. `test:scripts` and the CI architecture-health job include this node; the arch filter includes `packages/vue-vscode/**`.
+Clean products validate. Manifest cases, products and verify/test commands match the verifier. Acceptance checks current schema, ownership and behavior without a historical commit pin; an invented product schema is rejected. `test:scripts` and the CI architecture-health job include this node; the arch filter includes `packages/vue-vscode/**`.
 
 ## ARH7-cutover (reject) — AC1
 
@@ -30,3 +30,5 @@ VSC0 start-attempt-scope evidence and the desktop/web shared boundary must name 
 ## ARH7-cost (reject) — AC5
 
 No committed wall-clock/RSS/speedup. Required work is not removed; the locator is retired. Dirty twin plants `wallNs`.
+
+The shared predecessor join validates current scheduler lifecycle ownership and incarnation rejection/drain witnesses and the source-witness fence on external publication. These contracts carry no stored Git identity as acceptance evidence.

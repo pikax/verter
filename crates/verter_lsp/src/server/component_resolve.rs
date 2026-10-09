@@ -35,7 +35,7 @@ use super::{ResolvedComponentDocument, VerterLanguageServer};
 /// fallback for not-yet-indexed relative files.
 fn imported_component_canonical_candidates(
     parent_canonical_id: &str,
-    parent_analysis: Option<&verter_session::FileAnalysisSnapshot>,
+    parent_analysis: Option<&verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
     import_source: &str,
     workspace_resolved: Option<String>,
 ) -> Vec<String> {
@@ -84,13 +84,13 @@ impl VerterLanguageServer {
     fn ensure_component_ready(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let host = self.documents.host();
         if host.get_source(canonical_id).is_none() && !host.ensure_loaded(canonical_id) {
             return None;
         }
 
-        if is_default_export_component_carrier(canonical_id) {
+        if is_default_export_component_carrier(self.documents.language_classifier(), canonical_id) {
             let profile = self.documents.tsx_profile.read().clone();
             // ANALYSIS-facing side effect: this is intentionally the shared
             // compile path, which also leaves the exact carrier public API ready
@@ -104,7 +104,9 @@ impl VerterLanguageServer {
     }
 
     fn imported_component_export_name<'a>(
-        parent_analysis: Option<&'a verter_session::FileAnalysisSnapshot>,
+        parent_analysis: Option<
+            &'a verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+        >,
         import_source: &str,
         local_binding_name: Option<&'a str>,
     ) -> Option<&'a str> {
@@ -132,7 +134,9 @@ impl VerterLanguageServer {
     fn resolve_imported_component_canonical_id(
         &self,
         parent_uri: &Uri,
-        parent_analysis: Option<&verter_session::FileAnalysisSnapshot>,
+        parent_analysis: Option<
+            &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+        >,
         import_source: &str,
         local_binding_name: Option<&str>,
     ) -> Option<String> {
@@ -156,7 +160,8 @@ impl VerterLanguageServer {
         );
 
         for candidate in candidates {
-            if is_default_export_component_carrier(&candidate) {
+            if is_default_export_component_carrier(self.documents.language_classifier(), &candidate)
+            {
                 if self.ensure_component_ready(&candidate).is_some() {
                     return Some(candidate);
                 }
@@ -179,8 +184,10 @@ impl VerterLanguageServer {
             else {
                 continue;
             };
-            if is_default_export_component_carrier(&resolved_id)
-                && self.ensure_component_ready(&resolved_id).is_some()
+            if is_default_export_component_carrier(
+                self.documents.language_classifier(),
+                &resolved_id,
+            ) && self.ensure_component_ready(&resolved_id).is_some()
             {
                 return Some(resolved_id);
             }
@@ -189,16 +196,76 @@ impl VerterLanguageServer {
         None
     }
 
+    /// Run `read` — several reads of one imported child — so that every value
+    /// it returns describes ONE committed content of that child, and record
+    /// that content hash as the request's dependency evidence.
+    ///
+    /// The content hash is sampled on both sides of `read`; equal samples
+    /// prove no commit of other bytes landed between the child reads (an
+    /// eviction re-committing the same bytes is no movement), so analysis
+    /// spans are never interpreted through another content's source or
+    /// geometry. A cold child is registered by the read itself, so a moved
+    /// content is read once more at the content it settled on. Content that
+    /// moves across that read too is a concurrent edit: the read yields
+    /// nothing, and the request is marked unsettled so it answers
+    /// `ContentModified` rather than without the child it asked about —
+    /// whatever content the child ends at.
+    pub(super) fn read_child_at_one_revision<T>(
+        &self,
+        child_canonical_id: &str,
+        mut read: impl FnMut() -> Option<T>,
+    ) -> Option<T> {
+        let revision = || {
+            self.documents
+                .host()
+                .registered_source_whole_hash(child_canonical_id)
+        };
+        for _ in 0..2 {
+            let before = revision();
+            let value = read()?;
+            #[cfg(test)]
+            {
+                let hook = self.child_read_hook.lock().take();
+                if let Some(mut hook) = hook {
+                    hook();
+                    *self.child_read_hook.lock() = Some(hook);
+                }
+            }
+            let after = revision();
+            if before == after {
+                if let Some(at) = after {
+                    crate::documents::ForegroundRequest::bracket_dependency(child_canonical_id, at);
+                }
+                return Some(value);
+            }
+        }
+        crate::documents::ForegroundRequest::mark_dependency_unsettled();
+        None
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_child_read_hook_for_test(&self, hook: Option<super::ChildReadHook>) {
+        *self.child_read_hook.lock() = hook;
+    }
+
     fn resolved_component_document(
         &self,
         child_canonical_id: &str,
     ) -> Option<ResolvedComponentDocument> {
-        let child_analysis = self
-            .documents
-            .host()
-            .get_analysis(child_canonical_id)
-            .or_else(|| self.ensure_component_ready(child_canonical_id))?;
-        let child_source = self.documents.host().get_source(child_canonical_id)?;
+        let (child_analysis, child_source) =
+            self.read_child_at_one_revision(child_canonical_id, || {
+                let analysis = self
+                    .documents
+                    .host()
+                    .get_analysis(child_canonical_id)
+                    .or_else(|| self.ensure_component_ready(child_canonical_id))?;
+                let source = crate::documents::ForegroundRequest::host_target_source(
+                    &self.documents,
+                    child_canonical_id,
+                    self.documents.host().get_source(child_canonical_id)?,
+                )?;
+                Some((analysis, source))
+            })?;
         let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
         let child_uri = crate::uri::path_to_file_uri(child_canonical_id)?;
 
@@ -229,9 +296,9 @@ impl VerterLanguageServer {
             .resolve_for_persistent_state(
                 parent_canonical_id,
                 specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                 },
             )
             .map_result(|resolved| resolved.source_id)
@@ -239,8 +306,8 @@ impl VerterLanguageServer {
 
     pub(super) fn component_import_binding_name(
         &self,
-        analysis: &verter_session::FileAnalysisSnapshot,
-        component: &verter_semantic::analysis::template::TemplateComponentUsage,
+        analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+        component: &verter_session_query::analysis::template::TemplateComponentUsage,
     ) -> Option<String> {
         let import_source = component.import_source.as_ref()?;
         let import = analysis
@@ -262,8 +329,8 @@ impl VerterLanguageServer {
     pub(super) fn resolve_component_document_for_usage(
         &self,
         parent_uri: &Uri,
-        parent_analysis: &verter_session::FileAnalysisSnapshot,
-        component: &verter_semantic::analysis::template::TemplateComponentUsage,
+        parent_analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+        component: &verter_session_query::analysis::template::TemplateComponentUsage,
     ) -> Option<ResolvedComponentDocument> {
         let import_source = component.import_source.as_ref()?;
         let binding_name = self.component_import_binding_name(parent_analysis, component);
@@ -280,7 +347,7 @@ impl VerterLanguageServer {
     pub(super) fn resolve_component_document_for_import_binding(
         &self,
         parent_uri: &Uri,
-        parent_analysis: &verter_session::FileAnalysisSnapshot,
+        parent_analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         import_source: &str,
         binding_name: &str,
     ) -> Option<ResolvedComponentDocument> {
@@ -304,7 +371,7 @@ impl VerterLanguageServer {
 
         let mut emit_locations = Vec::new();
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineEmits {
+            if mac.kind != verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits {
                 continue;
             }
             for emit_field in &mac.emit_fields {
@@ -410,7 +477,11 @@ impl VerterLanguageServer {
                 let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
                 Some((target_canonical_id.to_string(), s, e))
             })?;
-        let target_source = host.get_source(&resolved_id)?;
+        let target_source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            &resolved_id,
+            host.get_source(&resolved_id)?,
+        )?;
         let target_li = LineIndex::new(&target_source, self.position_encoding.read().clone());
         let start_pos = target_li.offset_to_position(start)?;
         let end_pos = target_li.offset_to_position(end)?;
@@ -426,7 +497,7 @@ impl VerterLanguageServer {
     pub(super) fn resolve_template_identifier(
         &self,
         uri: &Uri,
-        analysis: &verter_session::FileAnalysisSnapshot,
+        analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         line_index: &LineIndex,
         word: &str,
     ) -> Option<GotoDefinitionResponse> {
@@ -442,7 +513,10 @@ impl VerterLanguageServer {
                     {
                         return Some(GotoDefinitionResponse::Scalar(location));
                     }
-                    if is_default_export_component_carrier(canonical_id) {
+                    if is_default_export_component_carrier(
+                        self.documents.language_classifier(),
+                        canonical_id,
+                    ) {
                         if let Some(location) =
                             self.resolve_precise_export_location(canonical_id, "default")
                         {
@@ -459,7 +533,10 @@ impl VerterLanguageServer {
                     {
                         return Some(GotoDefinitionResponse::Scalar(location));
                     }
-                    if is_default_export_component_carrier(&resolved) {
+                    if is_default_export_component_carrier(
+                        self.documents.language_classifier(),
+                        &resolved,
+                    ) {
                         if let Some(location) =
                             self.resolve_precise_export_location(&resolved, "default")
                         {
@@ -772,7 +849,11 @@ impl VerterLanguageServer {
             };
 
             if let Some((resolved_id, start, end)) = terminal {
-                let target_source = host.get_source(&resolved_id)?;
+                let target_source = crate::documents::ForegroundRequest::host_target_source(
+                    &self.documents,
+                    &resolved_id,
+                    host.get_source(&resolved_id)?,
+                )?;
                 let target_li = LineIndex::new(&target_source, encoding);
                 let start_pos = target_li.offset_to_position(start)?;
                 let end_pos = target_li.offset_to_position(end)?;
@@ -832,7 +913,11 @@ impl VerterLanguageServer {
             host.get_export_span_follow_reexports(&canonical, &sig.name)?
         };
 
-        let source = host.get_source(&terminal_id)?;
+        let source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            &terminal_id,
+            host.get_source(&terminal_id)?,
+        )?;
         let line_index = LineIndex::new(&source, self.position_encoding.read().clone());
         let start_pos = line_index.offset_to_position(terminal_start)?;
         let end_pos = line_index.offset_to_position(terminal_end)?;
@@ -864,7 +949,13 @@ impl VerterLanguageServer {
             // Check if this file has re-export signatures at the target position
             if let Some(analysis) = host.get_analysis(&canonical) {
                 // Find which export signature the target position falls within
-                if let Some(source) = host.get_source(&canonical) {
+                if let Some(source) = host.get_source(&canonical).and_then(|source| {
+                    crate::documents::ForegroundRequest::host_target_source(
+                        &self.documents,
+                        &canonical,
+                        source,
+                    )
+                }) {
                     let target_li = LineIndex::new(&source, encoding.clone());
                     if let Some(offset) = target_li.position_to_offset(&loc.range.start) {
                         for sig in analysis.export_signatures.iter() {
@@ -917,7 +1008,7 @@ impl VerterLanguageServer {
 
         // Tier 1: defineModel macro
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineModel {
+            if mac.kind != verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel {
                 continue;
             }
             let macro_model_name = mac.model_name.as_deref().unwrap_or("modelValue");
@@ -992,7 +1083,10 @@ impl VerterLanguageServer {
                 .analysis
                 .macros
                 .iter()
-                .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+                .filter(|mac| {
+                    mac.kind
+                        == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
+                })
                 .flat_map(|mac| mac.slot_fields.iter())
                 .filter_map(|slot_field| {
                     attr_name_match_rank(slot_name, &slot_field.name)
@@ -1039,7 +1133,10 @@ impl VerterLanguageServer {
                 .analysis
                 .macros
                 .iter()
-                .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+                .filter(|mac| {
+                    mac.kind
+                        == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
+                })
                 .flat_map(|mac| mac.slot_fields.iter())
                 .filter_map(|slot_field| {
                     attr_name_match_rank(slot_name, &slot_field.name)
@@ -1080,17 +1177,24 @@ impl VerterLanguageServer {
             component_name,
         )?;
 
-        let analysis = self
-            .documents
-            .host()
-            .get_analysis(&child_canonical_id)
-            .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
-
-        let (child_structure, _) = self
-            .documents
-            .host()
-            .registered_file_structure_snapshot(&child_canonical_id)?;
-        let child_source = std::sync::Arc::clone(child_structure.source().source_arc());
+        let (analysis, child_structure) =
+            self.read_child_at_one_revision(&child_canonical_id, || {
+                let analysis = self
+                    .documents
+                    .host()
+                    .get_analysis(&child_canonical_id)
+                    .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
+                let (structure, _) = self
+                    .documents
+                    .host()
+                    .registered_file_structure_snapshot(&child_canonical_id)?;
+                Some((analysis, structure))
+            })?;
+        let child_source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            &child_canonical_id,
+            std::sync::Arc::clone(child_structure.source().source_arc()),
+        )?;
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
         let blocks = project_carrier_blocks(&child_structure);
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
@@ -1284,12 +1388,13 @@ mod canonicalize_provider_path_tests {
 #[cfg(test)]
 mod imported_component_candidate_tests {
     use super::imported_component_canonical_candidates;
-    use verter_semantic::analysis::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImport;
 
     // @ai-generated - Verifies parent-analysis identity outranks mutable fallbacks.
     #[test]
     fn analysis_identity_precedes_competing_workspace_and_lexical_fallbacks() {
-        let mut analysis = verter_session::FileAnalysisSnapshot::default();
+        let mut analysis =
+            verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
         analysis.imports.push(AnalyzedImport {
             source: "../shared/DirectChild".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),

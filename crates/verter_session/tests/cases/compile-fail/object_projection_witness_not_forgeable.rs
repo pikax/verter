@@ -1,7 +1,4 @@
-use verter_session::semantic_query::{
-    ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula,
-    ObjectProjectionAlternative, ObjectProjectionFormula,
-};
+use verter_type_engine::semantic_query::{ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula, ObjectProjectionAlternative, ObjectProjectionFormula};
 
 fn forge_alternative(
     alternative: &ObjectProjectionAlternative,

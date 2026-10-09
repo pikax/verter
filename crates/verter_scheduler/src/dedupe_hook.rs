@@ -91,6 +91,7 @@ mod tests {
     fn identity(canonical: &str, generation: u64) -> WorkNodeIdentity {
         WorkNodeIdentity::FileStage {
             canonical: Arc::from(canonical),
+            incarnation: 1,
             generation,
             stage: FileStageKey::Source,
         }

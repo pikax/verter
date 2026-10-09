@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 use verter_workspace::{
     AmbientLibSpec, CanonicalPath, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
     VfsProjectConfig, WorkspaceAccess,

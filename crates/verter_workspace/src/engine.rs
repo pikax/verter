@@ -30,10 +30,11 @@ use crate::resolution_currency::{
 use crate::traits::WorkspaceResourceSnapshot;
 use crate::types::{ExactResolution, ExactResolutionResult, VfsProvenance};
 use crate::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
-use crate::{SignatureAdmission, CANDIDATE_CAP};
-use verter_semantic::resolver_core::{
+use verter_session_query::facts::fact_cache::{SignatureAdmission, CANDIDATE_CAP};
+use verter_session_query::resolution::ProjectId;
+use verter_session_query::resolution::{
     IdeProjectConfig, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
     ResolveResult, SessionFingerprint,
 };
@@ -111,6 +112,10 @@ enum ResolutionLane {
     Workspace,
     /// An overlay-lane candidate, with its admission sequence number.
     RequestOverlay(u64),
+    /// A complete workspace answer its producer could not retain (the
+    /// retention account refused it): no slot holds it and no decision node
+    /// speaks for it, so a subscriber that adopts it restates its witness.
+    Unretained,
 }
 
 /// The overlay lane: overlay answers held by the overlay authorities that
@@ -122,7 +127,7 @@ type OverlayLane =
 struct LazyResolutionCacheEntry {
     result: Option<ResolveResult>,
     query: ResolutionQueryKey,
-    signature: crate::ReadSetSignature,
+    signature: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 impl LazyResolutionCacheEntry {
@@ -131,8 +136,8 @@ impl LazyResolutionCacheEntry {
         let result = self.result.as_ref().map_or(0, |result| {
             result.source_id.len() + result.provider_id.len() + result.provider_specifier.len()
         });
-        let facts =
-            self.signature.facts.len() * (std::mem::size_of::<crate::FactVersionRef>() + 64);
+        let facts = self.signature.facts.len()
+            * (std::mem::size_of::<verter_session_query::facts::fact_cache::FactVersionRef>() + 64);
         std::mem::size_of::<Self>()
             + std::mem::size_of::<LazyResolutionCacheKey>()
             + key.importer_id.len()
@@ -222,44 +227,6 @@ type ResolutionFlightKey = (LazyResolutionCacheKey, bool);
 struct FlightDelivery {
     lane: ResolutionLane,
     entry: LazyResolutionCacheEntry,
-}
-
-/// One bounded multi-candidate resolution slot.
-///
-/// Concurrent base/session/world resolutions of the same
-/// `(importer, specifier, phase, kind, population)` coexist as distinct
-/// candidates whose value-side `ReadSetSignature`s distinguish the
-/// resolution inputs they observed. Retention is the shared per-slot
-/// [`crate::CANDIDATE_CAP`] with FIFO eviction — the same policy the
-/// session `ValidatedFactCache` slot applies — so a retarget never
-/// silently discards the witness of the candidate it superseded.
-type LazyResolutionCandidates = SmallVec<[LazyResolutionCacheEntry; CANDIDATE_CAP]>;
-
-/// Push `candidate` onto a slot, evicting oldest-first at
-/// [`crate::CANDIDATE_CAP`]. Mirrors the session `ValidatedFactCache`
-/// admission policy exactly: append, then drain the front until the
-/// slot is at the cap.
-///
-/// Returns the queries whose candidates aged out, so the caller can
-/// remove their decision nodes in the same fence. An aged-out candidate
-/// no longer has an answer behind it, so leaving its decision published
-/// would let a consumer keep validating against a decision nothing can
-/// serve — and would grow the graph without bound.
-fn admit_resolution_candidate(
-    slot: &mut LazyResolutionCandidates,
-    candidate: LazyResolutionCacheEntry,
-) -> Vec<ResolutionQueryKey> {
-    let mut evicted = Vec::new();
-    if slot.len() >= CANDIDATE_CAP {
-        let drop_count = slot.len() - CANDIDATE_CAP + 1;
-        evicted.extend(slot.drain(..drop_count).map(|entry| entry.query));
-    }
-    // The incoming candidate republishes this query's decision, so an
-    // aged-out entry for the SAME query is a replacement rather than a
-    // removal.
-    evicted.retain(|query| *query != candidate.query);
-    slot.push(candidate);
-    evicted
 }
 
 /// Post-mutation realpath knowledge a content mutator can assert.
@@ -397,7 +364,7 @@ struct ObservedBaselineValue<'a> {
 /// fold, and the live observation triple at once.
 #[derive(Debug, Clone, Copy)]
 enum ObservedFamilyValue<'a> {
-    Probe(verter_semantic::resolver_core::PathProbe),
+    Probe(verter_session_query::resolution::PathProbe),
     Realpath(Option<&'a str>),
     Manifest(Option<[u8; 16]>),
 }
@@ -465,7 +432,7 @@ impl BaselineFold {
 ///  7. `package_index` (read or write)
 ///  8. `dir_index` (read or write)
 ///  9. `lazy_resolution_cache` (read or write)
-/// 10. `content_transitions` / `subtree_transitions` (read or write)
+/// 10. `freshness` (the content-transition history; a leaf)
 ///
 /// **`resolution_world_write` outranks BOTH evidence ledgers.** Gate → ledger
 /// is the REQUIRED order and the one the code takes:
@@ -491,11 +458,14 @@ impl BaselineFold {
 /// ordering constraints. `resolution_epoch` is an atomic, sequenced by
 /// `resolution_world_write` rather than by a lock order of its own.
 pub(crate) struct Engine {
-    pub(crate) input_resolution_budgets: verter_semantic::resolver_core::InputResolutionBudgets,
+    pub(crate) input_resolution_budgets: verter_session_query::resolution::InputResolutionBudgets,
     pub(crate) overlay: RwLock<OverlayStore>,
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
-    lazy_resolution_cache: RwLock<FxHashMap<LazyResolutionCacheKey, LazyResolutionCandidates>>,
+    /// The workspace lane: every importer's resolution slots, each
+    /// candidate charged to the installed retention account and retired
+    /// with its importer (see [`lazy_resolution_cache`]).
+    lazy_resolution_cache: RwLock<lazy_resolution_cache::WorkspaceResolutionSlots>,
     /// The overlay lane (see [`ResolutionLane`]): overlay answers, each held
     /// by the overlay authorities that produced or reused it and released
     /// with the last of them, charged to the installed retention account,
@@ -631,43 +601,28 @@ pub(crate) struct Engine {
     /// invalidates it implicitly.
     workspace_default_env_hashes: ArcSwapOption<WorkspaceDefaultEnvHashes>,
 
-    /// Per-canonical content-transition ledger: canonical id → the
-    /// `content_generation` recorded at its most recent content
-    /// transition (overlay write/clear, snapshot inject/remove, disk
-    /// write/copy/delete). The workspace is the sole content authority,
-    /// so this is the AUTHORITATIVE per-canonical freshness rail for
-    /// consumers retaining content-derived artifacts: an artifact built
-    /// at generation `G` for canonical `C` is provably content-fresh
-    /// only while `G >= last_content_transition_generation(C)`. Unlike a
-    /// global generation-equality clause, the ledger is per-canonical —
-    /// unrelated transitions never invalidate an untouched canonical's
-    /// retained artifacts (package reuse). Recording lives at the
-    /// workspace mutation chokepoints, so mutators that bypass any
+    /// Per-canonical content-transition history: the AUTHORITATIVE
+    /// per-canonical freshness rail for consumers retaining
+    /// content-derived artifacts. An artifact built at generation `G` for
+    /// canonical `C` is provably content-fresh only while
+    /// `G >= last_content_transition_generation(C)`. The rail is
+    /// per-canonical — unrelated transitions never invalidate an untouched
+    /// canonical's retained artifacts (package reuse) — and folds in every
+    /// recorded SUBTREE transition (`delete_dir_all`, a watcher
+    /// `DirectoryTreeDirty` recovery) whose prefix contains `C`, since those
+    /// change a member set the engine cannot enumerate. Recording lives at
+    /// the workspace mutation chokepoints, so mutators that bypass any
     /// host-level wrapper (direct embedder `notify_upsert`, `write_file`,
     /// `copy_file`) are covered by construction. Keys are normalized
-    /// through [`verter_semantic::resolver_core::normalize_canonical_id`] at the
-    /// recording chokepoints AND the query, so a direct embedder passing
-    /// a non-canonical key form (backslashes, Windows drive casing)
-    /// records under the same key the gate reads.
+    /// through [`verter_session_query::resolution::normalize_canonical_id`]
+    /// at the recording chokepoints AND the query, so a direct embedder
+    /// passing a non-canonical key form (backslashes, Windows drive
+    /// casing) records under the same key the gate reads.
     ///
-    /// Growth: insert-only, bounded by the number of DISTINCT canonicals
-    /// ever mutated in this workspace instance — the same order as the
-    /// snapshot/edge stores, which key per-canonical and are also never
-    /// compacted; the ledger adds one `(String, u64)` per such canonical.
-    content_transitions: RwLock<FxHashMap<String, u64>>,
-
-    /// Per-SUBTREE content-transition ledger: directory prefix → the
-    /// `content_generation` recorded at its most recent subtree-scoped
-    /// mutation (`delete_dir_all`, a watcher `DirectoryTreeDirty`
-    /// recovery). Those mutations change an UNKNOWN member set — the
-    /// engine cannot enumerate every canonical a recursive disk delete
-    /// or an out-of-band disk change touched — so they record the
-    /// PREFIX instead; [`Self::last_content_transition_generation`]
-    /// folds in every recorded prefix that contains the queried
-    /// canonical. Same normalization and growth story as
-    /// `content_transitions` (bounded by distinct mutated directory
-    /// prefixes).
-    subtree_transitions: RwLock<FxHashMap<String, u64>>,
+    /// Growth: evidence no live reader owns retires into a monotone floor
+    /// (see [`crate::freshness`]); retained artifacts and request views
+    /// own the evidence they read through [`crate::FreshnessReaders`].
+    freshness: Arc<crate::freshness::FreshnessHistory>,
 }
 
 struct StrictSelfRootTransition<'a>(&'a Engine);
@@ -688,12 +643,12 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::new_with_input_resolution_budgets(
-            verter_semantic::resolver_core::InputResolutionBudgets::default(),
+            verter_session_query::resolution::InputResolutionBudgets::default(),
         )
     }
 
     pub(crate) fn new_with_input_resolution_budgets(
-        input_resolution_budgets: verter_semantic::resolver_core::InputResolutionBudgets,
+        input_resolution_budgets: verter_session_query::resolution::InputResolutionBudgets,
     ) -> Self {
         static NEXT_SESSION_FINGERPRINT: AtomicU64 = AtomicU64::new(1);
         let initial_extensions: Vec<String> = Self::merge_extensions(&[]);
@@ -713,7 +668,11 @@ impl Engine {
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
-            lazy_resolution_cache: RwLock::new(FxHashMap::default()),
+            lazy_resolution_cache: RwLock::new(
+                lazy_resolution_cache::WorkspaceResolutionSlots::new(
+                    lazy_resolution_cache::WORKSPACE_LANE_SLOT_CAP,
+                ),
+            ),
             overlay_lane: Arc::new(OverlayLane::new(
                 Arc::clone(&retention),
                 CANDIDATE_CAP,
@@ -754,8 +713,7 @@ impl Engine {
             ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
             default_resolve_extensions: ArcSwap::from_pointee(initial_extensions),
             workspace_default_env_hashes: ArcSwapOption::new(None),
-            content_transitions: RwLock::new(FxHashMap::default()),
-            subtree_transitions: RwLock::new(FxHashMap::default()),
+            freshness: Arc::new(crate::freshness::FreshnessHistory::new()),
         };
         // Publish an initial snapshot from the empty project graph so that
         // `published_state` is always `Some`. This ensures basic relative
@@ -770,7 +728,7 @@ impl Engine {
     /// then ascending lex. Used by [`Engine::new`] and
     /// [`Engine::set_default_resolve_extensions`] (single source of truth).
     fn merge_extensions(host_resolve_extensions: &[String]) -> Vec<String> {
-        let mut merged: BTreeSet<String> = verter_semantic::resolver_core::probe_extensions()
+        let mut merged: BTreeSet<String> = verter_resolution::probe_extensions()
             .iter()
             .map(|s| (*s).to_string())
             .collect();
@@ -846,6 +804,15 @@ impl Engine {
         // bump, so the source-env domain advances here.
         self.bump_source_env_generation();
         self.mutate_resolution_world(|world| {
+            // Under the publication gate, so no other publication lands
+            // between reading the live root and replacing it: an equivalent
+            // republication keeps the live authority, anything else keeps the
+            // fresh one its construction minted.
+            if let Some(live) = self.published_state.load_full() {
+                if root.republishes_authority_of(&live) {
+                    root.inherit_authority(&live);
+                }
+            }
             let root = Arc::new(root);
             self.published_state.store(Some(Arc::clone(&root)));
             #[cfg(any(test, feature = "test-support"))]
@@ -947,35 +914,18 @@ impl Engine {
         self.content_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// The per-canonical rail only moves FORWARD. A byte-less transition may
-    /// have advanced it past the global content generation, and a later real
-    /// mutation recorded at that lower generation must not walk it back onto a
-    /// key a consumer was already refused under.
+    /// Record `canonical_id`'s transition at `generation`, the content
+    /// generation the calling mutation just published. Every caller records
+    /// inside the resolution-world write that bumped it, so the rail only
+    /// moves FORWARD and never past the live generation.
     fn record_content_transition_at(&self, canonical_id: &str, generation: u64) {
-        let mut transitions = self.content_transitions.write();
-        let recorded = transitions
-            .entry(verter_semantic::resolver_core::normalize_canonical_id(
-                canonical_id,
-            ))
-            .or_insert(0);
-        // Every recorded transition mints a key strictly newer than the last
-        // one read for this canonical — a real mutation included, since a
-        // byte-less transition may already sit at or above its generation.
-        *recorded = if generation > *recorded {
-            generation
-        } else {
-            *recorded + 1
-        };
+        self.freshness
+            .record_exact(canonical_id, generation, self.current_content_generation());
     }
 
     fn record_subtree_content_transition_at(&self, prefix: &str, generation: u64) {
-        let mut normalized = verter_semantic::resolver_core::normalize_canonical_id(prefix);
-        while normalized.len() > 1 && normalized.ends_with('/') {
-            normalized.pop();
-        }
-        self.subtree_transitions
-            .write()
-            .insert(normalized, generation);
+        self.freshness
+            .record_subtree(prefix, generation, self.current_content_generation());
     }
 
     pub(crate) fn bump_content_generation(&self) -> u64 {
@@ -1003,7 +953,7 @@ impl Engine {
     /// registration pair, which does not exist on `wasm32`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn bump_content_generation_for(&self, canonical_id: &str) -> u64 {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         self.mutate_resolution_world(|_world| {
             self.pending_resolution_refresh
                 .write()
@@ -1014,60 +964,49 @@ impl Engine {
         })
     }
 
-    /// Record a content transition for `canonical_id` at the CURRENT
-    /// generation without bumping — for multi-canonical mutations that
-    /// bump once after recording every affected id.
+    /// Record a content transition for `canonical_id` WITHOUT a byte change.
     ///
     /// Strictly newer than whatever this canonical's rail last read, every
-    /// time: the caller was just refused at that very value, so recording
-    /// "current generation + 1" twice would hand its retry the same key back.
+    /// time: the caller was just refused at that very value. The transition
+    /// is a content generation of its own — bumped and recorded inside one
+    /// resolution-world write like every other transition — so it never
+    /// records ahead of the live generation, where no retirement could ever
+    /// reclaim it.
     pub(crate) fn record_content_transition(&self, canonical_id: &str) {
-        let generation = self.current_content_generation();
-        self.record_content_transition_at(canonical_id, generation + 1);
+        self.mutate_resolution_world(|_world| {
+            let generation = self.bump_content_generation_in_world();
+            self.record_content_transition_at(canonical_id, generation);
+            ((), true)
+        })
     }
 
     /// Record a SUBTREE content transition for every canonical under
-    /// `prefix` (inclusive) at the current generation, without bumping —
-    /// for directory-scoped mutations whose member set the engine cannot
-    /// enumerate (`delete_dir_all`, watcher `DirectoryTreeDirty`
-    /// recovery). Callers bump once after recording, exactly like
+    /// `prefix` (inclusive) WITHOUT a byte change, for directory-scoped
+    /// transitions whose member set the engine cannot enumerate. A content
+    /// generation of its own, exactly like
     /// [`Self::record_content_transition`].
     #[allow(dead_code)]
     pub(crate) fn record_subtree_content_transition(&self, prefix: &str) {
-        let generation = self.current_content_generation();
-        self.record_subtree_content_transition_at(prefix, generation + 1);
+        self.mutate_resolution_world(|_world| {
+            let generation = self.bump_content_generation_in_world();
+            self.record_subtree_content_transition_at(prefix, generation);
+            ((), true)
+        })
     }
 
     /// The generation recorded at `canonical_id`'s most recent content
-    /// transition; `0` when the canonical has never transitioned. Folds
-    /// the exact per-canonical record with every recorded SUBTREE prefix
-    /// containing the canonical (a `delete_dir_all` / watcher recovery
-    /// transitions every member of the subtree).
+    /// transition, or a later one; `0` when the canonical has never
+    /// transitioned. Folds the exact per-canonical record with every
+    /// recorded SUBTREE prefix containing the canonical (a `delete_dir_all`
+    /// / watcher recovery transitions every member of the subtree).
+    /// Monotone per canonical: retiring history only ever raises it.
     pub(crate) fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
-        let exact = self
-            .content_transitions
-            .read()
-            .get(&canonical)
-            .copied()
-            .unwrap_or(0);
-        let subtree = self
-            .subtree_transitions
-            .read()
-            .iter()
-            // Boundary-correct subtree containment through the shared
-            // `path_matches_prefix` chokepoint — the recorded root
-            // prefix `"/"` folds into every canonical (a raw
-            // next-byte-is-`'/'` check can never match it), while a
-            // byte-prefix sibling (`/srcx.ts` under `/src`) never
-            // matches. Recorded prefixes are normalized at
-            // [`Self::record_subtree_content_transition`]; the helper
-            // re-normalizes on read so both sides agree.
-            .filter(|(prefix, _)| crate::path_matches_prefix(canonical.as_str(), prefix))
-            .map(|(_, generation)| *generation)
-            .max()
-            .unwrap_or(0);
-        exact.max(subtree)
+        self.freshness.last_transition(canonical_id)
+    }
+
+    /// Handle through which readers own the freshness evidence they read.
+    pub(crate) fn freshness_readers(&self) -> crate::freshness::FreshnessReaders {
+        crate::freshness::FreshnessReaders::new(Arc::clone(&self.freshness))
     }
 
     /// Four-step resolution-world publication protocol. The callback performs
@@ -1183,6 +1122,9 @@ impl Engine {
             // session decision root.
             self.propagate_base_changes_into_sessions(&replacement, &base_seeds, held_session);
         }
+        let write = Self::with_tombstone_retirement(write, &mut replacement.facts, || {
+            self.next_resolution_fact_version()
+        });
         match write {
             WorldWrite::Discard => {}
             WorldWrite::Retain => {
@@ -1330,6 +1272,31 @@ impl Engine {
         )
     }
 
+    /// The last step of both publication protocols: a root whose retired
+    /// decision history outgrew its live graph folds it into the derived
+    /// floor (see
+    /// [`crate::resolution_currency::ResolutionFactRoot::retire_tombstones_if_due`]).
+    ///
+    /// A retirement moves what retired nodes read, so it publishes a new
+    /// identity even for a batch that would only have retained one. A
+    /// discarded batch never retires: its replacement root is dropped.
+    fn with_tombstone_retirement(
+        write: WorldWrite,
+        facts: &mut crate::resolution_currency::ResolutionFactRoot,
+        fresh: impl FnOnce() -> ResolutionFactVersion,
+    ) -> WorldWrite {
+        match write {
+            WorldWrite::Discard => WorldWrite::Discard,
+            write => {
+                if facts.retire_tombstones_if_due(fresh) {
+                    WorldWrite::Publish
+                } else {
+                    write
+                }
+            }
+        }
+    }
+
     pub(crate) fn default_resolution_population(&self) -> ResolutionPopulation {
         ResolutionPopulation::Session(self.default_resolution_session)
     }
@@ -1361,7 +1328,7 @@ impl Engine {
         fingerprint: SessionFingerprint,
         mutation: impl FnOnce(&ResolutionWorldRoot, &mut ResolutionSessionRoot) -> (R, bool),
     ) -> R {
-        crate::probe_scope!(MUTATE_RESOLUTION_SESS);
+        verter_session_query::probe_scope!(MUTATE_RESOLUTION_SESS);
         let domain = self.session_resolution_domain(fingerprint);
         let _base_read_fence = self.resolution_world_write.lock();
         let base = self.resolution_world.load_full();
@@ -1434,6 +1401,9 @@ impl Engine {
                 .facts
                 .propagate(seeds, || self.next_resolution_fact_version());
         }
+        let write = Self::with_tombstone_retirement(write, &mut replacement.facts, || {
+            self.next_resolution_fact_version()
+        });
         match write {
             WorldWrite::Discard => {}
             WorldWrite::Retain => {
@@ -1473,6 +1443,7 @@ impl Engine {
         captured: &CapturedResolutionFence,
         query: ResolutionQueryKey,
         direct_edges: Vec<ResolutionFactKey>,
+        charge: Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
     ) {
         let node = ResolutionFactKey::decision(query);
         match (node.population(), captured.session_domain.as_ref()) {
@@ -1480,7 +1451,9 @@ impl Engine {
                 self.mutate_resolution_world_locked_with_held_session(
                     Self::held_session_of(captured),
                     |world| {
-                        world.facts.publish_derived(node, direct_edges);
+                        world
+                            .facts
+                            .publish_charged_decision(node, direct_edges, charge);
                         ((), WorldWrite::Retain)
                     },
                 );
@@ -1490,7 +1463,9 @@ impl Engine {
                     domain,
                     captured.world.base.as_ref(),
                     |_base, session| {
-                        session.facts.publish_derived(node, direct_edges);
+                        session
+                            .facts
+                            .publish_charged_decision(node, direct_edges, charge);
                         ((), WorldWrite::Retain)
                     },
                 );
@@ -1502,39 +1477,162 @@ impl Engine {
         }
     }
 
-    /// Drop the decision node of a query whose candidate aged out of its
-    /// slot, under the same fence that admitted the replacement.
+    /// Drop the decision nodes of `queries` — queries whose last candidate
+    /// left the workspace lane — under the fence that admitted the
+    /// replacement.
     ///
-    /// Publishes a new world identity: the removal ADVANCES the node's
-    /// version, which every parent that recorded it must observe.
-    fn remove_resolution_decision(
+    /// Runs inside the resolve fence: the caller holds the base publication
+    /// gate and, for a session population, that session's write gate. A
+    /// query of another live session takes that session's gate here, the
+    /// same base gate → session order the publication protocol's fan-out
+    /// takes.
+    ///
+    /// Publishes a new world identity per changed root: a removal ADVANCES
+    /// each node's version, which every parent that recorded it must
+    /// observe.
+    fn retire_resolution_decisions(
         &self,
         captured: &CapturedResolutionFence,
-        query: ResolutionQueryKey,
+        retirement: lazy_resolution_cache::SlotRetirement,
     ) {
-        let node = ResolutionFactKey::decision(query);
-        let remove = |facts: &mut crate::resolution_currency::ResolutionFactRoot| {
-            if facts.remove_derived(&node, self.next_resolution_fact_version()) {
-                WorldWrite::Publish
-            } else {
-                WorldWrite::Discard
-            }
+        if retirement.is_empty() {
+            return;
+        }
+        self.retract_lazy_dependencies(retirement.dependencies);
+        let held_session = Self::held_session_of(captured);
+        let (base, sessions) = Self::decision_nodes_by_population(retirement.queries);
+        if !base.is_empty() {
+            self.mutate_resolution_world_locked_with_held_session(held_session, |world| {
+                ((), self.remove_decision_nodes(&mut world.facts, &base))
+            });
+        }
+        for (fingerprint, nodes) in sessions {
+            let held = match (held_session, captured.session_domain.as_ref()) {
+                (Some(held), Some(domain)) if held == fingerprint => Some(Arc::clone(domain)),
+                _ => None,
+            };
+            let domain = match held {
+                Some(domain) => domain,
+                None => match self.resolution_sessions.read().get(&fingerprint) {
+                    Some(domain) => Arc::clone(domain),
+                    None => continue,
+                },
+            };
+            let _session_write = (held_session != Some(fingerprint)).then(|| domain.write.lock());
+            self.mutate_resolution_session_write_held(
+                &domain,
+                captured.world.base.as_ref(),
+                |_base, session| ((), self.remove_decision_nodes(&mut session.facts, &nodes)),
+            );
+        }
+    }
+
+    /// Retire the decision nodes of `queries` from inside a base world
+    /// mutation, alongside the importer state that mutation retires.
+    ///
+    /// The caller holds the base publication gate with the base epoch ODD
+    /// and no session gate, so each session root it touches is published
+    /// inside the same window — no capture can pair the mutated base root
+    /// with a session root still holding a retired importer's decisions.
+    fn retire_resolution_decisions_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        retirement: lazy_resolution_cache::SlotRetirement,
+    ) {
+        if retirement.is_empty() {
+            return;
+        }
+        self.retract_lazy_dependencies(retirement.dependencies);
+        let (base, sessions) = Self::decision_nodes_by_population(retirement.queries);
+        self.remove_decision_nodes(&mut world.facts, &base);
+        for (fingerprint, nodes) in sessions {
+            let Some(domain) = self.resolution_sessions.read().get(&fingerprint).cloned() else {
+                continue;
+            };
+            let _session_write = domain.write.lock();
+            self.mutate_resolution_session_write_held(&domain, world, |_base, session| {
+                ((), self.remove_decision_nodes(&mut session.facts, &nodes))
+            });
+        }
+    }
+
+    /// Retract the resolution-owned dependency edges no retained answer
+    /// backs any more, for importers the workspace does not hold: a held
+    /// importer's edges are import-graph state its consumers read whatever
+    /// the lane retains, and leave with the importer's own retirement. Runs
+    /// under the publication gate, like every lane mutation, so it cannot
+    /// interleave with the admission that records one.
+    fn retract_lazy_dependencies(&self, dependencies: Vec<(String, String)>) {
+        if dependencies.is_empty() {
+            return;
+        }
+        let in_snapshot: Vec<bool> = {
+            let snapshot = self.snapshot.read();
+            dependencies
+                .iter()
+                .map(|(importer, _)| snapshot.contains(importer))
+                .collect()
         };
-        match (node.population(), captured.session_domain.as_ref()) {
-            (ResolutionPopulation::Base, _) => {
-                self.mutate_resolution_world_locked_with_held_session(
-                    Self::held_session_of(captured),
-                    |world| ((), remove(&mut world.facts)),
-                );
+        let mut edges = self.edges.write();
+        for ((importer, dependency), in_snapshot) in dependencies.into_iter().zip(in_snapshot) {
+            if in_snapshot || edges.holds_state_beyond_lazy_resolutions(&importer) {
+                continue;
             }
-            (ResolutionPopulation::Session(_), Some(domain)) => {
-                self.mutate_resolution_session_write_held(
-                    domain,
-                    captured.world.base.as_ref(),
-                    |_base, session| ((), remove(&mut session.facts)),
-                );
+            edges.retract_lazy_resolved_dep(&importer, &dependency);
+        }
+    }
+
+    /// Whether the workspace holds `importer` as one of its own files — its
+    /// content, or dependency state beyond resolution answers (its parsed
+    /// edges) — so that the importer's own retirement removes every edge it
+    /// owns.
+    fn importer_held_by_workspace(&self, importer: &str) -> bool {
+        self.snapshot.read().contains(importer)
+            || self
+                .edges
+                .read()
+                .holds_state_beyond_lazy_resolutions(importer)
+    }
+
+    /// Split `queries` into base and per-session decision nodes.
+    fn decision_nodes_by_population(
+        queries: Vec<ResolutionQueryKey>,
+    ) -> (
+        Vec<ResolutionFactKey>,
+        Vec<(SessionFingerprint, Vec<ResolutionFactKey>)>,
+    ) {
+        let mut base = Vec::new();
+        let mut sessions: Vec<(SessionFingerprint, Vec<ResolutionFactKey>)> = Vec::new();
+        for query in queries {
+            let node = ResolutionFactKey::decision(query);
+            match node.population() {
+                ResolutionPopulation::Base => base.push(node),
+                ResolutionPopulation::Session(fingerprint) => {
+                    match sessions.iter_mut().find(|(known, _)| *known == fingerprint) {
+                        Some((_, nodes)) => nodes.push(node),
+                        None => sessions.push((fingerprint, vec![node])),
+                    }
+                }
             }
-            (ResolutionPopulation::Session(_), None) => {}
+        }
+        (base, sessions)
+    }
+
+    /// Remove `nodes` from one root, each under a fresh version. Publishes
+    /// when any was present.
+    fn remove_decision_nodes(
+        &self,
+        facts: &mut crate::resolution_currency::ResolutionFactRoot,
+        nodes: &[ResolutionFactKey],
+    ) -> WorldWrite {
+        let mut removed = false;
+        for node in nodes {
+            removed |= facts.remove_derived(node, self.next_resolution_fact_version());
+        }
+        if removed {
+            WorldWrite::Publish
+        } else {
+            WorldWrite::Discard
         }
     }
 
@@ -1559,9 +1657,9 @@ impl Engine {
         &self,
         owner_canonical: &str,
         population: ResolutionPopulation,
-    ) -> Option<crate::FactVersionRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
         let node = ResolutionFactKey::owner_resolution_set(
-            CanonicalResolutionId::new(verter_semantic::resolver_core::normalize_canonical_id(
+            CanonicalResolutionId::new(verter_session_query::resolution::normalize_canonical_id(
                 owner_canonical,
             )),
             population,
@@ -1632,11 +1730,13 @@ impl Engine {
             return None;
         }
         let version = world.fact_version(&node);
-        Some(crate::FactVersionRef::ResolveImports(
-            crate::ResolveImportsFactRef::Resolution(
-                crate::resolution_currency::ResolutionFactRef::new(node, version),
+        Some(
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(
+                    crate::resolution_currency::ResolutionFactRef::new(node, version),
+                ),
             ),
-        ))
+        )
     }
 
     fn replace_world_exact_resolutions(
@@ -1645,29 +1745,14 @@ impl Engine {
         canonical_id: &str,
         resolutions: &[ExactResolution],
     ) -> bool {
-        if world.owner_exacts_equal(canonical_id, resolutions) {
+        let Some(affected) = world.replace_owner_exacts(canonical_id, resolutions) else {
             return false;
-        }
-        let mut affected = world.owner_exact_fact_keys(canonical_id);
-        affected.extend(resolutions.iter().map(|resolution| {
-            ResolutionFactKey::exact_importer(
-                canonical_id,
-                &resolution.specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: resolution.phase,
-                    kind: resolution.kind,
-                },
-                ResolutionPopulation::Base,
-            )
-        }));
-        affected.sort();
-        affected.dedup();
+        };
         for key in affected {
             world
                 .facts
                 .advance(key, self.next_resolution_fact_version());
         }
-        world.replace_owner_exacts(canonical_id, resolutions);
         true
     }
 
@@ -1690,7 +1775,7 @@ impl Engine {
         canonical_id: &str,
         population: ResolutionPopulation,
     ) -> Vec<ResolutionFactKey> {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         let mut keys = vec![
             ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(canonical.clone()),
@@ -1715,9 +1800,9 @@ impl Engine {
         &self,
         world: &mut ResolutionWorldRoot,
         canonical_id: &str,
-        outcome: verter_semantic::resolver_core::PathProbe,
+        outcome: verter_session_query::resolution::PathProbe,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if world.path_probes.get(&canonical).copied() == Some(outcome) {
             return false;
         }
@@ -1727,8 +1812,8 @@ impl Engine {
         }
         if matches!(
             outcome,
-            verter_semantic::resolver_core::PathProbe::File
-                | verter_semantic::resolver_core::PathProbe::Directory
+            verter_session_query::resolution::PathProbe::File
+                | verter_session_query::resolution::PathProbe::Directory
         ) {
             self.advance_absent_realpath_ancestors(world, &canonical);
         }
@@ -1769,7 +1854,7 @@ impl Engine {
     /// recorded evidence baselines and advance the exact path facts so
     /// stale witnesses fail. Never touches recovery scopes.
     fn advance_base_path_facts_unknown(&self, world: &mut ResolutionWorldRoot, canonical_id: &str) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         world.path_probes.remove(&canonical);
         world.realpaths.remove(&canonical);
         for key in Self::path_fact_keys(&canonical, ResolutionPopulation::Base) {
@@ -1801,9 +1886,9 @@ impl Engine {
         canonical_id: &str,
         resolved: Option<String>,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         let resolved =
-            resolved.map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path));
+            resolved.map(|path| verter_session_query::resolution::normalize_canonical_id(&path));
         if world.realpaths.get(&canonical) == Some(&resolved) {
             return false;
         }
@@ -1827,7 +1912,7 @@ impl Engine {
         canonical_id: &str,
         fingerprint: Option<[u8; 16]>,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if !crate::resolution_currency::is_package_manifest_path(&canonical) {
             return false;
         }
@@ -1950,16 +2035,16 @@ impl Engine {
         canonical_id: &str,
         manifest_fingerprint: Option<[u8; 16]>,
     ) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         let population = ResolutionPopulation::Session(fingerprint);
         let was_overlay = session.overlay_paths.contains(&canonical);
         let effective_before = if was_overlay {
-            Some(verter_semantic::resolver_core::PathProbe::File)
+            Some(verter_session_query::resolution::PathProbe::File)
         } else {
             base.path_probes.get(&canonical).copied()
         };
         let path_changed =
-            effective_before != Some(verter_semantic::resolver_core::PathProbe::File);
+            effective_before != Some(verter_session_query::resolution::PathProbe::File);
         // An overlay's effective realpath is its canonical overlay path.
         // Compare against the recorded base realpath value: only a base
         // value known to already equal the canonical leaves the effective
@@ -2034,7 +2119,7 @@ impl Engine {
         fingerprint: SessionFingerprint,
         canonical_id: &str,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if session.overlay_paths.remove(&canonical).is_none() {
             return false;
         }
@@ -2059,14 +2144,144 @@ impl Engine {
         self.replace_world_exact_resolutions(world, canonical_id, &[])
     }
 
-    fn remove_edges_under_in_world(&self, world: &mut ResolutionWorldRoot, prefix: &str) -> bool {
-        let exact_owners = world.exact_owners_under(prefix);
-        self.edges.write().remove_under(prefix);
-        let mut changed = false;
-        for owner in exact_owners {
-            changed |= self.replace_world_exact_resolutions(world, &owner, &[]);
+    /// Retire everything `canonical_id` owns as an importer: its
+    /// workspace-lane slots and their decision nodes (with its owner set,
+    /// which goes with its last decision). Called in the same world
+    /// mutation that removes its edges because the importer left the
+    /// workspace.
+    ///
+    /// Session-population slots stay while the session still sees the
+    /// importer through an open overlay: that view still resolves from it.
+    fn retire_importer_in_world(&self, world: &mut ResolutionWorldRoot, canonical_id: &str) {
+        let retirement = {
+            let overlay = self.overlay.read();
+            self.lazy_resolution_cache
+                .write()
+                .retire_owner(canonical_id, |owner, population| {
+                    Self::importer_retires(&overlay, owner, population)
+                })
+        };
+        #[cfg(test)]
+        resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::ImporterSlotsRetired);
+        self.retire_resolution_decisions_in_world(world, retirement);
+    }
+
+    /// [`Self::retire_importer_in_world`] for every importer at or under
+    /// `prefix`. Returns every importer the lane held there.
+    fn retire_importers_under_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        prefix: &str,
+    ) -> Vec<String> {
+        let (owners, retirement) = {
+            let overlay = self.overlay.read();
+            self.lazy_resolution_cache
+                .write()
+                .retire_owners_under(prefix, |owner, population| {
+                    Self::importer_retires(&overlay, owner, population)
+                })
+        };
+        self.retire_resolution_decisions_in_world(world, retirement);
+        owners
+    }
+
+    /// An overlay closing over an importer the base world knows is absent
+    /// leaves the session no view of it: retire the session's slots and
+    /// decisions for it, the half [`Self::retire_importer_in_world`] kept
+    /// while the overlay was open. Runs inside the session's publication
+    /// window, so the slots and decisions go together.
+    ///
+    /// An importer the base world has no absence evidence for (never
+    /// probed, or still on disk) keeps its slots; the lane's slot cap and
+    /// the retention account bound those.
+    fn retire_closed_overlay_importer(
+        &self,
+        base: &ResolutionWorldRoot,
+        session: &mut ResolutionSessionRoot,
+        fingerprint: SessionFingerprint,
+        canonical_id: &str,
+    ) {
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
+        if base.path_probes.get(&canonical).copied()
+            != Some(verter_session_query::resolution::PathProbe::Absent)
+        {
+            return;
         }
-        changed
+        let population = ResolutionPopulation::Session(fingerprint);
+        let retirement = self
+            .lazy_resolution_cache
+            .write()
+            .retire_owner(&canonical, |_, slot_population| {
+                slot_population == population
+            });
+        self.retract_lazy_dependencies(retirement.dependencies);
+        let nodes: Vec<ResolutionFactKey> = retirement
+            .queries
+            .into_iter()
+            .map(ResolutionFactKey::decision)
+            .collect();
+        self.remove_decision_nodes(&mut session.facts, &nodes);
+    }
+
+    /// Whether `world` records `importer` as gone from the workspace for
+    /// `population`: absent on disk, and — for a session — not shown by an
+    /// open overlay either. The admission-side twin of the retirement
+    /// predicate [`Self::importer_retires`].
+    fn importer_known_absent(
+        &self,
+        world: &ResolutionWorldRoot,
+        importer: &str,
+        population: ResolutionPopulation,
+    ) -> bool {
+        let canonical = verter_session_query::resolution::normalize_canonical_id(importer);
+        world.path_probes.get(&canonical).copied()
+            == Some(verter_session_query::resolution::PathProbe::Absent)
+            && Self::importer_retires(&self.overlay.read(), &canonical, population)
+    }
+
+    fn importer_retires(
+        overlay: &OverlayStore,
+        owner: &str,
+        population: ResolutionPopulation,
+    ) -> bool {
+        match population {
+            ResolutionPopulation::Base => true,
+            ResolutionPopulation::Session(_) => !overlay.has_overlay(owner),
+        }
+    }
+
+    /// Remove the dependency and exact state of every owner at or under
+    /// `prefix`. Returns the dependency owners removed.
+    fn remove_edges_under_in_world(
+        &self,
+        world: &mut ResolutionWorldRoot,
+        prefix: &str,
+    ) -> Vec<String> {
+        let exact_owners = world.exact_owners_under(prefix);
+        let removed = self.edges.write().remove_under(prefix);
+        for owner in exact_owners {
+            self.replace_world_exact_resolutions(world, &owner, &[]);
+        }
+        removed
+    }
+
+    /// Remove every importer at or under `prefix` from the world a recursive
+    /// deletion leaves: its edges, its slots and decisions, and — as a
+    /// per-file deletion does — its recorded absence, so a demand from one
+    /// of them still in flight is served at its fence but not retained
+    /// ([`Self::importer_known_absent`]).
+    fn remove_importers_under_in_world(&self, world: &mut ResolutionWorldRoot, prefix: &str) {
+        let mut removed = self.remove_edges_under_in_world(world, prefix);
+        removed.extend(self.retire_importers_under_in_world(world, prefix));
+        removed.sort();
+        removed.dedup();
+        for importer in removed {
+            self.update_base_path_facts(
+                world,
+                &importer,
+                verter_session_query::resolution::PathProbe::Absent,
+            );
+        }
     }
 
     /// Execute one canonical-scoped content mutation while the resolution
@@ -2076,7 +2291,7 @@ impl Engine {
         &self,
         canonical_id: &str,
         remove_edges: bool,
-        path_after: Option<verter_semantic::resolver_core::PathProbe>,
+        path_after: Option<verter_session_query::resolution::PathProbe>,
         realpath_after: BaseRealpathTransition,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
@@ -2089,13 +2304,16 @@ impl Engine {
             if remove_edges {
                 self.remove_file_edges_in_world(world, canonical_id);
             }
+            if path_after == Some(verter_session_query::resolution::PathProbe::Absent) {
+                self.retire_importer_in_world(world, canonical_id);
+            }
             if let Some(path_after) = path_after {
                 self.update_base_path_facts(world, canonical_id, path_after);
             }
             match realpath_after {
                 BaseRealpathTransition::Unknown => {
                     world.realpaths.remove(
-                        &verter_semantic::resolver_core::normalize_canonical_id(canonical_id),
+                        &verter_session_query::resolution::normalize_canonical_id(canonical_id),
                     );
                 }
                 BaseRealpathTransition::Known(resolved) => {
@@ -2115,7 +2333,7 @@ impl Engine {
         canonical_id: &str,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
-        crate::probe_scope!(MUTATE_OVERLAY_UPSERT);
+        verter_session_query::probe_scope!(MUTATE_OVERLAY_UPSERT);
         let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
         self.mutate_resolution_session(fingerprint, |base, session| {
@@ -2145,7 +2363,7 @@ impl Engine {
         if records.is_empty() {
             return;
         }
-        crate::probe_scope!(MUTATE_OVERLAY_UPSERT);
+        verter_session_query::probe_scope!(MUTATE_OVERLAY_UPSERT);
         let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
         self.mutate_resolution_session(fingerprint, |base, session| {
@@ -2191,12 +2409,13 @@ impl Engine {
     ) -> R {
         let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
-        self.mutate_resolution_session(fingerprint, |_base, session| {
+        self.mutate_resolution_session(fingerprint, |base, session| {
             let (result, changed) = mutation();
             if !changed {
                 return (result, false);
             }
             let revealed = Self::reveal_session_overlay_facts(session, fingerprint, canonical_id);
+            self.retire_closed_overlay_importer(base, session, fingerprint, canonical_id);
             let generation = self.bump_content_generation_in_world();
             self.record_content_transition_at(canonical_id, generation);
             (result, revealed || changed)
@@ -2217,13 +2436,13 @@ impl Engine {
             if !changed {
                 return (result, false);
             }
-            self.remove_edges_under_in_world(world, prefix);
+            self.remove_importers_under_in_world(world, prefix);
             let generation = self.bump_content_generation_in_world();
             for canonical_id in transitioned {
                 self.update_base_path_facts(
                     world,
                     &canonical_id,
-                    verter_semantic::resolver_core::PathProbe::Absent,
+                    verter_session_query::resolution::PathProbe::Absent,
                 );
                 self.update_base_realpath_fact(world, &canonical_id, None);
                 self.update_base_manifest_fact(world, &canonical_id, None);
@@ -2253,9 +2472,9 @@ impl Engine {
                 return (result, false);
             }
             if remove_edges {
-                self.remove_edges_under_in_world(world, prefix);
+                self.remove_importers_under_in_world(world, prefix);
             }
-            let normalized = verter_semantic::resolver_core::normalize_canonical_id(prefix);
+            let normalized = verter_session_query::resolution::normalize_canonical_id(prefix);
             self.advance_resolution_fact(
                 &mut world.facts,
                 ResolutionFactKey::RecoveryScope {
@@ -2404,9 +2623,15 @@ impl Engine {
     /// publication gate (every writer is out of its window): the captured
     /// fence while its world is still current, else the latest coherent
     /// world when every fact the attempt observed still holds there — an
-    /// advance that touched nothing this attempt read is compatible, and
-    /// admitting into it reruns nothing. `None` when an observed fact
-    /// changed, or the request overlay's lane did: a genuine conflict.
+    /// advance that transitioned nothing this attempt read is compatible,
+    /// and admitting into it reruns nothing. `None` when an observed fact
+    /// changed or the request overlay's lane did (a genuine conflict), or
+    /// when an observed canonical reads as transitioned since the capture.
+    /// The last case is conservative: an observed canonical no view lease
+    /// holds answers the content-transition history's retirement floor, so
+    /// a retirement pass raising that floor past the captured generation
+    /// refuses the attempt and costs an outer restart even though nothing
+    /// it read changed.
     fn admission_fence_under_gate(
         &self,
         captured: &CapturedResolutionFence,
@@ -2565,7 +2790,7 @@ impl Engine {
     pub(crate) fn captured_resolution_stamp_for_test(
         &self,
         population: ResolutionPopulation,
-    ) -> Option<crate::AggregateStamp> {
+    ) -> Option<verter_session_query::facts::fact_cache::AggregateStamp> {
         self.capture_resolution_world(population)
             .and_then(|captured| captured.world.resolution_stamp(population))
     }
@@ -2575,42 +2800,42 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
     ) -> Option<ResolutionQueryKey> {
         self.lazy_resolution_cache
             .read()
-            .get(&LazyResolutionCacheKey {
+            .candidates(&LazyResolutionCacheKey {
                 importer_id: importer_id.to_owned(),
                 specifier: specifier.to_owned(),
                 phase: context.phase,
                 kind: context.kind,
                 population,
             })
-            .and_then(|slot| slot.last())
+            .last()
             .map(|entry| entry.query.clone())
     }
 
     /// Number of candidates currently retained in one resolution slot.
-    /// Bounded by [`crate::CANDIDATE_CAP`].
+    /// Bounded by [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`].
     #[cfg(test)]
     pub(crate) fn lazy_resolution_slot_len_for_test(
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
     ) -> usize {
         self.lazy_resolution_cache
             .read()
-            .get(&LazyResolutionCacheKey {
+            .candidates(&LazyResolutionCacheKey {
                 importer_id: importer_id.to_owned(),
                 specifier: specifier.to_owned(),
                 phase: context.phase,
                 kind: context.kind,
                 population,
             })
-            .map_or(0, |slot| slot.len())
+            .count()
     }
 
     /// [`Self::lazy_resolution_slot_len_for_test`] for the overlay lane.
@@ -2619,7 +2844,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
     ) -> usize {
         self.overlay_lane
@@ -2639,7 +2864,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
         overlay_domain: bool,
     ) -> usize {
@@ -2667,12 +2892,16 @@ impl Engine {
         self.overlay_lane.queue_len() + self.overlay_values.queue_len()
     }
 
-    /// Install the host's aggregate retention account: from here on the
-    /// overlay lane and the overlay value table charge each entry they
-    /// retain to it, and retain nothing it refuses.
+    /// Replace the retention account the resident resolution state (the
+    /// workspace lane, the overlay lane and the overlay value table)
+    /// charges from here on. Test-support only: every Engine charges the
+    /// process-local account from construction.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install_resolution_retention(
         &self,
-        account: Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+        account: Arc<
+            dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount,
+        >,
     ) {
         self.retention.install(account);
     }
@@ -2685,16 +2914,53 @@ impl Engine {
         self.published_state.load_full()
     }
 
+    /// Current occupancy of the workspace lane and of every live resolution
+    /// root's derived graph — base and session — read as one coherent
+    /// generation: every lane and root mutation runs under the base
+    /// publication gate (session writers included), so holding it pins the
+    /// lane and every root together.
+    pub(crate) fn resolution_residency(&self) -> crate::traits::ResolutionResidency {
+        let _publication = self.resolution_world_write.try_lock().unwrap_or_else(|| {
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::ResidencyGateContended,
+            );
+            self.resolution_world_write.lock()
+        });
+        let mut derived = self.resolution_world.load().facts.residency();
+        for domain in self.resolution_sessions.read().values() {
+            let session = domain.root.load().facts.residency();
+            derived.derived_nodes += session.derived_nodes;
+            derived.edges += session.edges;
+            derived.dependency_buckets += session.dependency_buckets;
+            derived.retired_nodes += session.retired_nodes;
+        }
+        let slots = self.lazy_resolution_cache.read().residency();
+        crate::traits::ResolutionResidency {
+            slots: slots.slots,
+            candidates: slots.candidates,
+            owners: slots.owners,
+            slot_queue_entries: slots.queue_entries,
+            slot_capacity: slots.slot_capacity,
+            slot_queue_capacity: slots.queue_capacity,
+            derived_nodes: derived.derived_nodes,
+            decision_edges: derived.edges,
+            dependency_buckets: derived.dependency_buckets,
+            retired_decisions: derived.retired_nodes,
+        }
+    }
+
     pub(crate) fn resource_snapshot(&self) -> WorkspaceResourceSnapshot {
+        let resolution = self.resolution_residency();
         let overlay = self.overlay.read();
         let snapshot = self.snapshot.read();
         let edges = self.edges.read();
         let package_index = self.package_index.read();
         let published = self.load_published();
-        let resolution_slots = self.lazy_resolution_cache.read().len();
 
         WorkspaceResourceSnapshot {
-            resolution_slots,
+            resolution_slots: resolution.slots,
+            resolution,
             overlay_resolution_slots: self.overlay_lane.len(),
             overlay_value_versions: self.overlay_values.len(),
             resolution_flights: self.flights.len(),
@@ -2709,6 +2975,7 @@ impl Engine {
                 .as_ref()
                 .map(|root| root.snapshot.projects.len())
                 .unwrap_or(0),
+            freshness_history: self.freshness.residency(),
         }
     }
 
@@ -2738,7 +3005,7 @@ impl Engine {
             let graph = self.project_graph.read();
             let resolver = configured_projects
                 .clone()
-                .map(verter_semantic::resolver_core::ModuleResolverCore::new)
+                .map(verter_resolution::ModuleResolverCore::new)
                 .unwrap_or_else(|| graph.to_module_resolver_core());
 
             // Build a WorkspaceSnapshot from the graph's projects
@@ -2748,7 +3015,7 @@ impl Engine {
                 .map(|(i, config)| {
                     crate::snapshot_builder::ownership_project_from_vfs_config(
                         config,
-                        crate::workspace_snapshot::ProjectId(i as u32),
+                        verter_session_query::resolution::ProjectId(i as u32),
                     )
                 })
                 .collect();
@@ -2799,7 +3066,7 @@ impl Engine {
     ) -> Option<crate::types::PackageManifest> {
         use crate::package_index::ManifestEntry;
 
-        let canonical_id = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical_id = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         {
             let cache = self.package_index.read();
             match cache.get_cached(&canonical_id) {
@@ -2824,7 +3091,7 @@ impl Engine {
     }
 
     pub(crate) fn invalidate_package_manifest(&self, canonical_id: &str) {
-        let canonical_id = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical_id = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if canonical_id.ends_with("/package.json") {
             self.package_index.write().invalidate(&canonical_id);
         }
@@ -2895,11 +3162,17 @@ impl Engine {
                         let changed = self.mutate_resolution_session_locked(
                             &session_domain,
                             world,
-                            |_base, session| {
+                            |base, session| {
                                 self.invalidate_package_manifest(&canonical_id);
                                 let changed = self.overlay.write().clear(&canonical_id);
                                 if changed {
                                     Self::reveal_session_overlay_facts(
+                                        session,
+                                        session_fingerprint,
+                                        &canonical_id,
+                                    );
+                                    self.retire_closed_overlay_importer(
+                                        base,
                                         session,
                                         session_fingerprint,
                                         &canonical_id,
@@ -2925,13 +3198,13 @@ impl Engine {
                                 self.update_base_path_facts(
                                     world,
                                     &canonical_id,
-                                    verter_semantic::resolver_core::PathProbe::File,
+                                    verter_session_query::resolution::PathProbe::File,
                                 );
                                 // A disk-backed change cannot cheaply prove
                                 // the post-change realpath; comparisons stay
                                 // conservative until re-observed.
                                 world.realpaths.remove(
-                                    &verter_semantic::resolver_core::normalize_canonical_id(
+                                    &verter_session_query::resolution::normalize_canonical_id(
                                         &canonical_id,
                                     ),
                                 );
@@ -2947,7 +3220,7 @@ impl Engine {
                                 self.advance_base_path_facts_unknown(world, &canonical_id);
                                 if canonical_id.ends_with("/package.json") {
                                     let canonical =
-                                        verter_semantic::resolver_core::normalize_canonical_id(
+                                        verter_session_query::resolution::normalize_canonical_id(
                                             &canonical_id,
                                         );
                                     world.manifest_fingerprints.remove(&canonical);
@@ -2969,11 +3242,12 @@ impl Engine {
                         self.invalidate_package_manifest(&canonical_id);
                         self.mark_parent_dir_dirty(&canonical_id);
                         self.remove_file_edges_in_world(world, &canonical_id);
+                        self.retire_importer_in_world(world, &canonical_id);
                         self.snapshot.write().remove(&canonical_id);
                         self.update_base_path_facts(
                             world,
                             &canonical_id,
-                            verter_semantic::resolver_core::PathProbe::Absent,
+                            verter_session_query::resolution::PathProbe::Absent,
                         );
                         self.update_base_realpath_fact(world, &canonical_id, None);
                         self.update_base_manifest_fact(world, &canonical_id, None);
@@ -2988,7 +3262,7 @@ impl Engine {
                         // change), so record the narrowest subtree scope at
                         // the batch's post-mutation generation.
                         let normalized =
-                            verter_semantic::resolver_core::normalize_canonical_id(&prefix);
+                            verter_session_query::resolution::normalize_canonical_id(&prefix);
                         self.advance_resolution_fact(
                             &mut world.facts,
                             ResolutionFactKey::RecoveryScope {
@@ -3027,13 +3301,29 @@ impl Engine {
     }
 
     /// Set exact resolutions for a file.
+    ///
+    /// An unchanged refresh writes nothing anywhere, so it is decided under
+    /// the publication gate before a publication window opens: it builds no
+    /// replacement root and never turns the epoch odd, so no concurrent
+    /// capture is refused for it.
     pub(crate) fn set_exact_resolutions(
         &self,
         canonical_id: &str,
         resolutions: Vec<ExactResolution>,
     ) -> ExactResolutionResult {
+        let _write = self.resolution_world_write.lock();
+        if self
+            .edges
+            .read()
+            .exact_resolutions_unchanged(canonical_id, &resolutions)
+        {
+            return ExactResolutionResult {
+                newly_resolved: Vec::new(),
+                changed: false,
+            };
+        }
         let retained = resolutions.clone();
-        self.mutate_resolution_world(|world| {
+        self.mutate_resolution_world_locked(|world| {
             let result = self
                 .edges
                 .write()
@@ -3085,8 +3375,8 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.resolve_import_outcome(reader, importer_id, specifier, ctx)
             .into_transient_result()
     }
@@ -3103,7 +3393,7 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
@@ -3124,8 +3414,8 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.resolve_import_outcome_with_evidence(reader, evidence, importer_id, specifier, ctx)
             .into_transient_result()
     }
@@ -3144,7 +3434,7 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
@@ -3169,7 +3459,7 @@ impl Engine {
         expected_published: &Arc<crate::published_state::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
@@ -3193,7 +3483,7 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         operation: ResolutionOperation<'_>,
     ) -> ResolutionOutcome {
         self.resolve_import_outcome_in_published(
@@ -3252,7 +3542,7 @@ impl Engine {
     /// never re-read.
     fn witness_evidence_is_unenumerable(
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
-        signature: &crate::ReadSetSignature,
+        signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
         use crate::resolution_currency::ResolutionEvidenceSource;
         matches!(evidence, ResolutionEvidenceSource::Uncovered(_))
@@ -3264,7 +3554,7 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         request_overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
-        signature: &crate::ReadSetSignature,
+        signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
         use crate::resolution_currency::ResolutionEvidenceSource;
         // Fail closed: a caller that declared no live source re-observes
@@ -3348,7 +3638,7 @@ impl Engine {
             {
                 continue;
             }
-            let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+            let key = verter_session_query::resolution::normalize_canonical_id(canonical);
             let recorded = Self::recorded_baseline(&recorded_before, &key);
             // A source that could not produce a trustworthy live observation
             // gets no stamp and no fold. The stamp certifies an actual live
@@ -3436,14 +3726,14 @@ impl Engine {
     /// was last read LIVE, or `None` when it never has been.
     #[cfg(test)]
     pub(crate) fn evidence_verified_generation_for_test(&self, canonical: &str) -> Option<u64> {
-        let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let key = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.evidence_verified_generation.read().get(&key).copied()
     }
 
     /// Whether `canonical` is still awaiting evidence re-observation.
     #[cfg(test)]
     pub(crate) fn pending_resolution_refresh_for_test(&self, canonical: &str) -> bool {
-        let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let key = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.pending_resolution_refresh.read().contains(&key)
     }
 
@@ -3462,7 +3752,7 @@ impl Engine {
             probe: reader.probe_path(canonical_id),
             realpath: reader
                 .realpath(canonical_id)
-                .map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path)),
+                .map(|path| verter_session_query::resolution::normalize_canonical_id(&path)),
             manifest: crate::resolution_currency::is_package_manifest_path(canonical_id).then(
                 || {
                     reader.read_file(canonical_id).map(|source| {
@@ -3598,7 +3888,7 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         operation: ResolutionOperation<'_>,
     ) -> ResolutionOutcome {
         let ResolutionOperation {
@@ -3608,7 +3898,7 @@ impl Engine {
             overlay: request_overlay,
             cancelled,
         } = operation;
-        crate::probe_scope!(RESOLVE_IN_PUBLISHED);
+        verter_session_query::probe_scope!(RESOLVE_IN_PUBLISHED);
         let overlay_reader;
         let reader: &dyn crate::traits::WorkspaceRead = match request_overlay {
             Some(overlay) => {
@@ -3630,11 +3920,11 @@ impl Engine {
         // across retries and settled (completed or abandoned) on return.
         let mut flight_lease = None;
         loop {
-            crate::probe_scope!(RESOLVE_ATTEMPT);
+            verter_session_query::probe_scope!(RESOLVE_ATTEMPT);
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::AttemptStart);
             let mut captured = {
-                crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
+                verter_session_query::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
             };
             // A request overlay answers from its own effective world: every
@@ -3684,13 +3974,11 @@ impl Engine {
             // overlay's effective world — every fact it observed, negative
             // probes included, still holds with the overlay in place.
             let candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> = {
-                crate::probe_scope!(RESOLVE_CANDIDATE_READ);
+                verter_session_query::probe_scope!(RESOLVE_CANDIDATE_READ);
                 let mut candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> =
                     self.lazy_resolution_cache
                         .read()
-                        .get(&cache_key)
-                        .into_iter()
-                        .flatten()
+                        .candidates(&cache_key)
                         .map(|entry| (ResolutionLane::Workspace, entry.clone()))
                         .collect();
                 if overlay_lane {
@@ -3710,7 +3998,7 @@ impl Engine {
             // rejected.
             let mut rejected_exact_targets = Vec::new();
             {
-                crate::probe_scope!(RESOLVE_SCREEN_EXACT);
+                verter_session_query::probe_scope!(RESOLVE_SCREEN_EXACT);
                 for (_, candidate) in candidates.iter() {
                     let candidate_exact_version =
                         candidate.signature.resolution_fact_version(&exact_fact);
@@ -3731,7 +4019,7 @@ impl Engine {
             // the miss. The hook fires after the observation but before the
             // attempt can select a resolver or admit.
             let exact = {
-                crate::probe_scope!(RESOLVE_EXACT_LOOKUP);
+                verter_session_query::probe_scope!(RESOLVE_EXACT_LOOKUP);
                 captured
                     .world
                     .base
@@ -3745,7 +4033,7 @@ impl Engine {
             let context_fact = ResolutionFactKey::context_importer(importer_id, population);
             transaction.lock().observe(context_fact);
             let selected_context = {
-                crate::probe_scope!(RESOLVE_CONTEXT_SELECT);
+                verter_session_query::probe_scope!(RESOLVE_CONTEXT_SELECT);
                 match selected_context_for_path(captured.world.base.as_ref(), importer_id) {
                     Ok(context) => Some(context),
                     Err(_) => {
@@ -3760,13 +4048,17 @@ impl Engine {
             let mut reused = false;
             let mut restated_witness = false;
             let mut publish_candidate = false;
+            // The query of a reused workspace-lane candidate whose decision
+            // node this demand roots on: re-checked under the final fence,
+            // where another admission may have evicted it.
+            let mut reused_decision: Option<ResolutionQueryKey> = None;
 
             // Reader-driven evidence refresh for the retained candidates' own
             // recorded canonicals; a refreshed (changed) world means the
             // captured root is superseded — retry against the new world.
             let mut refreshed = false;
             {
-                crate::probe_scope!(RESOLVE_REFRESH_EVID);
+                verter_session_query::probe_scope!(RESOLVE_REFRESH_EVID);
                 for (_, entry) in candidates.iter() {
                     refreshed |= self.refresh_resolution_evidence(
                         reader,
@@ -3800,7 +4092,7 @@ impl Engine {
             // exact or resolver-derived — republishes through the same slot.
             let reusable_for_this_view = |entry: &LazyResolutionCacheEntry| {
                 let candidate_context = {
-                    crate::probe_scope!(RESOLVE_REUSE_CTX);
+                    verter_session_query::probe_scope!(RESOLVE_REUSE_CTX);
                     Self::complete_provider_context(
                         captured.world.base.as_ref(),
                         selected_context.clone(),
@@ -3813,7 +4105,7 @@ impl Engine {
                     return false;
                 };
                 let query_matches = {
-                    crate::probe_scope!(RESOLVE_REUSE_QUERY);
+                    verter_session_query::probe_scope!(RESOLVE_REUSE_QUERY);
                     let query = ResolutionQueryKey::importer(
                         importer_id,
                         specifier,
@@ -3826,7 +4118,7 @@ impl Engine {
                 if !query_matches {
                     return false;
                 }
-                crate::probe_scope!(RESOLVE_REUSE_VALIDATE);
+                verter_session_query::probe_scope!(RESOLVE_REUSE_VALIDATE);
                 // A witness the declared evidence source cannot
                 // re-observe is not a witness this attempt may stand
                 // on. See `witness_evidence_is_unenumerable`.
@@ -3834,7 +4126,7 @@ impl Engine {
                     && !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
             };
             let mut reusable: Option<(ResolutionLane, LazyResolutionCacheEntry)> = {
-                crate::probe_scope!(RESOLVE_REUSE_FIND);
+                verter_session_query::probe_scope!(RESOLVE_REUSE_FIND);
                 candidates
                     .iter()
                     .find(|(_, entry)| reusable_for_this_view(entry))
@@ -3898,11 +4190,15 @@ impl Engine {
                 let mut transaction = transaction.lock();
                 transaction.set_query(entry.query.clone());
                 let node = ResolutionFactKey::decision(entry.query.clone());
-                if matches!(lane, ResolutionLane::RequestOverlay(_))
-                    || captured.world.request_overlay_reaches(&node)
+                if matches!(
+                    lane,
+                    ResolutionLane::RequestOverlay(_) | ResolutionLane::Unretained
+                ) || captured.world.request_overlay_reaches(&node)
                 {
                     transaction.adopt_witness(&entry.signature);
                     restated_witness = true;
+                } else {
+                    reused_decision = Some(entry.query.clone());
                 }
                 reused = true;
                 entry.result.clone()
@@ -3930,15 +4226,15 @@ impl Engine {
                                     provider_id: id.clone(),
                                     provider_specifier: specifier.to_string(),
                                     provider_target:
-                                        verter_semantic::resolver_core::ProviderTarget::SourceFile,
+                                        verter_session_query::resolution::ProviderTarget::SourceFile,
                                     resolution_kind:
-                                        verter_semantic::resolver_core::ResolutionKind::Bundler,
+                                        verter_session_query::resolution::ResolutionKind::Bundler,
                                     owner_tsconfig_path: None,
                                 }
                             })
                     })
                 } else {
-                    crate::probe_scope!(RESOLVE_TRACKED);
+                    verter_session_query::probe_scope!(RESOLVE_TRACKED);
                     let tracked = TransactionReader::new(reader, &transaction);
                     let capability = TrackedResolutionCapability::new();
                     let driven = captured
@@ -3947,7 +4243,7 @@ impl Engine {
                         .published
                         .as_ref()
                         .map_or(Ok(None), |root| {
-                            let request = verter_semantic::resolver_core::ResolveRequest {
+                            let request = verter_session_query::resolution::ResolveRequest {
                                 importer_id: importer_id.to_string(),
                                 specifier: specifier.to_string(),
                                 kind: ctx.kind,
@@ -4032,18 +4328,35 @@ impl Engine {
                 resolution_test_hooks::ResolutionPhase::PublicationGateWait,
             );
             let (_publication, _session_publication) = {
-                crate::probe_scope!(RESOLVE_PUBLISH_LOCK);
+                verter_session_query::probe_scope!(RESOLVE_PUBLISH_LOCK);
                 (
                     self.resolution_world_write.lock(),
                     session_domain.as_ref().map(|domain| domain.write.lock()),
                 )
             };
-            let admission_fence = self.admission_fence_under_gate(
-                &captured,
-                population,
-                request_overlay,
-                &transaction.lock(),
-            );
+            let admission_fence = self
+                .admission_fence_under_gate(
+                    &captured,
+                    population,
+                    request_overlay,
+                    &transaction.lock(),
+                )
+                .filter(|latest| {
+                    // A reuse rooted on its decision is stamped with the
+                    // decision's version in the fenced world, which its
+                    // transaction never observed: a later world is
+                    // compatible only while that decision has not advanced
+                    // since the reuse validated its candidate. A retired
+                    // decision is not rooted on (the reuse restates its
+                    // candidate's witness below), so it is not compared.
+                    reused_decision.as_ref().is_none_or(|query| {
+                        if !self.lazy_resolution_cache.read().serves(&cache_key, query) {
+                            return true;
+                        }
+                        let node = ResolutionFactKey::decision(query.clone());
+                        latest.world.fact_version(&node) == captured.world.fact_version(&node)
+                    })
+                });
             match admission_fence {
                 Some(latest) => {
                     transaction.lock().rebase_onto(Arc::clone(&latest.world));
@@ -4080,6 +4393,38 @@ impl Engine {
             if !reader.resolution_event_bridge_complete() {
                 transaction.lock().mark_untracked_backend();
             }
+            // Under the fence the lane and the decision graph agree: a
+            // decision is live exactly while a candidate serves its query.
+            // A reused candidate another admission evicted since this demand
+            // read it has no live decision to root on — its tombstone has no
+            // edges, so nothing would ever invalidate a witness on it. Such a
+            // reuse restates the candidate's own witness instead, which the
+            // finish below validates against the fenced world.
+            let mut slot_backed = false;
+            if let Some(reused_query) = reused_decision.as_ref() {
+                if self
+                    .lazy_resolution_cache
+                    .read()
+                    .serves(&cache_key, reused_query)
+                {
+                    slot_backed = true;
+                } else if let Some((_, entry)) = reusable.as_ref() {
+                    transaction.lock().adopt_witness(&entry.signature);
+                    restated_witness = true;
+                }
+            }
+            // A workspace answer for an importer the fenced world already
+            // records as gone is served with its own witness, never
+            // retained: its importer's retirement has run, and nothing would
+            // retire a slot admitted after it. A session keeps the importer
+            // while an open overlay still shows it, as retirement does.
+            let importer_retired = publish_candidate
+                && !overlay_lane
+                && self.importer_known_absent(
+                    captured.world.base.as_ref(),
+                    importer_id,
+                    population,
+                );
             #[cfg(test)]
             resolution_test_hooks::record_completed_outputs_at_final_fence(
                 input_ledger.applied_output_count_for_test(),
@@ -4093,7 +4438,7 @@ impl Engine {
             let direct_edges = transaction.direct_edges();
             let observed_values = transaction.take_observed_values();
             let mut admission = {
-                crate::probe_scope!(RESOLVE_TXN_FINISH);
+                verter_session_query::probe_scope!(RESOLVE_TXN_FINISH);
                 transaction.finish()
             };
             if matches!(
@@ -4109,7 +4454,7 @@ impl Engine {
                 && !overlay_lane
                 && matches!(&admission, SignatureAdmission::Cacheable(_))
                 && {
-                    crate::probe_scope!(RESOLVE_FOLD_EVIDENCE);
+                    verter_session_query::probe_scope!(RESOLVE_FOLD_EVIDENCE);
                     self.fold_observed_base_evidence(
                         Self::held_session_of(&captured),
                         observed_values,
@@ -4137,6 +4482,8 @@ impl Engine {
                 SignatureAdmission::Cacheable(signature) => Some(signature.clone()),
                 SignatureAdmission::NonCacheable(_) => None,
             };
+            // Complete and current, before any retention decision.
+            let complete_answer = cacheable_signature.is_some();
 
             let mut published = false;
             if reused {
@@ -4162,7 +4509,7 @@ impl Engine {
                 if let (Some(signature), Some(query), Some(overlay)) =
                     (cacheable_signature, query.clone(), request_overlay)
                 {
-                    crate::probe_scope!(RESOLVE_ADMIT);
+                    verter_session_query::probe_scope!(RESOLVE_ADMIT);
                     let entry = LazyResolutionCacheEntry {
                         result: result.clone(),
                         query,
@@ -4183,33 +4530,77 @@ impl Engine {
                 }
             } else if publish_candidate {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
-                    crate::probe_scope!(RESOLVE_ADMIT);
+                    verter_session_query::probe_scope!(RESOLVE_ADMIT);
                     let entry = LazyResolutionCacheEntry {
                         result: result.clone(),
                         query: query.clone(),
                         signature,
                     };
-                    let evicted = admit_resolution_candidate(
-                        self.lazy_resolution_cache
-                            .write()
-                            .entry(cache_key.clone())
-                            .or_default(),
-                        entry.clone(),
-                    );
-                    // The candidate, its decision node and the removal of
-                    // every aged-out sibling's decision all land under the
-                    // same fence, so a slot can never hold an answer whose
-                    // decision has no edges recorded, and no decision can
-                    // outlive the candidate that serves it.
-                    for query in evicted {
-                        self.remove_resolution_decision(&captured, query);
+                    // The candidate owns its decision node and edges, so
+                    // one charge covers all three.
+                    let bytes = entry.retained_bytes(&cache_key)
+                        + direct_edges.len() * lazy_resolution_cache::DECISION_EDGE_BYTES;
+                    // A retired importer's answer keeps its own precise
+                    // witness — valid, and invalidated by the facts it
+                    // observed — but takes no slot and no decision node.
+                    let reservation = if importer_retired {
+                        Err(None)
+                    } else {
+                        self.retention.reserve(bytes).map_err(
+                            |crate::overlay_residency::RetentionRefused| {
+                                Some(verter_audit::NonAdmissionReason::RetentionPressure)
+                            },
+                        )
+                    };
+                    match reservation {
+                        Ok(charge) => {
+                            // One charge, shared by the candidate and by
+                            // every root that holds its decision node.
+                            let charge = Arc::new(charge);
+                            let retirement = self.lazy_resolution_cache.write().admit(
+                                cache_key.clone(),
+                                entry.clone(),
+                                Arc::clone(&charge),
+                            );
+                            // The candidate, its decision node and the
+                            // removal of every decision it left without a
+                            // candidate all land under the same fence, so a
+                            // slot can never hold an answer whose decision
+                            // has no edges recorded, and no decision can
+                            // outlive the candidate that serves it. The
+                            // node is published first: a retirement that
+                            // folds the root's history then pins the version
+                            // this attempt's captured world reads for it.
+                            self.publish_resolution_decision(
+                                &captured,
+                                query,
+                                direct_edges,
+                                charge,
+                            );
+                            self.retire_resolution_decisions(&captured, retirement);
+                            published = true;
+                            slot_backed = true;
+                            delivery = Some(FlightDelivery {
+                                lane: ResolutionLane::Workspace,
+                                entry,
+                            });
+                        }
+                        // The answer is complete; it is not kept. It is
+                        // served uncached, with no slot and no decision
+                        // node, and delivered to the flight's subscribers
+                        // as an unretained answer, whose witness each
+                        // restates rather than rooting on a node that was
+                        // never published.
+                        Err(refusal) => {
+                            if let Some(reason) = refusal {
+                                admission = SignatureAdmission::NonCacheable(reason);
+                            }
+                            delivery = Some(FlightDelivery {
+                                lane: ResolutionLane::Unretained,
+                                entry,
+                            });
+                        }
                     }
-                    self.publish_resolution_decision(&captured, query, direct_edges);
-                    published = true;
-                    delivery = Some(FlightDelivery {
-                        lane: ResolutionLane::Workspace,
-                        entry,
-                    });
                 }
             }
             // Settle the flight this demand leads: deliver its candidate,
@@ -4249,9 +4640,9 @@ impl Engine {
                     let node = ResolutionFactKey::decision(query);
                     let version = captured.world.fact_version(&node);
                     admission =
-                        SignatureAdmission::Cacheable(crate::ReadSetSignature::new(Arc::from([
-                            crate::FactVersionRef::ResolveImports(
-                                crate::ResolveImportsFactRef::Resolution(
+                        SignatureAdmission::Cacheable(verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
+                            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(
                                     crate::resolution_currency::ResolutionFactRef {
                                         key: node,
                                         version,
@@ -4267,10 +4658,21 @@ impl Engine {
             // importer's overlay-only specifier.
             if request_overlay.is_none() && matches!(&admission, SignatureAdmission::Cacheable(_)) {
                 input_ledger.commit_loaded_inputs(reader);
-                if let Some(ref result) = result {
-                    self.edges
-                        .write()
-                        .add_lazy_resolved_dep(importer_id, &result.source_id);
+            }
+            // The dependency edge is import-graph bookkeeping for every
+            // complete answer, retained or refused retention: an importer
+            // the workspace holds keeps it until its own retirement removes
+            // every edge it owns. An importer the workspace does not hold
+            // has nothing else to retire it, so its edge is recorded only
+            // while a workspace-lane candidate backs it, under the same gate
+            // that retracts it with that candidate.
+            if request_overlay.is_none() && complete_answer {
+                if let Some(result) = result.as_ref() {
+                    if slot_backed || self.importer_held_by_workspace(importer_id) {
+                        self.edges
+                            .write()
+                            .add_lazy_resolved_dep(importer_id, &result.source_id);
+                    }
                 }
             }
 
@@ -4321,7 +4723,7 @@ impl Engine {
                 if target == ResolveContextId::unowned()
                     && result.owner_tsconfig_path.is_none()
                     && result.provider_target
-                        == verter_semantic::resolver_core::ProviderTarget::SourceFile =>
+                        == verter_session_query::resolution::ProviderTarget::SourceFile =>
             {
                 Some(selected.with_external_provider_projection(result))
             }
@@ -4336,10 +4738,10 @@ impl Engine {
     pub(crate) fn resolve_import_for_project(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.resolve_import_for_project_outcome(reader, owner, specifier, ctx)
             .into_transient_result()
     }
@@ -4347,9 +4749,9 @@ impl Engine {
     pub(crate) fn resolve_import_for_project_outcome(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let population = reader.resolution_population();
         let mut input_ledger =
@@ -4578,10 +4980,10 @@ impl Engine {
             .snapshot
             .resolver
             .preferred_specifier_candidates(importer_id, target_id)?;
-        let normalized_target = verter_semantic::resolver_core::normalize_canonical_id(target_id);
-        let context = verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        let normalized_target = verter_session_query::resolution::normalize_canonical_id(target_id);
+        let context = verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         };
         let mut best: Option<String> = None;
         for candidate in candidates {
@@ -4593,7 +4995,7 @@ impl Engine {
                 context,
             );
             if outcome.into_transient_result().is_some_and(|result| {
-                verter_semantic::resolver_core::normalize_canonical_id(&result.source_id)
+                verter_session_query::resolution::normalize_canonical_id(&result.source_id)
                     == normalized_target
             }) {
                 match &best {
@@ -4617,7 +5019,7 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         captured_world: &Arc<CapturedResolutionWorld>,
         input_ledger: &mut crate::resolver::InputResolutionLedger,
     ) -> ResolutionOutcome {
@@ -4642,7 +5044,7 @@ impl Engine {
             .published
             .as_ref()
             .map_or(Ok(None), |root| {
-                let request = verter_semantic::resolver_core::ResolveRequest {
+                let request = verter_session_query::resolution::ResolveRequest {
                     importer_id: importer_id.to_string(),
                     specifier: specifier.to_string(),
                     kind: ctx.kind,
@@ -4715,7 +5117,7 @@ impl Engine {
         importer_id: &str,
         specifier: &str,
         target_id: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         captured_world: &Arc<CapturedResolutionWorld>,
     ) -> ResolutionOutcome {
         let population = captured_world.population;
@@ -4752,8 +5154,8 @@ impl Engine {
                     source_id: target_id.to_owned(),
                     provider_id: target_id.to_owned(),
                     provider_specifier: specifier.to_owned(),
-                    provider_target: verter_semantic::resolver_core::ProviderTarget::SourceFile,
-                    resolution_kind: verter_semantic::resolver_core::ResolutionKind::Bundler,
+                    provider_target: verter_session_query::resolution::ProviderTarget::SourceFile,
+                    resolution_kind: verter_session_query::resolution::ResolutionKind::Bundler,
                     owner_tsconfig_path: None,
                 })
             });
@@ -4865,7 +5267,7 @@ impl Engine {
         input_ledgers: &mut [crate::resolver::InputResolutionLedger],
         final_validate: &dyn Fn() -> bool,
     ) -> bool {
-        crate::probe_scope!(RECORD_PARSED_EDGES);
+        verter_session_query::probe_scope!(RECORD_PARSED_EDGES);
         assert_eq!(
             records.len(),
             input_ledgers.len(),
@@ -4955,7 +5357,7 @@ impl Engine {
         input_ledger: &mut crate::resolver::InputResolutionLedger,
         final_validate: &dyn Fn() -> bool,
     ) -> bool {
-        crate::probe_scope!(RECORD_PARSED_EDGES);
+        verter_session_query::probe_scope!(RECORD_PARSED_EDGES);
         loop {
             let population = reader.resolution_population();
             let captured = self.capture_stable_resolution_world(population);
@@ -5143,8 +5545,8 @@ impl Engine {
         for edge in edges {
             match edge {
                 crate::types::ParsedEdge::Relative { specifier, kind } => {
-                    let ctx = verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    let ctx = verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                         kind: *kind,
                     };
                     let relative_candidate = specifier.starts_with('.').then(|| {
@@ -5157,7 +5559,7 @@ impl Engine {
                     let batch_key = relative_results.as_ref().and_then(|_| {
                         let (_, joined_stem) = relative_candidate.as_ref()?;
                         let normalized_importer =
-                            verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+                            verter_session_query::resolution::normalize_canonical_id(canonical_id);
                         let scope = if suffix_crosses_node_modules(&normalized_importer) {
                             ParsedRelativeBatchScope::PackageImporter(normalized_importer)
                         } else {
@@ -5241,10 +5643,10 @@ impl Engine {
                             canonical_id,
                             specifier,
                             path,
-                            verter_semantic::resolver_core::ResolutionContext {
-                                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                            verter_session_query::resolution::ResolutionContext {
+                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                                 kind:
-                                    verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                                    verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                             },
                             captured_world,
                         );
@@ -5260,9 +5662,9 @@ impl Engine {
                             }
                         }
                     } else {
-                        let ctx = verter_semantic::resolver_core::ResolutionContext {
-                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                            kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        let ctx = verter_session_query::resolution::ResolutionContext {
+                            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                            kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                         };
                         let outcome = self.resolve_parsed_edge_in_world(
                             reader,
@@ -5420,7 +5822,7 @@ impl Engine {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn unregister_ambient_lib(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Result<(), crate::ambient_lib::AmbientLibError> {
         use crate::ambient_lib::{cas_unregister, normalize_canonical_id};
@@ -5442,7 +5844,7 @@ impl Engine {
     pub(crate) fn read_ambient_lib(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         let canonical = crate::ambient_lib::normalize_canonical_id(canonical_id);
@@ -5463,9 +5865,9 @@ impl Engine {
     /// `lib_order`) that exposes the symbol.
     pub(crate) fn lookup_ambient_symbol(
         &self,
-        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
+        consumer_project: verter_session_query::resolution::ProjectStableKey,
         symbol: &str,
-    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
+    ) -> Option<verter_session_query::resolution::AmbientSymbolHit> {
         let ambient = self.ambient_libs.load_full();
         let p = ambient.by_project.get(&consumer_project)?;
         let candidates = p.symbol_index.get(symbol)?;
@@ -5474,7 +5876,7 @@ impl Engine {
             consumer_project,
             canonical_id.as_ref(),
         );
-        Some(verter_semantic::resolver_core::AmbientSymbolHit {
+        Some(verter_session_query::resolution::AmbientSymbolHit {
             project: consumer_project,
             canonical_id,
             virtual_id,
@@ -5485,8 +5887,8 @@ impl Engine {
     /// Resolve a `ProjectId` to its stable key against the published snapshot.
     pub(crate) fn project_stable_key(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+        project_id: verter_session_query::resolution::ProjectId,
+    ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         let published = self.load_published()?;
         published
             .snapshot
@@ -5524,11 +5926,9 @@ impl std::fmt::Debug for Engine {
 const WORKSPACE_PARSER_FLAGS: &[&str] = &["verter-parser-v1", SVELTE_RUNE_AMBIENT_PARSER_FLAG];
 
 /// The Svelte rune-ambient parse-env flag mixed into `parse_env_hash`. Its
-/// version suffix MUST track `verter_compiler`'s `RUNE_AMBIENT_PRELUDE_VERSION`
+/// version suffix MUST track `verter_language`'s `RUNE_AMBIENT_PRELUDE_VERSION`
 /// so a rune-prelude surface change invalidates a rune module's stale inferred
-/// exports. A `verter_session` freshness guard pins the two in lockstep (the
-/// version constant lives in `verter_compiler`, which `verter_workspace` does
-/// not depend on, so the link is asserted from the crate that sees both).
+/// exports. A `verter_session` freshness guard pins the two in lockstep.
 pub const SVELTE_RUNE_AMBIENT_PARSER_FLAG: &str = "svelte-rune-ambient-v1";
 
 /// Workspace-level ambient corpus fingerprint mixed into every project's
@@ -5628,14 +6028,14 @@ fn compose_env_hash_tables_from_configs(
             ProjectPayload::Fallback { .. } => None,
         };
         let selected = configs.iter().find(|config| {
-            verter_semantic::resolver_core::normalize_canonical_id(&config.root)
+            verter_session_query::resolution::normalize_canonical_id(&config.root)
                 == project.root.as_str()
-                && verter_semantic::resolver_core::normalize_canonical_id(&config.workspace_root)
+                && verter_session_query::resolution::normalize_canonical_id(&config.workspace_root)
                     == project.workspace_root.as_str()
                 && config
                     .tsconfig_path
                     .as_deref()
-                    .map(verter_semantic::resolver_core::normalize_canonical_id)
+                    .map(verter_session_query::resolution::normalize_canonical_id)
                     .as_deref()
                     == expected_tsconfig
         });
@@ -5778,6 +6178,8 @@ pub(crate) fn workspace_default_project_identity_hash_for_engine(_engine: &Engin
     })
 }
 
+#[path = "lazy_resolution_cache.rs"]
+mod lazy_resolution_cache;
 #[cfg(test)]
 #[path = "resolution_candidate_slot_tests.rs"]
 mod resolution_candidate_slot_tests;

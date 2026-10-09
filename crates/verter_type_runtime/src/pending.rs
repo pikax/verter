@@ -36,6 +36,10 @@ pub(crate) struct PendingRequestTable {
 }
 
 impl PendingRequestTable {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.lock().closed
+    }
+
     /// Register a request only while the reader is alive. The closed check and
     /// insertion share one lock with [`Self::close_and_fail_with`], closing the
     /// EOF race where a request could be inserted immediately after the reader

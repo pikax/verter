@@ -25,8 +25,8 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
-use verter_session::resolver_core::FactVersionRef;
 use verter_session::{CompileErrorPolicy, HostConfig};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn metahost() -> ComponentMetaHost {
     ComponentMetaHost::new_standalone(HostConfig {

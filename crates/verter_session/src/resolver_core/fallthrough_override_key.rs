@@ -10,7 +10,7 @@
 //!
 //! This is an INTERNAL cache-key type (no public / wire DTO, no new CRITICAL
 //! rule). It carries no `whole_hash` / `content_hash` / raw
-//! [`crate::semantic_query::SemanticNodeId`] (R6) — it is a content-free unit
+//! [`verter_type_engine::semantic_query::SemanticNodeId`] (R6) — it is a content-free unit
 //! discriminator.
 
 /// Override-identity cache-key dimension: either the request carries no

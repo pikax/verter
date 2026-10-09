@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use verter_session::for_tests::app_config_no_override_proof_get_or_compute_for_tests;
-use verter_session::resolver_core::FactVersionRef;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 #[test]
 fn app_config_proof_does_not_observe_member_presence_facts() {

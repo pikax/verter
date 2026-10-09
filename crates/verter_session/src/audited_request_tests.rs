@@ -17,7 +17,7 @@
 //! * The shared semantic dispatcher (`ProjectSemanticDispatch::execute`
 //!   and `execute_read`) never publishes records. It performs cooperative
 //!   admission, dep-signature accumulation, and warm-cache reads, but it
-//!   has no path to `audit_records.insert`. Records emerge only when an
+//!   has no path to the records store. Records emerge only when an
 //!   outer entry-point synthesises and finalises them.
 //!
 //! Future drift in either direction would be a correctness regression:
@@ -39,13 +39,13 @@ use std::sync::Arc;
 
 use verter_audit::RequestKind;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{
-    PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey,
-};
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::{FileLanguage, UpsertRequest, VerterHost};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{
+    PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey,
+};
 
 /// Build a host that has audit recording fully enabled. The
 /// regression test for raw-dispatch nesting only matters when
@@ -83,8 +83,10 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 /// an empty `type_args` slice short-circuits to `Opaque(Miss)` for
 /// `DefineProps`, which is exactly the path we want to exercise to
 /// prove the dispatch arm produced no record.
-fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+fn synthetic_macro_owner(
+    canonical: &str,
+) -> verter_type_engine::semantic_query::ResolvedDeclSlotIdentity {
+    verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical),
         verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
@@ -104,7 +106,7 @@ fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::ResolvedDecl
 ///
 /// Discriminating: the assertions inspect the records store via
 /// `host_audit_runtime().snapshot()` AND drive a direct
-/// `take_audit_record(request_id)` lookup. A drift commit that, say,
+/// `take_record(request_id)` lookup. A drift commit that, say,
 /// inserted a record under the active request id without bumping
 /// the snapshot would still surface as a `Some(_)` from `take`.
 #[test]
@@ -150,7 +152,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         let footprint_capture = host.config.footprint_capture && host.config.audit_enabled;
         let accumulator = if footprint_capture {
             Some(Arc::new(
-                crate::component_meta_audit::RequestFootprintAccumulator::new(),
+                verter_type_engine::request_footprint::RequestFootprintAccumulator::new(),
             ))
         } else {
             None
@@ -183,9 +185,9 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         let macro_key = SemanticQueryKey::ResolveMacroPayload {
             owner,
             macro_index: 0,
-            macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+            macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
             type_args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::MacroPayloadContext::new(
+            context: verter_type_engine::semantic_query::MacroPayloadContext::new(
                 Default::default(),
                 ProjectionMode::Expanded,
             ),
@@ -210,17 +212,17 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         // typical component-meta entry-point would touch.
         let graph = host.project_type_store().semantic_graph();
         let primitive_base = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let path_key = SemanticQueryKey::ProjectPath {
             base: primitive_base,
             path: Arc::from(
                 vec![PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier("nonexistent"),
+                    verter_type_engine::semantic_query::PropertyKey::identifier("nonexistent"),
                 )]
                 .into_boxed_slice(),
             ),
-            context: crate::semantic_query::ProjectionReductionContext::published(
+            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Identity,
             ),
         };
@@ -256,7 +258,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
     // assigned to the manual context returns `None`. This catches a
     // drift commit that inserted under our id without incrementing
     // the snapshot counter.
-    let drained = host.take_audit_record(request_id);
+    let drained = host.host_audit_runtime().take_record(request_id);
     assert!(
         drained.is_none(),
         "no audit record should be filed against request_id={request_id}; got {drained:?}",

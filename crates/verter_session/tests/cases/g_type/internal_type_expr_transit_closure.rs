@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::AnalyzedMacroKind;
 use verter_session::typeinfo::framework_surface::{
     NamedTypeLeaf, NamedTypeMember, NamedTypeMemberOutput,
 };
 use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use verter_session::{LanguageRegistry, UpsertRequest, VerterHost};
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 use verter_type_expr::{LiteralValue, PrimitiveName};
 
 use super::harness;
@@ -68,6 +68,7 @@ fn macro_dtos(
         root_identity: [0u8; 16],
         level: TypeInfoQueryLevel::FullMetadata,
     })
+    .expect("the Vue adapter is admitted")
 }
 
 fn macro_dtos_fresh_and_warm(

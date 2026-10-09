@@ -18,8 +18,7 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt as _;
-use tokio::sync::{Notify, OnceCell, Semaphore};
-use tower_lsp_server::Client;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::resilient_provider::{
     EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
@@ -99,7 +98,7 @@ async fn make_resilient(
     let spawn_gate = Arc::new(Semaphore::new(0));
     let initial_crash_notify = Arc::new(parking_lot::Mutex::new(None));
     let notifier = Arc::new(LspNotifier::new(
-        Arc::new(tokio::sync::OnceCell::new()),
+        crate::outbound::Outbound::default(),
         "tsgo",
     ));
     let provider = ProviderHub::new(
@@ -586,53 +585,6 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
 // owning project, so the fallback's notifier — not its lifecycle — is what
 // keeps that attestation truthful on the wire.
 
-/// A handshake-only `LanguageServer` so a real
-/// [`tower_lsp_server::Client`](Client) with its outgoing socket exists
-/// in-process for the wire tests below.
-struct HandshakeOnlyServer;
-
-impl tower_lsp_server::LanguageServer for HandshakeOnlyServer {
-    async fn initialize(
-        &self,
-        _params: tower_lsp_server::ls_types::InitializeParams,
-    ) -> Result<tower_lsp_server::ls_types::InitializeResult, tower_lsp_server::jsonrpc::Error>
-    {
-        Ok(tower_lsp_server::ls_types::InitializeResult::default())
-    }
-
-    async fn shutdown(&self) -> Result<(), tower_lsp_server::jsonrpc::Error> {
-        Ok(())
-    }
-}
-
-/// Drive one real [`Client`] through a completed handshake and return it with
-/// the outgoing socket the editor would read. Structural start announcements
-/// are suppressed by the client until the server is initialized, so the
-/// handshake is part of the fixture, not optional setup. The socket is the
-/// undrained server→client stream: every notification the client sends lands
-/// there, in order.
-async fn initialized_client_with_socket() -> (Arc<OnceCell<Client>>, tower_lsp_server::ClientSocket)
-{
-    let client_cell: Arc<OnceCell<Client>> = Arc::new(OnceCell::new());
-    let cell_for_init = Arc::clone(&client_cell);
-    let (mut service, socket) = tower_lsp_server::LspService::new(move |client| {
-        let _ = cell_for_init.set(client);
-        HandshakeOnlyServer
-    });
-    use tower_service::Service as _;
-    let params = serde_json::to_value(tower_lsp_server::ls_types::InitializeParams::default())
-        .expect("initialize params serialize");
-    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
-        .params(params)
-        .id(1)
-        .finish();
-    futures_util::future::poll_fn(|cx| service.poll_ready(cx))
-        .await
-        .expect("the service accepts the handshake");
-    let _ = service.call(initialize).await;
-    (client_cell, socket)
-}
-
 /// The shared route's managed fallback: the engine's INITIAL start must stay
 /// off the `$/verter/typeProviderStarted` wire (the attested promise), while a
 /// crash REPLACEMENT is still announced so the editor's pid tracking follows
@@ -643,8 +595,10 @@ async fn initialized_client_with_socket() -> (Arc<OnceCell<Client>>, tower_lsp_s
 /// fallback was activated: startedKinds=[\"tsgo\"]").
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_fallback_initial_start_stays_off_the_wire_but_a_recovery_is_announced() {
-    let (client_cell, wire) = initialized_client_with_socket().await;
-    let mut wire = wire;
+    let client = crate::outbound::Outbound::default();
+    let mut wire = client.wire();
+    // The editor has been answered `initialize`: start announcements may flow.
+    client.assume_initialized();
 
     let initial = MockTypeProvider::new();
     initial.set_child_pid(Some(4321));
@@ -661,7 +615,7 @@ async fn shared_fallback_initial_start_stays_off_the_wire_but_a_recovery_is_anno
             replacement,
             spawn_gate: Arc::clone(&spawn_gate),
         },
-        Arc::new(LspNotifier::recovery_only(Arc::clone(&client_cell), "tsgo")),
+        Arc::new(LspNotifier::recovery_only(client.clone(), "tsgo")),
         HubPolicy::explicit(3),
     );
     provider

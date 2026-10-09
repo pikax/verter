@@ -628,6 +628,10 @@ impl TsgoOwnedProvider {
 }
 
 impl TypeProvider for TsgoOwnedProvider {
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        self.lsp.applied_content(path)
+    }
+
     fn provider_id(&self) -> &'static str {
         // The OWNED dual-surface provider IS the tsgo provider — the `--api` attach
         // is an internal implementation detail of the ONE provider (the consult's

@@ -24,23 +24,23 @@ pub(super) fn vue_api_hover_at_offset(
         "Watcher"
     } else if matches!(
         api,
-        verter_semantic::analysis::VueApiClassification::Provide
-            | verter_semantic::analysis::VueApiClassification::Inject
+        verter_session_query::analysis::types::VueApiClassification::Provide
+            | verter_session_query::analysis::types::VueApiClassification::Inject
     ) {
         "Dependency Injection"
     } else if matches!(
         api,
-        verter_semantic::analysis::VueApiClassification::Ref
-            | verter_semantic::analysis::VueApiClassification::ShallowRef
-            | verter_semantic::analysis::VueApiClassification::Reactive
-            | verter_semantic::analysis::VueApiClassification::ShallowReactive
-            | verter_semantic::analysis::VueApiClassification::Computed
-            | verter_semantic::analysis::VueApiClassification::ToRef
-            | verter_semantic::analysis::VueApiClassification::ToRefs
-            | verter_semantic::analysis::VueApiClassification::Readonly
-            | verter_semantic::analysis::VueApiClassification::ShallowReadonly
-            | verter_semantic::analysis::VueApiClassification::CustomRef
-            | verter_semantic::analysis::VueApiClassification::TriggerRef
+        verter_session_query::analysis::types::VueApiClassification::Ref
+            | verter_session_query::analysis::types::VueApiClassification::ShallowRef
+            | verter_session_query::analysis::types::VueApiClassification::Reactive
+            | verter_session_query::analysis::types::VueApiClassification::ShallowReactive
+            | verter_session_query::analysis::types::VueApiClassification::Computed
+            | verter_session_query::analysis::types::VueApiClassification::ToRef
+            | verter_session_query::analysis::types::VueApiClassification::ToRefs
+            | verter_session_query::analysis::types::VueApiClassification::Readonly
+            | verter_session_query::analysis::types::VueApiClassification::ShallowReadonly
+            | verter_session_query::analysis::types::VueApiClassification::CustomRef
+            | verter_session_query::analysis::types::VueApiClassification::TriggerRef
     ) {
         "Reactivity Primitive"
     } else {
@@ -66,7 +66,7 @@ pub(super) fn vue_api_hover_at_offset(
     if ssr_context
         && matches!(
             api,
-            verter_semantic::analysis::VueApiClassification::UseTemplateRef
+            verter_session_query::analysis::types::VueApiClassification::UseTemplateRef
         )
     {
         lines.push(
@@ -117,14 +117,24 @@ pub(in crate::features) fn hover_for_word(
 }
 
 /// Map a binding's reactivity kind to a label for the hover kind prefix.
-fn reactivity_kind_label(binding: &verter_semantic::analysis::AnalyzedBinding) -> Option<String> {
+fn reactivity_kind_label(
+    binding: &verter_session_query::analysis::types::AnalyzedBinding,
+) -> Option<String> {
     match binding.reactivity_kind {
-        verter_semantic::analysis::ReactivityKind::Ref => Some("ref".to_string()),
-        verter_semantic::analysis::ReactivityKind::Computed => Some("computed".to_string()),
-        verter_semantic::analysis::ReactivityKind::Reactive => Some("reactive".to_string()),
-        verter_semantic::analysis::ReactivityKind::MaybeRef => Some("maybe ref".to_string()),
-        verter_semantic::analysis::ReactivityKind::Mutable => Some("mutable".to_string()),
-        verter_semantic::analysis::ReactivityKind::None => {
+        verter_session_query::analysis::types::ReactivityKind::Ref => Some("ref".to_string()),
+        verter_session_query::analysis::types::ReactivityKind::Computed => {
+            Some("computed".to_string())
+        }
+        verter_session_query::analysis::types::ReactivityKind::Reactive => {
+            Some("reactive".to_string())
+        }
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef => {
+            Some("maybe ref".to_string())
+        }
+        verter_session_query::analysis::types::ReactivityKind::Mutable => {
+            Some("mutable".to_string())
+        }
+        verter_session_query::analysis::types::ReactivityKind::None => {
             if binding.is_reactive {
                 Some("reactive".to_string())
             } else {
@@ -134,16 +144,18 @@ fn reactivity_kind_label(binding: &verter_semantic::analysis::AnalyzedBinding) -
     }
 }
 
-fn format_binding_hover(binding: &verter_semantic::analysis::AnalyzedBinding) -> Hover {
+fn format_binding_hover(binding: &verter_session_query::analysis::types::AnalyzedBinding) -> Hover {
     let mut lines = Vec::new();
 
     let kind_str = match binding.kind {
-        verter_semantic::analysis::AnalyzedBindingKind::Const => "const",
-        verter_semantic::analysis::AnalyzedBindingKind::Let => "let",
-        verter_semantic::analysis::AnalyzedBindingKind::Var => "var",
-        verter_semantic::analysis::AnalyzedBindingKind::Function => "function",
-        verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => "async function",
-        verter_semantic::analysis::AnalyzedBindingKind::Class => "class",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Const => "const",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Let => "let",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Var => "var",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Function => "function",
+        verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
+            "async function"
+        }
+        verter_session_query::analysis::types::AnalyzedBindingKind::Class => "class",
     };
 
     // Show type annotation if available
@@ -160,31 +172,31 @@ fn format_binding_hover(binding: &verter_semantic::analysis::AnalyzedBinding) ->
 
     // Show granular reactivity kind
     match binding.reactivity_kind {
-        verter_semantic::analysis::ReactivityKind::None => {
+        verter_session_query::analysis::types::ReactivityKind::None => {
             if binding.is_reactive {
                 lines.push("*(reactive)*".to_string());
             }
         }
-        verter_semantic::analysis::ReactivityKind::Ref => {
+        verter_session_query::analysis::types::ReactivityKind::Ref => {
             lines.push("*(ref — needs `.value`)*".to_string())
         }
-        verter_semantic::analysis::ReactivityKind::Computed => {
+        verter_session_query::analysis::types::ReactivityKind::Computed => {
             lines.push("*(computed — needs `.value`, read-only)*".to_string());
         }
-        verter_semantic::analysis::ReactivityKind::Reactive => {
+        verter_session_query::analysis::types::ReactivityKind::Reactive => {
             lines.push("*(reactive — direct property access)*".to_string());
         }
-        verter_semantic::analysis::ReactivityKind::MaybeRef => {
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef => {
             lines.push("*(maybe ref — may need `.value`)*".to_string());
         }
-        verter_semantic::analysis::ReactivityKind::Mutable => {
+        verter_session_query::analysis::types::ReactivityKind::Mutable => {
             lines.push("*(mutable — reassignable)*".to_string());
         }
     }
 
     if let Some(ref init) = binding.initializer {
         match init {
-            verter_semantic::analysis::BindingInitializer::FunctionCall {
+            verter_session_query::analysis::types::BindingInitializer::FunctionCall {
                 callee,
                 callee_import_source,
                 ..
@@ -195,13 +207,13 @@ fn format_binding_hover(binding: &verter_semantic::analysis::AnalyzedBinding) ->
                     .unwrap_or_default();
                 lines.push(format!("Initialized via `{callee}()`{source_info}"));
             }
-            verter_semantic::analysis::BindingInitializer::Literal { kind } => {
+            verter_session_query::analysis::types::BindingInitializer::Literal { kind } => {
                 lines.push(format!("Literal: {kind:?}"));
             }
-            verter_semantic::analysis::BindingInitializer::Reference { name } => {
+            verter_session_query::analysis::types::BindingInitializer::Reference { name } => {
                 lines.push(format!("References `{name}`"));
             }
-            verter_semantic::analysis::BindingInitializer::Other => {}
+            verter_session_query::analysis::types::BindingInitializer::Other => {}
         }
     }
 
@@ -215,7 +227,7 @@ fn format_binding_hover(binding: &verter_semantic::analysis::AnalyzedBinding) ->
 }
 
 fn format_import_hover(
-    binding: &verter_semantic::analysis::AnalyzedImportBinding,
+    binding: &verter_session_query::analysis::types::AnalyzedImportBinding,
     source: &str,
 ) -> Hover {
     let type_prefix = if binding.is_type_only { "type " } else { "" };
@@ -237,15 +249,15 @@ fn format_import_hover(
     }
 }
 
-fn format_macro_hover(mac: &verter_semantic::analysis::AnalyzedMacro) -> Hover {
+fn format_macro_hover(mac: &verter_session_query::analysis::types::AnalyzedMacro) -> Hover {
     let macro_name = match mac.kind {
-        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose => "defineExpose",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineOptions => "defineOptions",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults => "withDefaults",
     };
 
     let mut lines = Vec::new();

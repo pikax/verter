@@ -16,6 +16,7 @@ pub mod client_framework_manifest_ts;
 pub mod ctx;
 pub mod descriptor;
 pub mod language_classifier;
+pub mod options;
 pub mod project_capabilities;
 pub mod public_contract;
 pub mod registry;
@@ -47,6 +48,7 @@ pub use descriptor::{
     VirtualPathPolicy, ALL_FRAMEWORK_SURFACE_KINDS,
 };
 pub use language_classifier::HostLanguageClassifier;
+pub use options::{FrameworkOptions, FrameworkOptionsError};
 pub use project_capabilities::ProjectCapabilitySnapshot;
 pub use public_contract::{
     ComponentContractAvailability, ComponentContractUnsupported,
@@ -57,8 +59,9 @@ pub use public_contract::{
     PublicTypeReference,
 };
 pub use registry::{
-    CarrierLeg, FrameworkAdapterRegistry, FrameworkRegistration, SurfaceRegistration,
-    TagDisposition,
+    CarrierGrammarCapability, CarrierGrammarCompositionError, CarrierLeg, FrameworkAdapterRegistry,
+    FrameworkCapabilityCatalog, FrameworkRegistration, HostServices, MissingRegisteredGrammar,
+    SurfaceRegistration, TagDisposition,
 };
 pub use self_file::{
     rune_module_provider_content, self_file_provider_content, serves_self_file_provider_buffer,

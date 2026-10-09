@@ -39,11 +39,11 @@ use std::sync::Arc;
 
 use crate::CompileTarget;
 use smallvec::smallvec;
-use verter_semantic::analysis::{
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacroKind, MacroTypeDep,
 };
-use verter_semantic::input::ImportBindingKind;
-use verter_semantic::resolver_core::WorkspaceAlias;
+use verter_session_query::resolution::WorkspaceAlias;
 use verter_span::Span;
 
 use super::*;
@@ -114,7 +114,7 @@ fn make_macro_type_dep(name: &str) -> MacroTypeDep {
         macro_kind: AnalyzedMacroKind::DefineProps,
         macro_index: 0,
         macro_span: Span::new(0, 0),
-        usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+        usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
     }
 }
 

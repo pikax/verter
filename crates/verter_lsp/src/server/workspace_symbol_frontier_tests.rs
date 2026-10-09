@@ -112,9 +112,9 @@ async fn frontier_fixture_with(
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
     let host_for_server = Arc::clone(&host);
     let provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             crate::LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&provider_for_server)),
@@ -128,6 +128,7 @@ async fn frontier_fixture_with(
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while futures_util::StreamExt::next(&mut socket).await.is_some() {}
@@ -192,13 +193,15 @@ fn install_materialized_workspace_with_paths(
     ));
     let root_cp = verter_workspace::CanonicalPath::new(root);
     let tsconfig = format!("{root}/tsconfig.json");
-    let spec = verter_semantic::resolver_core::StaticMembershipSpec {
+    let spec = verter_session_query::resolution::StaticMembershipSpec {
         files: Vec::new(),
-        include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+        include: vec![verter_session_query::resolution::CompiledGlob::new(
+            verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
+                &root_cp, "**/*",
+            ),
         )],
-        exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
-            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+        exclude: vec![verter_session_query::resolution::CompiledGlob::new(
+            verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                 &root_cp,
                 "node_modules/**",
             ),
@@ -214,30 +217,30 @@ fn install_materialized_workspace_with_paths(
     .collect();
     let projects = vec![
         verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            id: verter_session_query::resolution::ProjectId(0),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(&tsconfig),
-                membership: verter_semantic::resolver_core::ConfiguredMembership {
+                membership: verter_session_query::resolution::ConfiguredMembership {
                     spec,
                     materialized_files,
                 },
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 workspace_aliases: Vec::new(),
             },
         },
         verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(1),
+            id: verter_session_query::resolution::ProjectId(1),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                 membership: verter_workspace::FallbackMembership {
                     root: root_cp.clone(),
-                    exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                        verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                    exclude: vec![verter_session_query::resolution::CompiledGlob::new(
+                        verter_session_query::resolution::NormalizedGlob::new(&format!(
                             "{root}/node_modules/**"
                         )),
                     )]
@@ -253,7 +256,7 @@ fn install_materialized_workspace_with_paths(
     );
     if !paths.is_empty() {
         project_config.compiler_options =
-            verter_semantic::resolver_core::IdeProjectCompilerOptions {
+            verter_session_query::resolution::IdeProjectCompilerOptions {
                 base_url: Some(root.to_string()),
                 paths: paths
                     .iter()
@@ -262,7 +265,7 @@ fn install_materialized_workspace_with_paths(
                 ..Default::default()
             };
     }
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![project_config]);
+    let resolver = verter_resolution::ModuleResolverCore::new(vec![project_config]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
@@ -284,11 +287,11 @@ fn configured_project_with_materialized_carriers(
     materialized_files: &[String],
 ) -> verter_workspace::workspace_snapshot::OwnershipProject {
     let root_cp = verter_workspace::CanonicalPath::new(root);
-    let membership = verter_semantic::resolver_core::ConfiguredMembership {
-        spec: verter_semantic::resolver_core::StaticMembershipSpec {
+    let membership = verter_session_query::resolution::ConfiguredMembership {
+        spec: verter_session_query::resolution::StaticMembershipSpec {
             files: Vec::new(),
-            include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+            include: vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                     &root_cp, "**/*",
                 ),
             )],
@@ -300,7 +303,7 @@ fn configured_project_with_materialized_carriers(
             .collect(),
     };
     verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(id),
+        id: verter_session_query::resolution::ProjectId(id),
         root: root_cp.clone(),
         workspace_root: root_cp,
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -318,8 +321,9 @@ fn configured_project_with_materialized_carriers(
 /// source set follows the resolved owner identity, not the parent's raw walk cache.
 #[test]
 fn configured_frontier_scope_excludes_nested_project_carriers_from_broad_membership() {
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::workspace_snapshot::{
-        ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+        ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
 
     let root = "d:/workspace";

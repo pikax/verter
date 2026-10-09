@@ -17,7 +17,7 @@
 //! from, and are re-exported for the handler-signature summarizers in `hover.rs`.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::features::event_modifiers::{modifier_description, modifier_description_for_event};

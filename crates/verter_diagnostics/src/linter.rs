@@ -8,9 +8,9 @@ use crate::cross_file::CrossFileSnapshot;
 use crate::diagnostic_set::DiagnosticSet;
 use crate::rules::{FileContext, RuleRegistry};
 use crate::visitor::LintVisitor;
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
-use verter_semantic::analysis::StyleBlockAnalysis;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::style::StyleBlockAnalysis;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 /// Main linter engine. Holds the rule registry and configuration.
 pub struct Linter {

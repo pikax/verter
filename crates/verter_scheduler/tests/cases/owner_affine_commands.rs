@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use verter_scheduler::dag::{DepKey, FileStageKey, WorkNodeIdentity};
-use verter_scheduler::owner_command::OwnerCommand;
-use verter_scheduler::pool::{
+use verter_scheduler::execution::owner_command::OwnerCommand;
+use verter_scheduler::execution::pool::{
     SchedulerCpuPool, SchedulerIoPool, SchedulerPoolSubmitError, SchedulerPoolSubmitResult,
 };
 use verter_scheduler::{Admission, CpuPool};
@@ -113,11 +113,13 @@ fn cpu_owner_command_submit_is_bounded() {
 fn dep_key_has_no_resource_capacity_arm() {
     let file = DepKey::from_identity(&WorkNodeIdentity::FileStage {
         canonical: Arc::from("/a.ts"),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Source,
     });
     let artifact = DepKey::from_identity(&WorkNodeIdentity::Artifact {
         canonical: Arc::from("/a.ts"),
+        incarnation: 1,
         generation: 1,
         profile_hash: [0; 16],
         content_hash: [0; 16],

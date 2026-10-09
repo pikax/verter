@@ -10,7 +10,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateElement;
+use verter_session_query::analysis::template::TemplateElement;
 
 /// Vue built-in component names that shouldn't be overridden.
 const RESERVED_NAMES: &[&str] = &[
@@ -77,7 +77,7 @@ impl LintRule for NoReservedComponentNames {
 
     fn check_template(
         &self,
-        tpl: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        tpl: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
         ctx: &mut LintContext,
     ) {
         // Use the template's components list to check import sources.
@@ -114,8 +114,9 @@ impl LintRule for NoReservedComponentNames {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateComponentUsage;
 
-    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run_rule(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

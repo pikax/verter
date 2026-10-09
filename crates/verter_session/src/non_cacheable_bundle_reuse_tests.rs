@@ -132,10 +132,15 @@ fn touch_bundle(
 ) -> (bool, bool, u64) {
     let view = host.resolver_store_view_read().into_owned_view();
     let before = cold_flight_runs(host);
-    let (bundle, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
-        |_probe| host.prepared_decl_bundle_with_store_view(&view, Some(memo.bundle_memo()), owner),
-    );
+    let (bundle, non_cacheable) =
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
+            |_probe| {
+                host.prepared_decl_bundle_with_store_view(&view, Some(memo.bundle_memo()), owner)
+            },
+        );
     (
         bundle.is_some(),
         non_cacheable,

@@ -36,16 +36,16 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::MacroExpansionDiagnostics;
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::MacroExpansionDiagnostics;
+use verter_session_query::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedObjectShape,
     ExpandedProperty, ExpansionExecutionStatus, ExpansionResult,
 };
-use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::type_solver::result::{ExecutionStatus, SolverExactness};
 
-use crate::resolver_core::ResolverContext;
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Top-level driver: publish the `define_props` / `define_emits` /
 /// `define_slots` shapes for every type-based macro in `snapshot`.
@@ -63,6 +63,7 @@ pub(crate) fn project_define_macro_shapes(
     _diag_sink: &mut [MacroExpansionDiagnostics],
     purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
 ) {
+    let dispatch = query_engine.dispatch;
     use crate::resolver_core::ComponentMetaResolutionPurpose;
     let ctx = query_engine.ctx;
 
@@ -90,7 +91,7 @@ pub(crate) fn project_define_macro_shapes(
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
                 if let Some(result) =
-                    define_props_shape(ctx, owner_canonical, macro_index, evaluated_types)
+                    define_props_shape(ctx, dispatch, owner_canonical, macro_index, evaluated_types)
                 {
                     evaluated_types.define_props.push(ExpandedMacroProps {
                         macro_index,
@@ -99,7 +100,9 @@ pub(crate) fn project_define_macro_shapes(
                 }
             }
             AnalyzedMacroKind::DefineEmits => {
-                if let Some(result) = define_emits_shape(ctx, owner_canonical, macro_index) {
+                if let Some(result) =
+                    define_emits_shape(ctx, dispatch, owner_canonical, macro_index)
+                {
                     evaluated_types.define_emits.push(ExpandedMacroObjectShape {
                         macro_index,
                         result,
@@ -107,7 +110,9 @@ pub(crate) fn project_define_macro_shapes(
                 }
             }
             AnalyzedMacroKind::DefineSlots => {
-                if let Some(result) = define_slots_shape(ctx, owner_canonical, macro_index) {
+                if let Some(result) =
+                    define_slots_shape(ctx, dispatch, owner_canonical, macro_index)
+                {
                     evaluated_types.define_slots.push(ExpandedMacroObjectShape {
                         macro_index,
                         result,
@@ -145,13 +150,18 @@ pub(crate) fn project_define_macro_shapes(
 /// macro resolved to no props" rather than "no macro". This distinguishes
 /// resolved-but-empty from unresolved/missing.
 fn define_props_shape(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     if !macro_surface_resolves(
         ctx,
+        dispatch,
         owner_canonical,
         macro_index,
         AnalyzedMacroKind::DefineProps,
@@ -160,8 +170,10 @@ fn define_props_shape(
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineProps),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     // Fold a genuine partial macro surface into the request-result
     // completeness so the enclosing component-meta result is refused warm
     // promotion (the no-poison invariant).
@@ -234,7 +246,11 @@ fn define_props_shape(
 /// No secondary evaluated/analyzer row participates: every occurrence owns
 /// its payload source and publication evidence.
 fn define_emits_shape(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -242,6 +258,7 @@ fn define_emits_shape(
     // emits surface with no events is `Some(empty)`.
     if !macro_surface_resolves(
         ctx,
+        dispatch,
         owner_canonical,
         macro_index,
         AnalyzedMacroKind::DefineEmits,
@@ -250,8 +267,10 @@ fn define_emits_shape(
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     dtos_read.observe_partial();
     let dtos = dtos_read.dtos;
 
@@ -303,7 +322,11 @@ fn define_emits_shape(
 /// as the slot's `(props: { ... }) => RT` function expression. Per-slot
 /// bindings are published separately by `resolve_slot_bindings_graph_native`.
 fn define_slots_shape(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -311,6 +334,7 @@ fn define_slots_shape(
     // slots surface with no slot members is `Some(empty)`.
     if !macro_surface_resolves(
         ctx,
+        dispatch,
         owner_canonical,
         macro_index,
         AnalyzedMacroKind::DefineSlots,
@@ -319,8 +343,10 @@ fn define_slots_shape(
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     dtos_read.observe_partial();
     let dtos = dtos_read.dtos;
 
@@ -358,17 +384,21 @@ fn define_slots_shape(
 /// flows through `ctx`, and the underlying dispatch queries are memoised in the
 /// shared `SemanticGraphStore`, so this shares the DTO path's reduction work.
 fn macro_surface_resolves(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
 ) -> bool {
-    ctx.host_for_fact_tracer_install()
-        .resolve_vue_macro_surface_with_ctx(
-            ctx,
-            &dto_request(owner_canonical, macro_index, macro_kind),
-        )
-        .is_some()
+    crate::typeinfo::framework_surface::vue_exec::resolve_vue_macro_surface_with_ctx(
+        ctx,
+        dispatch,
+        &dto_request(owner_canonical, macro_index, macro_kind),
+    )
+    .is_some()
 }
 
 /// FullMetadata DTO request for `(owner, macro_index, kind)`.
@@ -400,7 +430,7 @@ fn dto_request(
 /// `SemanticNodeData::Signature` carrier — node synthesis is demand-driven at
 /// the consuming dispatch, never eager here. No source-text reparse.
 pub(crate) fn slot_field_function_source(
-    slot: &verter_semantic::analysis::AnalyzedSlotField,
+    slot: &verter_session_query::analysis::types::AnalyzedSlotField,
 ) -> verter_type_expr::facts::SemanticTypeSource {
     use verter_type_expr::facts::{
         ClosedTypeFact, FunctionParamFact, FunctionSignatureFact, SemanticTypeSource,
@@ -460,7 +490,7 @@ pub(crate) fn slot_field_function_source(
 /// typed `RequiredSourceUnavailable` error).
 fn fail_shape_result_on_failed_member(
     properties: &[ExpandedProperty],
-    index_signatures: &[verter_semantic::analysis::type_expand::ExpandedIndexSignature],
+    index_signatures: &[verter_session_query::analysis::type_expand::ExpandedIndexSignature],
     exactness: &mut SolverExactness,
     execution_status: &mut ExecutionStatus,
 ) {
@@ -477,7 +507,7 @@ fn fail_shape_result_on_failed_member(
     }
     *exactness = SolverExactness::Incomplete;
     *execution_status = merge_execution_status(*execution_status, ExecutionStatus::HardStop);
-    crate::request_context::mark_request_result_partial();
+    verter_type_engine::request_context::mark_request_result_partial();
 }
 
 /// Severity-ordered merge of two expansion execution statuses (the worse status

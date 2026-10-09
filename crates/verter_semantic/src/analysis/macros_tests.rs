@@ -2,6 +2,7 @@ use oxc_allocator::Allocator;
 use oxc_parser::ParseOptions;
 use oxc_span::SourceType;
 use verter_parser::oxc_parse::Parser;
+use verter_session_query::analysis::macros::props_root_binding;
 
 use super::*;
 
@@ -2812,7 +2813,7 @@ mod locator_only_macro_replay {
         reset_test_build_count, test_build_count, RootBindingIndex,
     };
     use crate::analysis::scope::AnalysisScope;
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::ConstructorBindingOutcome;
 
     fn parse_source<'a>(alloc: &'a Allocator, source: &'a str) -> oxc_parser::ParserReturn<'a> {

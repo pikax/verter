@@ -1,0 +1,9 @@
+error[E0451]: fields `ty` and `frame_root` of struct `GatedLeaf` are private
+  --> tests/compile-fail/flow_gated_leaf_struct_literal_not_forgeable.rs:9:9
+   |
+ 8 |     GatedLeaf {
+   |     --------- in this type
+ 9 |         ty: leaf.ty().clone(),
+   |         ^^ private field
+10 |         frame_root: None,
+   |         ^^^^^^^^^^ private field

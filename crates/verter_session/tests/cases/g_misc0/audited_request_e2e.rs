@@ -1,19 +1,17 @@
 //! End-to-end coverage for `AuditedRequest` — confirms the audit
 //! record is published, the outer request_id is preserved through
-//! `resolve_component_meta_with_view`, and `take_audit_record` drains
+//! `resolve_component_meta_with_view`, and `take_record` drains
 //! a concrete record.
 //!
 //! Protects against two regressions found in the post-F5 review:
 //!
 //! 1. `emit_audit_trace` used to just stderr the record and drop it
 //!    without inserting into the host's `AuditRecordsStore`, so
-//!    `take_audit_record` always returned `None`.
-//! 2. `resolve_component_meta_with_view` used its own global static
-//!    `next_component_meta_audit_request_id` counter, producing a
-//!    different id from the one stamped onto
-//!    `ResolvedComponentMetaState.request_id` by
-//!    `get_component_meta_with_resolution` — the record was stored
-//!    under the inner id while callers looked up with the outer id.
+//!    `take_record` always returned `None`.
+//! 2. `resolve_component_meta_with_view` must key its record by the
+//!    request id the outer `get_component_meta_with_resolution` stamped
+//!    onto `ResolvedComponentMetaState.request_id`; a freshly minted
+//!    inner id would store the record where callers never look.
 
 use std::sync::Arc;
 
@@ -60,7 +58,7 @@ fn audited_request_attach_to_returns_triple_with_matching_request_id() {
     assert_eq!(
         record.request_id, resolution.request_id,
         "audit record's request_id must match resolution.request_id so \
-         `take_audit_record(resolution.request_id)` drains the right record",
+         `take_record(resolution.request_id)` drains the right record",
     );
     assert_eq!(record.canonical_id, "/x.vue");
 }
@@ -76,7 +74,9 @@ fn audited_request_attach_to_take_audit_record_drains_after_resolve() {
     // The harness already drained the record; a second take by the same
     // id must return None (strict insert-then-take semantics).
     assert!(
-        host.take_audit_record(resolution.request_id).is_none(),
+        host.host_audit_runtime()
+            .take_record(resolution.request_id)
+            .is_none(),
         "record must have been drained by the harness on return",
     );
 }
@@ -89,7 +89,7 @@ fn concurrent_audits_on_same_host_each_see_their_own_record() {
     // Two concurrent audited-request threads on the same host, each
     // resolving the same canonical. Distinct request_ids must be
     // assigned (host.next_request_id is thread-safe) and each
-    // thread's `take_audit_record(resolution.request_id)` must drain
+    // thread's `take_record(resolution.request_id)` must drain
     // that thread's own record, not the other's.
     let h1 = {
         let host = Arc::clone(&host);
@@ -343,7 +343,8 @@ fn direct_resolve_without_audit_context_still_publishes_via_static_counter() {
     // the audit_builder sees it and stamps the record with the same id.
     assert!(resolution.request_id > 0);
     let record = host
-        .take_audit_record(resolution.request_id)
+        .host_audit_runtime()
+        .take_record(resolution.request_id)
         .expect("record must be published under the outer request_id");
     assert_eq!(record.request_id, resolution.request_id);
     assert_eq!(record.canonical_id, "/x.vue");

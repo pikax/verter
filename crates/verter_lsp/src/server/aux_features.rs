@@ -41,7 +41,7 @@ pub(super) async fn handle_document_symbol(
     server: &VerterLanguageServer,
     params: DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
-    let _hg = HandlerGuard::new("document_symbol");
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_symbol");
     let uri = &params.text_document.uri;
 
     let symbols = (|| {
@@ -91,7 +91,7 @@ pub(super) async fn handle_folding_range(
     server: &VerterLanguageServer,
     params: FoldingRangeParams,
 ) -> Result<Option<Vec<FoldingRange>>> {
-    let _hg = HandlerGuard::new("folding_range");
+    let _hg = HandlerGuard::new(&server.handler_activity, "folding_range");
     let uri = &params.text_document.uri;
 
     let ranges = (|| {
@@ -113,7 +113,7 @@ pub(super) async fn handle_selection_range(
     server: &VerterLanguageServer,
     params: SelectionRangeParams,
 ) -> Result<Option<Vec<SelectionRange>>> {
-    let _hg = HandlerGuard::new("selection_range");
+    let _hg = HandlerGuard::new(&server.handler_activity, "selection_range");
     let uri = &params.text_document.uri;
 
     let result = (|| {
@@ -185,7 +185,21 @@ pub(super) async fn handle_document_highlight(
     server: &VerterLanguageServer,
     params: DocumentHighlightParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
-    let _hg = HandlerGuard::new("document_highlight");
+    let uri = &params.text_document_position_params.text_document.uri;
+    server
+        .answer_foreground(
+            crate::documents::ForegroundRoute::DocumentHighlight,
+            uri,
+            handle_document_highlight_attempt(server, &params),
+        )
+        .await
+}
+
+async fn handle_document_highlight_attempt(
+    server: &VerterLanguageServer,
+    params: &DocumentHighlightParams,
+) -> Result<Option<Vec<DocumentHighlight>>> {
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_highlight");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -290,7 +304,7 @@ pub(super) async fn handle_signature_help(
     server: &VerterLanguageServer,
     params: SignatureHelpParams,
 ) -> Result<Option<SignatureHelp>> {
-    let _hg = HandlerGuard::new("signature_help");
+    let _hg = HandlerGuard::new(&server.handler_activity, "signature_help");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -346,7 +360,20 @@ pub(super) async fn handle_code_action(
     server: &VerterLanguageServer,
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
-    let _hg = HandlerGuard::new("code_action");
+    server
+        .answer_repaired_edit_foreground(
+            crate::documents::ForegroundRoute::CodeAction,
+            &params.text_document.uri,
+            handle_code_action_attempt(server, &params),
+        )
+        .await
+}
+
+async fn handle_code_action_attempt(
+    server: &VerterLanguageServer,
+    params: &CodeActionParams,
+) -> Result<Option<CodeActionResponse>> {
+    let _hg = HandlerGuard::new(&server.handler_activity, "code_action");
     let uri = &params.text_document.uri;
     let range = &params.range;
 
@@ -390,7 +417,10 @@ pub(super) async fn handle_code_action(
             // macro edit offset is analyzer-minted against the bytes the
             // ANALYSIS saw, so the two identities must agree before an edit is
             // produced.
-            let live_revision = verter_session::AnalysisSourceRevision::of_source(&doc.source);
+            let live_revision =
+                verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+                    &doc.source,
+                );
             let mut macro_actions = crate::features::macro_actions::macro_code_actions(
                 &doc.source,
                 live_revision,
@@ -596,6 +626,7 @@ pub(super) async fn handle_code_action(
                         };
                         let preamble_reanchor =
                             crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor_from_structure(
+                                server.documents.language_classifier(),
                                 &ctx.tsx_path,
                                 &carrier_source,
                                 &user_import_spans,
@@ -612,11 +643,7 @@ pub(super) async fn handle_code_action(
                             }),
                             &carrier_source_exists,
                             negotiated_encoding,
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
+                            &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                             preamble_reanchor.as_ref(),
                         );
                         all_actions.extend(actions);
@@ -755,7 +782,20 @@ pub(super) async fn handle_semantic_tokens_full(
     server: &VerterLanguageServer,
     params: SemanticTokensParams,
 ) -> Result<Option<SemanticTokensResult>> {
-    let _hg = HandlerGuard::new("semantic_tokens");
+    server
+        .answer_foreground(
+            crate::documents::ForegroundRoute::SemanticTokens,
+            &params.text_document.uri,
+            handle_semantic_tokens_full_attempt(server, &params),
+        )
+        .await
+}
+
+async fn handle_semantic_tokens_full_attempt(
+    server: &VerterLanguageServer,
+    params: &SemanticTokensParams,
+) -> Result<Option<SemanticTokensResult>> {
+    let _hg = HandlerGuard::new(&server.handler_activity, "semantic_tokens");
     let uri = &params.text_document.uri;
 
     // Skip TSGO while typing — serial TSGO pipeline must stay clear
@@ -829,7 +869,7 @@ pub(super) async fn handle_code_lens(
     server: &VerterLanguageServer,
     params: CodeLensParams,
 ) -> Result<Option<Vec<CodeLens>>> {
-    let _hg = HandlerGuard::new("code_lens");
+    let _hg = HandlerGuard::new(&server.handler_activity, "code_lens");
     let uri = &params.text_document.uri;
 
     let lenses = (|| {
@@ -849,7 +889,20 @@ pub(super) async fn handle_inlay_hint(
     server: &VerterLanguageServer,
     params: InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>> {
-    let _hg = HandlerGuard::new("inlay_hint");
+    server
+        .answer_foreground(
+            crate::documents::ForegroundRoute::InlayHint,
+            &params.text_document.uri,
+            handle_inlay_hint_attempt(server, &params),
+        )
+        .await
+}
+
+async fn handle_inlay_hint_attempt(
+    server: &VerterLanguageServer,
+    params: &InlayHintParams,
+) -> Result<Option<Vec<InlayHint>>> {
+    let _hg = HandlerGuard::new(&server.handler_activity, "inlay_hint");
     let uri = &params.text_document.uri;
     let range = &params.range;
 
@@ -1040,7 +1093,7 @@ pub(super) async fn handle_linked_editing_range(
     server: &VerterLanguageServer,
     params: LinkedEditingRangeParams,
 ) -> Result<Option<LinkedEditingRanges>> {
-    let _hg = HandlerGuard::new("linked_editing");
+    let _hg = HandlerGuard::new(&server.handler_activity, "linked_editing");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -1057,7 +1110,7 @@ pub(super) async fn handle_document_link(
     server: &VerterLanguageServer,
     params: DocumentLinkParams,
 ) -> Result<Option<Vec<DocumentLink>>> {
-    let _hg = HandlerGuard::new("document_link");
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_link");
     let uri = &params.text_document.uri;
 
     let links = (|| {
@@ -1079,7 +1132,7 @@ pub(super) async fn handle_document_color(
     server: &VerterLanguageServer,
     params: DocumentColorParams,
 ) -> Result<Vec<ColorInformation>> {
-    let _hg = HandlerGuard::new("document_color");
+    let _hg = HandlerGuard::new(&server.handler_activity, "document_color");
     let uri = &params.text_document.uri;
 
     let colors = (|| {
@@ -1098,10 +1151,10 @@ pub(super) async fn handle_document_color(
 }
 
 pub(super) async fn handle_color_presentation(
-    _server: &VerterLanguageServer,
+    server: &VerterLanguageServer,
     params: ColorPresentationParams,
 ) -> Result<Vec<ColorPresentation>> {
-    let _hg = HandlerGuard::new("color_presentation");
+    let _hg = HandlerGuard::new(&server.handler_activity, "color_presentation");
     Ok(color_info::color_presentations(&params.color))
 }
 
@@ -1109,7 +1162,7 @@ pub(super) async fn handle_formatting(
     server: &VerterLanguageServer,
     params: DocumentFormattingParams,
 ) -> Result<Option<Vec<TextEdit>>> {
-    let _hg = HandlerGuard::new("formatting");
+    let _hg = HandlerGuard::new(&server.handler_activity, "formatting");
     let uri = &params.text_document.uri;
 
     let edits = (|| {
@@ -1141,17 +1194,14 @@ pub(super) async fn handle_formatting(
 /// else (non-carrier, or a future carrier without its own arm) returns `None`
 /// and the on-type handler emits no edit.
 fn carrier_kind_for_on_type(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     language_id: &str,
     canonical_id: &str,
 ) -> Option<crate::features::auto_close_tag::CarrierKind> {
     use crate::features::auto_close_tag::carrier_kind_for_language;
-    let language = verter_session::LanguageRegistry::global()
+    let language = classifier
         .carrier_for_editor_language_id(language_id)
-        .unwrap_or_else(|| {
-            verter_session::LanguageRegistry::global()
-                .classify_static(canonical_id)
-                .static_resolution()
-        });
+        .unwrap_or_else(|| classifier.classify(canonical_id));
     carrier_kind_for_language(&language)
 }
 
@@ -1159,7 +1209,7 @@ pub(super) async fn handle_on_type_formatting(
     server: &VerterLanguageServer,
     params: DocumentOnTypeFormattingParams,
 ) -> Result<Option<Vec<TextEdit>>> {
-    let _hg = HandlerGuard::new("on_type_formatting");
+    let _hg = HandlerGuard::new(&server.handler_activity, "on_type_formatting");
     let uri = &params.text_document_position.text_document.uri;
     let position = &params.text_document_position.position;
 
@@ -1174,7 +1224,11 @@ pub(super) async fn handle_on_type_formatting(
         // `<script>` / `<style>` blocks. The carrier kind is resolved from the
         // document's authoritative editor `language_id`; the region gate lives
         // in `auto_close_tag_in_carrier`.
-        let carrier = carrier_kind_for_on_type(&doc.language_id, &doc.canonical_id)?;
+        let carrier = carrier_kind_for_on_type(
+            server.documents.language_classifier(),
+            &doc.language_id,
+            &doc.canonical_id,
+        )?;
 
         let offset = doc.line_index.position_to_offset(position)? as usize;
         let snippet = crate::features::auto_close_tag::auto_close_tag_in_structure(
@@ -1201,7 +1255,7 @@ pub(super) async fn handle_symbol(
     server: &VerterLanguageServer,
     params: WorkspaceSymbolParams,
 ) -> Result<Option<WorkspaceSymbolResponse>> {
-    let _hg = HandlerGuard::new("workspace_symbol");
+    let _hg = HandlerGuard::new(&server.handler_activity, "workspace_symbol");
     let symbols = workspace_symbols(&server.documents.host(), &params.query);
     Ok(if symbols.is_empty() {
         None
@@ -1214,7 +1268,7 @@ pub(super) async fn handle_prepare_call_hierarchy(
     server: &VerterLanguageServer,
     params: CallHierarchyPrepareParams,
 ) -> Result<Option<Vec<CallHierarchyItem>>> {
-    let _hg = HandlerGuard::new("prepare_call_hierarchy");
+    let _hg = HandlerGuard::new(&server.handler_activity, "prepare_call_hierarchy");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
 
@@ -1239,7 +1293,7 @@ pub(super) async fn handle_incoming_calls(
     server: &VerterLanguageServer,
     params: CallHierarchyIncomingCallsParams,
 ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
-    let _hg = HandlerGuard::new("incoming_calls");
+    let _hg = HandlerGuard::new(&server.handler_activity, "incoming_calls");
     let uri = &params.item.uri;
 
     let calls = (|| {
@@ -1264,7 +1318,7 @@ pub(super) async fn handle_outgoing_calls(
     server: &VerterLanguageServer,
     params: CallHierarchyOutgoingCallsParams,
 ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-    let _hg = HandlerGuard::new("outgoing_calls");
+    let _hg = HandlerGuard::new(&server.handler_activity, "outgoing_calls");
     let uri = &params.item.uri;
 
     let calls = (|| {
@@ -1286,8 +1340,18 @@ pub(super) async fn handle_outgoing_calls(
 
 #[cfg(test)]
 mod on_type_gate_tests {
-    use super::carrier_kind_for_on_type;
     use crate::features::auto_close_tag::CarrierKind;
+    use verter_session::framework::{
+        FrameworkOptions, HostLanguageClassifier, ProjectCapabilitySnapshot,
+    };
+
+    fn carrier_kind_for_on_type(language_id: &str, canonical_id: &str) -> Option<CarrierKind> {
+        super::carrier_kind_for_on_type(
+            &HostLanguageClassifier::default(),
+            language_id,
+            canonical_id,
+        )
+    }
 
     /// BLOCKER 1: the on-type auto-close gate must resolve a carrier ONLY for a
     /// framework carrier document. A plain `.ts` / `.js` / `.tsx` document (where
@@ -1347,6 +1411,32 @@ mod on_type_gate_tests {
         assert_eq!(
             carrier_kind_for_on_type("plaintext", "file:///proj/src/App.svelte"),
             Some(CarrierKind::Svelte),
+        );
+    }
+
+    /// A host narrowed to Vue never resolves the Svelte markup carrier — not
+    /// from the editor `languageId`, not from the `.svelte` path — so on-type
+    /// formatting cannot answer with Svelte tag edits for a vertical the
+    /// serving host does not admit, while the admitted carrier still engages.
+    #[test]
+    fn unadmitted_carrier_resolves_to_no_carrier_on_a_narrowed_host() {
+        let vue_only = HostLanguageClassifier::with_built_in_registry_and_options(
+            ProjectCapabilitySnapshot::empty(),
+            &FrameworkOptions::admitting_names(["vue"]).expect("vue is composed"),
+        );
+        for (lang, path) in [
+            ("svelte", "file:///proj/src/App.svelte"),
+            ("plaintext", "file:///proj/src/App.svelte"),
+        ] {
+            assert_eq!(
+                super::carrier_kind_for_on_type(&vue_only, lang, path),
+                None,
+                "`{lang}` at {path} names a carrier this host does not admit",
+            );
+        }
+        assert_eq!(
+            super::carrier_kind_for_on_type(&vue_only, "vue", "file:///proj/src/App.vue"),
+            Some(CarrierKind::Vue),
         );
     }
 }

@@ -1,25 +1,86 @@
 use std::{collections::HashMap, sync::Arc};
 
-use tower_lsp_server::{
-    ls_types::{Diagnostic, Uri},
-    Client,
-};
+use tower_lsp_server::ls_types::{Diagnostic, Uri};
 
 use super::{uri_to_canonical_id, DocumentRegistry, DocumentSnapshotIdentity};
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
 
 #[derive(Clone)]
-pub(crate) struct DiagnosticPublication {
+pub(crate) struct ReadinessBasis {
     pub snapshot: DocumentSnapshotIdentity,
+    environment: ObservedEnvironment,
+}
+
+/// The compiler generation and workspace root a basis observed.
+#[derive(Clone)]
+struct ObservedEnvironment {
     generation: Option<u64>,
-    epoch: u64,
+    // Weak identity prevents address reuse without retaining a retired root's payload.
+    workspace: Option<std::sync::Weak<verter_workspace::PublishedRoot>>,
+}
+
+impl ObservedEnvironment {
+    fn workspace_matches(
+        &self,
+        current: Option<&std::sync::Weak<verter_workspace::PublishedRoot>>,
+    ) -> bool {
+        match (self.workspace.as_ref(), current) {
+            (Some(before), Some(after)) => std::sync::Weak::ptr_eq(before, after),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether both are still the host's.
+    fn matches(&self, host: &verter_session::VerterHost, canonical_id: &str) -> bool {
+        let workspace = host.workspace_read().published_root();
+        host.get_diagnostics_generation(canonical_id) == self.generation
+            && self.workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
+    }
+}
+
+impl ReadinessBasis {
+    pub(crate) fn capture(documents: &DocumentRegistry, uri: &Uri) -> Option<Self> {
+        let snapshot = documents.snapshot_identity(uri)?;
+        let host = documents.host();
+        Some(Self {
+            snapshot,
+            environment: ObservedEnvironment {
+                generation: host.get_diagnostics_generation(&uri_to_canonical_id(uri)),
+                workspace: host
+                    .workspace_read()
+                    .published_root()
+                    .as_ref()
+                    .map(Arc::downgrade),
+            },
+        })
+    }
+
+    fn environment_is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        self.environment
+            .matches(&documents.host(), &uri_to_canonical_id(uri))
+    }
+
+    fn is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        documents.snapshot_identity_is_current(uri, &self.snapshot)
+            && self.environment_is_current(documents, uri)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PublicationEpoch(u64);
+
+#[derive(Clone)]
+pub(crate) struct BackgroundPublication {
+    basis: ReadinessBasis,
+    epoch: PublicationEpoch,
 }
 
 #[derive(Clone)]
 pub(crate) struct DiagnosticsRefresh {
     pub uri: Uri,
     pub snapshot: DocumentSnapshotIdentity,
-    epoch: u64,
+    epoch: PublicationEpoch,
 }
 
 /// One registered outbound diagnostics send.
@@ -31,7 +92,7 @@ pub(crate) struct DiagnosticsRefresh {
 struct InFlightSend {
     /// The epoch of the publication that owns this send, so a late publisher only
     /// ever releases the slot it registered itself.
-    epoch: u64,
+    epoch: PublicationEpoch,
     /// Held by the state map; dropped on cancellation. The publisher's receiver
     /// resolving (by value or by sender drop) means CANCELLED.
     _cancel: tokio::sync::oneshot::Sender<()>,
@@ -48,7 +109,7 @@ struct InFlightSend {
 /// editor waiting on the receipt never sends.
 #[derive(Clone)]
 struct DiagnosticsReceipt {
-    publication: DiagnosticPublication,
+    publication: BackgroundPublication,
     surface: Option<Arc<ProviderSurfaceSnapshot>>,
     complete: bool,
 }
@@ -56,7 +117,7 @@ struct DiagnosticsReceipt {
 #[derive(Default)]
 pub(super) struct DiagnosticsState {
     next_epoch: u64,
-    epochs: HashMap<String, u64>,
+    epochs: HashMap<String, PublicationEpoch>,
     receipts: HashMap<String, DiagnosticsReceipt>,
     /// The outbound sends currently suspended on the client channel, one per URI.
     in_flight: HashMap<String, InFlightSend>,
@@ -78,7 +139,7 @@ impl DiagnosticsState {
     /// The previous design made the close AWAIT a global publisher mutex that the
     /// send held across the client enqueue, so one stalled client consumer could
     /// strand every close, open and change behind it.
-    fn take_uri(&mut self, uri: &str, epoch: Option<u64>) {
+    fn take_uri(&mut self, uri: &str, epoch: Option<PublicationEpoch>) {
         match epoch {
             Some(epoch) => {
                 self.epochs.insert(uri.to_string(), epoch);
@@ -108,7 +169,7 @@ impl DocumentRegistry {
             return false;
         }
         state.next_epoch += 1;
-        let epoch = state.next_epoch;
+        let epoch = PublicationEpoch(state.next_epoch);
         state.take_uri(refresh.uri.as_str(), Some(epoch));
         true
     }
@@ -117,12 +178,9 @@ impl DocumentRegistry {
     /// discarded computation through the normal coordinator, once per epoch.
     /// A newer document or publication already owns its own work and must not
     /// be displaced by this older writer.
-    fn refresh_superseded_diagnostics(&self, uri: &Uri, publication: &DiagnosticPublication) {
-        if !self.snapshot_identity_is_current(uri, &publication.snapshot)
-            || self
-                .host()
-                .get_diagnostics_generation(&uri_to_canonical_id(uri))
-                == publication.generation
+    fn refresh_superseded_diagnostics(&self, uri: &Uri, publication: &BackgroundPublication) {
+        if !self.snapshot_identity_is_current(uri, &publication.basis.snapshot)
+            || publication.basis.environment_is_current(self, uri)
         {
             return;
         }
@@ -131,11 +189,11 @@ impl DocumentRegistry {
             return;
         }
         state.next_epoch += 1;
-        let epoch = state.next_epoch;
+        let epoch = PublicationEpoch(state.next_epoch);
         state.take_uri(uri.as_str(), Some(epoch));
         let _ = self.diagnostics_refresh_tx.send(DiagnosticsRefresh {
             uri: uri.clone(),
-            snapshot: publication.snapshot.clone(),
+            snapshot: publication.basis.snapshot.clone(),
             epoch,
         });
     }
@@ -146,7 +204,7 @@ impl DocumentRegistry {
     /// is in flight to notice, and no editor signal follows. Every publication
     /// therefore settles the receipts its own computation may have outdated.
     fn refresh_outdated_receipts(&self) {
-        let receipts: Vec<(Uri, DiagnosticPublication)> = self
+        let receipts: Vec<(Uri, BackgroundPublication)> = self
             .diagnostics_state
             .lock()
             .receipts
@@ -179,12 +237,12 @@ impl DocumentRegistry {
 
     /// Pending work invalidates immediately, including same-version semantic
     /// enrichment. The epoch also fences publications already awaiting a provider.
-    pub(crate) fn invalidate_diagnostics(&self, uri: &str) -> u64 {
+    pub(crate) fn invalidate_diagnostics(&self, uri: &str) -> PublicationEpoch {
         let mut state = self.diagnostics_state.lock();
         state.next_epoch += 1;
-        let epoch = state.next_epoch;
+        let epoch = PublicationEpoch(state.next_epoch);
         state.take_uri(uri, Some(epoch));
-        tracing::debug!(uri, epoch, "diagnostics invalidated");
+        tracing::debug!(uri, epoch = epoch.0, "diagnostics invalidated");
         epoch
     }
 
@@ -226,7 +284,7 @@ impl DocumentRegistry {
     /// invalidation or reopen has already replaced the entry, so this rollback
     /// finds a different epoch and leaves it alone. It can only ever remove the
     /// reservation it wrote itself.
-    fn rollback_unowned_reservation(&self, uri: &str, epoch: u64) {
+    fn rollback_unowned_reservation(&self, uri: &str, epoch: PublicationEpoch) {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri) == Some(&epoch) {
             state.take_uri(uri, None);
@@ -244,7 +302,7 @@ impl DocumentRegistry {
     fn claim_outbound_send(
         &self,
         uri: &Uri,
-        publication: &DiagnosticPublication,
+        publication: &BackgroundPublication,
     ) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri.as_str()) != Some(&publication.epoch) {
@@ -263,7 +321,7 @@ impl DocumentRegistry {
 
     /// Release the send slot this publication registered, iff it is still ours,
     /// and report whether it was.
-    fn release_outbound_send(&self, uri: &Uri, epoch: u64) -> bool {
+    fn release_outbound_send(&self, uri: &Uri, epoch: PublicationEpoch) -> bool {
         let mut state = self.diagnostics_state.lock();
         if state
             .in_flight
@@ -296,65 +354,55 @@ impl DocumentRegistry {
         state.epochs.len().max(state.receipts.len())
     }
 
-    pub(crate) fn begin_diagnostics_publication(&self, uri: &Uri) -> Option<DiagnosticPublication> {
-        self.admit_diagnostics_publication(uri, || {
-            Some((
-                self.snapshot_identity(uri)?,
-                self.host()
-                    .get_diagnostics_generation(&uri_to_canonical_id(uri)),
-            ))
-        })
+    pub(crate) fn begin_diagnostics_publication(&self, uri: &Uri) -> Option<BackgroundPublication> {
+        self.admit_diagnostics_publication(uri, || ReadinessBasis::capture(self, uri))
     }
 
     fn admit_diagnostics_publication(
         &self,
         uri: &Uri,
-        capture: impl FnOnce() -> Option<(DocumentSnapshotIdentity, Option<u64>)>,
-    ) -> Option<DiagnosticPublication> {
+        capture: impl FnOnce() -> Option<ReadinessBasis>,
+    ) -> Option<BackgroundPublication> {
         // Reserve ownership before capture: a suspended old read must never
         // retire a newer publication when it resumes.
         let epoch = self.invalidate_diagnostics(uri.as_str());
-        let Some((snapshot, generation)) = capture() else {
+        let Some(basis) = capture() else {
             // No publication will carry this epoch, so nothing will ever settle
             // it. Give it back — but only if it is still ours (see the method).
             self.rollback_unowned_reservation(uri.as_str(), epoch);
             return None;
         };
-        Some(DiagnosticPublication {
-            snapshot,
-            generation,
-            epoch,
-        })
+        Some(BackgroundPublication { basis, epoch })
     }
 
     pub(crate) fn diagnostic_publication_is_current(
         &self,
         uri: &Uri,
-        publication: &DiagnosticPublication,
+        publication: &BackgroundPublication,
     ) -> bool {
-        self.snapshot_identity_is_current(uri, &publication.snapshot)
-            && self
-                .host()
-                .get_diagnostics_generation(&uri_to_canonical_id(uri))
-                == publication.generation
+        publication.basis.is_current(self, uri)
             && self.diagnostics_state.lock().epochs.get(uri.as_str()) == Some(&publication.epoch)
     }
 
-    /// Publish one result, racing the client enqueue against this URI's
-    /// cancellation.
+    /// Publish one result, racing its delivery against this URI's cancellation.
     ///
-    /// The enqueue is bounded by the client channel, and a client that stops
-    /// draining it suspends the send for as long as it likes. NOTHING the document
-    /// lifecycle needs is held across that await: the fence is the synchronous
-    /// claim/cancel slot, not a mutex the close has to wait on, so a close, open or
-    /// change never queues behind a stalled consumer. A close instead CANCELS the
-    /// suspended enqueue, and the abandoned payload never reaches the client — the
-    /// same stale-publication guarantee, without the stranding.
+    /// The payload goes into the bounded [`crate::outbound::ReplaceableLane`],
+    /// and a client that stops reading suspends its delivery for as long as it
+    /// likes. NOTHING the document lifecycle needs is held across that await: the
+    /// fence is the synchronous claim/cancel slot, not a mutex the close has to
+    /// wait on, so a close, open or change never queues behind a stalled consumer.
+    /// A close or supersession instead CANCELS the suspended delivery, which
+    /// withdraws the payload from the lane, so it never reaches the client — the
+    /// same stale-publication guarantee, without the stranding. The transport
+    /// writer re-checks this epoch, under the same lock as the fence, and the
+    /// basis's compiler generation and workspace root at the moment it takes
+    /// the payload, so a publication cancelled before the take
+    /// is never written even if this task has not yet observed the cancellation.
+    /// Only the one payload already being written may finish.
     pub(crate) async fn publish_diagnostics(
         &self,
-        client: &Client,
         uri: &Uri,
-        publication: &DiagnosticPublication,
+        publication: &BackgroundPublication,
         diagnostics: Vec<Diagnostic>,
         complete: bool,
         surface: Option<Arc<ProviderSurfaceSnapshot>>,
@@ -366,9 +414,9 @@ impl DocumentRegistry {
             .then(|| self.claim_outbound_send(uri, publication))
             .flatten();
         let Some(cancelled) = claimed else {
-            tracing::debug!(uri = uri.as_str(), epoch = publication.epoch,
+            tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0,
                 current_epoch = ?self.diagnostics_state.lock().epochs.get(uri.as_str()),
-                generation = ?publication.generation,
+                generation = ?publication.basis.environment.generation,
                 current_generation = ?self.host().get_diagnostics_generation(&uri_to_canonical_id(uri)),
                 "diagnostics publication superseded");
             self.refresh_superseded_diagnostics(uri, publication);
@@ -376,16 +424,37 @@ impl DocumentRegistry {
             return;
         };
 
+        let params = tower_lsp_server::ls_types::PublishDiagnosticsParams::new(
+            uri.clone(),
+            diagnostics,
+            Some(publication.basis.snapshot.version),
+        );
+        // The take re-checks the whole basis: the epoch fences the source (every
+        // edit and close takes it), and the compiler generation and workspace
+        // root can each advance without touching the epoch.
+        let still_current = {
+            let state = Arc::clone(&self.diagnostics_state);
+            let host = self.host.clone();
+            let canonical_id = uri_to_canonical_id(uri);
+            let uri = uri.to_string();
+            let epoch = publication.epoch;
+            let environment = publication.basis.environment.clone();
+            move || {
+                state.lock().epochs.get(&uri) == Some(&epoch)
+                    && environment.matches(&host.host(), &canonical_id)
+            }
+        };
         let sent = tokio::select! {
             // Cancellation wins a tie: a close that has already taken the URI must
-            // never have its result committed as a receipt.
+            // never have its result committed as a receipt. Losing the race drops
+            // the lane offer, which withdraws a payload the writer has not taken.
             biased;
             _ = cancelled => false,
-            () = client.publish_diagnostics(
-                uri.clone(),
-                diagnostics,
-                Some(publication.snapshot.version),
-            ) => true,
+            delivery = self.diagnostics_outbound.publish_diagnostics(
+                publication.epoch.0,
+                params,
+                still_current,
+            ) => delivery == crate::outbound::Delivery::Delivered,
         };
         // Releasing our own slot is also how a cancelled publisher reports that the
         // URI moved on: the slot it registered is gone.
@@ -393,9 +462,12 @@ impl DocumentRegistry {
         if !sent || !still_ours {
             tracing::debug!(
                 uri = uri.as_str(),
-                epoch = publication.epoch,
+                epoch = publication.epoch.0,
                 "diagnostics send cancelled before it reached the client"
             );
+            // A payload the writer retired because its compiler generation or
+            // workspace moved on still owns the document: owe its replacement.
+            self.refresh_superseded_diagnostics(uri, publication);
             self.refresh_outdated_receipts();
             return;
         }
@@ -403,9 +475,9 @@ impl DocumentRegistry {
         let mut state = self.diagnostics_state.lock();
         if state.epochs.get(uri.as_str()) == Some(&publication.epoch) {
             if complete {
-                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch, generation = ?publication.generation, "diagnostics complete");
+                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.environment.generation, "diagnostics complete");
             } else {
-                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch, generation = ?publication.generation, "diagnostics incomplete; publication owed");
+                tracing::debug!(uri = uri.as_str(), epoch = publication.epoch.0, generation = ?publication.basis.environment.generation, "diagnostics incomplete; publication owed");
             }
             // An incomplete publication is recorded as OWED rather than dropped:
             // the generation advance that settles its carrier must find it.
@@ -433,7 +505,7 @@ impl DocumentRegistry {
         receipt.is_some_and(|receipt| {
             receipt.complete
                 && self.diagnostic_publication_is_current(uri, &receipt.publication)
-                && self.semantic_diagnostics_ready(uri, receipt.publication.snapshot.revision)
+                && self.semantic_diagnostics_ready(uri, receipt.publication.basis.snapshot.revision)
                 && receipt.surface.is_none_or(|snapshot| {
                     self.provider_surfaces
                         .captured_snapshot_still_honored(&snapshot)
@@ -637,6 +709,508 @@ mod tests {
         );
     }
 
+    fn diagnostic(message: &str) -> Vec<Diagnostic> {
+        vec![Diagnostic::new_simple(
+            tower_lsp_server::ls_types::Range::default(),
+            message.into(),
+        )]
+    }
+
+    /// A registry publishing through `outbound`'s diagnostics lane.
+    fn registry_on(outbound: &crate::outbound::Outbound) -> DocumentRegistry {
+        DocumentRegistry::with_diagnostics_lane(
+            Arc::new(VerterHost::new_standalone(HostConfig::default())),
+            outbound.diagnostics_lane(),
+        )
+    }
+
+    fn message_text(message: &tower_lsp_server::jsonrpc::Request) -> (String, String) {
+        let params: tower_lsp_server::ls_types::PublishDiagnosticsParams =
+            serde_json::from_value(message.params().cloned().expect("params"))
+                .expect("publishDiagnostics params decode");
+        let text = params
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        (params.uri.as_str().to_owned(), text)
+    }
+
+    /// Everything the writer would write right now, without waiting for more.
+    fn written_now(wire: &mut crate::outbound::Wire) -> Vec<(String, String)> {
+        use futures_util::{FutureExt as _, StreamExt as _};
+        let mut written = Vec::new();
+        while let Some(Some(message)) = wire.next().now_or_never() {
+            if message.method() == "textDocument/publishDiagnostics" {
+                written.push(message_text(&message));
+            }
+        }
+        written
+    }
+
+    /// A publication cancelled while the client is not reading never reaches
+    /// it, even when its own publisher task is still suspended.
+    ///
+    /// The editor stops reading, so the writer takes nothing and the edited
+    /// document's publication waits in the lane, its publisher parked on the
+    /// delivery. A newer edit (or a close) then cancels it — and the publisher
+    /// is deliberately NOT polled again, as when the runtime has not yet
+    /// scheduled it. When the editor resumes reading, the writer reaches the
+    /// stale payload first; it must see that the publication is no longer
+    /// current and retire it rather than write it.
+    ///
+    /// Discriminating: a writer that takes whatever is queued, relying on the
+    /// publisher to withdraw its own payload once it observes the cancellation,
+    /// writes `stale` (and, for the close, a diagnostics set for a document the
+    /// editor no longer has open).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cancelled_publication_is_retired_when_the_writer_reaches_it() {
+        for close in [false, true] {
+            let outbound = crate::outbound::Outbound::default();
+            let documents = registry_on(&outbound);
+            let edited: Uri = "file:///workspace/Edited.vue".parse().unwrap();
+            open(&documents, &edited);
+
+            let stale = documents.begin_diagnostics_publication(&edited).unwrap();
+            let stale_send =
+                documents.publish_diagnostics(&edited, &stale, diagnostic("stale"), true, None);
+            tokio::pin!(stale_send);
+            assert!(
+                futures_util::poll!(&mut stale_send).is_pending(),
+                "nobody is writing, so the publication waits for the client"
+            );
+            assert_eq!(outbound.load().replaceable.admitted.messages, 1);
+
+            if close {
+                documents.did_close(&edited);
+            } else {
+                let _newer = documents.begin_diagnostics_publication(&edited).unwrap();
+            }
+
+            // The editor resumes reading before the stale publisher runs again.
+            let mut wire = outbound.wire();
+            assert_eq!(
+                written_now(&mut wire),
+                Vec::<(String, String)>::new(),
+                "the cancelled payload must never be written (close: {close})"
+            );
+            assert_eq!(
+                outbound.load().replaceable.retained(),
+                Default::default(),
+                "the retired payload is no longer retained"
+            );
+            stale_send.await;
+            assert!(!documents.diagnostics_ready(&edited));
+        }
+    }
+
+    /// The writer retires a queued publication when the compiler generation or
+    /// workspace root changes without an editor edit, then owes a replacement.
+    /// An epoch-only take fence writes `obsolete` behind the stalled frame.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_transport_retires_publications_from_an_outdated_environment() {
+        use serde_json::json;
+        use tower_lsp_server::ls_types::notification::LogMessage;
+        use tower_lsp_server::ls_types::{LogMessageParams, MessageType};
+
+        struct ServerTask(tokio::task::JoinHandle<()>);
+        impl Drop for ServerTask {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        for change_workspace in [false, true] {
+            let outbound = crate::outbound::Outbound::default();
+            let documents = registry_on(&outbound);
+            let vfs = crate::test_utils::make_test_vfs_workspace_with_resolver(
+                "/workspace",
+                Some("/workspace/tsconfig.json"),
+            )
+            .read()
+            .clone()
+            .unwrap();
+            documents.host().set_workspace(vfs.clone());
+            let (service, _socket) = tower_lsp_server::LspService::new(|_| HandshakeOnly);
+            let (editor_end, server_end) = tokio::io::duplex(2048);
+            let (server_in, server_out) = tokio::io::split(server_end);
+            let mut server = ServerTask(tokio::spawn(crate::outbound::serve(
+                server_in,
+                server_out,
+                service,
+                outbound.clone(),
+            )));
+            let (editor_in, mut editor_out) = tokio::io::split(editor_end);
+            let mut reader = tokio::io::BufReader::new(editor_in);
+            send_frame(
+                &mut editor_out,
+                json!({"jsonrpc":"2.0", "id":1,
+                "method":"initialize", "params":{"capabilities":{}}}),
+            )
+            .await;
+            assert_eq!(recv_frame(&mut reader).await["id"], 1);
+            outbound.notify_detached::<LogMessage>(LogMessageParams {
+                typ: MessageType::LOG,
+                message: "x".repeat(8192),
+            });
+            let edited: Uri = "file:///workspace/Edited.vue".parse().unwrap();
+            let sentinel: Uri = "file:///workspace/Sentinel.vue".parse().unwrap();
+            open(&documents, &edited);
+            open(&documents, &sentinel);
+            let mut refreshes = documents.subscribe_diagnostics_refresh();
+            let obsolete = documents.begin_diagnostics_publication(&edited).unwrap();
+            let obsolete_send = documents.publish_diagnostics(
+                &edited,
+                &obsolete,
+                diagnostic("obsolete"),
+                true,
+                None,
+            );
+            tokio::pin!(obsolete_send);
+            assert!(futures_util::poll!(&mut obsolete_send).is_pending());
+            if change_workspace {
+                let root = documents.host().workspace_read().published_root().unwrap();
+                vfs.publish_snapshot(verter_workspace::PublishedRoot::new_vfs_only(
+                    root.snapshot.clone(),
+                ));
+                assert_eq!(
+                    documents
+                        .host()
+                        .get_diagnostics_generation(&uri_to_canonical_id(&edited)),
+                    obsolete.basis.environment.generation,
+                    "only the workspace basis changed"
+                );
+            } else {
+                documents
+                    .host()
+                    .bump_diagnostics_generation(&uri_to_canonical_id(&edited));
+            }
+            assert!(!documents.diagnostic_publication_is_current(&edited, &obsolete));
+            let marker = documents.begin_diagnostics_publication(&sentinel).unwrap();
+            let marker_send = documents.publish_diagnostics(
+                &sentinel,
+                &marker,
+                diagnostic("sentinel"),
+                true,
+                None,
+            );
+            tokio::pin!(marker_send);
+            assert!(futures_util::poll!(&mut marker_send).is_pending());
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                assert_eq!(recv_frame(&mut reader).await["method"], "window/logMessage");
+                let next = recv_frame(&mut reader).await;
+                assert_eq!(
+                    next["params"]["uri"],
+                    sentinel.as_str(),
+                    "the obsolete publication never reaches the resumed editor"
+                );
+                obsolete_send.await;
+                marker_send.await;
+            })
+            .await
+            .expect("the resumed writer reaches the sentinel");
+            assert!(!documents.diagnostics_ready(&edited));
+            assert_eq!(
+                refreshes.try_recv().expect("a replacement is owed").uri,
+                edited
+            );
+            send_frame(&mut editor_out, json!({"jsonrpc":"2.0", "method":"exit"})).await;
+            tokio::time::timeout(std::time::Duration::from_secs(30), &mut server.0)
+                .await
+                .expect("the session exits")
+                .unwrap();
+        }
+    }
+
+    /// A publication superseded while it waits for a slow client is withdrawn,
+    /// and the client receives only the newer diagnostics once it reads again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_send_superseded_behind_a_slow_client_never_reaches_it() {
+        let outbound = crate::outbound::Outbound::default();
+        let documents = registry_on(&outbound);
+        let busy: Uri = "file:///workspace/Busy.vue".parse().unwrap();
+        let edited: Uri = "file:///workspace/Edited.vue".parse().unwrap();
+        open(&documents, &busy);
+        open(&documents, &edited);
+
+        let first = documents.begin_diagnostics_publication(&busy).unwrap();
+        let first_send =
+            documents.publish_diagnostics(&busy, &first, diagnostic("busy-1"), true, None);
+        tokio::pin!(first_send);
+        assert!(futures_util::poll!(&mut first_send).is_pending());
+
+        let stale = documents.begin_diagnostics_publication(&edited).unwrap();
+        let stale_send =
+            documents.publish_diagnostics(&edited, &stale, diagnostic("stale"), true, None);
+        tokio::pin!(stale_send);
+        assert!(
+            futures_util::poll!(&mut stale_send).is_pending(),
+            "the slow client keeps the publication waiting"
+        );
+        // An edit supersedes the waiting publication; its publisher observes the
+        // cancellation and returns without a receipt.
+        let fresh = documents.begin_diagnostics_publication(&edited).unwrap();
+        stale_send.await;
+
+        let fresh_send =
+            documents.publish_diagnostics(&edited, &fresh, diagnostic("fresh"), true, None);
+        tokio::pin!(fresh_send);
+        assert!(futures_util::poll!(&mut fresh_send).is_pending());
+
+        let mut wire = outbound.wire();
+        assert_eq!(
+            written_now(&mut wire),
+            vec![
+                (busy.as_str().to_owned(), "busy-1".to_owned()),
+                (edited.as_str().to_owned(), "fresh".to_owned()),
+            ],
+            "the superseded payload must never reach the client"
+        );
+        first_send.await;
+        fresh_send.await;
+        assert!(documents.diagnostics_ready(&busy));
+        assert!(documents.diagnostics_ready(&edited));
+    }
+
+    struct HandshakeOnly;
+
+    impl tower_lsp_server::LanguageServer for HandshakeOnly {
+        async fn initialize(
+            &self,
+            _: tower_lsp_server::ls_types::InitializeParams,
+        ) -> tower_lsp_server::jsonrpc::Result<tower_lsp_server::ls_types::InitializeResult>
+        {
+            Ok(Default::default())
+        }
+
+        async fn shutdown(&self) -> tower_lsp_server::jsonrpc::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn send_frame(
+        writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+        message: serde_json::Value,
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+        let body = serde_json::to_vec(&message).unwrap();
+        writer
+            .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(&body).await.unwrap();
+        writer.flush().await.unwrap();
+    }
+
+    async fn recv_frame(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> serde_json::Value {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+        let mut length = None;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("Content-Length: ") {
+                length = Some(value.parse::<usize>().unwrap());
+            }
+        }
+        let mut body = vec![0; length.expect("every frame carries a length")];
+        reader.read_exact(&mut body).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Read diagnostics until `uri` receives `last`, returning every set read
+    /// as `(uri, joined messages)`; the large `busy` set reads as `busy`.
+    async fn read_diagnostics_until(
+        reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+        busy_set: &[Diagnostic],
+        uri: &Uri,
+        last: &str,
+    ) -> Vec<(String, String)> {
+        let mut received = Vec::new();
+        loop {
+            let message = recv_frame(reader).await;
+            assert_eq!(message["method"], "textDocument/publishDiagnostics");
+            let params: tower_lsp_server::ls_types::PublishDiagnosticsParams =
+                serde_json::from_value(message["params"].clone()).unwrap();
+            let text = if params.diagnostics.len() == busy_set.len() {
+                assert_eq!(
+                    params.diagnostics, busy_set,
+                    "the taken payload lands whole"
+                );
+                "busy".to_owned()
+            } else {
+                params
+                    .diagnostics
+                    .iter()
+                    .map(|d| d.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let done = params.uri == *uri && text == last;
+            received.push((params.uri.as_str().to_owned(), text));
+            if done {
+                return received;
+            }
+        }
+    }
+
+    /// Cancellation, supersession and close/reopen against the real transport
+    /// writer while the editor is not reading.
+    ///
+    /// A large publication is in the middle of being written into a full pipe —
+    /// the one payload the writer has taken. Behind it, one document's
+    /// publication is superseded by an edit and another document is closed,
+    /// with nothing newer offered for either, and neither cancelled publisher is
+    /// polled again before the editor resumes. The editor then receives the
+    /// taken payload whole and the publication queued after the cancelled ones —
+    /// never the superseded set, never a set for the closed document — and,
+    /// once the document reopens, only the current publications.
+    ///
+    /// Discriminating: a writer that takes whatever is queued and relies on each
+    /// publisher to withdraw its own payload writes `stale` and `closed-stale`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_transport_never_writes_a_cancelled_publication() {
+        use futures_util::FutureExt as _;
+        use serde_json::json;
+
+        let outbound = crate::outbound::Outbound::default();
+        let documents = registry_on(&outbound);
+        let (service, _socket) = tower_lsp_server::LspService::new(|_| HandshakeOnly);
+        let (editor_end, server_end) = tokio::io::duplex(2 * 1024);
+        let (server_in, server_out) = tokio::io::split(server_end);
+        let server = tokio::spawn(crate::outbound::serve(
+            server_in,
+            server_out,
+            service,
+            outbound.clone(),
+        ));
+        let (editor_in, mut editor_out) = tokio::io::split(editor_end);
+        let mut editor_in = tokio::io::BufReader::new(editor_in);
+        send_frame(
+            &mut editor_out,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}}),
+        )
+        .await;
+        assert_eq!(recv_frame(&mut editor_in).await["id"], 1);
+
+        let busy: Uri = "file:///workspace/Busy.vue".parse().unwrap();
+        let edited: Uri = "file:///workspace/Edited.vue".parse().unwrap();
+        let closed: Uri = "file:///workspace/Closed.vue".parse().unwrap();
+        let sentinel: Uri = "file:///workspace/Sentinel.vue".parse().unwrap();
+        for uri in [&busy, &edited, &closed, &sentinel] {
+            open(&documents, uri);
+        }
+
+        // Far larger than the pipe: the writer takes it first and stays parked
+        // in the middle of writing it.
+        let busy_set: Vec<Diagnostic> = (0..200)
+            .flat_map(|i| diagnostic(&format!("busy-{i}-{}", "x".repeat(64))))
+            .collect();
+        let busy_publication = documents.begin_diagnostics_publication(&busy).unwrap();
+        let busy_send =
+            documents.publish_diagnostics(&busy, &busy_publication, busy_set.clone(), true, None);
+        tokio::pin!(busy_send);
+        assert!(futures_util::poll!(&mut busy_send).is_pending());
+
+        let stale = documents.begin_diagnostics_publication(&edited).unwrap();
+        let stale_send =
+            documents.publish_diagnostics(&edited, &stale, diagnostic("stale"), true, None);
+        tokio::pin!(stale_send);
+        assert!(futures_util::poll!(&mut stale_send).is_pending());
+        let closed_stale = documents.begin_diagnostics_publication(&closed).unwrap();
+        let closed_stale_send = documents.publish_diagnostics(
+            &closed,
+            &closed_stale,
+            diagnostic("closed-stale"),
+            true,
+            None,
+        );
+        tokio::pin!(closed_stale_send);
+        assert!(futures_util::poll!(&mut closed_stale_send).is_pending());
+
+        // An edit supersedes one publication and the other document closes,
+        // with nothing newer offered for either yet. A later publication queues
+        // behind both and marks where the writer has reached.
+        let fresh = documents.begin_diagnostics_publication(&edited).unwrap();
+        documents.did_close(&closed);
+        let marker = documents.begin_diagnostics_publication(&sentinel).unwrap();
+        let marker_send =
+            documents.publish_diagnostics(&sentinel, &marker, diagnostic("sentinel"), true, None);
+        tokio::pin!(marker_send);
+        assert!(futures_util::poll!(&mut marker_send).is_pending());
+
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            read_diagnostics_until(&mut editor_in, &busy_set, &sentinel, "sentinel"),
+        )
+        .await
+        .expect("the resumed editor reaches the later publication");
+        assert_eq!(
+            received,
+            vec![
+                (busy.as_str().to_owned(), "busy".to_owned()),
+                (sentinel.as_str().to_owned(), "sentinel".to_owned()),
+            ],
+            "the payload being written finishes; a cancelled publication is never written"
+        );
+
+        // The document reopens, and both documents publish their current sets.
+        open(&documents, &closed);
+        let reopened = documents.begin_diagnostics_publication(&closed).unwrap();
+        let fresh_send =
+            documents.publish_diagnostics(&edited, &fresh, diagnostic("fresh"), true, None);
+        let reopened_send =
+            documents.publish_diagnostics(&closed, &reopened, diagnostic("reopened"), true, None);
+        let (received, (), ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(
+                async {
+                    let mut received =
+                        read_diagnostics_until(&mut editor_in, &busy_set, &edited, "fresh").await;
+                    if !received.contains(&(closed.as_str().to_owned(), "reopened".to_owned())) {
+                        received.extend(
+                            read_diagnostics_until(&mut editor_in, &busy_set, &closed, "reopened")
+                                .await,
+                        );
+                    }
+                    received
+                },
+                fresh_send,
+                reopened_send
+            )
+        })
+        .await
+        .expect("the current publications reach the editor");
+        received.iter().for_each(|(_, text)| {
+            assert!(
+                text == "fresh" || text == "reopened",
+                "only current publications follow: {received:?}"
+            )
+        });
+
+        // The cancelled publishers resume only now, and own nothing.
+        stale_send.await;
+        closed_stale_send.await;
+        assert!(busy_send.as_mut().now_or_never().is_some());
+        assert!(marker_send.as_mut().now_or_never().is_some());
+        for uri in [&busy, &edited, &closed, &sentinel] {
+            assert!(documents.diagnostics_ready(uri), "{}", uri.as_str());
+        }
+        assert_eq!(
+            outbound.load().replaceable.retained(),
+            Default::default(),
+            "nothing is retained once the editor has read everything"
+        );
+
+        send_frame(&mut editor_out, json!({"jsonrpc": "2.0", "method": "exit"})).await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), server)
+            .await
+            .expect("the server exits")
+            .unwrap();
+    }
+
     #[test]
     fn paused_diagnostics_admission_cannot_displace_a_newer_publication() {
         let documents =
@@ -651,10 +1225,7 @@ mod tests {
         let mut newer = None;
         let older = documents
             .admit_diagnostics_publication(&uri, || {
-                let snapshot = documents.snapshot_identity(&uri).unwrap();
-                let generation = documents
-                    .host()
-                    .get_diagnostics_generation(&uri_to_canonical_id(&uri));
+                let basis = ReadinessBasis::capture(&documents, &uri).unwrap();
                 // Suspend the old capture while a later edit and publication own the file.
                 assert!(
                     documents
@@ -662,7 +1233,7 @@ mod tests {
                         .changed
                 );
                 newer = documents.begin_diagnostics_publication(&uri);
-                Some((snapshot, generation))
+                Some(basis)
             })
             .unwrap();
         assert!(!documents.diagnostic_publication_is_current(&uri, &older));

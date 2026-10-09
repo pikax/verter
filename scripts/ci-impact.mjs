@@ -80,6 +80,7 @@ export const COMPILE_CONTRACT_OWNER_CRATES = Object.freeze({
   language: "verter_language",
   semantic: "verter_semantic",
   session: "verter_session",
+  "session-query": "verter_session_query",
   "type-runtime": "verter_type_runtime",
   workspace: "verter_workspace",
 });

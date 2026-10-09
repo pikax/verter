@@ -11,7 +11,7 @@
 //! The facade returns ENCODED WIRE BYTES (`Vec<u8>` of UTF-8 JSON), NOT a
 //! [`verter_type_expr::TypeExpr`] and NOT a sealed carrier. The reverse
 //! materialization runs INTERNALLY through the sealed
-//! [`crate::project_semantic_dispatch::output_materialization::OutputProjector`]
+//! [`crate::output_sinks::OutputProjector`]
 //! capability — the typeinfo output sink mints the capability, materializes
 //! the node into a sealed `OutputTypeExpr`, unwraps it via the capability,
 //! and serializes the resulting `TypeExpr` here. FFI callers therefore
@@ -22,17 +22,17 @@
 //!
 //! The raw `SemanticNodeId -> TypeExpr` raise primitive
 //! `raise_node_to_type_expr` stays module-private to
-//! [`crate::project_semantic_dispatch::raise`]; this facade reaches it only
+//! [`verter_type_engine::project_semantic_dispatch::raise`]; this facade reaches it only
 //! through the sealed output capability, never directly.
 
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::SemanticNodeId;
+use crate::output_sinks::OutputProjector;
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 /// Terminal display text for one graph node, plus whether the underlying
 /// materialization carried any typed resolver-degradation leaf (see
-/// [`crate::project_semantic_dispatch::output_materialization::OutputTypeExpr::has_degradation`]).
+/// [`verter_type_engine::project_semantic_dispatch::output_materialization::OutputTypeExpr::has_degradation`]).
 ///
 /// `degraded` is set when a NESTED resolver miss (a genuine unmaterialized
 /// sentinel — `QueryError::Miss`, `UnmodeledPosition`, `BudgetExceeded`, …,
@@ -55,21 +55,23 @@ pub(crate) struct RenderedNodeDisplay {
 /// boundary, so graph-oriented consumers cannot branch on a
 /// reverse-materialized shape.
 pub(crate) fn render_node_display_with_ctx(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<RenderedNodeDisplay> {
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let cap = TypeinfoRaiseOutputCap::new(&dispatch);
+    let cap = TypeinfoRaiseOutputCap::new(dispatch);
     let sealed = cap.materialize_output_type_expr(node)?;
     let degraded = sealed.has_degradation();
-    let type_expr = sealed.into_type_expr(&cap);
+    let type_expr = sealed.into_type_expr(cap.authority());
     let text = verter_type_expr::render_type_expr_display(&type_expr)
         .ok()?
         .text;
     Some(RenderedNodeDisplay { text, degraded })
 }
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// The typeinfo FFI bytes-facade output-sink capability: the facade here
     /// holds this to materialize a graph node into a sealed output carrier
     /// and unwrap it before JSON-encoding. Its constructor is visible ONLY
@@ -96,7 +98,7 @@ impl VerterHost {
     /// practice and collapses to the same miss signal the FFI surface maps
     /// to `null`).
     ///
-    /// [`OutputProjector`]: crate::project_semantic_dispatch::output_materialization::OutputProjector
+    /// [`OutputProjector`]: crate::output_sinks::OutputProjector
     #[must_use]
     pub fn project_node_to_type_expr_json_bytes(&self, node: SemanticNodeId) -> Option<Vec<u8>> {
         // Query-RETURNER: it returns the encoded `TypeExpr` with no outer
@@ -114,7 +116,9 @@ impl VerterHost {
         // visible only within `crate::typeinfo::raise`): this FFI facade is a
         // true output sink.
         let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-        let type_expr = cap.materialize_output_type_expr(node)?.into_type_expr(&cap);
+        let type_expr = cap
+            .materialize_output_type_expr(node)?
+            .into_type_expr(cap.authority());
         serde_json::to_vec(&type_expr).ok()
     }
 
@@ -159,11 +163,11 @@ impl VerterHost {
         let hot = dispatch
             .raise_semantic_type_source_to_hot(
                 &source,
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id,
                     scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
+                    context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Expanded,
                     ),
                     interior_failures: None,
                 },
@@ -180,7 +184,7 @@ impl VerterHost {
         let cap = TypeinfoRaiseOutputCap::new(&dispatch);
         Some(
             cap.materialize_output_type_expr(hot.node())?
-                .into_type_expr(&cap),
+                .into_type_expr(cap.authority()),
         )
     }
 
@@ -214,7 +218,9 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-        let type_expr = cap.materialize_output_type_expr(node)?.into_type_expr(&cap);
+        let type_expr = cap
+            .materialize_output_type_expr(node)?
+            .into_type_expr(cap.authority());
         Some(verter_protocol::typeinfo::graph_export::encode_type_expr_graph(&type_expr, budgets))
     }
 
@@ -240,6 +246,9 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-        Some(cap.materialize_output_type_expr(node)?.into_type_expr(&cap))
+        Some(
+            cap.materialize_output_type_expr(node)?
+                .into_type_expr(cap.authority()),
+        )
     }
 }

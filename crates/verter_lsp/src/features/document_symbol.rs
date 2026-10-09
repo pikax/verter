@@ -1,7 +1,7 @@
 // Document symbols from SFC structure + verter_session analysis.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -309,29 +309,37 @@ fn span_to_range(span_start: u32, span_end: u32, line_index: &LineIndex, fallbac
     Range { start, end }
 }
 
-fn binding_symbol_kind(kind: &verter_semantic::analysis::AnalyzedBindingKind) -> SymbolKind {
+fn binding_symbol_kind(
+    kind: &verter_session_query::analysis::types::AnalyzedBindingKind,
+) -> SymbolKind {
     match kind {
-        verter_semantic::analysis::AnalyzedBindingKind::Const => SymbolKind::CONSTANT,
-        verter_semantic::analysis::AnalyzedBindingKind::Let
-        | verter_semantic::analysis::AnalyzedBindingKind::Var => SymbolKind::VARIABLE,
-        verter_semantic::analysis::AnalyzedBindingKind::Function
-        | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => SymbolKind::FUNCTION,
-        verter_semantic::analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
+        verter_session_query::analysis::types::AnalyzedBindingKind::Const => SymbolKind::CONSTANT,
+        verter_session_query::analysis::types::AnalyzedBindingKind::Let
+        | verter_session_query::analysis::types::AnalyzedBindingKind::Var => SymbolKind::VARIABLE,
+        verter_session_query::analysis::types::AnalyzedBindingKind::Function
+        | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
+            SymbolKind::FUNCTION
+        }
+        verter_session_query::analysis::types::AnalyzedBindingKind::Class => SymbolKind::CLASS,
     }
 }
 
-fn build_binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) -> Option<String> {
+fn build_binding_detail(
+    binding: &verter_session_query::analysis::types::AnalyzedBinding,
+) -> Option<String> {
     let mut parts = Vec::new();
 
     match binding.kind {
-        verter_semantic::analysis::AnalyzedBindingKind::Const => parts.push("const"),
-        verter_semantic::analysis::AnalyzedBindingKind::Let => parts.push("let"),
-        verter_semantic::analysis::AnalyzedBindingKind::Var => parts.push("var"),
-        verter_semantic::analysis::AnalyzedBindingKind::Function => parts.push("function"),
-        verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+        verter_session_query::analysis::types::AnalyzedBindingKind::Const => parts.push("const"),
+        verter_session_query::analysis::types::AnalyzedBindingKind::Let => parts.push("let"),
+        verter_session_query::analysis::types::AnalyzedBindingKind::Var => parts.push("var"),
+        verter_session_query::analysis::types::AnalyzedBindingKind::Function => {
+            parts.push("function")
+        }
+        verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
             parts.push("async function")
         }
-        verter_semantic::analysis::AnalyzedBindingKind::Class => parts.push("class"),
+        verter_session_query::analysis::types::AnalyzedBindingKind::Class => parts.push("class"),
     }
 
     if binding.is_reactive {
@@ -422,15 +430,17 @@ fn build_template_children(
     }
 }
 
-fn macro_kind_display(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {
+fn macro_kind_display(
+    kind: &verter_session_query::analysis::types::AnalyzedMacroKind,
+) -> &'static str {
     match kind {
-        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose => "defineExpose",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineOptions => "defineOptions",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults => "withDefaults",
     }
 }
 
@@ -438,9 +448,23 @@ fn macro_kind_display(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::style::{AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis};
-    use verter_semantic::analysis::types::ImportBindingKind;
-    use verter_semantic::analysis::*;
+
+    use verter_session_query::analysis::style::{
+        AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis,
+    };
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateComponentUsage;
+    use verter_session_query::analysis::template::TemplateElement;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImportBinding;
+    use verter_session_query::analysis::types::AnalyzedMacro;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::BindingInitializer;
+    use verter_session_query::analysis::types::ImportBindingKind;
+    use verter_session_query::analysis::types::ReactivityKind;
+    use verter_session_query::analysis::types::VueApiClassification;
 
     fn make_analysis(
         bindings: Vec<AnalyzedBinding>,

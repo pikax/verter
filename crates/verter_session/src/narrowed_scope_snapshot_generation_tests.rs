@@ -77,7 +77,9 @@ fn upsert(host: &VerterHost, source: &str) {
         .expect("upsert must succeed");
 }
 
-fn style_classes(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
+fn style_classes(
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> Vec<String> {
     snapshot
         .styles
         .iter()
@@ -86,7 +88,9 @@ fn style_classes(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
         .collect()
 }
 
-fn export_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
+fn export_names(
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> Vec<String> {
     snapshot
         .export_signatures
         .iter()

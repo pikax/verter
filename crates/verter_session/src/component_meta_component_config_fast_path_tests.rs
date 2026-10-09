@@ -51,7 +51,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -66,7 +66,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
 fn resolve_button_meta(
     host: &Arc<VerterHost>,
     canonical: &str,
-) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     host.get_component_meta(canonical)
         .expect("getComponentMeta must succeed for the ComponentConfig fixture")
 }
@@ -204,8 +204,12 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let proof_cold =
-        crate::component_meta_caches::app_config_no_override_proof_get_or_compute(&*host, &key);
+    let proof_cold = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
+        &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
+        &key,
+    );
     // ^ This is a `pub(crate)` API exercising the `&dyn ResolverContext`
     // entry; `&*host` derefs `Arc<VerterHost>` to a concrete `&VerterHost`
     // which coerces to `&dyn ResolverContext` via the trait impl.
@@ -262,8 +266,10 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let proof_no_ac = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    let proof_no_ac = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
         &key_no_app_config,
     );
     let installs_after_no_ac = host
@@ -289,8 +295,10 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let proof_warm = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    let proof_warm = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
         &key_no_app_config,
     );
     let installs_after_warm = host
@@ -324,8 +332,10 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let _ = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    let _ = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
         &key_no_app_config,
     );
     let installs_after_invalidate = host

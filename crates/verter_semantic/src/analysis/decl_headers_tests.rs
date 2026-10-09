@@ -21,10 +21,10 @@ fn index_for(source: &str) -> DeclHeaderIndex {
 
 #[test]
 fn owner_scoped_headers_do_not_merge_same_name_declarations() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -83,10 +83,10 @@ fn ordinary_header_entry_point_uses_module_zero_owner() {
 
 #[test]
 fn default_export_aliases_are_scoped_by_lexical_owner() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -120,10 +120,12 @@ export default interface InstanceDefault { instance: number }
 
 #[test]
 fn jsdoc_typedef_headers_use_attachment_or_explicit_region_owner() {
-    use crate::analysis::top_level_owners::{TopLevelOwnerRegion, TopLevelOwnerTable};
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::{
+        TopLevelOwnerRegion, TopLevelOwnerTable,
+    };
     use verter_span::Span;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
@@ -197,11 +199,11 @@ const instanceMarker = 0;
 
 #[test]
 fn augmentation_contributors_retain_lexical_owner() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
-    use crate::analysis::type_eval::AugmentationScopeKind;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_session_query::declarations::AugmentationScopeKind;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -259,7 +261,11 @@ fn assert_name_parity_as(source: &str, source_type: oxc_span::SourceType) -> Dec
     index
 }
 
-fn assert_parity(env: &crate::analysis::type_eval::EvalEnv, index: &DeclHeaderIndex, source: &str) {
+fn assert_parity(
+    env: &verter_session_query::declarations::EvalEnv,
+    index: &DeclHeaderIndex,
+    source: &str,
+) {
     let mut env_types: Vec<&str> = env
         .type_symbols
         .keys()
@@ -439,10 +445,10 @@ interface Trailing extends WrongTrailing /* @vue-ignore */ {}
 
 #[test]
 fn vue_ignore_facts_are_scoped_to_exact_merged_contributor_and_lexical_owner() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::facts::VueIgnoredHeritageFact;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
@@ -665,7 +671,8 @@ fn member_header_facts_match_production_index_across_body_shapes() {
             .unwrap_or_else(|| panic!("{name} header"))
             .member_headers;
         assert_eq!(
-            &env_members, header_members,
+            env_members.as_slice(),
+            header_members.as_slice(),
             "member-header facts must match the production index for:\n{source}"
         );
     }
@@ -788,7 +795,7 @@ fn seeded_enum_headers_read_the_stored_member_names_fact() {
 
 #[test]
 fn enum_registers_dual_space_headers_with_members_in_enum_table() {
-    use crate::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
+    use verter_session_query::declarations::{TypeDeclKind, ValueDeclKind};
 
     let source = "enum E { A, B }\nexport enum F { C = 'c' }\n";
     let index = index_for(source);
@@ -1022,10 +1029,10 @@ fn selective_statement_lowering_matches_whole_env_group() {
     // Lower ONLY the demanded symbol's contributing statements through
     // the shared statement arm and compare the produced group against
     // the whole-env walk's group — the core selective-lowering parity.
-    use crate::analysis::type_eval::EvalEnv;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::declarations::EvalEnv;
 
     let source = r#"
 interface Merged { a: string }

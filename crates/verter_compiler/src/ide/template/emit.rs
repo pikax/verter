@@ -332,6 +332,51 @@ pub struct ExprPlan<'a> {
     pieces: Vec<ExprPiece<'a>>,
 }
 
+impl<'a> ExprPlan<'a> {
+    /// Splice unmapped synthetic `text` into the plan just before the authored
+    /// byte at source `offset` (appended when nothing follows it). A verbatim
+    /// slice spanning `offset` is split there. Used for scaffolding that must
+    /// land inside a RELOCATED expression, where no source position exists to
+    /// prepend at.
+    pub(crate) fn splice_synthetic_at(&mut self, offset: u32, text: String) {
+        let mut index = self.pieces.len();
+        for (i, piece) in self.pieces.iter().enumerate() {
+            let start = match piece {
+                ExprPiece::Verbatim { range } => {
+                    if range.start.0 < offset && offset < range.end.0 {
+                        let (head, tail) = (
+                            SourceByteRange::new(range.start, SourceByteOffset(offset)),
+                            SourceByteRange::new(SourceByteOffset(offset), range.end),
+                        );
+                        self.pieces[i] = ExprPiece::Verbatim { range: head };
+                        self.pieces
+                            .insert(i + 1, ExprPiece::Verbatim { range: tail });
+                        index = i + 1;
+                        break;
+                    }
+                    range.start.0
+                }
+                ExprPiece::Ident { source_start, .. }
+                | ExprPiece::IgnoredIdent { source_start, .. } => source_start.0,
+                ExprPiece::SynthesizedCore {
+                    core_source_start, ..
+                } => core_source_start.0,
+                ExprPiece::Synthetic { .. } => continue,
+            };
+            if start >= offset {
+                index = i;
+                break;
+            }
+        }
+        self.pieces.insert(
+            index,
+            ExprPiece::Synthetic {
+                text: EmitText::Owned(text),
+            },
+        );
+    }
+}
+
 /// Plan a user value expression `[span.start, span.end)` (already trimmed) into an
 /// ordered [`ExprPlan`]. `all_bindings` is the enclosing expression's extracted
 /// bindings (a binding outside `span` is filtered out). When no bindings are

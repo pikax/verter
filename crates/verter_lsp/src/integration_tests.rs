@@ -192,6 +192,7 @@ const message = 'hello'
         character: (offset - line_start) as u32,
     };
     let items = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -235,6 +236,7 @@ const count = ref(0)
     // Position inside script should also return completions
     let position = position_of(source, "ref(0)");
     let items = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -271,6 +273,7 @@ const msg = 'hello'
     // Go-to-definition on "msg" in template should find the binding declaration in script
     let position = position_of(source, "msg }}</div>");
     let def = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -302,6 +305,7 @@ const msg = 'hello'
     // Click on "msg" in template
     let position = position_of(source, "msg }}</div>");
     let def = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -358,6 +362,7 @@ const title = 'hello'
 
     let position = position_of(source, "title }}</h1>");
     let def = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         &doc.source,
         &blocks,
@@ -3484,6 +3489,22 @@ fn verter_types_stub_covers_tsx_imports() {
         stub.contains("defineOptions_Box"),
         "stub must export defineOptions_Box"
     );
+
+    // Template condition re-narrowing and v-for frame helpers
+    for name in [
+        "flowNarrow",
+        "flowExcluded",
+        "flowBranch",
+        "flowEach1",
+        "flowEach2",
+        "flowEach3",
+    ] {
+        assert!(
+            stub.contains(&format!("export declare function {name}"))
+                || stub.contains(&format!("export declare const {name}")),
+            "stub must export {name}"
+        );
+    }
 }
 
 // ─── Hover with MockTypeProvider (regression test for TSGO integration) ───
@@ -4995,7 +5016,9 @@ const pageTitle: string = 'Hello'
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc.source,
+        ),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5060,7 +5083,9 @@ const x = 1
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc.source,
+        ),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5111,7 +5136,9 @@ defineSlots<{
     let blocks = test_carrier_blocks(&doc.source);
     let control = crate::features::macro_actions::macro_code_actions(
         &doc.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc.source,
+        ),
         Some(&analysis_v1),
         &blocks,
         &doc.line_index,
@@ -5147,7 +5174,9 @@ defineSlots<{}>()
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc_v2.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc_v2.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc_v2.source,
+        ),
         Some(&analysis_v1),
         &blocks_v2,
         &doc_v2.line_index,
@@ -5849,6 +5878,7 @@ fn document_drop_edit_accepts_svelte_carrier() {
     };
 
     let edit = document_drop_edit(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "file:///project/src/MyButton.svelte",
         &drop_pos,
         source,
@@ -5876,6 +5906,7 @@ fn document_drop_edit_accepts_svelte_carrier() {
 
     // Discrimination: a non-carrier .ts drop returns None.
     let none = document_drop_edit(
+        &verter_session::framework::HostLanguageClassifier::default(),
         "file:///project/src/util.ts",
         &drop_pos,
         source,
@@ -5940,6 +5971,7 @@ fn definition_retries_default_export_for_svelte_carrier() {
     };
 
     let result = definition_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,

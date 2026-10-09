@@ -105,6 +105,13 @@ pub use tsc::script::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION;
 #[cfg(any(test, feature = "test-support"))]
 pub use template::code_gen::vdom::props::emit_static_style_object;
 
+// Test-only re-export of the flow-transparent callback check (reference
+// generator, typed seam, source-backed plan builder and the contract fixtures,
+// including the production-route SFC fixtures) for the paired real-provider
+// tests in `verter_lsp`. No production path names it.
+#[cfg(any(test, feature = "test-support"))]
+pub use ide::template::flow_check;
+
 #[cfg(test)]
 mod compile_ported_tests;
 #[cfg(test)]

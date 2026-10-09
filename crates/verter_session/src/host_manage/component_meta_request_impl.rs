@@ -22,25 +22,22 @@
 // module's `pub(crate)`-re-exported surface.
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::named_fact_tracer;
-use crate::host_manage::component_meta_trace_custom;
 use crate::meta_resolve::ResolvedComponentMetaState;
 use crate::resolver_core::{
     ComponentMetaCacheLookup, ComponentMetaComputeOutcome, ComponentMetaRequestHost, RequestSource,
     SingleflightRole,
 };
-use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::component_meta_trace_custom;
+use verter_type_engine::named_fact_tracer;
+use verter_type_engine::semantic_query::ProjectionMode;
 
-#[cfg(test)]
-use crate::host_test_force::TracerScope;
+#[cfg(any(test, feature = "test-support"))]
+use verter_type_engine::engine_test_knobs::TracerScope;
 
-use crate::instant::Instant;
-
-pub(crate) fn next_component_meta_audit_request_id() -> u64 {
-    static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
+use verter_type_engine::instant::Instant;
 
 /// Attach the request tracer's finalized dependency evidence to the returned
 /// resolution and translate non-admission outcomes into the request driver's
@@ -48,27 +45,27 @@ pub(crate) fn next_component_meta_audit_request_id() -> u64 {
 /// cache signature.
 fn component_meta_outcome_from_tracer(
     mut value: Option<ResolvedComponentMetaState>,
-    finalise: crate::resolver_core::FactReadSetFinalise,
+    finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
 ) -> ComponentMetaComputeOutcome<ResolvedComponentMetaState> {
     let cache_refusal = match finalise {
-        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
             if let Some(resolved) = value.as_mut() {
                 resolved.fact_versions = facts.to_vec();
             }
             None
         }
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) => {
             if let Some(resolved) = value.as_mut() {
                 resolved.fact_versions = facts.to_vec();
             }
-            Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
+            Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }
         // Both size and STABILITY refusals propagate transitively: the
         // value is served, nothing is published, and every enclosing
         // scope inherits the refusal.
-        crate::resolver_core::FactReadSetFinalise::Overflow
-        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
-            Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }
     };
     ComponentMetaComputeOutcome {
@@ -94,13 +91,13 @@ fn observe_component_meta_owner_whole_hash(
         .map(|captured| captured.whole_hash)
         .or_else(uncaptured_hash);
     let Some(whole_hash) = whole_hash else {
-        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-            crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
         );
         return None;
     };
-    crate::resolver_core::resolver_context::observe_fan_out(
-        crate::resolver_core::FactVersionRef::FileWholeHash {
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: canonical.to_string(),
             hash: whole_hash,
         },
@@ -166,7 +163,7 @@ pub(crate) fn request_source_performed_compute(source: RequestSource) -> bool {
 
 pub(crate) fn should_skip_imported_registry_seed_refresh(
     owner_canonical: &str,
-    declaration: &ResolvedTypeDeclaration,
+    declaration: &verter_session_query::declarations::metadata::ResolvedTypeDeclaration,
     existing_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> bool {
     crate::resolver_core::component_meta::imported_registry_seed_can_skip_refresh(
@@ -357,7 +354,7 @@ impl ComponentMetaRequestHost for VerterHost {
         base_is_current: bool,
     ) -> ComponentMetaComputeOutcome<Self::Resolution> {
         let (value, finalise) = named_fact_tracer!(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(self),
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(self),
             TracerScope::ComponentMetaRequest,
             || {
                 let owner_whole_hash =
@@ -444,7 +441,7 @@ impl ComponentMetaRequestHost for VerterHost {
     fn resolution_completeness(
         &self,
         result: &Self::Resolution,
-    ) -> crate::semantic_query::ResultCompleteness {
+    ) -> verter_type_engine::semantic_query::ResultCompleteness {
         result.completeness
     }
 }
@@ -529,7 +526,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         base_is_current: bool,
     ) -> ComponentMetaComputeOutcome<Self::Resolution> {
         let (value, finalise) = named_fact_tracer!(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(self.host),
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(self.host),
             TracerScope::ComponentMetaRequest,
             || {
                 let owner_whole_hash =
@@ -624,16 +621,11 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
     fn resolution_completeness(
         &self,
         result: &Self::Resolution,
-    ) -> crate::semantic_query::ResultCompleteness {
+    ) -> verter_type_engine::semantic_query::ResultCompleteness {
         result.completeness
     }
 }
 
-/// Native declaration kind for the resolved pre-expansion type.
-pub type ResolvedDeclarationKind = crate::resolver_core::ResolvedDeclarationKind;
-
-/// Native pre-expansion declaration metadata retained by the shared resolver.
-pub type ResolvedTypeDeclaration = crate::resolver_core::ResolvedTypeDeclaration;
 pub type ResolvedTypeRegistryMeta = crate::resolver_core::ResolvedTypeRegistryMeta;
 pub type ResolvedMacroMeta = crate::resolver_core::ResolvedMacroMeta;
 pub type ResolvedNativeProp = crate::resolver_core::ResolvedNativeProp;

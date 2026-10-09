@@ -6,8 +6,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::ProjectId;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -18,7 +19,7 @@ use verter_workspace::snapshot_builder::{
     build_workspace_snapshot_simple, membership_to_spec, supported_extensions_for,
 };
 use verter_workspace::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 
 use super::*;
@@ -186,24 +187,14 @@ fn unique_ws_root() -> String {
 /// thing.
 fn read_store_manifest_strict(ws_root: &str) -> Result<Option<Manifest>, String> {
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    let path = store.manifest_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
-            .map(Some)
-            .map_err(|e| {
-                format!(
-                    "carrier manifest at {} is present but unparseable: {e}",
-                    path.display()
-                )
-            }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!(
-            "carrier manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
-            path.display(),
+    store.read_published().map_err(|e| {
+        format!(
+            "carrier store at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            store.workspace_dir().display(),
             e.kind(),
             e.raw_os_error()
-        )),
-    }
+        )
+    })
 }
 
 /// The synthetic workspace root a store-isolating test derives must be unique across
@@ -276,7 +267,7 @@ fn store_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
     let corrupt_root = unique_ws_root();
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
     std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
-    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+    std::fs::write(store.head_path(), b"{ this manifest is truncated")
         .expect("write a corrupt manifest");
 
     // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
@@ -478,6 +469,106 @@ async fn owner_loss_retracts_previously_published_carrier() {
             .membership_ledger()
             .is_advertised(&CanonicalSource::from(source.as_str())),
         "owner loss must leave the source NOT advertised in the ledger-backed getExternalFiles"
+    );
+}
+
+/// Every transition the coordinator runs — an owned publish, a single- and a
+/// multi-source activation, an owner-loss reconcile and an explicit removal — enters
+/// the session's ONE gate registry through a freshly built reconciler, and leaves no
+/// gate behind once it returns.
+#[tokio::test]
+async fn coordinator_transitions_retire_their_source_gates() {
+    let (coord, mock) = coordinator();
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let unadvertised = format!("{ws_root}/src/Other.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+    let (host, fs) = host_without_snapshot();
+    let gates = Arc::clone(coord.source_gates());
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+    let outcome = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion.clone()],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("publish under a configured owner succeeds");
+    assert!(matches!(outcome, ReconcileOutcome::Advertised { .. }));
+    assert_eq!(gates.live_gates(), 0, "an owned publish retired its gate");
+
+    assert!(coord
+        .activate_published_source(&source)
+        .await
+        .expect("single activation succeeds"));
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "a single activation retired its gate"
+    );
+
+    let activated = coord
+        .activate_published_sources(&[unadvertised.clone(), source.clone()])
+        .await
+        .expect("batch activation succeeds");
+    assert_eq!(activated, 1, "only the advertised source activates");
+    assert!(
+        mock.calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::ActivateCarrierMembers { .. })),
+        "the batch reached the provider while its gates were held"
+    );
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "a multi-source activation retired every gate it held"
+    );
+
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        build_workspace_snapshot_simple(Vec::new(), SnapshotGeneration(2)),
+    )));
+    let outcome = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("owner loss reconciles to a tombstone");
+    assert!(matches!(outcome, ReconcileOutcome::Tombstoned { .. }));
+    assert_eq!(
+        gates.live_gates(),
+        0,
+        "an owner-loss retract retired its gate"
+    );
+
+    let outcome = coord
+        .remove_membership(&source, AbsentReason::Deleted)
+        .await
+        .expect("an explicit removal succeeds");
+    assert!(matches!(outcome, ReconcileOutcome::Tombstoned { .. }));
+    assert_eq!(gates.live_gates(), 0, "a removal retired its gate");
+    assert!(
+        gates.backing_capacity() > 0,
+        "the transitions went through the coordinator's shared registry"
     );
 }
 
@@ -740,7 +831,7 @@ async fn durable_retract_failure_propagates_not_silent_success() {
     //    commit performs fails (the fail-closed "present-but-corrupt manifest
     //    propagates" path).
     let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
-    std::fs::write(store.manifest_path(), b"{ this is not valid json :: ")
+    std::fs::write(store.head_path(), b"{ this is not valid json :: ")
         .expect("corrupt the manifest on disk");
 
     // 3. Owner-loss reconcile (NoProject) → the reconciler's durable retract fails

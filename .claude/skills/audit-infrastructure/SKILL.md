@@ -11,6 +11,26 @@ For end-user API reference and debug workflows see [`docs/audit-footprint/`](../
 
 ## Architecture Overview — Substrate Vs Session
 
+### Optional capture policy and availability
+
+The binding REQUIRED / REQUIRED-budget / REQUIRED-lifetime / OPTIONAL policy,
+per-owner inventory format, default-off `semantic-observe` feature and generator
+constraints live in [`docs/arch/semantic-observe.md`](../../../docs/arch/semantic-observe.md).
+Inventory files are `crates/*/observe-inventory/*.md`; extend the owning file,
+not a shared table. Required validity, budgets, diagnostic data and current
+occupancy/ownership charges remain independent of capture.
+
+`verter_audit::observe::CaptureAvailability::compiled()` reports `Unavailable`
+when `semantic-observe` is off and `Available` when on. `observe::capture`
+returns `None` without calling its collector when off; it returns the collected
+payload when on, never fabricated zero metrics. `ObserveMode` supplies the
+uncaptured/captured vocabulary; root selection and existing audit-endpoint
+migration remain with the execution/consolidation owner. The feature currently
+implies legacy measurement gates without removing them. Integration tests in
+`crates/verter_audit/tests/cases/observe_feature_closure.rs` check resolver-2
+production and dev-unified closures on host/WASM; run the audit tests both with
+and without `--features semantic-observe`.
+
 Audit state is split between a leaf substrate crate (`verter_audit`) and the session crate (`verter_session`). `verter_audit` may depend only on `verter_span` plus ecosystem crates — never on `verter_session` or any other `verter_*` crate.
 
 | Layer | Crate | Owns |
@@ -158,7 +178,7 @@ Every public audited entry-point follows the same lifecycle: stamp a request id,
 
 ### Component-Meta
 
-`VerterHost::get_component_meta_with_resolution(canonical_id, mode)` returns `(Option<ComponentMetaAnalysis>, Option<ResolvedComponentMetaState>)`. The audit record is published into the host's bounded `AuditRecordsStore` and drained via `VerterHost::take_audit_record(request_id)`.
+`VerterHost::get_component_meta_with_resolution(canonical_id, mode)` returns `(Option<ComponentMetaAnalysis>, Option<ResolvedComponentMetaState>)`. The audit record is published into the host's bounded `AuditRecordsStore` and drained via `HostAuditRuntime::take_record(request_id)`.
 
 `AuditedRequest` builder (`crates/verter_session/src/audited_request.rs`) wraps one call in a request-scoped audit harness, resets per-thread counters, validates exactly one request was created, and returns `(ComponentMetaAnalysis, ResolvedComponentMetaState, RequestAuditRecord)` as a triple. `AuditedRequestBuilder::resolve_component_meta` is the test-facing convenience; `AuditedRequestBuilder::run_custom` lets a closure issue arbitrary single-request audited work.
 
@@ -238,7 +258,7 @@ Filter is read ONCE at registration time inside `AuditRequestRegistration::new` 
 
 ## `HostAuditRuntime` & Sampler Thread
 
-`HostAuditRuntime` (`crates/verter_session/src/host_audit_runtime.rs`) wraps the `AuditRecordsStore` instance, the `AuditConfig` snapshot, and the active-request registry. Each `VerterHost` owns one independent runtime; multiple hosts in one process do NOT share audit state.
+`HostAuditRuntime` (`crates/verter_session/src/host_audit_runtime.rs`) mints and solely owns the host's `AuditRecordsStore`, and holds the `AuditConfig` snapshot and the active-request registry. Each `VerterHost` owns one independent runtime; multiple hosts in one process do NOT share audit state. The host keeps no second store handle and has no audit-record methods of its own: records publish through an `AuditRequestRegistration` or, for a read outside an audited entry-point, the crate-private `publish_record`; consumers drain with `host_audit_runtime().take_record(id)`. Every record is keyed by an id from the host's one request-id counter (`VerterHost::next_request_id`) — there is no process-wide id counter, so an unregistered record can never land on, and replace, an audited record's id (`audit_request_ids_share_one_host_key_space`).
 
 ### Public surface
 

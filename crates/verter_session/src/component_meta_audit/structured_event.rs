@@ -6,7 +6,7 @@
 //! module preserves the historic
 //! `verter_session::component_meta_audit::structured_event::*` import
 //! path so the session's own modules
-//! (`host_manage::component_meta_trace_structured!` and friends) do
+//! (`request_observers::component_meta_trace_structured!` and friends) do
 //! not need to retarget every import to the substrate.
 
 pub use verter_audit::structured_event::StructuredAuditEvent;

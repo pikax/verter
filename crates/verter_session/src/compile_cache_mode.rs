@@ -43,7 +43,7 @@
 //! (`HasBlockOverride` / `CssHashOverridePresent`
 //! / `HasIdeOnlyAnalysis` / `HasDevLastGood`). The session cache's
 //! path-precise
-//! [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+//! [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 //! fact rail and per-session slot state handle all of them, so:
 //!
 //! * [`CompileCacheMode::Session`] stays `Session` for EVERY reason —
@@ -60,7 +60,7 @@
 //!   and ignores every reason (stateless already bypasses host caches).
 
 use smallvec::SmallVec;
-use verter_semantic::resolver_core::WorkspaceAlias;
+use verter_session_query::resolution::WorkspaceAlias;
 
 use crate::types::{
     CompileCacheMode, CompileErrorPolicy, CompileInput, CompileProfile, DowngradeReason, HostConfig,

@@ -1689,6 +1689,28 @@ enum OpenKind {
     CarrierSource,
 }
 
+/// Registered carrier bytes are candidates for the next plugin refresh;
+/// cache-only loads cannot change these candidates or manufacture application.
+enum ContentReceipt {
+    Registered(Arc<str>),
+    Applied(Arc<str>),
+}
+
+impl ContentReceipt {
+    fn bytes(&self) -> &Arc<str> {
+        match self {
+            Self::Registered(bytes) | Self::Applied(bytes) => bytes,
+        }
+    }
+
+    fn applied_bytes(&self) -> Option<&Arc<str>> {
+        match self {
+            Self::Applied(bytes) => Some(bytes),
+            Self::Registered(_) => None,
+        }
+    }
+}
+
 /// A `TypeProvider` backed by a tsserver process (`node tsserver.js`).
 pub struct TsserverTypeProvider {
     transport: Arc<TsserverTransport>,
@@ -1700,10 +1722,14 @@ pub struct TsserverTypeProvider {
     tree: verter_tsgo_api::process::TreeKill,
     /// Cached file contents for position conversion.
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
-    /// Files that have been sent to tsserver via `open` command, tagged by
-    /// [`OpenKind`] so a resync replays a source WITH content but a carrier
-    /// companion CONTENTLESSLY. Used by `update_file` to decide between `open` vs
-    /// `updateOpen`. `load_file` adds to `contents` but NOT to `opened_files`.
+    /// Registered carrier candidates and bytes confirmed by an engine acknowledgement.
+    accepted: Arc<parking_lot::RwLock<HashMap<String, ContentReceipt>>>,
+    /// Serialize ordinary file commands through their acknowledgement.
+    document_gate: Mutex<()>,
+    /// Open files tagged by [`OpenKind`] so resync replays source content and
+    /// carrier membership separately. `update_file` opens a missing file or
+    /// replaces an existing buffer through `updateOpen`. `load_file` only caches
+    /// conversion content and does not add an open file.
     opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
     /// Workspace root path (forward slashes) for `projectRootPath` in open commands.
     workspace_root: String,
@@ -2331,6 +2357,8 @@ impl TsserverTypeProvider {
             child,
             tree,
             contents: contents_cache,
+            accepted: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            document_gate: Mutex::new(()),
             opened_files: Arc::new(Mutex::new(HashMap::new())),
             workspace_root: ws_root,
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
@@ -2828,7 +2856,37 @@ fn carrier_metadata_requires_refresh(
         && active_sources.contains(source)
 }
 
+/// A refresh certifies only its captured content, never a cache replacement
+/// that arrived while the engine was awaited.
+async fn certify_carrier_content(
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    accepted: &parking_lot::RwLock<HashMap<String, ContentReceipt>>,
+    delivered: Vec<(String, Arc<str>)>,
+) {
+    let cache = contents.lock().await;
+    let mut receipts = accepted.write();
+    for (path, bytes) in delivered {
+        if cache.get(&path) == Some(&bytes)
+            && receipts.get(&path).map(ContentReceipt::bytes) == Some(&bytes)
+        {
+            receipts.insert(path, ContentReceipt::Applied(bytes));
+        }
+    }
+}
+
 impl TypeProvider for TsserverTypeProvider {
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        if self.transport.stdin_tx.is_closed() || self.transport.pending.table.is_closed() {
+            return crate::traits::AppliedContent::NotApplied;
+        }
+        match self.accepted.read().get(&Self::normalize_path(path)) {
+            Some(ContentReceipt::Applied(bytes)) => {
+                crate::traits::AppliedContent::Applied(Arc::clone(bytes))
+            }
+            _ => crate::traits::AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsserver"
     }
@@ -2841,11 +2899,13 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let content = content.to_string();
         let transport = Arc::clone(&self.transport);
+        let accepted = Arc::clone(&self.accepted);
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         let content_generations = Arc::clone(&self.content_generations);
         Box::pin(async move {
+            let _document = self.document_gate.lock().await;
             crate::type_runtime_trace_scope_async!(
                 "tsserver_open_file",
                 format!(
@@ -2855,6 +2915,7 @@ impl TypeProvider for TsserverTypeProvider {
                     project_root,
                 ),
                 async {
+                    accepted.write().remove(&file);
                     store_content_bump_generation(
                         &contents_cache,
                         &content_generations,
@@ -2866,25 +2927,31 @@ impl TypeProvider for TsserverTypeProvider {
                         .lock()
                         .await
                         .insert(file.clone(), OpenKind::Source);
-                    // tsserver `open` command doesn't return a response.
+                    // updateOpen acknowledges the content before it becomes a receipt.
                     // projectRootPath tells tsserver where to find tsconfig.json.
                     transport
-                        .command_no_response(
-                            "open",
+                        .request(
+                            "updateOpen",
                             serde_json::json!({
-                                "file": file,
-                                "fileContent": content,
-                                "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                                    else if file.ends_with(".jsx") { "JSX" }
-                                    else if file.ends_with(".js") { "JS" }
-                                    else { "TS" },
-                                "projectRootPath": project_root,
+                                "openFiles": [{
+                                    "file": file,
+                                    "fileContent": content,
+                                    "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                        else if file.ends_with(".jsx") { "JSX" }
+                                        else if file.ends_with(".js") { "JS" }
+                                        else { "TS" },
+                                    "projectRootPath": project_root,
+                                }]
                             }),
                         )
                         .await?;
                     crate::type_runtime_trace_event!(
                         "tsserver_open_file_result",
                         format!("file={} opened=true", file),
+                    );
+                    accepted.write().insert(
+                        file.clone(),
+                        ContentReceipt::Applied(Arc::from(content.as_str())),
                     );
                     Ok(())
                 }
@@ -2931,11 +2998,13 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let content = content.to_string();
         let transport = Arc::clone(&self.transport);
+        let accepted = Arc::clone(&self.accepted);
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
         let content_generations = Arc::clone(&self.content_generations);
         Box::pin(async move {
+            let _document = self.document_gate.lock().await;
             crate::type_runtime_trace_scope_async!(
                 "tsserver_update_file",
                 format!(
@@ -2950,12 +3019,14 @@ impl TypeProvider for TsserverTypeProvider {
                     // without a trailing newline and can leave an old suffix in
                     // ScriptInfo, splitting its line table from the Program.
                     let old_end = {
-                        let cache = contents_cache.lock().await;
+                        let cache = accepted.read();
                         cache
                             .get(&file)
+                            .and_then(ContentReceipt::applied_bytes)
                             .map(|c| byte_offset_to_tsserver_pos(c, c.len() as u32))
                     };
 
+                    accepted.write().remove(&file);
                     store_content_bump_generation(
                         &contents_cache,
                         &content_generations,
@@ -2973,7 +3044,7 @@ impl TypeProvider for TsserverTypeProvider {
                             );
                             // Use updateOpen with textChanges spanning the old content
                             transport
-                                .command_no_response(
+                                .request(
                                     "updateOpen",
                                     serde_json::json!({
                                         "changedFiles": [{
@@ -2994,13 +3065,12 @@ impl TypeProvider for TsserverTypeProvider {
                                     file, end_line, end_offset
                                 ),
                             );
-                            Ok(())
                         } else {
                             // No old content in cache (shouldn't happen since opened_files
                             // is only set when content was sent) — close and reopen
                             tracing::warn!("tsserver update_file: no cached content for open file {file}, closing and reopening");
                             transport
-                                .command_no_response(
+                                .request(
                                     "updateOpen",
                                     serde_json::json!({
                                         "closedFiles": [&file],
@@ -3020,7 +3090,6 @@ impl TypeProvider for TsserverTypeProvider {
                                 "tsserver_update_file_result",
                                 format!("file={} mode=reopen_after_cache_miss", file),
                             );
-                            Ok(())
                         }
                     } else {
                         // File not open yet — open it and track. `update_file` is the
@@ -3034,16 +3103,18 @@ impl TypeProvider for TsserverTypeProvider {
                             content.len()
                         );
                         transport
-                            .command_no_response(
-                                "open",
+                            .request(
+                                "updateOpen",
                                 serde_json::json!({
-                                    "file": file,
-                                    "fileContent": content,
-                                    "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                                        else if file.ends_with(".jsx") { "JSX" }
-                                        else if file.ends_with(".js") { "JS" }
-                                        else { "TS" },
-                                    "projectRootPath": project_root,
+                                    "openFiles": [{
+                                        "file": file,
+                                        "fileContent": content,
+                                        "scriptKindName": if file.ends_with(".tsx") { "TSX" }
+                                            else if file.ends_with(".jsx") { "JSX" }
+                                            else if file.ends_with(".js") { "JS" }
+                                            else { "TS" },
+                                        "projectRootPath": project_root,
+                                    }]
                                 }),
                             )
                             .await?;
@@ -3051,8 +3122,9 @@ impl TypeProvider for TsserverTypeProvider {
                             "tsserver_update_file_result",
                             format!("file={} mode=first_open", file),
                         );
-                        Ok(())
                     }
+                    accepted.write().insert(file, ContentReceipt::Applied(Arc::from(content.as_str())));
+                    Ok(())
                 }
             )
             .await
@@ -3062,6 +3134,7 @@ impl TypeProvider for TsserverTypeProvider {
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
+        let accepted = Arc::clone(&self.accepted);
         let contents_cache = Arc::clone(&self.contents);
         let content_generations = Arc::clone(&self.content_generations);
         let opened_files = Arc::clone(&self.opened_files);
@@ -3076,10 +3149,12 @@ impl TypeProvider for TsserverTypeProvider {
             .fetch_add(1, Ordering::Relaxed)
             + 1;
         Box::pin(async move {
+            let _document = self.document_gate.lock().await;
             crate::type_runtime_trace_scope_async!(
                 "tsserver_close_file",
                 format!("file={}", file),
                 async {
+                    accepted.write().remove(&file);
                     let carrier_source = carrier_sources.read().get(&file).cloned();
                     if let Some(source) = carrier_source.as_ref() {
                         if let Some(project) = carrier_projects.read().get(source).cloned() {
@@ -3095,7 +3170,10 @@ impl TypeProvider for TsserverTypeProvider {
                         if opened_files.lock().await.remove(source) == Some(OpenKind::CarrierSource)
                         {
                             transport
-                                .command_no_response("close", serde_json::json!({ "file": source }))
+                                .request(
+                                    "updateOpen",
+                                    serde_json::json!({ "closedFiles": [source] }),
+                                )
                                 .await?;
                         }
                         forget_content(&contents_cache, &content_generations, source).await;
@@ -3109,16 +3187,21 @@ impl TypeProvider for TsserverTypeProvider {
                         );
                     }
                     forget_content(&contents_cache, &content_generations, &file).await;
-                    opened_files.lock().await.remove(&file);
+                    let was_open = opened_files.lock().await.remove(&file).is_some();
                     // Retract the carrier→project routing for a closed companion so
                     // it no longer injects `projectFileName` (a closed companion is
                     // no longer a member; a stale route would target a project the
                     // companion left). A no-op for a real `.ts`/`.tsx` file (never in
                     // the carrier map).
                     carrier_projects.write().remove(&file);
-                    if carrier_source.is_none() {
+                    // Only a file this provider opened is closed in tsserver: closing
+                    // one it merely loaded from disk (a project member, a companion
+                    // whose registration is already gone, a repeated close) fails
+                    // tsserver's open-file assertion, and the acknowledged failure
+                    // would read as a broken write that restarts the engine.
+                    if carrier_source.is_none() && was_open {
                         transport
-                            .command_no_response("close", serde_json::json!({ "file": file }))
+                            .request("updateOpen", serde_json::json!({ "closedFiles": [file] }))
                             .await?;
                     }
                     crate::type_runtime_trace_event!(
@@ -3192,6 +3275,7 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(companion_path);
         let content: Arc<str> = Arc::from(content);
         let project_file_name = Self::normalize_path(project_file_name);
+        let accepted = Arc::clone(&self.accepted);
         let contents_cache = Arc::clone(&self.contents);
         let content_generations = Arc::clone(&self.content_generations);
         let carrier_projects = Arc::clone(&self.carrier_projects);
@@ -3208,6 +3292,10 @@ impl TypeProvider for TsserverTypeProvider {
             + 1;
         let script_kind_name = if file.ends_with(".jsx") { "JSX" } else { "TSX" };
         Box::pin(async move {
+            accepted.write().insert(
+                file.clone(),
+                ContentReceipt::Registered(Arc::clone(&content)),
+            );
             // Hydrate the LOCAL position-conversion content for the companion —
             // the generated bytes also back the managed process's single active
             // source ScriptInfo. Closed workspace carriers remain lazy store-
@@ -3268,11 +3356,12 @@ impl TypeProvider for TsserverTypeProvider {
                 active_sources,
                 Arc::clone(&carrier_refresh),
                 refresh_generation,
-                file,
+                file.clone(),
                 CarrierRefreshPriority::Interactive,
             );
             wait_for_carrier_refresh(&carrier_refresh, refresh_generation).await?;
 
+            certify_carrier_content(&contents_cache, &accepted, vec![(file, content)]).await;
             Ok(())
         })
     }
@@ -3295,6 +3384,16 @@ impl TypeProvider for TsserverTypeProvider {
         let refresh = Arc::clone(&self.carrier_refresh);
         let refresh_generation = &self.carrier_store_refresh_generation;
         Box::pin(async move {
+            let (captured, needs_receipt) = {
+                let receipts = self.accepted.read();
+                match receipts.get(&companion) {
+                    Some(receipt) => (
+                        Some(Arc::clone(receipt.bytes())),
+                        receipt.applied_bytes().is_none(),
+                    ),
+                    None => (None, false),
+                }
+            };
             let newly_active = activate_published_carrier_inner(
                 PublishedCarrierActivation {
                     transport: Arc::clone(&transport),
@@ -3310,17 +3409,21 @@ impl TypeProvider for TsserverTypeProvider {
                 true,
             )
             .await?;
-            if newly_active {
+            if newly_active || needs_receipt {
                 let generation = refresh_generation.fetch_add(1, Ordering::Relaxed) + 1;
                 schedule_carrier_refresh(
                     transport,
                     active_sources,
                     Arc::clone(&refresh),
                     generation,
-                    companion,
+                    companion.clone(),
                     CarrierRefreshPriority::Interactive,
                 );
                 wait_for_carrier_refresh(&refresh, generation).await?;
+            }
+            if let Some(bytes) = captured {
+                certify_carrier_content(&self.contents, &self.accepted, vec![(companion, bytes)])
+                    .await;
             }
             Ok(())
         })
@@ -3347,7 +3450,27 @@ impl TypeProvider for TsserverTypeProvider {
         let refresh = Arc::clone(&self.carrier_refresh);
         let refresh_generation = &self.carrier_store_refresh_generation;
         Box::pin(async move {
-            let mut changed_file = None;
+            let captured: Vec<(String, Arc<str>)> = {
+                let receipts = self.accepted.read();
+                members
+                    .iter()
+                    .filter_map(|member| {
+                        let path = Self::normalize_path(&member.companion_path);
+                        receipts
+                            .get(&path)
+                            .map(|receipt| (path.clone(), Arc::clone(receipt.bytes())))
+                    })
+                    .collect()
+            };
+            let mut changed_file = {
+                let receipts = self.accepted.read();
+                captured
+                    .iter()
+                    .find(|(path, bytes)| {
+                        receipts.get(path).and_then(ContentReceipt::applied_bytes) != Some(bytes)
+                    })
+                    .map(|(path, _)| path.clone())
+            };
             let mut activation_error = None;
             for member in members {
                 let source = Self::normalize_path(&member.source_path);
@@ -3399,6 +3522,7 @@ impl TypeProvider for TsserverTypeProvider {
             if let Some(error) = activation_error {
                 return Err(error);
             }
+            certify_carrier_content(&self.contents, &self.accepted, captured).await;
             Ok(())
         })
     }
@@ -3433,11 +3557,17 @@ impl TypeProvider for TsserverTypeProvider {
                     companions: &carrier_companions,
                 },
                 &file,
-                content,
+                Arc::clone(&content),
                 &source,
                 &project_file_name,
             )
             .await;
+            if metadata_changed {
+                self.accepted.write().insert(
+                    file.clone(),
+                    ContentReceipt::Registered(Arc::clone(&content)),
+                );
+            }
             if carrier_metadata_requires_refresh(
                 metadata_changed,
                 &active_sources.read(),
@@ -3450,10 +3580,12 @@ impl TypeProvider for TsserverTypeProvider {
                     active_sources,
                     Arc::clone(&refresh),
                     generation,
-                    file,
+                    file.clone(),
                     CarrierRefreshPriority::Interactive,
                 );
                 wait_for_carrier_refresh(&refresh, generation).await?;
+                certify_carrier_content(&contents_cache, &self.accepted, vec![(file, content)])
+                    .await;
             }
             Ok(())
         })

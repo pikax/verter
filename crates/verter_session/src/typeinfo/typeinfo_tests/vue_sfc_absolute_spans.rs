@@ -13,9 +13,10 @@
 //! provably wrong for the second of two script blocks) and PASS against the
 //! position-preserving tree.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::typeinfo::framework_surface::vue_exec::{
     resolved_vue_surface_for_test, slots_from_typeinfo_surface,
@@ -52,7 +53,10 @@ fn raw_source(host: &VerterHost, canonical_id: &str) -> Arc<str> {
     )
 }
 
-fn whole_hash(host: &VerterHost, canonical_id: &str) -> verter_semantic::analysis::types::Hash16 {
+fn whole_hash(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     host.ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash
@@ -287,7 +291,7 @@ fn raise_member_value(
     host: &VerterHost,
     member: &TypeInfoSurfaceMember,
 ) -> verter_type_expr::TypeExpr {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
@@ -346,8 +350,12 @@ fn defineslots_return_span_slices_raw_to_vnode_array() {
     let macro_surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots<...>() must resolve a macro surface");
+
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
+        &fixture_dispatch_0,
         &resolved_vue_surface_for_test(macro_surface.clone()),
     );
 

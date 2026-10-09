@@ -83,7 +83,7 @@ fn session_slot_present(host: &VerterHost, profile: &CompileProfile) -> bool {
     host.compile_cache()
         .get(OWNER)
         .map(|cc| {
-            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new()
+            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
                 .peek_signature(&cc, profile_hash)
                 .is_some()
         })
@@ -92,7 +92,7 @@ fn session_slot_present(host: &VerterHost, profile: &CompileProfile) -> bool {
 
 fn template_slot(
     host: &VerterHost,
-) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
     host.derived_raw_cache().get(OWNER).and_then(|cc| {
         cc.raw_template_analysis()
             .map(|entry| Arc::clone(&entry.template))
@@ -131,8 +131,8 @@ fn external_src_compile_uses_the_session_slot_not_the_template_slot() {
         OWNER,
         vec![verter_workspace::ExactResolution {
             specifier: "./partial.html".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/proj/partial.html".to_string()),
             possible_canonical_ids: vec!["/proj/partial.html".to_string()],
         }],

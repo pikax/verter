@@ -69,7 +69,7 @@ pub mod mapper_fingerprint {
 
     use verter_type_expr::{MappedModifier, TypeExpr};
 
-    use crate::mapper_binder_registry::{MapperBinderRegistry, MapperFingerprint};
+    use verter_type_engine::mapper_binder_registry::{MapperBinderRegistry, MapperFingerprint};
 
     /// Public newtype around the internal `MapperFingerprint`.
     /// This is what `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`
@@ -145,20 +145,70 @@ pub mod mapper_fingerprint {
 /// materialisation through the ONE shared dispatch (no second engine).
 #[cfg(any(test, feature = "test-support"))]
 pub mod semantic_source_probe {
+    use verter_type_expr::facts::SemanticTypeSource;
+    use verter_type_expr::TypeExpr;
+
+    use crate::resolver_core::HostCapabilities;
+    use crate::VerterHost;
+    use verter_type_engine::project_semantic_dispatch::semantic_source as probe;
+
     /// Whether a published source's DEMAND-walk (Published(Expanded)) payload
     /// carries ANY typed degradation — the masking probe over the full
-    /// consumer walk.
-    pub use crate::project_semantic_dispatch::semantic_source::demand_semantic_source_is_degraded as demand_is_degraded;
+    /// consumer walk. Reads the host's current view.
+    pub fn demand_is_degraded(
+        host: &VerterHost,
+        owner_canonical: &str,
+        source: &SemanticTypeSource,
+    ) -> Option<bool> {
+        probe::demand_semantic_source_is_degraded_with_ctx::<HostCapabilities>(
+            host,
+            owner_canonical,
+            source,
+        )
+    }
+
     /// Demand-materialize a published source under `Published(Expanded)` —
-    /// the explicit full consumer walk.
-    pub use crate::project_semantic_dispatch::semantic_source::demand_semantic_source_type_expr as demand_type_expr;
+    /// the explicit full consumer walk. Reads the host's current view.
+    pub fn demand_type_expr(
+        host: &VerterHost,
+        owner_canonical: &str,
+        source: &SemanticTypeSource,
+    ) -> Option<TypeExpr> {
+        probe::demand_semantic_source_type_expr_with_ctx::<HostCapabilities>(
+            host,
+            owner_canonical,
+            source,
+        )
+    }
+
     /// Whether a published source's raised payload carries ANY typed
     /// degradation (the raise-time sidecar, read pre-unwrap) — the typed
     /// masking probe, independent of `synthesis_should_suppress`.
-    pub use crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_is_degraded as shallow_is_degraded;
+    pub fn shallow_is_degraded(
+        host: &VerterHost,
+        owner_canonical: &str,
+        source: &SemanticTypeSource,
+    ) -> Option<bool> {
+        probe::shallow_semantic_source_is_degraded_with_ctx::<HostCapabilities>(
+            host,
+            owner_canonical,
+            source,
+        )
+    }
+
     /// Shell-materialize a published source WITHOUT a reduction demand —
     /// the shallow published shape (`Ref` / utility carriers survive).
-    pub use crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_type_expr as shallow_type_expr;
+    pub fn shallow_type_expr(
+        host: &VerterHost,
+        owner_canonical: &str,
+        source: &SemanticTypeSource,
+    ) -> Option<TypeExpr> {
+        probe::shallow_semantic_source_type_expr_with_ctx::<HostCapabilities>(
+            host,
+            owner_canonical,
+            source,
+        )
+    }
 }
 
 /// Test-only arm for the component-meta output force-fail knob: the next

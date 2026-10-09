@@ -20,8 +20,8 @@
 //! arm below would COMPILE and trybuild would turn red.
 
 use std::sync::Arc;
-use verter_session::semantic_query::composite::CompositeList;
-use verter_session::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query::composite::CompositeList;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 fn main() {
     let members: Arc<[SemanticNodeId]> = Arc::from([]);
@@ -34,12 +34,12 @@ fn main() {
     // (3) The canonical-mint witness module is not even reachable —
     // `project_semantic_dispatch` (home of `CanonicalMint`) is
     // `pub(crate)`, so a derived composite cannot be minted from outside.
-    let _ = verter_session::project_semantic_dispatch::canonical_algebra::CanonicalMint {};
+    let _ = verter_type_engine::project_semantic_dispatch::canonical_algebra::CanonicalMint {};
     // (4) Neither can any bypass category be minted.
     let _ = CompositeList::authored_shell(Arc::clone(&members));
     let _ = CompositeList::ordered_carrier(Arc::clone(&members));
     let _ = CompositeList::preserving_rebuild(Arc::clone(&members));
     let _ = CompositeList::query_subject(Arc::clone(&members));
     // (5) The category registry itself is not nameable.
-    let _ = verter_session::semantic_query::composite::CompositeCarrierCategory::Canonical(todo!());
+    let _ = verter_type_engine::semantic_query::composite::CompositeCarrierCategory::Canonical(todo!());
 }

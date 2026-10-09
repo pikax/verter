@@ -80,7 +80,8 @@ fn call_rootless_without_registered_ambient_stays_fail_closed() {
             extensions: vec![".ts".into(), ".tsx".into(), ".d.ts".into()],
             workspace_root: "/fixtures".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/fixtures"),

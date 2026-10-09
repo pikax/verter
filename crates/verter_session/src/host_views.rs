@@ -14,6 +14,14 @@ use crate::host_executor;
 use crate::types::{DiagnosticsSnapshot, EffectiveFileState, FileMeta};
 use crate::VerterHost;
 
+/// The content identity of one committed source record: its whole hash.
+///
+/// A distinct type, not the bare `Hash16` representation shared with
+/// declaration and fact hashes, so a value of another hash space cannot be
+/// recorded as, or compared against, a source's committed content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CommittedSourceContent(verter_session_query::analysis::types::Hash16);
+
 impl VerterHost {
     /// Get the scheduler instance.
     pub fn scheduler(&self) -> &Arc<verter_scheduler::scheduler::Scheduler> {
@@ -76,12 +84,32 @@ impl VerterHost {
         )
     }
 
+    /// Return the content identity of the committed source record: its whole
+    /// hash.
+    ///
+    /// Unlike [`Self::registered_source_revision_token`], which a cache
+    /// eviction followed by an identical reload advances, this is the same
+    /// for every commit of the same bytes. A reader that retains an answer
+    /// derived from the source records it as dependency evidence, so evicting
+    /// or resetting the file's cached state never invalidates the answer;
+    /// only a commit of other bytes does.
+    #[must_use]
+    pub fn registered_source_whole_hash(
+        &self,
+        canonical_id: &str,
+    ) -> Option<CommittedSourceContent> {
+        let canonical_id = self.resolve_alias_or_canonical(canonical_id);
+        Some(CommittedSourceContent(
+            self.scheduler.try_get_source(&canonical_id)?.whole_hash,
+        ))
+    }
+
     /// Return the content-free schema-8 projection for one committed carrier.
     /// The projection is derived solely from the registered envelope.
     pub fn ordered_sfc_structure(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis> {
+    ) -> Option<verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis> {
         let structure = self.registered_file_structure(canonical_id)?;
         Some(crate::host_resolve::ordered_sfc_structure_analysis(
             &structure,
@@ -103,7 +131,7 @@ impl VerterHost {
     pub fn scheduler_export_signatures(
         &self,
         canonical_id: &str,
-    ) -> Option<Vec<verter_semantic::analysis::ExportSignature>> {
+    ) -> Option<Vec<verter_session_query::analysis::types::ExportSignature>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(data.export_signatures.clone())
@@ -117,7 +145,7 @@ impl VerterHost {
     pub fn scheduler_script_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>> {
+    ) -> Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(Arc::clone(&data.script_analysis))
@@ -158,7 +186,7 @@ impl VerterHost {
     pub fn scheduler_style_analyses(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>> {
+    ) -> Option<Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(Arc::clone(&data.style_analyses))
@@ -224,7 +252,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         _profile: Option<u64>,
-    ) -> Option<Vec<verter_semantic::analysis::StyleBlockAnalysis>> {
+    ) -> Option<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>> {
         use crate::host_executor::HostAnalysisData;
 
         let analysis_snap = self.scheduler.try_get_analysis(canonical_id)?;

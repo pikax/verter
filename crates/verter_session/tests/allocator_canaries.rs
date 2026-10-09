@@ -223,11 +223,10 @@ mod canary_warm_hit_zero_alloc {
 
     use std::hint::black_box;
 
-    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
-    use verter_session::resolver_core::{
-        FactVersionRef, ParseFactRef, PermissiveStoreView, ValidatedFactCache,
-    };
-    use verter_session::semantic_query::HashValue;
+    use verter_session::resolver_core::{PermissiveStoreView, ValidatedFactCache};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+    use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
+    use verter_type_engine::semantic_query::HashValue;
 
     use super::alloc_count;
 
@@ -348,75 +347,6 @@ mod canary_warm_hit_zero_alloc {
     }
 }
 
-mod canary_absolutize_already_absolute_zero_alloc {
-    //! Allocation canary for `SemanticTypeSource::absolutized_against`
-    //! over a LARGE already-absolute surface.
-    //!
-    //! The absolutization walker is copy-on-first-change: scanning an
-    //! already-absolute source performs NO clones and NO heap allocation
-    //! (the dominant case — a fallthrough source re-absolutized under a
-    //! consuming scope). The pre-fix walker eagerly cloned every member
-    //! into a fresh `Vec` before learning nothing changed, so this canary
-    //! reads a per-member allocation delta there and zero here.
-
-    use std::hint::black_box;
-    use std::sync::Arc;
-
-    use verter_type_expr::facts::{
-        ClosedTypeFact, ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact, SemanticTypeSource,
-    };
-    use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace, TypeBodySlot};
-    use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
-    use verter_type_expr::MemberVisibility;
-
-    use super::alloc_count;
-
-    fn absolute_member(index: usize) -> ObjectMemberFact {
-        ObjectMemberFact::Property(ObjectPropertyFact {
-            key: verter_type_expr::facts::FactAuthoredPropertyKey::string(format!("member{index}")),
-            optional: false,
-            readonly: false,
-            visibility: MemberVisibility::Public,
-            ty: TypeBodySlot {
-                // ALREADY-ABSOLUTE anchor: nothing to rewrite.
-                anchor: AuthoredAnchor {
-                    canonical_id: Arc::from("/already/absolute.ts"),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Anchored"),
-                    space: LocatorSymbolSpace::Type,
-                },
-                path: Arc::from(Vec::new().into_boxed_slice()),
-            },
-            span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
-        })
-    }
-
-    #[test]
-    fn absolutizing_a_large_already_absolute_surface_allocates_nothing() {
-        const MEMBERS: usize = 256;
-        let members: Vec<ObjectMemberFact> = (0..MEMBERS).map(absolute_member).collect();
-        let source = SemanticTypeSource::Closed(ClosedTypeFact::Object(ObjectShapeFact {
-            members: Arc::from(members.into_boxed_slice()),
-        }));
-
-        // Warm any lazy init, then measure the walk alone.
-        let _ = black_box(source.absolutized_against("/consumer.vue"));
-        let baseline = alloc_count();
-        let rewritten = source.absolutized_against("/consumer.vue");
-        let after = alloc_count();
-        black_box(&rewritten);
-        assert_eq!(source, rewritten, "already-absolute input round-trips");
-        let delta = after - baseline;
-        assert_eq!(
-            delta, 0,
-            "absolutizing a {MEMBERS}-member already-absolute surface must \
-             be allocation-free (copy-on-first-change) — a walker that \
-             eagerly clones the members into a Vec before discovering \
-             nothing changed reports a per-member delta here; observed {delta}"
-        );
-    }
-}
-
 mod canary_signature_fingerprint_zero_alloc {
     //! Allocation canary for `compute_signature_fingerprint` over the
     //! per-domain / source-env / project-generation `FactVersionRef`
@@ -433,11 +363,11 @@ mod canary_signature_fingerprint_zero_alloc {
 
     use std::hint::black_box;
 
-    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
-    use verter_session::resolver_core::{
-        compute_signature_fingerprint_for_tests, DerivedFactKind, FactVersionRef, ParseFactRef,
-        ResolveImportsFactRef, RouteSurfaceFactRef,
+    use verter_session::resolver_core::compute_signature_fingerprint_for_tests;
+    use verter_session_query::facts::fact_cache::{
+        DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
     };
+    use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
     use super::alloc_count;
 
@@ -517,113 +447,6 @@ mod canary_signature_fingerprint_zero_alloc {
              format!() reports ≥ 5 allocations per call here; observed \
              {delta} over {ITERATIONS} iterations",
             facts.len(),
-        );
-    }
-}
-
-mod canary_flow_return_audit_emission_zero_alloc {
-    //! Cold-vs-warm audit contract, allocation half
-    //! (`U6.FLOW_RETURN_SUBSTRATE` exit acceptance): without an
-    //! installed accumulator the flow-return audit emission helpers
-    //! allocate NOTHING — no event payload, no detail string, no
-    //! boxed variant. The warm family hit never reaches the helpers
-    //! at all (the behavioral half, pinned by
-    //! `warm_hit_emits_no_flow_return_started_event` in
-    //! `tests/cases/g_type/flow_return_audit_contract.rs`); this
-    //! canary pins that even the COLD-path helpers construct no
-    //! audit payload when no accumulator is installed, so a request
-    //! with audit off / footprint off pays zero audit allocation on
-    //! the flow path.
-    //!
-    //! Discrimination: a regression that builds a payload BEFORE the
-    //! accumulator gate — a `format!` detail, a `String::from`
-    //! canonical, a boxed event — reports ≥ 1 allocation per call
-    //! and pushes the 10 000-iteration delta to ≥ 10 000. The
-    //! companion test proves the counter responds to a real
-    //! per-iteration allocation through the same helpers' argument
-    //! shape, so the zero cannot be vacuous.
-    //!
-    //! Measurement isolation: no request context and no accumulator
-    //! are installed on this harness thread; the helpers' TLS probes
-    //! are warmed before the measured window so lazy TLS init is not
-    //! attributed to the loop.
-
-    use std::hint::black_box;
-    use std::sync::Arc;
-
-    use verter_semantic::analysis::flow::peeker::{FlowSliceBudgetAxis, FlowSliceBudgetExceeded};
-    use verter_session::flow_return_audit::{
-        record_flow_cycle_reentry, record_flow_return_started, record_flow_slice_budget_exceeded,
-    };
-
-    use super::alloc_count;
-
-    #[test]
-    fn emission_helpers_allocate_nothing_without_accumulator() {
-        // Setup phase — argument construction allocates and is NOT
-        // counted toward the measured delta.
-        let canonical: Arc<str> = Arc::from("/w/flow-canary.ts");
-        let symbol: Arc<str> = Arc::from("makeThing");
-        let exceeded = FlowSliceBudgetExceeded {
-            axis: FlowSliceBudgetAxis::SelectedNodes,
-            limit: 4096,
-            observed: 4097,
-        };
-
-        // Warm the TLS probes (request-context slot, accumulator
-        // slot) so one-time lazy initialisation is pre-paid.
-        for _ in 0..64 {
-            record_flow_return_started(&canonical, &symbol);
-            record_flow_slice_budget_exceeded(&exceeded);
-            record_flow_cycle_reentry(1, &symbol);
-        }
-
-        let baseline = alloc_count();
-        const ITERATIONS: usize = 10_000;
-        for i in 0..ITERATIONS {
-            record_flow_return_started(&canonical, &symbol);
-            record_flow_slice_budget_exceeded(&exceeded);
-            record_flow_cycle_reentry(i as u32, &symbol);
-        }
-        let after = alloc_count();
-        let delta = after - baseline;
-        assert_eq!(
-            delta, 0,
-            "flow-return audit emission helpers must allocate NOTHING without an \
-             installed accumulator (the cold-vs-warm audit contract's \
-             no-audit-payload half). A helper that builds a payload before the \
-             accumulator gate — a format!() detail, a String canonical, a boxed \
-             event — reports ≥ {ITERATIONS} here; observed {delta} over \
-             {ITERATIONS} iterations of all three helpers."
-        );
-    }
-
-    /// Discrimination companion: the same loop shape, with a real
-    /// per-iteration payload allocation of the kind the gate must
-    /// prevent. The counter must observe it — proving the zero above
-    /// is a measured zero, not a dead counter.
-    #[test]
-    fn discrimination_companion_ungated_payload_is_observed() {
-        let canonical: Arc<str> = Arc::from("/w/flow-canary.ts");
-        let symbol: Arc<str> = Arc::from("makeThing");
-        for i in 0..32 {
-            let _ = black_box(format!("warmup-{i}"));
-        }
-        let baseline = alloc_count();
-        const ITERATIONS: usize = 1_000;
-        for _ in 0..ITERATIONS {
-            // Exactly the payload an ungated helper would build.
-            let detail = format!("{canonical}::{symbol}");
-            black_box(detail);
-        }
-        let after = alloc_count();
-        let delta = after - baseline;
-        assert!(
-            delta >= ITERATIONS as u64,
-            "companion: a per-iteration format!() payload must be observed by the \
-             counting allocator (≥ {ITERATIONS} allocations); got {delta}. A zero \
-             here means the counter is not wired and the zero-allocation canary \
-             above proves nothing."
         );
     }
 }
@@ -923,48 +746,5 @@ mod flow_product_allocation;
 #[path = "allocation_cases/construction_bytes.rs"]
 mod construction_bytes_allocation;
 
-#[path = "allocation_cases/flow_literal_provenance.rs"]
-mod flow_literal_provenance_allocation;
-
-mod signature_kernel_warm_positional {
-    //! Warm positional Empty/One read: no per-candidate `Arc` clone and no
-    //! intern-shard lock. The counting allocator is process-global in this
-    //! binary; the measured window is the repeated read after the fixture is
-    //! interned.
-
-    use std::hint::black_box;
-
-    use verter_session::for_tests::{
-        warm_positional_read, warm_positional_read_many, WarmPositionalLockProbe,
-        WarmPositionalStore,
-    };
-
-    use super::{alloc_count, reset_alloc_counter};
-
-    #[test]
-    fn warm_positional_read_does_not_allocate_or_lock() {
-        let fixture = WarmPositionalStore::fixture();
-        let _ = warm_positional_read(&fixture);
-
-        reset_alloc_counter();
-        // bounded-loop: repeated warm positional reads of interned One and Many.
-        for _ in 0..10_000 {
-            black_box(warm_positional_read(&fixture));
-            black_box(warm_positional_read_many(&fixture));
-        }
-        let allocations = alloc_count();
-        assert_eq!(
-            allocations, 0,
-            "warm positional read allocated {allocations} times (per-candidate Arc clone?)"
-        );
-
-        let WarmPositionalLockProbe {
-            acquires_before,
-            acquires_after,
-        } = fixture.lock_probe();
-        assert_eq!(
-            acquires_after, acquires_before,
-            "warm positional read acquired intern-shard locks ({acquires_before} -> {acquires_after})"
-        );
-    }
-}
+#[path = "allocation_cases/expression_source_selection.rs"]
+mod expression_source_selection_allocation;

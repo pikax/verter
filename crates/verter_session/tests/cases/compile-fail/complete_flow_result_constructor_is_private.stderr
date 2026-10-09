@@ -4,7 +4,7 @@ error[E0624]: associated function `new` is private
   |     let _ = CompleteFlowResult::new(todo!());
   |                                 ^^^ private associated function
   |
- ::: $WORKSPACE/crates/verter_session/src/project_semantic_dispatch/flow_solve.rs
+ ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/flow_solve.rs
   |
   |     fn new(parts: CompleteFlowResultParts) -> Self {
   |     ---------------------------------------------- private associated function defined here

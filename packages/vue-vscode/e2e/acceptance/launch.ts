@@ -115,7 +115,7 @@ async function main(): Promise<void> {
   if (withNativePreview) {
     const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
     console.log(`acceptance lane: provisioning ${extension} into the isolated profile`);
-    provisionVsCodeExtension({
+    await provisionVsCodeExtension({
       cliArgs: resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath),
       extension,
       extensionsDir,

@@ -30,7 +30,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -79,7 +79,7 @@ defineSlots<MissingSlots>()
         .filter(|d| {
             matches!(
                 d.macro_kind,
-                verter_semantic::analysis::component_meta::MacroExpansionKind::DefineSlots,
+                verter_session_query::analysis::component_meta::MacroExpansionKind::DefineSlots,
             )
         })
         .collect();

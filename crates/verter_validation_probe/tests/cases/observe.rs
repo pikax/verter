@@ -1133,7 +1133,7 @@ fn trusted_run() -> WorkflowRun {
     WorkflowRun {
         id: 1,
         path: ".github/workflows/validation-probe.yml".to_string(),
-        event: "push".to_string(),
+        event: "schedule".to_string(),
         conclusion: "success".to_string(),
         head_branch: "main".to_string(),
         run_attempt: 1,
@@ -1339,6 +1339,33 @@ fn a_post_cutoff_insert_that_shifts_a_page_does_not_change_membership() {
     assert!(source.scans.get() >= 2);
 }
 
+/// Only the workflow's own default-branch triggers are trusted: the nightly
+/// schedule and a manual dispatch. A pull-request run is refused even when its
+/// head branch is spelled like the default branch (a fork's `main`), and so is
+/// any event the workflow is not triggered by.
+#[test]
+fn only_scheduled_or_dispatched_default_branch_runs_are_trusted() {
+    for (event, trusted) in [
+        ("schedule", true),
+        ("workflow_dispatch", true),
+        ("pull_request", false),
+        ("pull_request_target", false),
+        ("push", false),
+    ] {
+        let mut source = base_mock();
+        source.runs.get_mut(&1).expect("run").event = event.to_string();
+        let dir = fetch_dir();
+        let inventory = ObservationInventory::fetch_with(&source, dir.path())
+            .unwrap_or_else(|e| panic!("{event}: {e}"));
+        assert_eq!(
+            inventory.artifacts.len(),
+            usize::from(trusted),
+            "a `{event}` run on the default branch must be {}",
+            if trusted { "trusted" } else { "refused" },
+        );
+    }
+}
+
 /// LISTING_RETRIES is three total attempts. One transient page failure is
 /// retried and the fetch still returns the full inventory.
 #[test]
@@ -1538,46 +1565,18 @@ fn the_observation_job_uploads_the_prefixed_artifact_and_never_disposes_on_a_num
         .expect("repo")
         .join(".github/workflows/validation-probe.yml");
     let text = std::fs::read_to_string(&path).expect("workflow");
-    // The probe job's package run executes the observation test, so the same
-    // job publishes the artifact; there is no second job re-preparing a runner
-    // for it.
-    assert!(
-        !text.contains("\n  observe:"),
-        "the observation artifact is uploaded by the probe job, not a duplicate job"
-    );
-    let upload = text
-        .find("      - name: Upload the observation artifact")
-        .expect("the probe job uploads the observation artifact");
-    let step_end = text[upload + 1..]
-        .find("      - name:")
-        .map(|at| upload + 1 + at)
-        .unwrap_or(text.len());
-    let step = &text[upload..step_end];
-    assert!(step
+    let (probe, observation) = text
+        .split_once("\n  observe:")
+        .expect("separate observation job");
+    assert!(probe.contains("-E 'not test(observation_lane_emits_one_artifact)'"));
+    assert!(!probe.contains("Upload the observation artifact"));
+    assert!(observation.contains("continue-on-error: true"));
+    assert!(observation.contains("-E 'test(observation_lane_emits_one_artifact)'"));
+    assert!(observation
         .contains("validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}"));
-    assert!(
-        step.contains("if: always()"),
-        "the observation upload must publish even after a failing probe step"
-    );
-    assert!(
-        !step.contains("--dispose"),
-        "the observation upload must not carry the probe disposition"
-    );
-    assert!(
-        !step.contains("threshold") && !step.contains("rebaseline"),
-        "the observation upload must not threshold or rebaseline"
-    );
-    // Published before the lane is disposed, like the summary. Only the STEPS
-    // are searched: the file's header prose names the disposition too.
-    let steps = text.find("jobs:").expect("the workflow declares jobs");
-    let dispose = steps
-        + text[steps..]
-            .find("--dispose")
-            .expect("the workflow disposes the lane");
-    assert!(
-        upload < dispose,
-        "the observation artifact is published before disposition"
-    );
+    assert!(observation.contains("if: always()"));
+    assert!(!observation.contains("--dispose"));
+    assert!(!observation.contains("threshold") && !observation.contains("rebaseline"));
 }
 
 #[test]

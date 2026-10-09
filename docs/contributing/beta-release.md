@@ -95,11 +95,10 @@ since `release-tag.yml` tags only an exact release subject. It then tags the squ
 1. **validate** — proves the tag is the squash of the release pull request
    whose CI passed for this tree (`scripts/release-proof.mjs`); the tests and
    every build already ran there, as its CI lanes and `Release Check`
-2. **publish-crates** — crates.io (after validate)
-3. **publish-npm** — npm with `--tag beta`, from the release pull request's
+2. **publish-npm** — npm with `--tag beta`, from the release pull request's
    CI artifacts
-4. **github-release** — GitHub Release with the same binaries
-5. **deploy-playground** — Netlify deployment
+3. **github-release** — GitHub Release with the same binaries
+4. **deploy-playground** — Netlify deployment
 
 ## 6. Post-Release Verification
 
@@ -110,9 +109,6 @@ npm view @verter/native version
 
 # Verify VS Code marketplace
 # Check https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
-
-# Verify crates.io
-cargo search verter_compiler
 
 # Smoke test
 npm create vite@latest test-app -- --template vue-ts

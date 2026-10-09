@@ -62,6 +62,7 @@ pub mod footprint;
 pub mod instant;
 pub mod memory;
 pub mod noop;
+pub mod observe;
 pub mod observer;
 pub mod origin_graph;
 pub mod payloads;

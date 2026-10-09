@@ -38,6 +38,17 @@
 //! second confirms the producer call-sites use the new
 //! `engine_fact_signature_*` helpers (not the legacy
 //! `engine_dep_signature_for_canonical`).
+//!
+//! A third guard here used to scan `component_meta_caches.rs` for the
+//! warm-read validation adapters and the per-cache routing bodies, plus the
+//! `cache_runtime::node` cold-winner revalidators. Those bodies are owned by
+//! the facade's own producers (`project_semantic_dispatch/memo.rs`,
+//! `cache_runtime/node.rs`) and `component_meta_caches.rs` is passive storage,
+//! so such a scanner would reject a storage split while proving nothing about
+//! the strict warm-read contract. The contract itself is unchanged and
+//! behaviourally owned by the fact matrix (`tests/cases/fact_matrix/`) and the
+//! warm-hit cases that drive a real warm read against a live store view; the
+//! compiler owns the single-definition property of the shared adapter bodies.
 
 use std::fs;
 use std::path::PathBuf;
@@ -46,6 +57,16 @@ fn read_session_source(relative: &str) -> String {
     let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
     let mut path = PathBuf::from(cargo_manifest_dir);
     path.push("src");
+    path.push(relative);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+}
+
+/// Read a `verter_type_engine` source file relative to its `src/`.
+fn read_engine_source(relative: &str) -> String {
+    let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut path = PathBuf::from(cargo_manifest_dir);
+    path.push("../verter_type_engine/src");
     path.push(relative);
     fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
@@ -60,7 +81,7 @@ fn read_session_source(relative: &str) -> String {
 /// Source-grep arch guard.
 #[test]
 fn family_a_entries_carry_fact_dep_signature() {
-    let src = read_session_source("component_meta_caches.rs");
+    let src = read_engine_source("component_meta_caches.rs");
 
     // 1. The four single-entry caches store their value + carrier in the
     //    generic `Arc<CacheEntry<V>>` rather than a bespoke `*Entry`
@@ -101,8 +122,8 @@ fn family_a_entries_carry_fact_dep_signature() {
     //    carrier from `CacheEntry` while keeping `Candidate`'s would still
     //    pass file-wide. Windowing to the `CacheEntry<V>` body makes that
     //    drop flip the guard RED.
-    let admission = read_session_source("cache_runtime/admission.rs");
-    let cache_entry = struct_window(&admission, "pub(crate) struct CacheEntry<V> {");
+    let admission = read_engine_source("cache_runtime/admission.rs");
+    let cache_entry = struct_window(&admission, "pub struct CacheEntry<V> {");
     assert!(
         cache_entry.contains("pub signature: ReadSetSignature"),
         "`cache_runtime::CacheEntry<V>` must carry `signature: ReadSetSignature` — the \
@@ -155,17 +176,17 @@ fn family_a_entries_carry_fact_dep_signature() {
          A surviving legacy field would mean two coexisting validity rails. Window:\n{import_entry}"
     );
 
-    // 4. The lowering site folds the producer entry's raw rail into the
-    //    `ReadSetSignature` carrier at admission — pin the
+    // 4. The lowering site that folds the producer entry's raw rail into
+    //    the `ReadSetSignature` carrier is NOT asserted from this file.
+    //    `component_meta_caches.rs` is passive storage: the admission
+    //    lowering and the warm-read validation adapters moved to the
+    //    facade's own producers (`project_semantic_dispatch/memo.rs`), so
+    //    scanning this storage file for the
     //    `CacheAdmission::Cacheable { signature: ReadSetSignature::new(...) }`
-    //    shape so a regression that admitted without the carrier FAILS.
-    assert!(
-        src.contains("signature: crate::fact_signature_helpers::ReadSetSignature::new("),
-        "the imported-registry admission lowering must wrap the producer's \
-         `fact_dep_signature` into `ReadSetSignature::new(...)` on the \
-         `CacheAdmission::Cacheable` arm. Admitting without the carrier would bypass \
-         the path-precise validation rail."
-    );
+    //    shape rejected a storage split that changed nothing about the
+    //    carrier. The carrier's behavioural contract is owned by the fact
+    //    matrix (`tests/cases/fact_matrix/`) and the warm-hit cases that
+    //    drive a real warm read against a live store view.
 }
 
 /// Extract the `pub struct NAME { … }` window — from the struct start to
@@ -256,351 +277,6 @@ fn family_a_producers_call_new_fact_helpers() {
     );
 }
 
-/// A shared validation adapter site and the exact set of
-/// validation/bubble tokens its body carries on the warm-read path.
-///
-/// The Family A caches no longer each carry their own per-body
-/// validate/bubble pair: the four single-entry caches
-/// (`DeclarationLookupDb` / `ResolvabilityDb` / `OwnerCollectionDb` /
-/// `ShapeCacheDb`) route their warm read through the SHARED
-/// `SingleEntryArtifactNode::validate` + `single_entry_peek` adapters,
-/// and the query-identity cache (`ImportedRegistryDb`) routes through
-/// `QueryCandidateNode::lookup_candidate`
-/// (plus the bespoke `ImportedRegistryDb::peek`). Each adapter body MUST
-/// carry exactly one strict warm-read validator + one bubble, so
-/// dropping the pair at any shared site flips the guard RED.
-struct AdapterSiteSpec {
-    /// Human-readable name of the adapter site (for panic messages).
-    name: &'static str,
-    /// The `fn` signature prefix that opens the adapter's body. Matched
-    /// against `component_meta_caches.rs` (or, when `impl_anchor` is set,
-    /// against that impl window so a sibling cache's same-named method
-    /// cannot mask a drop here).
-    fn_sig: &'static str,
-    /// When set, scope the `fn_sig` search to this `impl XDb {` window
-    /// first — needed for `ImportedRegistryDb::peek`, whose `pub(crate)
-    /// fn peek(` signature is shared with `ShapeCacheDb::peek`.
-    impl_anchor: Option<&'static str>,
-}
-
-/// The shared warm-read validation adapters every live Family A cache
-/// routes through. The prepared-surface / prepared-member /
-/// prepared-target / routed-expr DBs are DELETED (their absence is
-/// guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`).
-const ADAPTER_SITES: &[AdapterSiteSpec] = &[
-    // The cooperative warm-hit validator shared by the four single-entry
-    // caches (DeclarationLookupDb / ResolvabilityDb / OwnerCollectionDb /
-    // ShapeCacheDb) through `SingleEntryArtifactNode`.
-    AdapterSiteSpec {
-        name: "SingleEntryArtifactNode::validate",
-        fn_sig:
-            "fn validate(\n        &self,\n        _key: &Self::Key,\n        entry: &CacheEntry",
-        impl_anchor: None,
-    },
-    // The compute-once warm-read peek shared by the single-entry caches
-    // that expose a `peek()` entry point (e.g. ShapeCacheDb).
-    AdapterSiteSpec {
-        name: "single_entry_peek",
-        fn_sig: "fn single_entry_peek<K, V>(",
-        impl_anchor: None,
-    },
-    // The warm-hit candidate validator the query-identity cache
-    // (ImportedRegistryDb) routes through via `QueryCandidateNode`.
-    AdapterSiteSpec {
-        name: "QueryCandidateNode::lookup_candidate",
-        fn_sig: "fn lookup_candidate(\n        &self,\n        key: &Self::Key,",
-        impl_anchor: None,
-    },
-    // The bespoke compute-once peek on the imported-registry cache, which
-    // validates a candidate inline rather than via `single_entry_peek`.
-    AdapterSiteSpec {
-        name: "ImportedRegistryDb::peek",
-        fn_sig: "pub(crate) fn peek(",
-        impl_anchor: Some("impl ImportedRegistryDb {"),
-    },
-];
-
-/// A named Family A cache's routing method: the cold/warm entry point
-/// that MUST construct the shared cache-runtime adapter node and hand it
-/// to the shared `lookup` entry point. Pins that the cache routes through
-/// the adapter rather than reading its backing store directly.
-struct RoutingSiteSpec {
-    /// Human-readable name (for panic messages).
-    name: &'static str,
-    /// The `impl XDb {` window to scope the routing-method search to, so a
-    /// sibling cache's same-named method cannot mask a bypass here.
-    impl_anchor: &'static str,
-    /// The routing-method signature prefix opening the body to scan.
-    fn_sig: &'static str,
-    /// The shared adapter node type the routing body MUST construct —
-    /// `SingleEntryArtifactNode` for the single-entry artifact caches or
-    /// `QueryCandidateNode` for the two query-identity caches. The guard
-    /// captures the `let <BIND> = <node_type> { … }` binding name and then
-    /// asserts the SAME body passes that binding to the shared `lookup`
-    /// (`lookup(&<BIND>,`). Matching by node type + captured binding is
-    /// name-agnostic (a `node`→`adapter` rename still passes) and
-    /// import-agnostic (any module-path prefix before `lookup` is allowed),
-    /// while still discriminating a bypass: a cache that read `self.entries`
-    /// / `self.store` directly never constructs the adapter node, so the
-    /// capture fails and the guard goes RED.
-    node_type: &'static str,
-    /// The backing-store field the constructed adapter node MUST borrow —
-    /// `entries: &self.entries,` / `store: &self.store,`. Pins that the
-    /// adapter node is wired to the cache's real backing store rather than a
-    /// detached throwaway.
-    store_field: &'static str,
-}
-
-/// Every live Family A cache routes its warm/cold read through one of the
-/// two shared cache-runtime adapter families:
-/// - the four single-entry caches build a `SingleEntryArtifactNode {
-///   entries: &self.entries, ... }` and hand it to the artifact-path
-///   `lookup(&node, ...)`.
-/// - the two query-identity caches build a `QueryCandidateNode { store:
-///   &self.store, ... }` and hand it to `crate::cache_runtime::query::lookup`.
-///
-/// Pinning the adapter-node construction + the shared `lookup` call per
-/// cache makes a regression that read the backing store directly (skipping
-/// the adapter's strict warm-read validation) flip the guard RED.
-const ROUTING_SITES: &[RoutingSiteSpec] = &[
-    RoutingSiteSpec {
-        name: "DeclarationLookupDb",
-        impl_anchor: "impl DeclarationLookupDb {",
-        fn_sig: "fn get_or_compute_in_scope<F>(",
-        node_type: "SingleEntryArtifactNode",
-        store_field: "entries: &self.entries,",
-    },
-    RoutingSiteSpec {
-        name: "ResolvabilityDb",
-        impl_anchor: "impl ResolvabilityDb {",
-        fn_sig: "fn get_or_compute_in_scope<F>(",
-        node_type: "SingleEntryArtifactNode",
-        store_field: "entries: &self.entries,",
-    },
-    RoutingSiteSpec {
-        name: "OwnerCollectionDb",
-        impl_anchor: "impl OwnerCollectionDb {",
-        fn_sig: "fn get_or_compute_in_scope<F>(",
-        node_type: "SingleEntryArtifactNode",
-        store_field: "entries: &self.entries,",
-    },
-    RoutingSiteSpec {
-        name: "ShapeCacheDb",
-        impl_anchor: "impl ShapeCacheDb {",
-        fn_sig: "fn get_or_compute_in_scope<F>(",
-        node_type: "SingleEntryArtifactNode",
-        store_field: "entries: &self.entries,",
-    },
-    RoutingSiteSpec {
-        name: "ImportedRegistryDb",
-        impl_anchor: "impl ImportedRegistryDb {",
-        fn_sig: "fn get_or_compute_admit_in_scope<F>(",
-        node_type: "QueryCandidateNode",
-        store_field: "store: &self.store,",
-    },
-];
-
-/// The strict self-root validator method on the `ReadSetSignature`
-/// carrier — the SOLE warm-read validity gate. The free-fn form
-/// (`validate_fact_signature_with_self_roots`) is no longer called from
-/// any Family A cache; the carrier method is.
-const STRICT_VALIDATOR: &str = ".validate_with_self_roots(";
-/// The fact-bubble method on the carrier — propagates the entry's
-/// observed facts into the caller's outer tracer on a warm hit.
-const BUBBLE: &str = ".bubble(";
-/// The legacy lazy free-fn validator that routes a self-root
-/// `FileWholeHash` through the untracked-accept rule. Forbidden.
-const LAZY_VALIDATOR: &str = "validate_fact_signature(ctx,";
-
-/// Extract the primary `impl XDb { … }` window — from `anchor` up to
-/// the next top-level `\nimpl ` / `\npub struct ` / `\nstruct `,
-/// exclusive.
-fn extract_db_impl_window<'a>(src: &'a str, anchor: &str) -> &'a str {
-    let start = src
-        .find(anchor)
-        .unwrap_or_else(|| panic!("expected `{anchor}` in component_meta_caches.rs"));
-    let after = &src[start + anchor.len()..];
-    let rel_end = ["\nimpl ", "\npub struct ", "\nstruct "]
-        .iter()
-        .filter_map(|m| after.find(m))
-        .min()
-        .unwrap_or(after.len());
-    &after[..rel_end]
-}
-
-/// Assert that `region` (a named adapter site) carries EXACTLY one strict
-/// validator and EXACTLY one bubble — a binary present/absent check at
-/// that single site, not an aggregate `>= N` count.
-fn assert_one_validator_one_bubble(region: &str, site: &str) {
-    let validators = region.matches(STRICT_VALIDATOR).count();
-    assert_eq!(
-        validators, 1,
-        "{site} MUST carry EXACTLY one `{STRICT_VALIDATOR}...)` — dropping it leaves a \
-         stale-serve hole, duplicating it signals a mis-split. Observed {validators}. Region:\n{region}"
-    );
-    let bubbles = region.matches(BUBBLE).count();
-    assert_eq!(
-        bubbles, 1,
-        "{site} MUST carry EXACTLY one `{BUBBLE}...)` so outer tracers see the inner \
-         observation set at this site. Observed {bubbles}. Region:\n{region}"
-    );
-}
-
-/// Every live Family A cache validates its warm-read path strictly
-/// through the `ReadSetSignature::validate_with_self_roots(ctx,
-/// &self_roots)` carrier method — the strict self-root validator: the
-/// entry's keyed canonical(s) are passed as the self-root set, so the
-/// leading self-root `FileWholeHash` is validated strictly (a
-/// same-canonical edit, or a keyed canonical untracked by the live store
-/// view, rejects the entry) while cross-file dependency facts keep lazy
-/// permissiveness. The legacy lazy free-fn `validate_fact_signature`
-/// warm-hit validator is forbidden.
-///
-/// BINARY per-named-SITE guard (NOT an aggregate `>= N` count): the four
-/// caches no longer each carry their own validate/bubble pair — they
-/// route through a small set of SHARED adapter bodies. The guard asserts
-/// each shared adapter carries exactly one validator + one bubble, so
-/// dropping the pair at any shared site (which would break every cache
-/// routing through it) flips the guard RED. The windows are
-/// fn-body-scoped, never file-wide, so a stray validator elsewhere can
-/// never mask a dropped pair.
-#[test]
-fn family_a_warm_hit_uses_fact_validation() {
-    let src = read_session_source("component_meta_caches.rs");
-
-    for spec in ADAPTER_SITES {
-        let search_scope: &str = match spec.impl_anchor {
-            Some(anchor) => extract_db_impl_window(&src, anchor),
-            None => &src,
-        };
-        let body = extract_fn_body(search_scope, spec.fn_sig);
-        assert_one_validator_one_bubble(body, spec.name);
-    }
-
-    // Proving the SHARED adapters validate is necessary but NOT sufficient:
-    // it does not prove each Family A cache actually ROUTES its warm read
-    // through those adapters. A cache that read `self.entries` / `self.store`
-    // directly — bypassing the adapter entirely — would still pass the
-    // adapter-body checks above. So pin, per named cache, that its
-    // cold/warm routing method constructs the shared adapter node and hands
-    // it to the shared `lookup` entry point. Each window is the cache's
-    // routing-method body (scoped to its own `impl XDb {`), so a sibling
-    // cache's routing cannot mask a bypass here.
-    //
-    // The check is STRUCTURAL, not name-pinned: capture the `let <BIND> =
-    // <node_type> { … }` binding identifier (regardless of the chosen name)
-    // and then assert the SAME body hands THAT binding to the shared
-    // `lookup(&<BIND>,` (regardless of any module-path prefix before
-    // `lookup`). A harmless local rename (`node`→`adapter`) or a query
-    // `lookup` import alias still passes; a bypass that reads `self.entries`
-    // / `self.store` directly never constructs the adapter node, so the
-    // capture fails and the guard goes RED — and a body that builds the node
-    // but never passes it to `lookup` has no `lookup(&<BIND>,` and also goes
-    // RED.
-    let node_binding_re =
-        regex::Regex::new(r"let\s+(\w+)\s*=\s*(SingleEntryArtifactNode|QueryCandidateNode)\s*\{")
-            .expect("routing node-binding regex");
-    for spec in ROUTING_SITES {
-        let impl_window = extract_db_impl_window(&src, spec.impl_anchor);
-        let body = extract_fn_body(impl_window, spec.fn_sig);
-
-        // Capture the adapter-node binding for THIS spec's node type.
-        let captured = node_binding_re
-            .captures_iter(body)
-            .find(|c| &c[2] == spec.node_type);
-        let bind = captured.unwrap_or_else(|| {
-            panic!(
-                "{} MUST construct the shared cache-runtime adapter node \
-                 `{} {{ … }}` in its `{}` body — a cache that read its backing \
-                 store (`self.entries` / `self.store`) directly would carry no \
-                 adapter-node construction and bypass the strict warm-read fact \
-                 validation the adapter enforces. Body:\n{body}",
-                spec.name, spec.node_type, spec.fn_sig,
-            )
-        });
-        let bind = bind[1].to_string();
-
-        // The constructed node must borrow the cache's real backing store.
-        assert!(
-            body.contains(spec.store_field),
-            "{} adapter node `{}` must borrow its backing store (`{}`) in its \
-             `{}` body. Body:\n{body}",
-            spec.name,
-            spec.node_type,
-            spec.store_field,
-            spec.fn_sig,
-        );
-
-        // The SAME body must hand THAT captured binding to the shared
-        // `lookup`. The `lookup(&<BIND>,` substring is module-path-agnostic
-        // (any prefix before `lookup` is allowed) and name-agnostic (the
-        // captured binding, not a literal `node`).
-        let lookup_call = format!("lookup(&{bind},");
-        assert!(
-            body.contains(&lookup_call),
-            "{} MUST hand its adapter node `{bind}` to the shared `lookup` \
-             entry point: its `{}` body must contain `{lookup_call}`. A body \
-             that constructs the adapter node but never passes it to `lookup` \
-             skips the shared strict warm-read fact validation. Body:\n{body}",
-            spec.name,
-            spec.fn_sig,
-        );
-    }
-
-    // The cold winner bubbles + post-compute revalidates in the shared
-    // `cache_runtime` substrate (`node.rs`). There are TWO cold-projection
-    // sites — the artifact path (`fn lookup<N: ArtifactNode>`) and the
-    // query-identity path (`fn lookup<N: QueryNode>`) — and each carries its
-    // own cold-winner bubble closure + post-compute revalidator closure. A
-    // file-wide `contains(STRICT_VALIDATOR)` / `contains(BUBBLE)` is
-    // NON-discriminating: dropping the pair from EITHER cold path would still
-    // pass because the OTHER path's pair satisfies the file-wide match. Scope
-    // each cold-projection body separately and assert exactly-one validator +
-    // exactly-one bubble in EACH (mirroring the warm-adapter exact-count
-    // pattern), so dropping either pair flips the guard RED.
-    let node_src = read_session_source("cache_runtime/node.rs");
-    let artifact_lookup = extract_fn_body(&node_src, "pub(crate) fn lookup<N: ArtifactNode>(");
-    assert_one_validator_one_bubble(artifact_lookup, "cache_runtime::node::lookup<ArtifactNode>");
-    // The query-identity path carries TWO winner-side projections — the
-    // admitted projection AND the admission-REFUSED opt-in projection
-    // (`QueryNode::lower_unadmitted`): an admission-refused computed value
-    // still flows to the winner, and its traced facts must STILL bubble
-    // into the enclosing tracer so the rejected child's observations keep
-    // rooting the consuming entries' signatures (cross-file invalidation).
-    // Exactly ONE post-compute revalidator + exactly TWO bubbles: dropping
-    // either projection's bubble (2→1) or both (2→0) flips the guard RED.
-    let query_lookup = extract_fn_body(&node_src, "pub(crate) fn lookup<N: QueryNode>(");
-    let query_validators = query_lookup.matches(STRICT_VALIDATOR).count();
-    assert_eq!(
-        query_validators, 1,
-        "cache_runtime::node::query::lookup<QueryNode> MUST carry EXACTLY one \
-         `{STRICT_VALIDATOR}...)` post-compute revalidator. Observed {query_validators}. \
-         Region:\n{query_lookup}"
-    );
-    let query_bubbles = query_lookup.matches(BUBBLE).count();
-    assert_eq!(
-        query_bubbles, 2,
-        "cache_runtime::node::query::lookup<QueryNode> MUST carry EXACTLY two \
-         `{BUBBLE}...)` sites — one on the admitted winner projection, one on the \
-         admission-REFUSED `lower_unadmitted` projection (the refused child's facts \
-         must still root the enclosing signatures). Observed {query_bubbles}. \
-         Region:\n{query_lookup}"
-    );
-
-    // The lazy free-fn `validate_fact_signature(ctx, …)` is forbidden
-    // file-wide: it routes a self-root `FileWholeHash` through the
-    // untracked-accept rule and would serve stale entries. Only the
-    // strict carrier method is permitted for Family A caches.
-    assert!(
-        !src.contains(LAZY_VALIDATOR),
-        "component_meta_caches.rs must NOT call the lazy `{LAZY_VALIDATOR} ...)` anywhere — \
-         the lazy validator routes a self-root FileWholeHash through the untracked-accept \
-         rule and serves stale entries. Use the strict \
-         `ReadSetSignature::validate_with_self_roots(ctx, &self_roots)` carrier method \
-         with the entry's keyed canonical(s) as the self-root set."
-    );
-}
-
 /// Extract the body of the function whose signature begins at
 /// `needle` in `src` — the brace-balanced span from the first `{`
 /// after the signature to its matching `}`.
@@ -667,9 +343,9 @@ fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
 ///   the overlay's. A signature builder must NEVER observe a hash; it
 ///   takes the observed hash as a parameter.
 ///
-/// The three central helpers live in `fact_signature_helpers.rs`; the
-/// four `engine_fact_signature_for_*` wrappers live in the engine's
-/// `mod.rs`. The producers (the observation point) are responsible for
+/// The three central helpers and the materialize-memo builder live in
+/// `fact_signature_helpers.rs`; the exported-type engine wrapper lives in
+/// the engine's `mod.rs`. The producers (the observation point) are responsible for
 /// read-ordering — not token-checkable; the producer-level
 /// overlay-discrimination tests in `query_db_self_root_tests.rs` cover
 /// that. Re-introducing any forbidden token inside any builder below
@@ -690,11 +366,11 @@ fn central_fact_signature_helpers_are_provenance_pure() {
     ];
 
     // The three central helpers in `fact_signature_helpers.rs`.
-    let helpers_src = read_session_source("fact_signature_helpers.rs");
+    let helpers_src = read_engine_source("fact_signature_helpers.rs");
     const HELPERS: &[&str] = &[
-        "pub(crate) fn fact_signature_for_exported_type(",
-        "pub(crate) fn fact_signature_for_canonical_member(",
-        "pub(crate) fn fact_signature_for_canonical_surface(",
+        "pub fn fact_signature_for_exported_type<",
+        "pub fn fact_signature_for_canonical_member<",
+        "pub fn fact_signature_for_canonical_surface<",
     ];
     for helper in HELPERS {
         let body = extract_fn_body(&helpers_src, helper);
@@ -710,23 +386,35 @@ fn central_fact_signature_helpers_are_provenance_pure() {
         }
     }
 
-    // The live engine wrappers in `component_meta_query_engine/mod.rs`.
-    // They delegate to the central helpers and must be provenance-pure
-    // for the same reason — a re-read inside a wrapper is the same
-    // publish-race hole as one inside the central helper. The
-    // walker-cluster's `engine_fact_signature_for_prepared_target`
-    // wrapper is DELETED (its `PreparedTargetDb` producer is gone), and
-    // `engine_fact_signature_for_canonical_member` had no surviving
-    // producer wrapper — the canonical-member signature builder lives in
+    // The live engine signature wrappers. They delegate to the central
+    // helpers and must be provenance-pure for the same reason — a re-read
+    // inside a wrapper is the same publish-race hole as one inside the
+    // central helper. The exported-type wrapper lives in the engine's
+    // `component_meta_query_engine/mod.rs`; the materialize-memo builder
+    // lives beside the central helpers in the type engine's
+    // `fact_signature_helpers.rs`. The canonical-member signature builder is
     // `fact_signature_helpers.rs::fact_signature_for_canonical_member`,
-    // already covered by the HELPERS list above.
-    let engine_src = read_session_source("resolver_core/component_meta_query_engine/mod.rs");
-    const ENGINE_WRAPPERS: &[&str] = &[
-        "pub(crate) fn engine_fact_signature_for_exported_type(",
-        "pub(crate) fn engine_fact_signature_for_materialize_memo(",
+    // already covered by the HELPERS list above. The flag selects the crate:
+    // `false` reads the session `src/`, `true` the type engine `src/`.
+    const ENGINE_WRAPPERS: &[(bool, &str, &str)] = &[
+        (
+            false,
+            "resolver_core/component_meta_query_engine/mod.rs",
+            "pub(crate) fn engine_fact_signature_for_exported_type(",
+        ),
+        (
+            true,
+            "fact_signature_helpers.rs",
+            "pub fn engine_fact_signature_for_materialize_memo(",
+        ),
     ];
-    for wrapper in ENGINE_WRAPPERS {
-        let body = extract_fn_body(&engine_src, wrapper);
+    for (in_engine, file, wrapper) in ENGINE_WRAPPERS {
+        let wrapper_src = if *in_engine {
+            read_engine_source(file)
+        } else {
+            read_session_source(file)
+        };
+        let body = extract_fn_body(&wrapper_src, wrapper);
         for forbidden in FORBIDDEN {
             assert!(
                 !body.contains(forbidden),

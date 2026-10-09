@@ -65,7 +65,7 @@ pub(super) fn require_lane_aligned(lane: &str, analysis_len: usize, lane_len: us
 }
 
 pub fn ordered_structure_to_ffi(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
 ) -> FfiOrderedSfcStructure {
     use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, MarkupNodeKind};
 
@@ -272,7 +272,7 @@ pub fn registered_structure_to_ffi(
 }
 
 fn structure_range(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
 ) -> FfiStructureRange {
     FfiStructureRange {
@@ -283,7 +283,7 @@ fn structure_range(
 }
 
 fn authored_name_to_ffi(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     authored: verter_language::parse_artifact::carrier_inventory::SourceSlice,
     normalized: verter_language::parse_artifact::carrier_inventory::InternedNameId,
 ) -> FfiAuthoredName {
@@ -339,7 +339,7 @@ fn block_role_to_ffi(
 }
 
 fn termination_to_ffi(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     value: &verter_language::parse_artifact::carrier_inventory::SyntaxTermination,
 ) -> FfiSyntaxTermination {
     use verter_language::parse_artifact::carrier_inventory::SyntaxTermination;
@@ -359,7 +359,7 @@ fn termination_to_ffi(
 }
 
 fn attribute_to_ffi(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     attribute: &verter_language::parse_artifact::carrier_inventory::CarrierAttribute,
 ) -> FfiCarrierAttribute {
     use verter_language::parse_artifact::carrier_inventory::{AttributeValue, CarrierAttribute};
@@ -414,7 +414,7 @@ fn attribute_to_ffi(
 /// mapping with hand-built parts without a live host.
 #[cfg(test)]
 pub(super) fn component_meta_parts_to_ffi(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<verter_session::meta_resolve::ComponentMetaResolutionOutput>,
     lanes: verter_session::meta_resolve::MaterializedComponentMetaTypeLanes,
 ) -> FfiComponentMeta {
@@ -430,16 +430,16 @@ pub(super) fn component_meta_parts_to_ffi(
                 diagnostics: std::sync::Arc::from([]),
             },
         ),
-        verter_session::semantic_query::ResultCompleteness::Complete,
+        verter_type_engine::semantic_query::ResultCompleteness::Complete,
     )
 }
 
 pub(super) fn component_meta_parts_with_contract_to_ffi(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<verter_session::meta_resolve::ComponentMetaResolutionOutput>,
     lanes: verter_session::meta_resolve::MaterializedComponentMetaTypeLanes,
     contract: verter_session::framework::ComponentContractAvailability,
-    completeness: verter_session::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 ) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
     // Sealed-identity wire tokens for style rows: each style's sealed ref is
@@ -779,13 +779,13 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                     .map(|binding| FfiImportBindingMeta {
                         name: binding.name,
                         kind: match binding.kind {
-                            verter_semantic::analysis::types::ImportBindingKind::Named => {
+                            verter_session_query::analysis::types::ImportBindingKind::Named => {
                                 "named".to_string()
                             }
-                            verter_semantic::analysis::types::ImportBindingKind::Default => {
+                            verter_session_query::analysis::types::ImportBindingKind::Default => {
                                 "default".to_string()
                             }
-                            verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                            verter_session_query::analysis::types::ImportBindingKind::Namespace => {
                                 "namespace".to_string()
                             }
                         },
@@ -1098,11 +1098,11 @@ fn contract_exactness_to_ffi(
 /// to anyone inspecting the reasons, which is the very outcome this state
 /// exists to prevent.
 ///
-/// [`PartialReason`]: verter_session::semantic_query::PartialReason
+/// [`PartialReason`]: verter_type_engine::semantic_query::PartialReason
 fn result_completeness_to_ffi(
-    completeness: verter_session::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 ) -> FfiResultCompleteness {
-    use verter_session::semantic_query::{PartialReason, PartialReasonSet, ResultCompleteness};
+    use verter_type_engine::semantic_query::{PartialReason, PartialReasonSet, ResultCompleteness};
     match completeness {
         ResultCompleteness::Complete => FfiResultCompleteness::Complete,
         ResultCompleteness::Partial(reasons) => FfiResultCompleteness::Partial {

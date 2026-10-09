@@ -3,14 +3,14 @@
 //! The publication finaliser picks between two candidate published-field shapes.
 //! Both the node-domain comparison ([`compare_node_improvement`]) and the
 //! `TypeExpr` comparison ([`compare_type_expr_improvement`]) read the SAME
-//! publication-scoring facts ([`crate::project_semantic_dispatch::raise::PublicationScore`])
+//! publication-scoring facts ([`verter_type_engine::project_semantic_dispatch::raise::PublicationScore`])
 //! and apply the SAME [`publication_score_improves`] formula — there is exactly
 //! ONE scoring algebra (the node front rides the shared `SemanticNodeData` fold;
 //! the `TypeExpr` front feeds the same per-arm rules), so the two comparisons can
 //! never drift. [`node_root_is_explicit_selector_operator`] reads the carrier kind
 //! directly and is a separate, non-scoring predicate.
 
-use crate::project_semantic_dispatch::raise::PublicationScore;
+use verter_type_engine::project_semantic_dispatch::raise::PublicationScore;
 
 /// Whether `candidate` is a strictly BETTER published shape than `current`,
 /// scored over the publication-scoring facts. The SINGLE comparison formula both
@@ -45,18 +45,20 @@ fn publication_score_improves(candidate: &PublicationScore, current: &Publicatio
 /// its zero symbolic carriers would beat any symbolic current
 /// (`0 < current.symbolic_carriers`), wrongly preferring the shapeless candidate.
 pub(crate) fn compare_node_improvement(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    candidate: crate::semantic_query::SemanticNodeId,
-    current: crate::semantic_query::SemanticNodeId,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+    candidate: verter_type_engine::semantic_query::SemanticNodeId,
+    current: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let candidate_score =
-        crate::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
-            &dispatch, candidate,
+        verter_type_engine::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
+            dispatch, candidate,
         );
     let current_score =
-        crate::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
-            &dispatch, current,
+        verter_type_engine::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
+            dispatch, current,
         );
     match (candidate_score, current_score) {
         (Some(candidate), Some(current)) => publication_score_improves(&candidate, &current),
@@ -76,12 +78,15 @@ pub(crate) fn compare_node_improvement(
 /// directly (peeling `Alias`); a builtin-utility name is matched on the
 /// reference's declaration name.
 pub(crate) fn node_root_is_explicit_selector_operator(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: crate::semantic_query::SemanticNodeId,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-    let graph = ctx.project_type_store().semantic_graph();
+    use verter_session_query::type_solver::builtin::BuiltinUtility;
+    use verter_type_engine::semantic_query::SemanticNodeData;
+    let graph = dispatch.graph();
     let is_selector_util = |name: &str| {
         matches!(
             BuiltinUtility::from_name(name),
@@ -90,7 +95,7 @@ pub(crate) fn node_root_is_explicit_selector_operator(
     };
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Alias(inner)) => {
-            node_root_is_explicit_selector_operator(ctx, *inner)
+            node_root_is_explicit_selector_operator(dispatch, *inner)
         }
         Some(
             SemanticNodeData::IndexedAccess { .. }
@@ -126,9 +131,11 @@ pub(crate) fn compare_type_expr_improvement(
     current: &verter_type_expr::TypeExpr,
 ) -> bool {
     let candidate_score =
-        crate::project_semantic_dispatch::raise::type_expr_publication_score(candidate);
+        verter_type_engine::project_semantic_dispatch::raise::type_expr_publication_score(
+            candidate,
+        );
     let current_score =
-        crate::project_semantic_dispatch::raise::type_expr_publication_score(current);
+        verter_type_engine::project_semantic_dispatch::raise::type_expr_publication_score(current);
     publication_score_improves(&candidate_score, &current_score)
 }
 
@@ -148,10 +155,10 @@ mod node_scoring_differential_tests {
         compare_node_improvement, compare_type_expr_improvement,
         node_root_is_explicit_selector_operator,
     };
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
     use crate::types::{AnalysisLevel, HostConfig};
     use crate::VerterHost;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
     fn build_host() -> VerterHost {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -181,6 +188,9 @@ mod node_scoring_differential_tests {
     #[test]
     fn compare_node_improvement_matches_type_expr_comparator_per_clause() {
         let host = build_host();
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+
         let foo = || TypeExpr::named("Foo");
         let idx = || TypeExpr::IndexedAccess {
             object: Arc::new(foo()),
@@ -215,7 +225,7 @@ mod node_scoring_differential_tests {
         for (candidate, current) in &pairs {
             let cand_node = lower(&host, candidate);
             let cur_node = lower(&host, current);
-            let node_verdict = compare_node_improvement(&host, cand_node, cur_node);
+            let node_verdict = compare_node_improvement(dispatch, cand_node, cur_node);
             let expr_verdict = compare_type_expr_improvement(candidate, current);
             assert_eq!(
                 node_verdict, expr_verdict,
@@ -244,6 +254,9 @@ mod node_scoring_differential_tests {
         // wrongly preferring the shapeless candidate. The invariant is
         // `(None, _) => false`; the symmetric `(Some, None) => true`.
         let host = build_host();
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+
         // A symbolic current: a bare `Foo` Ref raises to one symbolic carrier
         // (`symbolic_carriers == 1`), so the pre-fix default-score path returns
         // `true` here (the bug).
@@ -256,14 +269,14 @@ mod node_scoring_differential_tests {
         // symbolic current. Pre-fix (`unwrap_or_default`) this returned `true`
         // because {0,…} < {1,…}.
         assert!(
-            !compare_node_improvement(&host, unraisable, symbolic),
+            !compare_node_improvement(dispatch, unraisable, symbolic),
             "an unraisable candidate (publication score None) is never a publication \
              improvement over a symbolic current"
         );
         // (Some, None): a raisable symbolic candidate IS an improvement over an
         // unraisable (shapeless) current.
         assert!(
-            compare_node_improvement(&host, symbolic, unraisable),
+            compare_node_improvement(dispatch, symbolic, unraisable),
             "a raisable symbolic candidate improves over an unraisable (shapeless) current"
         );
     }
@@ -271,6 +284,9 @@ mod node_scoring_differential_tests {
     #[test]
     fn node_root_explicit_selector_matches_expected_kinds() {
         let host = build_host();
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+
         let foo = || TypeExpr::named("Foo");
         // selectors → true
         for expr in [
@@ -284,7 +300,7 @@ mod node_scoring_differential_tests {
         ] {
             let node = lower(&host, &expr);
             assert!(
-                node_root_is_explicit_selector_operator(&host, node),
+                node_root_is_explicit_selector_operator(dispatch, node),
                 "{expr:?} is an explicit selector operator at its root"
             );
         }
@@ -292,7 +308,7 @@ mod node_scoring_differential_tests {
         for expr in [foo(), TypeExpr::Primitive(PrimitiveName::String)] {
             let node = lower(&host, &expr);
             assert!(
-                !node_root_is_explicit_selector_operator(&host, node),
+                !node_root_is_explicit_selector_operator(dispatch, node),
                 "{expr:?} is NOT an explicit selector operator"
             );
         }

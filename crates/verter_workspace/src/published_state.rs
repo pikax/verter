@@ -31,6 +31,7 @@
 //! generation.
 
 use std::any::Any;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -38,7 +39,8 @@ use rustc_hash::FxHashMap;
 use verter_scheduler::invalidation::Hash16;
 
 use crate::resolution_currency::PublishedContextSelection;
-use crate::workspace_snapshot::{ProjectId, WorkspaceSnapshot};
+use crate::workspace_snapshot::WorkspaceSnapshot;
+use verter_session_query::resolution::ProjectId;
 
 /// Per-project four-array env-hash layout `[parse, resolve, type_, lib]`.
 ///
@@ -47,6 +49,31 @@ use crate::workspace_snapshot::{ProjectId, WorkspaceSnapshot};
 /// unpack into [`verter_session::session_view::EnvHashes`] by reading
 /// these indices in order.
 pub type ProjectEnvHashArray = [Hash16; 4];
+
+/// The identity of the project authority a published root answers under:
+/// its workspace snapshot, ownership readiness and per-project env-hash
+/// tables.
+///
+/// Every published root carries one. A root published as an equivalent
+/// republication of the live one — the same `WorkspaceSnapshot`, readiness and
+/// tables, differing only in the consumer extension — inherits the live
+/// root's authority; every other root carries an authority no other root of
+/// any workspace in this process ever carried. Two roots with equal
+/// authorities therefore resolve every query the same way, while a workspace
+/// replacement, a configuration or membership change, or a rebuilt snapshot
+/// never compares equal to what it replaced, even when its scalar snapshot
+/// generation repeats the replaced one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WorkspaceAuthority(u64);
+
+impl WorkspaceAuthority {
+    /// An authority no root has carried before. Process-unique, so roots of
+    /// two workspaces (a replaced one and its replacement) never alias.
+    fn mint() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// The published workspace root: snapshot + consumer extension + env-hash tables.
 ///
@@ -95,6 +122,11 @@ pub struct PublishedRoot {
     /// caller must never be able to hand one index the records of
     /// another. Every construction starts empty.
     context_selection: PublishedContextSelection,
+    /// The project authority this root answers under. Minted fresh by every
+    /// construction; publication replaces it with the live root's authority
+    /// only for an equivalent republication
+    /// ([`Self::republishes_authority_of`]).
+    authority: WorkspaceAuthority,
 }
 
 impl PublishedRoot {
@@ -111,6 +143,7 @@ impl PublishedRoot {
             env_hashes_by_project: FxHashMap::default(),
             project_identity_hashes: FxHashMap::default(),
             context_selection: PublishedContextSelection::default(),
+            authority: WorkspaceAuthority::mint(),
         }
     }
 
@@ -128,6 +161,7 @@ impl PublishedRoot {
             env_hashes_by_project: FxHashMap::default(),
             project_identity_hashes: FxHashMap::default(),
             context_selection: PublishedContextSelection::default(),
+            authority: WorkspaceAuthority::mint(),
         }
     }
 
@@ -149,6 +183,7 @@ impl PublishedRoot {
             env_hashes_by_project,
             project_identity_hashes,
             context_selection: PublishedContextSelection::default(),
+            authority: WorkspaceAuthority::mint(),
         }
     }
 
@@ -157,6 +192,33 @@ impl PublishedRoot {
         self.consumer_ext
             .as_ref()
             .and_then(|ext| ext.downcast_ref::<T>())
+    }
+
+    /// The project authority this root answers under.
+    ///
+    /// Equal across an equivalent republication (a consumer-extension-only
+    /// rebuild over the unchanged snapshot); distinct across every real
+    /// authority replacement. This — not the root's `Arc` identity — is what
+    /// a reader that captured one root compares against a later one.
+    pub fn authority(&self) -> WorkspaceAuthority {
+        self.authority
+    }
+
+    /// Whether publishing `self` while `live` is published changes nothing a
+    /// query resolves against: the same snapshot `Arc`, ownership readiness
+    /// and env-hash tables. Snapshot identity, not content, is compared: a
+    /// rebuilt snapshot is a new authority even when its content and scalar
+    /// generation repeat, because nothing proves it resolves the same way.
+    pub(crate) fn republishes_authority_of(&self, live: &PublishedRoot) -> bool {
+        Arc::ptr_eq(&self.snapshot, &live.snapshot)
+            && self.ownership_ready == live.ownership_ready
+            && self.env_hashes_by_project == live.env_hashes_by_project
+            && self.project_identity_hashes == live.project_identity_hashes
+    }
+
+    /// Carry `live`'s authority, for an equivalent republication.
+    pub(crate) fn inherit_authority(&mut self, live: &PublishedRoot) {
+        self.authority = live.authority;
     }
 
     /// This index's context-selection service.
@@ -186,6 +248,7 @@ impl std::fmt::Debug for PublishedRoot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PublishedRoot")
             .field("generation", &self.snapshot.generation)
+            .field("authority", &self.authority)
             .field("has_ext", &self.consumer_ext.is_some())
             .field("ownership_ready", &self.ownership_ready)
             .field(

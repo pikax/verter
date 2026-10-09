@@ -7,7 +7,7 @@
 //! fallthrough.rs`.
 
 use super::*;
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedSurfaceCompleteness, FallthroughBranch, FallthroughPropEntry, NoFallthroughReason,
     PartialBranchReason, UnresolvedBranchReason, UnresolvedRootTargetReason,
 };

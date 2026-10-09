@@ -23,7 +23,7 @@ use crate::documents::uri_to_canonical_id;
 use crate::provider_sync::ProviderPathKind;
 
 use super::background_init::spawn_heartbeat;
-use super::handler_guard::{block_in_place_if_available, HandlerGuard, ACTIVE_HANDLERS};
+use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::protocol_types::*;
 use super::server_utils::*;
 use super::VerterLanguageServer;
@@ -80,6 +80,11 @@ pub(super) async fn handle_initialize(
                 .and_then(|workspace| workspace.semantic_tokens.as_ref())
                 .and_then(|tokens| tokens.refresh_support)
                 .unwrap_or(false),
+            std::sync::atomic::Ordering::Release,
+        );
+        server.client_applies_versioned_edits.store(
+            crate::features::action_utils::WorkspaceEditSupport::negotiate(&params.capabilities)
+                == crate::features::action_utils::WorkspaceEditSupport::VersionedDocumentChanges,
             std::sync::atomic::Ordering::Release,
         );
         server.client_refreshes_inlay_hints.store(
@@ -258,8 +263,17 @@ pub(super) async fn handle_initialize(
         .as_ref()
         .is_some_and(|tp| tp.supports_completion_resolve());
 
+    // The capability surface reads the serving host's own classification
+    // authority for the watcher globs. The `HostRef` borrow (and the
+    // `SemanticActivityGuard` it owns) is scoped to that one call: it must
+    // never outlive the read it covers.
+    let capabilities = {
+        let host = server.documents.host();
+        server_capabilities(&encoding, resolve_provider, host.language_classifier())
+    };
+
     Ok(InitializeResult {
-        capabilities: server_capabilities(&encoding, resolve_provider),
+        capabilities,
         server_info: Some(ServerInfo {
             name: "verter-lsp".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -310,8 +324,10 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     tracing::info!("verter-lsp initialized");
 
     // A. Spawn heartbeat FIRST — ensures the extension sees heartbeats
-    // even while background initialization is running.
-    spawn_heartbeat(server.client.clone());
+    // even while background initialization is running. The server itself
+    // is the wiring: the heartbeat reads the server's own handler
+    // activity, never a call-site-supplied handle.
+    spawn_heartbeat(server);
 
     // B. Send immediate non-blocking notifications
     let tp_label = server.type_provider_kind.to_string();
@@ -456,23 +472,40 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // build tools, other editors). Enables non-VS Code clients (Neovim, etc.)
     // to get full external change detection via the standard LSP mechanism.
     let watch_kind = Some(WatchKind::Change | WatchKind::Create | WatchKind::Delete);
+    // Watcher globs are derived from the serving host's OWN composed
+    // classification authority, so the files this server watches are exactly
+    // the files its host classifies as framework carriers.
+    //
+    // `HostRef` owns a `SemanticActivityGuard`, which the guard contract
+    // requires to cover exactly ONE host call (see `documents::guarded_host`).
+    // Reading the classifier is that one call, so the borrow is scoped to the
+    // two glob reads below and the guard is released before the
+    // `client/registerCapability` round trip — holding it across a client
+    // request would park every queued close-time payload release for as long
+    // as the client takes to answer.
+    let (carrier_glob, adapter_module_glob) = {
+        let host = server.documents.host();
+        (
+            carrier_watch_glob(host.language_classifier()),
+            adapter_module_watch_glob(host.language_classifier()),
+        )
+    };
     let mut watchers = vec![FileSystemWatcher {
-        // Carrier-file watcher glob, built from the registry's carrier
+        // Carrier-file watcher glob, built from the host's registry carrier
         // rows. File-watching is a SERVER concern (the client manifest
         // carries no watch globs); this glob is the descriptor-derived
         // authority. It covers carrier extensions today (`.vue`,
         // `.svelte`) — including carrier rows with no registered
         // implementation, whose events produce no provider sync state
         // until a carrier lands.
-        glob_pattern: GlobPattern::String(carrier_watch_glob()),
+        glob_pattern: GlobPattern::String(carrier_glob),
         kind: watch_kind,
     }];
     // Dedicated ADAPTER-MODULE watcher glob (`**/*.{svelte.js,svelte.ts}`),
-    // built from `LanguageRegistry::all_adapter_module_extensions()`. A rune
-    // module is NOT a carrier and its coverage is its OWN descriptor-derived
-    // glob — the generic TS/JS glob below no longer carries rune-module
-    // responsibility.
-    if let Some(adapter_module_glob) = adapter_module_watch_glob() {
+    // built from the same host-composed registry. A rune module is NOT a
+    // carrier and its coverage is its OWN descriptor-derived glob — the
+    // generic TS/JS glob below no longer carries rune-module responsibility.
+    if let Some(adapter_module_glob) = adapter_module_glob {
         watchers.push(FileSystemWatcher {
             glob_pattern: GlobPattern::String(adapter_module_glob),
             kind: watch_kind,
@@ -533,7 +566,7 @@ pub(super) async fn handle_did_open(
     server: &VerterLanguageServer,
     params: DidOpenTextDocumentParams,
 ) {
-    let _hg = HandlerGuard::new("did_open");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_open");
     let uri = &params.text_document.uri;
     let _timer = server
         .statistics
@@ -572,7 +605,7 @@ pub(super) async fn handle_did_open(
     // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
     if let Some(canonical_id) = current_canonical_id.as_ref() {
         server.touch_mru(canonical_id);
-        if carrier_language_for(canonical_id).is_some() {
+        if carrier_language_for(server.documents.language_classifier(), canonical_id).is_some() {
             server.refresh_carrier_dependency_tracking(canonical_id);
             // Workspace discovery has already published most carrier snapshots.
             // Promote that immutable IDE projection immediately on open instead
@@ -610,6 +643,7 @@ pub(super) async fn handle_did_open(
         && !server.suppress_imported_carrier_prewarm;
     let imported_carrier_priority_ids =
         collect_imported_carrier_priority_ids_from_specifiers_for_publication(
+            server.documents.language_classifier(),
             &result.import_specifiers,
             current_canonical_id.as_deref(),
             |parent, specifier| server.resolve_import_specifier_for_publication(parent, specifier),
@@ -660,7 +694,9 @@ pub(super) async fn handle_did_open(
     // for any carrier or unknown-extension document).
     if current_canonical_id
         .as_deref()
-        .and_then(self_file_language_for)
+        .and_then(|canonical_id| {
+            self_file_language_for(server.documents.language_classifier(), canonical_id)
+        })
         .is_some()
     {
         server.sync_self_file_shadow_unresolved(uri).await;
@@ -698,7 +734,14 @@ pub(super) async fn handle_did_open(
     // This ensures re-opening a file after external modifications publishes
     // up-to-date merged diagnostics (Verter lint + type provider).
     if let Some(canonical_id) = current_canonical_id.as_ref() {
-        server.needs_ide_sync.insert(canonical_id.clone());
+        // The interactive repair is re-armed only when the eager sync above
+        // left the IDE leg owed: re-arming a leg it already delivered would make
+        // the next request apply the same revision a second time. The debounced
+        // work bit stays armed — its tick publishes the open's diagnostics and
+        // re-checks every leg against its own basis.
+        if server.ide_leg_owed_for_open_document(uri) {
+            server.needs_ide_sync.insert(canonical_id.clone());
+        }
         server.needs_deferred_sync.insert(canonical_id.clone());
         // Deliberately stamped `now` rather than at handler entry. An open is
         // not a keystroke: this handler has already synced the file eagerly
@@ -730,7 +773,7 @@ pub(super) async fn handle_did_change(
     server: &VerterLanguageServer,
     params: DidChangeTextDocumentParams,
 ) {
-    let _hg = HandlerGuard::new("did_change");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_change");
     let uri = params.text_document.uri.clone();
     let version = params.text_document.version;
     tracing::info!(
@@ -783,9 +826,12 @@ pub(super) async fn handle_did_change(
     //
     // By serializing through a tokio::sync::Mutex, waiting handlers YIELD their worker
     // thread instead of blocking it. Only one handler holds the blocking lock at a time.
+    // The active-count report is OPTIONAL freeze diagnosis, compiled in only
+    // under the default-off `semantic-observe` feature.
+    #[cfg(feature = "semantic-observe")]
     tracing::info!(
         "did_change MUTEX_WAIT v{version} active={} thread={:?}",
-        ACTIVE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed),
+        server.handler_activity.active(),
         std::thread::current().id()
     );
     let mutex_wait_start = std::time::Instant::now();
@@ -846,7 +892,8 @@ pub(super) async fn handle_did_change(
     let canonical_id = server.documents.get_canonical_id(&uri);
     if !style_only {
         if let Some(canonical_id) = canonical_id.as_ref() {
-            if carrier_language_for(canonical_id).is_some() {
+            if carrier_language_for(server.documents.language_classifier(), canonical_id).is_some()
+            {
                 server.refresh_carrier_dependency_tracking(canonical_id);
             }
         }
@@ -873,6 +920,8 @@ pub(super) async fn handle_did_change(
                         after_key,
                         frontier_unchanged,
                     );
+                    // No wake here: the change ticket signals the coordinator right
+                    // after, and its loop re-checks held publications on every wake.
                 }
             }
         }
@@ -948,7 +997,7 @@ pub(super) async fn handle_did_close(
     server: &VerterLanguageServer,
     params: DidCloseTextDocumentParams,
 ) {
-    let _hg = HandlerGuard::new("did_close");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_close");
     let uri = &params.text_document.uri;
     tracing::info!("did_close: {}", uri.as_str());
 
@@ -960,9 +1009,14 @@ pub(super) async fn handle_did_close(
     let close_canonical_id = (!is_virtual)
         .then(|| server.documents.get_canonical_id(uri))
         .flatten();
-    let close_generation = close_canonical_id.as_ref().and_then(|canonical_id| {
-        server.current_or_init_ide_sync_open_generation(uri, canonical_id)
-    });
+    let close_generation = match close_canonical_id.as_ref() {
+        Some(canonical_id) => {
+            server
+                .current_or_init_ide_sync_open_generation(uri, canonical_id)
+                .await
+        }
+        None => None,
+    };
     let close_repair_lease = close_canonical_id
         .as_ref()
         .zip(close_generation)
@@ -990,7 +1044,9 @@ pub(super) async fn handle_did_close(
     // explicitly so the open-document buffer does not linger in the provider.
     if server.documents.get_virtual_source_uri(uri).is_none() && server.project_sync.is_some() {
         if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
-            if self_file_language_for(&canonical_id).is_some() {
+            if self_file_language_for(server.documents.language_classifier(), &canonical_id)
+                .is_some()
+            {
                 server.clear_provider_sync_state(&canonical_id).await;
             }
         }
@@ -1135,7 +1191,7 @@ pub(super) async fn handle_did_change_workspace_folders(
     server: &VerterLanguageServer,
     params: DidChangeWorkspaceFoldersParams,
 ) {
-    let _hg = HandlerGuard::new("did_change_workspace_folders");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_change_workspace_folders");
     let event = &params.event;
 
     // Update workspace_roots (quick, non-blocking)
@@ -1190,7 +1246,7 @@ pub(super) async fn handle_did_change_watched_files(
     server: &VerterLanguageServer,
     params: DidChangeWatchedFilesParams,
 ) {
-    let _hg = HandlerGuard::new("did_change_watched_files");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_change_watched_files");
 
     let mut ts_js_resync_ids = Vec::new();
     let mut ts_js_delete_ids = Vec::new();
@@ -1222,9 +1278,18 @@ pub(super) async fn handle_did_change_watched_files(
                 importer_closure.extend(ws.affected_canonicals(&canonical_id));
             }
         }
+        // The carrier of a vertical this host does not admit is no script of
+        // any dialect: only the filesystem facts move — no provider event, no
+        // resync — exactly like an extension with no language row.
+        let unadmitted_carrier = server
+            .documents
+            .language_classifier()
+            .is_unadmitted_carrier(&canonical_id);
         // A framework carrier is never a TypeScript file in its own right: the
         // engine only ever sees the companions Verter delivers for it.
-        if carrier_language_for(&canonical_id).is_none() {
+        if !unadmitted_carrier
+            && carrier_language_for(server.documents.language_classifier(), &canonical_id).is_none()
+        {
             provider_changes.push(verter_type_runtime::WatchedFileChange {
                 path: canonical_id.clone(),
                 kind: if event.typ == FileChangeType::DELETED {
@@ -1252,7 +1317,13 @@ pub(super) async fn handle_did_change_watched_files(
             tracing::debug!("did_change_watched_files: config file changed: {canonical_id}");
             // Config files also trigger vite dep check below, but the
             // registry rebuild is the primary action.
-        } else if carrier_language_for(&canonical_id).is_some() {
+        } else if unadmitted_carrier {
+            tracing::debug!(
+                "did_change_watched_files: unadmitted carrier {canonical_id} — disk facts only"
+            );
+        } else if carrier_language_for(server.documents.language_classifier(), &canonical_id)
+            .is_some()
+        {
             // Any framework CARRIER (`.vue`, `.svelte`, …) routes through the
             // shared resync/delete queues. The downstream compile + provider
             // sync is carrier-generic: a carrier-less language's upserts fail
@@ -1264,7 +1335,9 @@ pub(super) async fn handle_did_change_watched_files(
             } else {
                 carrier_resync_ids.push(canonical_id);
             }
-        } else if adapter_module_language_for(&canonical_id).is_some() {
+        } else if adapter_module_language_for(server.documents.language_classifier(), &canonical_id)
+            .is_some()
+        {
             // A standalone ADAPTER MODULE (`.svelte.ts` / `.svelte.js` rune
             // module) — classified EXPLICITLY (descriptor-derived) rather than
             // falling through the incidental generic-TS `else` arm. A rune
@@ -1434,10 +1507,10 @@ pub(super) async fn handle_did_create_files(
     server: &VerterLanguageServer,
     params: CreateFilesParams,
 ) {
-    let _hg = HandlerGuard::new("did_create_files");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_create_files");
     for file in &params.files {
         // Only index framework CARRIER files (`.vue`, `.svelte`, …).
-        if carrier_language_for(&file.uri).is_none() {
+        if carrier_language_for(server.documents.language_classifier(), &file.uri).is_none() {
             continue;
         }
         let uri: Uri = match file.uri.parse() {
@@ -1457,10 +1530,10 @@ pub(super) async fn handle_did_delete_files(
     server: &VerterLanguageServer,
     params: DeleteFilesParams,
 ) {
-    let _hg = HandlerGuard::new("did_delete_files");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_delete_files");
     for file in &params.files {
         // Only framework CARRIER files (`.vue`, `.svelte`, …).
-        if carrier_language_for(&file.uri).is_none() {
+        if carrier_language_for(server.documents.language_classifier(), &file.uri).is_none() {
             continue;
         }
         let uri: Uri = match file.uri.parse() {

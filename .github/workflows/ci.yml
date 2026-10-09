@@ -166,7 +166,7 @@ jobs:
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
-            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH5/ARH7
+            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH4/ARH5/ARH7
             # verifiers). Their products join the live Rust tree — hotspot
             # sources, crate Cargo manifests and the cross-crate consumer
             # population derived from EVERY crate — so a product/verifier-only
@@ -179,6 +179,7 @@ jobs:
             # how an ARH1 edit or a scheduler.rs change could skip the ratified
             # contracts. ARH7 additionally joins packages/vue-vscode activation
             # sources, so an extension-only edit must still schedule this lane.
+            # ARH4 joins its API migration notes to the audit API reference.
             arch:
               - 'tests/architecture-health/**'
               # ARH5's public-example guard scans examples/reference for the
@@ -186,6 +187,7 @@ jobs:
               # so example-only edits must still schedule this lane.
               - 'examples/reference/**'
               - 'packages/vue-vscode/**'
+              - 'docs/audit-footprint/api-reference.md'
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -628,8 +630,11 @@ jobs:
             node scripts/run-cached.mjs -- 'cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
           fi
       # Fail closed before upload if a selector has gone stale, overlaps another
-      # lane, or would leave a provider lane empty.
+      # lane, or would leave a provider lane empty. The script bounds the
+      # listing itself and prints the still-running binaries when it trips;
+      # the step limit is the backstop above that bound and its diagnostics.
       - name: Verify the provider CI partition
+        timeout-minutes: 20
         run: node scripts/provider-ci.mjs verify --archive-file artifacts/rust-nextest-archive.tar.zst
       - name: Upload the shared Rust test archive
         uses: actions/upload-artifact@v6
@@ -669,7 +674,12 @@ jobs:
         with:
           name: rust-nextest-archive
           path: artifacts
+      # nextest bounds each test (slow-timeout), but not the `--list` pass every
+      # binary runs first; the step limit keeps a binary that never returns
+      # from it from spending the whole job budget. A shard runs in about
+      # three minutes.
       - name: Run core Rust tests from the shared archive
+        timeout-minutes: 30
         env:
           NEXTEST_PROFILE: ci
         run: |
@@ -971,10 +981,10 @@ jobs:
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
 
-  # The ARH0/ARH1/ARH2/ARH5/ARH7 verifiers join their products to the live
-  # tree (hotspot sources, crate manifests, the cross-crate consumer
-  # population derived from every crate, the compiler-facade cutover, and
-  # the VS Code activation composition), so this lane — not the js-filtered
+  # The ARH0/ARH1/ARH2/ARH4/ARH5/ARH7 verifiers join their products to the
+  # live tree (hotspot sources, crate manifests, the cross-crate consumer
+  # population derived from every crate, the host lifecycle cutover, the
+  # compiler-facade cutover, and the VS Code activation composition), so this lane — not the js-filtered
   # test:scripts job — is what runs the guards when a Rust dependency or
   # surface change moves a ratified population, and when the products or
   # the verifier themselves change.
@@ -1006,6 +1016,10 @@ jobs:
         run: node tests/architecture-health/ARH2/verify.mjs
       - name: ARH2 dirty twins
         run: node --test tests/architecture-health/ARH2/arh2.test.mjs
+      - name: ARH4 verify (host and session lifecycle cutover)
+        run: node tests/architecture-health/ARH4/verify.mjs
+      - name: ARH4 dirty twins
+        run: node --test tests/architecture-health/ARH4/arh4.test.mjs
       - name: ARH5 verify (compiler facade cutover)
         run: node tests/architecture-health/ARH5/verify.mjs
       - name: ARH5 dirty twins
@@ -1340,8 +1354,25 @@ jobs:
         with:
           name: wasm-build
           path: packages/wasm
+      # The browser binaries are keyed on the resolved Playwright version, which
+      # pins the exact browser builds it downloads. The apt system libraries
+      # cannot live in a cache, so a hit still runs `install-deps`.
+      - name: Resolve Playwright version
+        id: playwright-version
+        working-directory: packages/playground
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium-firefox-webkit
       - name: Install Playwright browsers (Chromium, Firefox, WebKit)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @verter/playground exec playwright install-deps chromium firefox webkit
       - name: Run the browser-host-domain gate
         run: node scripts/browser-host-gate.mjs --skip-build
 
@@ -1487,6 +1518,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build-vscode-e2e.outputs.matrix) }}
+    env:
+      # Keep the required matrix on the reviewed editor baseline. Local
+      # reproduction can set the same variable or opt into another build. It
+      # also keys the VS Code host cache below.
+      E2E_VSCODE_VERSION: "1.135.0"
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v6
@@ -1507,6 +1543,59 @@ jobs:
         with:
           name: vscode-e2e-build
           path: packages
+      # The VS Code host (a 330 MB archive) arrives BEFORE the test step and,
+      # after the first run, from the Actions cache instead of
+      # update.code.visualstudio.com. Every shard used to download it inside
+      # `runTests`, where one ECONNRESET crashed the runner (test-electron
+      # leaks a rejection from its own retry) and failed the shard.
+      #
+      # The key is the exact host: OS, arch, the pinned VS Code version, and
+      # the test-electron version whose cache layout (`vscode-<platform>-<version>`
+      # plus its `is-complete` marker) the runner reads. Only that one host
+      # directory is cached, never the rest of `.vscode-test`.
+      - name: Resolve VS Code host cache key
+        id: vscode-host
+        shell: bash
+        run: |
+          test_electron=$(node -p "require('./packages/vue-vscode/node_modules/@vscode/test-electron/package.json').version")
+          echo "key=vscode-host-${RUNNER_OS}-${RUNNER_ARCH}-${E2E_VSCODE_VERSION}-test-electron-${test_electron}" >> "$GITHUB_OUTPUT"
+      - name: Restore VS Code ${{ env.E2E_VSCODE_VERSION }}
+        id: vscode-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: packages/vue-vscode/.vscode-test/vscode-linux-x64-${{ env.E2E_VSCODE_VERSION }}
+          key: ${{ steps.vscode-host.outputs.key }}
+      # Runs on a hit too: then it finds the complete host in the cache and
+      # returns without touching the network, and a restored host missing its
+      # `is-complete` marker is downloaded again rather than trusted. It uses
+      # the same script and cache path `runTests` resolves through, so the test
+      # step finds the host and does not download. Four attempts, 15s/30s/60s
+      # apart; each attempt also gets test-electron's own internal retries.
+      - name: Acquire VS Code ${{ env.E2E_VSCODE_VERSION }}
+        shell: bash
+        run: |
+          for attempt in 1 2 3 4; do
+            if node packages/vue-vscode/out-test/e2e/acquireVscode.js "$E2E_VSCODE_VERSION"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 4 ]; then
+              delay=$((15 * 2 ** (attempt - 1)))
+              echo "::warning::VS Code $E2E_VSCODE_VERSION download failed on attempt $attempt/4; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          echo "::error::VS Code $E2E_VSCODE_VERSION could not be downloaded after 4 attempts. This is a host download failure, not a test failure."
+          exit 1
+      # Saved right after a successful download, not at job end, so a shard
+      # whose tests fail still seeds the cache. On a cold key several shards
+      # race to save; the losers only warn.
+      - name: Save VS Code ${{ env.E2E_VSCODE_VERSION }}
+        if: steps.vscode-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        continue-on-error: true
+        with:
+          path: packages/vue-vscode/.vscode-test/vscode-linux-x64-${{ env.E2E_VSCODE_VERSION }}
+          key: ${{ steps.vscode-cache.outputs.cache-primary-key }}
       - name: Run E2E tests (shard ${{ matrix.shard }}/${{ matrix.shard_count }})
         run: |
           echo "Routes: ${E2E_ROUTES}"
@@ -1515,9 +1604,6 @@ jobs:
           # The exact route list this shard owns, as the matrix producer emitted
           # it; the runner refuses an empty, duplicated or unknown entry.
           E2E_ROUTES: ${{ matrix.routes }}
-          # Keep the required matrix on the reviewed editor baseline. Local
-          # reproduction can set the same variable or opt into another build.
-          E2E_VSCODE_VERSION: "1.135.0"
           VERTER_REQUIRE_TSSERVER: "1"
           VERTER_REQUIRE_TSGO: "1"
       - name: Upload E2E diagnostics

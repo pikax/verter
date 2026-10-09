@@ -1,15 +1,17 @@
 //! `FileArtifactStore` unit tests.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 use super::{
-    AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
-    FileArtifacts, ProjectIdentity,
+    AugmentationTargetKey, AugmentationTargetKind, FileArtifactStore, FileArtifacts,
+    ProjectIdentity,
 };
-use crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint;
 use crate::project_type_store::IndexedReady;
+use verter_session_query::source::artifact_key::FileArtifactKey;
+use verter_session_query::source::toolchain::current_build_toolchain_fingerprint;
 
 fn synth_indexed(hash: u8) -> Arc<IndexedReady> {
     Arc::new(IndexedReady::new_for_test([hash; 16]))
@@ -75,8 +77,8 @@ fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifac
     .expect("Vue parse key");
     FileArtifactKey {
         canonical: Arc::from("/component.vue"),
-        content_hash: crate::hash::hash_16(source.as_bytes()),
-        parse_env_hash: super::BASE_PARSE_ENV_HASH,
+        content_hash: verter_semantic_source::source_hash::hash_16(source.as_bytes()),
+        parse_env_hash: verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         parse_key,
         build_toolchain_fingerprint: current_build_toolchain_fingerprint(),
         file_language_id: language,
@@ -336,7 +338,9 @@ fn stale_build_fingerprint_is_rejected_by_current_base_key() {
     let store = FileArtifactStore::new();
     let current = FileArtifactKey::base_for_test(Arc::from("/owner-exact.ts"), [3u8; 16]);
     let stale = FileArtifactKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(3),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            3,
+        ),
         ..current.clone()
     };
     let stale_payload = synth_artifacts(3);
@@ -372,7 +376,9 @@ fn another_stale_build_fingerprint_is_rejected_by_current_base_key() {
     let store = FileArtifactStore::new();
     let current = FileArtifactKey::base_for_test(Arc::from("/authored-import.ts"), [4u8; 16]);
     let stale = FileArtifactKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(4),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            4,
+        ),
         ..current.clone()
     };
     let stale_payload = synth_artifacts(4);
@@ -501,7 +507,9 @@ fn augmentation_index_starts_empty() {
 fn augmentation_index_round_trip() {
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet, FileArtifactKey};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let store = FileArtifactStore::new();
     let key = AugmentationTargetKey {
@@ -1030,7 +1038,8 @@ fn legacy_insert_bumps_on_content_change() {
 fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
 
     let store = FileArtifactStore::new();
     let key = AugmentationTargetKey {
@@ -1267,8 +1276,9 @@ fn synth_augmenter_artifacts_for_specifier(
     specifier: &str,
     parse_stable_hash: Hash16,
 ) -> Arc<FileArtifacts> {
-    use super::{FileFacts, ModuleAugmentationFact};
-    use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use super::FileFacts;
+    use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     Arc::new(FileArtifacts {
         indexed: synth_indexed(0xA9),
@@ -1406,8 +1416,10 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
     // next probe warm-hits a stale augmenter set.
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet, ModuleAugmentationFact};
-    use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
+    use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     let store = FileArtifactStore::new();
     let key = relative_dep_target_key();
@@ -1648,8 +1660,9 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
     // augmenter's contribution to the effective surface even though the
     // declared specifier is the same.
     let changed = {
-        use super::{FileFacts, ModuleAugmentationFact};
-        use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use super::FileFacts;
+        use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
@@ -1747,10 +1760,9 @@ fn parse_stable_hash_change_with_same_facts_invalidates_augmentation_index_and_b
 fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     use smallvec::smallvec;
 
-    use super::{
-        augmentation_contribution_equivalent, compute_augmenter_set_fingerprint, AugmenterEntry,
-        FileArtifactKey,
-    };
+    use super::{augmentation_contribution_equivalent, compute_augmenter_set_fingerprint};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     // Helper: the single fingerprint input that varies per augmenter at a
     // fixed canonical is `parse_stable_hash`. Build the one-entry augmenter
@@ -1803,8 +1815,9 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     // are unchanged, but the fact multiset governs which index rows the
     // augmenter contributes to, so a fact change must still invalidate.
     let diff_facts = {
-        use super::{FileFacts, ModuleAugmentationFact};
-        use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use super::FileFacts;
+        use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
@@ -1825,8 +1838,9 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     );
 
     let diff_owner = {
-        use super::{FileFacts, ModuleAugmentationFact};
-        use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use super::FileFacts;
+        use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        use verter_session_query::source::augmentation::ModuleAugmentationFact;
         Arc::new(FileArtifacts {
             indexed: synth_indexed(0xA9),
             facts: Arc::new(FileFacts::empty()),
@@ -2513,9 +2527,11 @@ fn captured_root_still_reaches_an_evicted_canonical() {
 #[test]
 fn captured_root_still_reaches_a_retired_augmenter_set() {
     use smallvec::{smallvec, SmallVec};
-    use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
 
-    use super::{AugmenterEntry, AugmenterSet, ModuleAugmentationFact};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
+    use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     let store = FileArtifactStore::new();
     let target = relative_dep_target_key();
@@ -3151,4 +3167,67 @@ fn a_distinct_content_edit_loop_on_one_canonical_is_swept_per_canonical() {
         "an explicit sweep with no root alive frees every retained version"
     );
     assert_eq!(store.retained_retired_version_count(), 0);
+}
+
+/// A stored artifact owns its canonical's content-transition evidence: the
+/// workspace may retire unrelated history (raising the floor every
+/// unleased canonical answers), but the stored artifact's canonical keeps
+/// answering from its own evidence until the version is reclaimed.
+#[test]
+fn stored_artifacts_own_their_canonical_freshness_evidence_until_reclaimed() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess, WorkspaceRead};
+
+    let workspace = MemoryWorkspace::new(MemoryOptions::default());
+    let store = FileArtifactStore::new();
+    store.install_freshness_readers(workspace.freshness_readers());
+    let leased = "/pkg/leased.d.ts";
+    let built_at = workspace.content_generation();
+    store.insert(Arc::from(leased), synth_indexed(1));
+    assert_eq!(
+        workspace
+            .resource_snapshot()
+            .freshness_history
+            .leased_entries,
+        1
+    );
+
+    let churn: Vec<(String, Arc<str>)> = (0..verter_workspace::freshness::DEFAULT_RETIRE_TRIGGER
+        + 64)
+        .map(|index| (format!("/churn/{index}.ts"), Arc::from("export {};")))
+        .collect();
+    workspace.notify_upsert_many(&churn);
+
+    assert!(
+        workspace.last_content_transition_generation("/pkg/unleased.d.ts") > built_at,
+        "unrelated churn past the retirement trigger must have raised the floor"
+    );
+    assert!(
+        workspace.last_content_transition_generation(leased) <= built_at,
+        "retiring unrelated history must not make a stored artifact stale"
+    );
+    // The batch's own records retire once the queue reaches the trigger,
+    // with no later mutation: only the leased entry and the records made
+    // after that pass remain, and they answer the batch's generation, not a
+    // future one an artifact built now would be refused under.
+    let residency = workspace.resource_snapshot().freshness_history;
+    assert!(
+        residency.exact_entries <= 1 + 64,
+        "unleased churn must have retired: {residency:?}"
+    );
+    let completed = workspace.content_generation();
+    assert!(
+        workspace.last_content_transition_generation("/churn/4159.ts") <= completed,
+        "a record after the batch's retirement pass must not answer a future generation"
+    );
+
+    store.clear_all();
+    store.reclaim_retired_versions();
+    assert_eq!(
+        workspace
+            .resource_snapshot()
+            .freshness_history
+            .leased_entries,
+        0,
+        "a reclaimed version must release its canonical's evidence"
+    );
 }

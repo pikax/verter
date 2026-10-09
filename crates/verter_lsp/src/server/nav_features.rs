@@ -43,7 +43,7 @@ use nav_features_support::*;
 
 pub(super) fn child_contract_completion_analysis(
     availability: verter_session::framework::ComponentContractAvailability,
-) -> Option<verter_session::FileAnalysisSnapshot> {
+) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
     let verter_session::framework::ComponentContractAvailability::Supported(contract) =
         availability
     else {
@@ -54,7 +54,7 @@ pub(super) fn child_contract_completion_analysis(
         .iter()
         .map(|prop| {
             let materialized = prop.ty.publication.materialized_type();
-            verter_semantic::analysis::AnalyzedPropDefinition {
+            verter_session_query::analysis::template::AnalyzedPropDefinition {
                 name: prop.name.to_string(),
                 callable_role: verter_type_expr::PropCallableRole::Other,
                 type_annotation: materialized.and_then(|expression| {
@@ -75,7 +75,7 @@ pub(super) fn child_contract_completion_analysis(
         .events
         .iter()
         .map(
-            |event| verter_semantic::analysis::template::AnalyzedEmitDefinition {
+            |event| verter_session_query::analysis::template::AnalyzedEmitDefinition {
                 event_name: event.name.to_string(),
                 has_validator: false,
                 is_declared: true,
@@ -94,7 +94,7 @@ pub(super) fn child_contract_completion_analysis(
                 .iter()
                 .map(|binding| binding.name.to_string())
                 .collect::<Vec<_>>();
-            verter_semantic::analysis::template::DefinedSlot {
+            verter_session_query::analysis::template::DefinedSlot {
                 name: slot.name.to_string(),
                 has_bindings: !binding_names.is_empty(),
                 binding_expressions: vec![String::new(); binding_names.len()],
@@ -105,9 +105,10 @@ pub(super) fn child_contract_completion_analysis(
             }
         })
         .collect();
-    let mut analysis = verter_session::FileAnalysisSnapshot::default();
+    let mut analysis =
+        verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
     analysis.template = Some(std::sync::Arc::new(
-        verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             prop_definitions,
             emit_definitions,
             defined_slots,
@@ -187,7 +188,7 @@ pub(super) async fn handle_hover(
     server: &VerterLanguageServer,
     params: HoverParams,
 ) -> Result<Option<Hover>> {
-    let _hg = HandlerGuard::new("hover");
+    let _hg = HandlerGuard::new(&server.handler_activity, "hover");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
     tracing::info!(
@@ -199,6 +200,24 @@ pub(super) async fn handle_hover(
     let _timer = server
         .statistics
         .timer("hover", Some(uri.as_str().to_string()));
+    // The whole response settles against the request admitted before the
+    // route's current-file repair, computed once.
+    server
+        .answer_repaired_foreground(
+            crate::documents::ForegroundRoute::Hover,
+            uri,
+            handle_hover_attempt(server, &params),
+        )
+        .await
+}
+
+/// The unsettled hover computation; [`handle_hover`] owns its settlement.
+async fn handle_hover_attempt(
+    server: &VerterLanguageServer,
+    params: &HoverParams,
+) -> Result<Option<Hover>> {
+    let uri = &params.text_document_position_params.text_document.uri;
+    let position = &params.text_document_position_params.position;
 
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = &server.type_provider {
@@ -267,8 +286,11 @@ pub(super) async fn handle_hover(
             // the mapped projection (its local name stays provider-answered).
             native.or_else(|| {
                 let canonical_id = server.documents.get_canonical_id(uri)?;
-                if !crate::server::carrier_language_for(&canonical_id)
-                    .is_some_and(|language| language.is_svelte())
+                if !crate::server::carrier_language_for(
+                    server.documents.language_classifier(),
+                    &canonical_id,
+                )
+                .is_some_and(|language| language.is_svelte())
                 {
                     return None;
                 }
@@ -299,6 +321,9 @@ pub(super) async fn handle_hover(
         )?;
         match child_hover {
             super::component_resolve::ChildHoverOutcome::Hover(child_hover) => {
+                // A cold native projection can hydrate an imported declaration
+                // and advance the diagnostics generation; that moves no input
+                // `handle_hover` admitted.
                 return Ok(Some(child_hover));
             }
             super::component_resolve::ChildHoverOutcome::SurfaceUnavailable
@@ -589,78 +614,57 @@ impl CompletionSourceContext {
     }
 }
 
-#[derive(Clone)]
-struct CompletionDocumentIdentity {
-    version: i32,
-    document_revision: crate::documents::DocumentRevisionId,
-}
-
-fn completion_document_identity(
-    server: &VerterLanguageServer,
-    uri: &Uri,
-) -> Option<CompletionDocumentIdentity> {
-    server
-        .documents
-        .get(uri)
-        .map(|document| CompletionDocumentIdentity {
-            version: document.version,
-            document_revision: document.document_revision,
-        })
-}
-
-fn completion_document_identity_matches(
-    before: Option<&CompletionDocumentIdentity>,
-    after: Option<&CompletionDocumentIdentity>,
-) -> bool {
-    match (before, after) {
-        (Some(before), Some(after)) => {
-            before.version == after.version && before.document_revision == after.document_revision
-        }
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 pub(super) async fn handle_completion(
     server: &VerterLanguageServer,
     params: CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
     let uri = params.text_document_position.text_document.uri.clone();
-    if uri.as_str().starts_with("verter-virtual://") {
-        return handle_completion_attempt(server, &params, false).await;
+    // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
+    // a completion request concurrently, so a completion can arrive BEFORE the
+    // document is registered. Wait for the registration event (bounded 300ms)
+    // rather than polling — the request resumes the instant the open lands, not
+    // at a poll-step boundary — and only then admit, so the admitted revision
+    // is the one the client sent the request against. Each request stays
+    // independent: an unrelated concurrent open cannot cancel a valid request
+    // into an empty response.
+    if !uri.as_str().starts_with("verter-virtual://") && server.documents.get(&uri).is_none() {
+        server
+            .documents
+            .registration
+            .wait_until(std::time::Duration::from_millis(300), || {
+                server.documents.get(&uri).is_some()
+            })
+            .await;
     }
-
     // Provider work can suspend while a newer document instance or edit commits.
-    // Match both version and immutable source identity: a close/reopen may reuse
-    // the same LSP version and must still invalidate the suspended response. The
-    // final native-only attempt keeps the commit fence through native calculation,
-    // so it returns the coherent post-fence snapshot even if the pre-wait identity
-    // sampled here was older.
-    for _attempt in 0..2 {
-        let identity_before = completion_document_identity(server, &uri);
-        let response = handle_completion_attempt(server, &params, false).await?;
-        let identity_after = completion_document_identity(server, &uri);
-        if completion_document_identity_matches(identity_before.as_ref(), identity_after.as_ref()) {
-            return Ok(response);
-        }
-        tracing::debug!(
-            "completion: retrying {} after document identity advanced {:?} -> {:?}",
-            uri.as_str(),
-            identity_before.as_ref().map(|identity| identity.version),
-            identity_after.as_ref().map(|identity| identity.version)
-        );
-    }
-    #[cfg(test)]
-    server.maybe_pause_completion_before_final_native().await;
-    handle_completion_attempt(server, &params, true).await
+    // The one admission pins the document revision (open incarnation and edit
+    // generation as well as the client version, so a close/reopen that reuses
+    // the version still supersedes the suspended response) and the project
+    // authority; every provider surface and imported contract the answer is
+    // read from joins it. An answer whose admitted inputs moved answers
+    // `ContentModified`: the cursor names a position in the admitted revision
+    // and is never reinterpreted against a later one. Background work that
+    // moves no admitted input — a diagnostics-generation advance, an identical
+    // surface re-record, an equivalent root publication — settles the answer.
+    // Completion reads its source under the edit-commit fence, so it is
+    // admitted under that fence too: an edit already queued ahead of this
+    // request commits first and the request pins the revision it was sent
+    // against, rather than pinning the replaced one and answering
+    // `ContentModified` for an edit that preceded it.
+    server
+        .answer_foreground_after_edit_commit(
+            crate::documents::ForegroundRoute::Completion,
+            &uri,
+            handle_completion_attempt(server, &params),
+        )
+        .await
 }
 
 async fn handle_completion_attempt(
     server: &VerterLanguageServer,
     params: &CompletionParams,
-    native_only: bool,
 ) -> Result<Option<CompletionResponse>> {
-    let _hg = HandlerGuard::new("completion");
+    let _hg = HandlerGuard::new(&server.handler_activity, "completion");
     let uri = &params.text_document_position.text_document.uri;
     let _timer = server
         .statistics
@@ -684,7 +688,7 @@ async fn handle_completion_attempt(
     // fence through every synchronous native snapshot read below; otherwise a
     // new edit can land between releasing the mutex and reading source/analysis.
     // The fence is released before any provider await.
-    let mut edit_fence = server.did_change_mutex.lock().await;
+    let edit_fence = server.did_change_mutex.lock().await;
     // NOTE: completion starts NO sync work here. The eager did_change carrier
     // refresh keeps the current-file surface fresh per keystroke, and the
     // import-dependency closure is background-published (capture-only readiness
@@ -751,24 +755,6 @@ async fn handle_completion_attempt(
         }
     }
 
-    // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
-    // a completion request concurrently, so a completion can arrive BEFORE the
-    // document is registered. Wait for the registration event (bounded 300ms)
-    // rather than polling — the request resumes the instant the open lands, not
-    // at a poll-step boundary. Each request stays independent: an unrelated
-    // concurrent open cannot cancel a valid request into an empty response.
-    if server.documents.get(uri).is_none() {
-        drop(edit_fence);
-        server
-            .documents
-            .registration
-            .wait_until(std::time::Duration::from_millis(300), || {
-                server.documents.get(uri).is_some()
-            })
-            .await;
-        edit_fence = server.did_change_mutex.lock().await;
-    }
-
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
         canonical_id
@@ -780,13 +766,13 @@ async fn handle_completion_attempt(
     struct NativeCompletionSnapshot {
         source: std::sync::Arc<str>,
         line_index: crate::documents::line_index::LineIndex,
-        analysis: Option<verter_session::FileAnalysisSnapshot>,
+        analysis: Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
         blocks: Vec<crate::documents::carrier_structure::CarrierBlockView>,
         structure: Option<verter_session::carrier_publication_store::RegisteredFileStructure>,
         canonical_id: String,
         authored_component_ingress_captured: bool,
     }
-    let native_snapshot = (|| {
+    let capture_native_snapshot = || {
         let (source, line_index, blocks, structure, feature_analysis, canonical_id) = {
             let doc = server.documents.get(uri)?;
             let (blocks, structure, feature_analysis) = if let Some(snapshot) =
@@ -835,8 +821,10 @@ async fn handle_completion_attempt(
                 .as_ref()
                 .map(|context| context.tag().to_string())
                 .or_else(|| {
-                    (CarrierTemplateLanguage::from_uri(uri.as_str())
-                        == Some(CarrierTemplateLanguage::Svelte)
+                    (CarrierTemplateLanguage::from_uri(
+                        server.documents.language_classifier(),
+                        uri.as_str(),
+                    ) == Some(CarrierTemplateLanguage::Svelte)
                         && matches!(
                             svelte_head_cursor_fact(structure, offset),
                             Some(SvelteHeadCursorFact::SnippetName)
@@ -860,15 +848,15 @@ async fn handle_completion_attempt(
                     })
             })?;
             if import.resolved_canonical_id.is_none()
-                && verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                && verter_semantic::resolver_core::path_is_carrier(&import.source)
+                && verter_session_query::resolution::is_relative_specifier(&import.source)
+                && verter_session_query::resolution::path_is_carrier(&import.source)
             {
-                import.resolved_canonical_id = Some(verter_semantic::resolver_core::join_paths(
-                    &verter_semantic::resolver_core::parent_dir(&canonical_id),
+                import.resolved_canonical_id = Some(verter_session_query::resolution::join_paths(
+                    &verter_session_query::resolution::parent_dir(&canonical_id),
                     &import.source,
                 ));
             }
-            let analysis = verter_session::FileAnalysisSnapshot {
+            let analysis = verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
                 imports,
                 ..Default::default()
             };
@@ -894,131 +882,184 @@ async fn handle_completion_attempt(
             canonical_id,
             authored_component_ingress_captured,
         })
-    })();
-    // Normal attempts release the typing fence before cold child/meta work and
-    // validate identity after provider awaits. The bounded final native-only
-    // attempt deliberately retains the fence through the synchronous native
-    // calculation: it has no provider await and therefore returns one coherent,
-    // current snapshot instead of panicking or failing open under sustained churn.
-    let native_edit_fence = if native_only {
-        Some(edit_fence)
-    } else {
-        drop(edit_fence);
-        #[cfg(test)]
-        server.maybe_pause_completion_after_snapshot().await;
-        None
     };
+    let native_snapshot = capture_native_snapshot();
+    // Release the typing fence before cold child/meta work and provider
+    // awaits; an edit after this point is a revision change of the admitted
+    // request and answers `ContentModified` at settlement.
+    drop(edit_fence);
     #[cfg(test)]
-    if native_only {
-        server.maybe_pause_final_completion_after_snapshot().await;
-    }
+    server.maybe_pause_completion_after_snapshot().await;
 
-    let recognized_authored_component_contract_miss = std::cell::Cell::new(false);
-    let verter_result = native_snapshot.as_ref().and_then(|native| {
-        let canonical_id = &native.canonical_id;
-        // The WORKSPACE component scan is opt-in: it enumerates components the
-        // document does not import yet (the auto-import tag surface), which is
-        // the background-enrichment lane's job. Resolving the ONE child the
-        // cursor is already inside is not — a `<template #|` slot name has no
-        // TypeScript surface at all, so Verter is its only possible owner and
-        // the resolver must be available whether or not the analysis sidebar
-        // is switched on.
-        let workspace_component_scan = server.documents.semantic_analysis_enabled()
-            && !native.authored_component_ingress_captured;
-        let resolve_component = |import_source: &str,
-                                 component_name: Option<&str>|
-         -> Option<verter_session::FileAnalysisSnapshot> {
-            let local_component_name = component_name?;
-            let (import, binding) =
-                native
-                    .analysis
-                    .as_ref()?
-                    .imports
-                    .iter()
-                    .find_map(|import| {
-                        if import.is_type_only || import.source != import_source {
-                            return None;
-                        }
-                        import
-                            .bindings
-                            .iter()
-                            .find(|binding| {
-                                !binding.is_type_only
-                                    && (binding.name == local_component_name
-                                        || to_kebab_case(&binding.name) == local_component_name
-                                        || binding.name == to_pascal_case(local_component_name))
-                            })
-                            .map(|binding| (import, binding))
-                    })?;
+    // Answers the native completion together with whether it recognized an
+    // authored component whose child contract is not cached yet.
+    let native_completion = |native_snapshot: Option<&NativeCompletionSnapshot>| {
+        let recognized_authored_component_contract_miss = std::cell::Cell::new(false);
+        let result = native_snapshot.and_then(|native| {
+            let canonical_id = &native.canonical_id;
+            // The WORKSPACE component scan is opt-in: it enumerates components the
+            // document does not import yet (the auto-import tag surface), which is
+            // the background-enrichment lane's job. Resolving the ONE child the
+            // cursor is already inside is not — a `<template #|` slot name has no
+            // TypeScript surface at all, so Verter is its only possible owner and
+            // the resolver must be available whether or not the analysis sidebar
+            // is switched on.
+            let workspace_component_scan = server.documents.semantic_analysis_enabled()
+                && !native.authored_component_ingress_captured;
+            let resolve_component = |import_source: &str,
+                                     component_name: Option<&str>|
+             -> Option<
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+            > {
+                let local_component_name = component_name?;
+                let (import, binding) =
+                    native
+                        .analysis
+                        .as_ref()?
+                        .imports
+                        .iter()
+                        .find_map(|import| {
+                            if import.is_type_only || import.source != import_source {
+                                return None;
+                            }
+                            import
+                                .bindings
+                                .iter()
+                                .find(|binding| {
+                                    !binding.is_type_only
+                                        && (binding.name == local_component_name
+                                            || to_kebab_case(&binding.name) == local_component_name
+                                            || binding.name == to_pascal_case(local_component_name))
+                                })
+                                .map(|binding| (import, binding))
+                        })?;
 
-            if let Some(contract) =
-                server.cached_barrel_component_contract(canonical_id, import_source, &binding.name)
-            {
-                let analysis = child_contract_completion_analysis(contract);
-                if analysis.is_none() {
-                    recognized_authored_component_contract_miss.set(true);
-                }
-                return analysis;
-            }
-
-            let resolved = import
-                .resolved_canonical_id
-                .as_deref()
-                .filter(|resolved| crate::server::is_default_export_component_carrier(resolved))
-                .map(str::to_string)
-                .or_else(|| {
-                    (verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                        && verter_semantic::resolver_core::path_is_carrier(&import.source))
-                    .then(|| {
-                        verter_semantic::resolver_core::join_paths(
-                            &verter_semantic::resolver_core::parent_dir(canonical_id),
-                            &import.source,
-                        )
-                    })
-                });
-            let Some(resolved) = resolved else {
-                recognized_authored_component_contract_miss.set(true);
-                return None;
-            };
-            match server.cached_child_public_contract(&resolved) {
-                Some(contract) => {
+                if let Some(contract) = server.cached_barrel_component_contract(
+                    canonical_id,
+                    import_source,
+                    &binding.name,
+                ) {
                     let analysis = child_contract_completion_analysis(contract);
                     if analysis.is_none() {
                         recognized_authored_component_contract_miss.set(true);
                     }
-                    analysis
+                    return analysis;
                 }
-                None => {
+
+                let resolved = import
+                    .resolved_canonical_id
+                    .as_deref()
+                    .filter(|resolved| {
+                        crate::server::is_default_export_component_carrier(
+                            server.documents.language_classifier(),
+                            resolved,
+                        )
+                    })
+                    .map(str::to_string)
+                    .or_else(|| {
+                        (verter_session_query::resolution::is_relative_specifier(&import.source)
+                            && verter_session_query::resolution::path_is_carrier(&import.source))
+                        .then(|| {
+                            verter_session_query::resolution::join_paths(
+                                &verter_session_query::resolution::parent_dir(canonical_id),
+                                &import.source,
+                            )
+                        })
+                    });
+                let Some(resolved) = resolved else {
                     recognized_authored_component_contract_miss.set(true);
-                    None
+                    return None;
+                };
+                match server.cached_child_public_contract(&resolved) {
+                    Some(contract) => {
+                        let analysis = child_contract_completion_analysis(contract);
+                        if analysis.is_none() {
+                            recognized_authored_component_contract_miss.set(true);
+                        }
+                        analysis
+                    }
+                    None => {
+                        recognized_authored_component_contract_miss.set(true);
+                        None
+                    }
                 }
-            }
-        };
-        let ws_components = if workspace_component_scan {
-            build_workspace_components(&server.documents.host(), canonical_id)
-        } else {
-            Vec::new()
-        };
-        type NativeComponentResolver<'a> =
-            dyn Fn(&str, Option<&str>) -> Option<verter_session::FileAnalysisSnapshot> + 'a;
-        let resolve_component: Option<&NativeComponentResolver<'_>> = Some(&resolve_component);
-        completions_at_position(
-            position,
-            &native.source,
-            &native.blocks,
-            native.analysis.as_ref(),
-            &native.line_index,
-            resolve_component,
-            if ws_components.is_empty() {
-                None
+            };
+            let ws_components = if workspace_component_scan {
+                build_workspace_components(&server.documents.host(), canonical_id)
             } else {
-                Some(&ws_components)
-            },
-            Some(uri.as_str()),
-            completion_ssr_context,
-            native.structure.as_ref(),
-        )
-    });
+                Vec::new()
+            };
+            type NativeComponentResolver<'a> = dyn Fn(
+                    &str,
+                    Option<&str>,
+                )
+                    -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>
+                + 'a;
+            let resolve_component: Option<&NativeComponentResolver<'_>> = Some(&resolve_component);
+            completions_at_position(
+                server.documents.language_classifier(),
+                position,
+                &native.source,
+                &native.blocks,
+                native.analysis.as_ref(),
+                &native.line_index,
+                resolve_component,
+                if ws_components.is_empty() {
+                    None
+                } else {
+                    Some(&ws_components)
+                },
+                Some(uri.as_str()),
+                completion_ssr_context,
+                native.structure.as_ref(),
+            )
+        });
+        (result, recognized_authored_component_contract_miss.get())
+    };
+    struct NativeCompletionItems {
+        is_incomplete: bool,
+        items: Option<Vec<CompletionItem>>,
+        maybe_style_position: bool,
+        recognized_authored_component_contract_miss: bool,
+    }
+    // B4: typed detail for `v-bind(|)` completions — the style position has
+    // no TSX projection, so each offered binding's type comes from a provider
+    // quickinfo at its DECLARATION position (bounded; fail-closed to the
+    // native kind detail when the mapping or provider is unavailable).
+    let native_items = |native_snapshot: Option<&NativeCompletionSnapshot>| {
+        let (verter_result, recognized_authored_component_contract_miss) =
+            native_completion(native_snapshot);
+        let (is_incomplete, items) = if provider_only {
+            (false, None)
+        } else {
+            verter_result
+                .map(|result| (result.is_incomplete, Some(result.items)))
+                .unwrap_or((false, None))
+        };
+        let maybe_style_position = native_snapshot.is_some_and(|native| {
+            native
+                .line_index
+                .position_to_offset(position)
+                .is_some_and(|offset| {
+                    native.blocks.iter().any(|block| {
+                        let (start, end) = block.content_range();
+                        block.tag_name == "style" && offset >= start && offset <= end
+                    })
+                })
+        });
+        NativeCompletionItems {
+            is_incomplete,
+            items,
+            maybe_style_position,
+            recognized_authored_component_contract_miss,
+        }
+    };
+    let NativeCompletionItems {
+        is_incomplete: verter_is_incomplete,
+        items: verter_items,
+        maybe_style_position,
+        recognized_authored_component_contract_miss,
+    } = native_items(native_snapshot.as_ref());
 
     // Provider-attribution E2E still computes Verter's template-visible NAME set,
     // but only as a subtractive scope boundary. No Verter completion item is ever
@@ -1056,28 +1097,6 @@ async fn handle_completion_attempt(
         }
         scope
     });
-    let (verter_is_incomplete, verter_items) = if provider_only {
-        (false, None)
-    } else {
-        verter_result
-            .map(|result| (result.is_incomplete, Some(result.items)))
-            .unwrap_or((false, None))
-    };
-    // B4: typed detail for `v-bind(|)` completions — the style position has
-    // no TSX projection, so each offered binding's type comes from a provider
-    // quickinfo at its DECLARATION position (bounded; fail-closed to the
-    // native kind detail when the mapping or provider is unavailable).
-    let maybe_style_position = native_snapshot.as_ref().is_some_and(|native| {
-        native
-            .line_index
-            .position_to_offset(position)
-            .is_some_and(|offset| {
-                native.blocks.iter().any(|block| {
-                    let (start, end) = block.content_range();
-                    block.tag_name == "style" && offset >= start && offset <= end
-                })
-            })
-    });
     let verter_items = match verter_items {
         Some(items) if maybe_style_position && is_style_v_bind_context(server, uri, position) => {
             Some(enrich_v_bind_completion_details(server, uri, items).await)
@@ -1085,7 +1104,7 @@ async fn handle_completion_attempt(
         other => other,
     };
 
-    if recognized_authored_component_contract_miss.get() {
+    if recognized_authored_component_contract_miss {
         server.enqueue_import_dependency_publication_if_idle(uri);
     }
 
@@ -1094,8 +1113,7 @@ async fn handle_completion_attempt(
     // its own. A cold native contract cache must not turn that provider-only
     // probe into a synthetic empty response; normal product requests retain
     // the cache-only fail-closed behavior above.
-    if native_only || (recognized_authored_component_contract_miss.get() && !provider_only) {
-        drop(native_edit_fence);
+    if recognized_authored_component_contract_miss && !provider_only {
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
                 is_incomplete: verter_is_incomplete,
@@ -1114,7 +1132,7 @@ async fn handle_completion_attempt(
             &native.source,
             &native.blocks,
             native.analysis.as_ref(),
-            CarrierTemplateLanguage::from_uri(uri.as_str()),
+            CarrierTemplateLanguage::from_uri(server.documents.language_classifier(), uri.as_str()),
             native.structure.as_ref(),
         );
         let source_ctx = match &context {
@@ -1160,7 +1178,6 @@ async fn handle_completion_attempt(
     // not a slot name. Serve Verter's list alone rather than merging junk into
     // a closed, server-owned surface.
     if matches!(source_ctx, CompletionSourceContext::TemplateFrameworkSlot) {
-        drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
                 is_incomplete: verter_is_incomplete,
@@ -1328,55 +1345,36 @@ async fn handle_completion_attempt(
                             ))
                         .then_some(".")
                     });
-                let mut type_completion_result = tp
-                    .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
-                    .await;
-                // Recover a "No content available" completion: the carrier surface
-                // the provider needs is not currently materialised. The recovery
-                // mechanism is engine-specific:
-                //   * tsserver — the carrier is served from the publish store via
-                //     the plugin (NOT an open buffer), so re-PUBLISH the carrier
-                //     companions (the change notification fires inside
-                //     `publish_carrier`) to refresh the store + evict the stale
-                //     resolution; the carrier-companion open verbs are no-ops here.
-                //   * tsgo — the carrier is an open buffer, so reopen it (close +
-                //     open) and re-sync the API to re-establish the lost content.
-                if matches!(
-                    server.type_provider_kind,
-                    crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::Tsgo
-                ) {
-                    for retry_delay_ms in [50u64, 150, 300] {
-                        let needs_retry = matches!(
-                            type_completion_result,
-                            Err(ref error) if error.message.contains("No content available")
-                        );
-                        if !needs_retry {
-                            break;
-                        }
-                        tracing::debug!(
-                            "completion: retrying completion after no-content error for {} (delay={}ms)",
-                            ctx.tsx_path,
-                            retry_delay_ms
-                        );
-                        if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
-                            if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
-                                server.publish_carrier_to_external_ts(&canonical_id).await;
+                // Repair once, then recapture the exact surface and remap the
+                // requested position. Provider writes supply their own ordering
+                // barrier; elapsed time cannot certify content availability.
+                let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+                    "completion",
+                    position,
+                    ctx,
+                    tsx_offset,
+                    |path: String, offset: u32| async move {
+                        tp.get_completions(&path, offset, tp_trigger).await
+                    },
+                    || async {
+                        match server.type_provider_kind {
+                            crate::TypeProviderKind::Tsserver => {
+                                server.publish_open_carrier_to_external_ts(uri).await;
                             }
-                        } else {
-                            server.force_reopen_current_file_in_type_provider(uri).await;
-                            server.sync_api_to_provider(uri).await;
+                            crate::TypeProviderKind::Tsgo => {
+                                server.force_reopen_current_file_in_type_provider(uri).await;
+                                server.sync_api_to_provider(uri).await;
+                            }
+                            _ => server.ensure_current_file_synced(uri).await,
                         }
-                        // Capture-only: a no-content recovery may re-enqueue the
-                        // background dependency publication, never await it.
                         let _ = server.dependency_readiness_capture(uri);
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
-                        type_completion_result = tp
-                            .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
-                            .await;
-                    }
-                }
-                match type_completion_result {
-                    Ok(mut type_result) => {
+                    },
+                    || server.type_provider_context(uri),
+                )
+                .await;
+                let ctx = outcome.ctx;
+                match outcome.value {
+                    Some(mut type_result) => {
                         tracing::debug!(
                             "completion: type provider returned {} items (incomplete={})",
                             type_result.items.len(),
@@ -1403,9 +1401,18 @@ async fn handle_completion_attempt(
                             tracing::debug!(
                                 "completion: retrying member access without dot trigger after empty backend result"
                             );
-                            if let Ok(mut retry_result) =
-                                tp.get_completions(&ctx.tsx_path, tsx_offset, None).await
-                            {
+                            let retry_result = match merge::carrier_position_to_tsx_offset_validated(
+                                position,
+                                &ctx.carrier_line_index,
+                                &ctx.mapper,
+                                &ctx.tsx_line_index,
+                            ) {
+                                Some(offset) => {
+                                    tp.get_completions(&ctx.tsx_path, offset, None).await.ok()
+                                }
+                                None => None,
+                            };
+                            if let Some(mut retry_result) = retry_result {
                                 filter_type_provider_completion_result(
                                     &mut retry_result,
                                     expr_context.as_ref(),
@@ -1457,7 +1464,10 @@ async fn handle_completion_attempt(
                             Some(&ctx.tsx_path),
                             tp.provider_id(),
                             is_template_attr_context,
-                            match CarrierTemplateLanguage::from_uri(uri.as_str()) {
+                            match CarrierTemplateLanguage::from_uri(
+                                server.documents.language_classifier(),
+                                uri.as_str(),
+                            ) {
                                 Some(CarrierTemplateLanguage::Vue) => {
                                     Some(merge::CarrierAttributeSyntax::Vue)
                                 }
@@ -1476,8 +1486,10 @@ async fn handle_completion_attempt(
                             }))
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!("completion: type provider error: {e}");
+                    None => {
+                        tracing::warn!(
+                            "completion: provider recovery did not settle a current result"
+                        );
                     }
                 }
             }
@@ -1498,7 +1510,7 @@ pub(super) async fn handle_completion_resolve(
     server: &VerterLanguageServer,
     mut item: CompletionItem,
 ) -> Result<CompletionItem> {
-    let _hg = HandlerGuard::new("completion_resolve");
+    let _hg = HandlerGuard::new(&server.handler_activity, "completion_resolve");
     // Check if this item requires auto-import (verter workspace components)
     if let Some(ref data) = item.data {
         if data.get("auto_import").and_then(|v| v.as_bool()) == Some(true) {
@@ -1549,9 +1561,33 @@ pub(super) async fn handle_completion_resolve(
                             return Ok(item);
                         };
 
+                        // Capture the surface the provider path serves BEFORE the
+                        // query: the provider answers against it, so its
+                        // enrichment and edits are accepted only while it is
+                        // still current, and any returned edit is translated
+                        // through it — never through a later replacement. A path
+                        // with no consistent surface (retired, unsynced, or no
+                        // longer matching its open source) has nothing to bracket
+                        // the provider's answer with, so the provider is not asked.
+                        let Some((carrier_uri, snapshot)) =
+                            super::nav_features_completion_resolve::capture_resolve_surface(
+                                server,
+                                provider_path,
+                            )
+                        else {
+                            return Err(tower_lsp_server::jsonrpc::Error::new(
+                                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                            ));
+                        };
                         if let Ok(Some(resolve_result)) =
                             tp.resolve_completion(provider_path, resolve_data).await
                         {
+                            if !server.provider_request_surface_still_valid(&carrier_uri, &snapshot)
+                            {
+                                return Err(tower_lsp_server::jsonrpc::Error::new(
+                                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                                ));
+                            }
                             // Lazy `completionItem/resolve` enrichment: fold the
                             // provider's resolved detail (signature) and
                             // documentation onto the item when it returned them.
@@ -1612,6 +1648,7 @@ pub(super) async fn handle_completion_resolve(
                                 let resolved = resolve_provider_auto_import_edits(
                                     server,
                                     provider_path,
+                                    Some(&snapshot),
                                     &provider_edits,
                                 )
                                 .map_err(|reason| {

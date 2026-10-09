@@ -122,6 +122,7 @@ fn two_prop_oxc(
         offset: inner_start,
         expression: None,
         multi_statement: false,
+        statements: None,
         errors: None,
         bindings: Some(BindingExtractionResult {
             bindings: vec![
@@ -151,7 +152,7 @@ fn two_prop_oxc(
             has_errors: false,
             dynamism: Dynamism::Dynamic,
         }),
-        ide_recovery_scope: Vec::new(),
+        ide_recovery_scope: None,
         dynamism: Dynamism::Dynamic,
     }
 }

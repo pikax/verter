@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use super::component_meta_trace_custom;
-use crate::instant::Instant;
 use crate::VerterHost;
+use verter_type_engine::component_meta_trace_custom;
+use verter_type_engine::instant::Instant;
 
 impl VerterHost {
     /// Test-only bare wrapper. Production callers go through
@@ -27,7 +27,7 @@ impl VerterHost {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts(dep_canonical, imported_name)
             .0
     }
@@ -54,12 +54,13 @@ impl VerterHost {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn resolve_imported_type_root_with_store_view(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts_with_store_view(
             self,
+            None,
             view,
             dep_canonical,
             imported_name,
@@ -69,7 +70,7 @@ impl VerterHost {
 
     /// Request-context-bound imported-root resolution.
     ///
-    /// The [`crate::resolver_core::ResolverContext`] is the authority for both
+    /// The [`verter_type_engine::resolver_core::ResolverContext`] is the authority for both
     /// the cache-validation view and every cold producer read. In particular,
     /// a session context must keep its overlay-aware prepared declaration and
     /// export-route reads all the way through the cold closure; reducing the
@@ -77,28 +78,40 @@ impl VerterHost {
     /// the overlay's semantic inputs.
     pub(crate) fn resolve_imported_type_root_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
-        self.resolve_imported_type_root_with_facts_with_context(ctx, dep_canonical, imported_name)
-            .0
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
+        self.resolve_imported_type_root_with_facts_with_context(
+            ctx,
+            session_view,
+            dep_canonical,
+            imported_name,
+        )
+        .0
     }
 
     /// Facts-returning sibling of
     /// [`Self::resolve_imported_type_root_with_context`].
     pub(crate) fn resolve_imported_type_root_with_facts_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
             ctx,
-            ctx.store_view(),
+            session_view,
+            &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx),
             dep_canonical,
             imported_name,
         )
@@ -123,8 +136,8 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         // Test-only convenience: seed the resolve-and-cache method with a
         // cold-seed view (either `StoreViewRead` arm). The production
@@ -139,6 +152,7 @@ impl VerterHost {
             .into_inner();
         self.resolve_imported_type_root_with_facts_with_store_view(
             self,
+            None,
             &view,
             dep_canonical,
             imported_name,
@@ -153,16 +167,20 @@ impl VerterHost {
     /// named hot-path site at `imported_type_root.rs:49`).
     pub(crate) fn resolve_imported_type_root_with_facts_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        view: &dyn crate::resolver_core::StoreView,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        session_view: Option<&dyn crate::session_view::SessionView>,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
             ctx,
+            session_view,
             view,
             dep_canonical,
             imported_name,
@@ -171,13 +189,16 @@ impl VerterHost {
 
     pub(in crate::host_manage) fn resolve_imported_type_root_with_facts_with_context_and_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        view: &dyn crate::resolver_core::StoreView,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        session_view: Option<&dyn crate::session_view::SessionView>,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
 
@@ -193,84 +214,83 @@ impl VerterHost {
         // an entry admitted under one roots on the LIVE hash and validates on every
         // warm read forever. The funnel consults the scope's verdict AFTER the
         // resolve runs and refuses the persist; the root is still returned.
-        let cached = self
-            .resolver
-            .runtime
-            .imported_roots
-            .get_or_resolve_returning_facts_with_context(
-                normalized_canonical.as_str(),
-                imported_name,
-                view,
-                ctx,
-                || {
-                    // Trace inside the closure: the closure runs only on
-                    // cache miss, so the trace event records actual
-                    // resolution work — not redundant lookups.
-                    component_meta_trace_custom!("resolve_imported_type_root", {
-                        use std::fmt::Write as _;
-                        let mut detail =
-                            String::with_capacity(24 + dep_canonical.len() + imported_name.len());
-                        let _ = write!(
-                            detail,
-                            "canonical={} imported={}",
-                            dep_canonical, imported_name
-                        );
-                        detail
-                    });
+        let cached = crate::host_manage::source_request::ImportedRootRequestDriver::new(
+            &self.resolver.runtime.imported_roots,
+        )
+        .get_or_resolve_returning_facts_with_context(
+            normalized_canonical.as_str(),
+            imported_name,
+            view,
+            ctx,
+            || {
+                // Trace inside the closure: the closure runs only on
+                // cache miss, so the trace event records actual
+                // resolution work — not redundant lookups.
+                component_meta_trace_custom!("resolve_imported_type_root", {
+                    use std::fmt::Write as _;
+                    let mut detail =
+                        String::with_capacity(24 + dep_canonical.len() + imported_name.len());
+                    let _ = write!(
+                        detail,
+                        "canonical={} imported={}",
+                        dep_canonical, imported_name
+                    );
+                    detail
+                });
 
-                    if let Some((resolved, facts)) = self
-                        .resolve_direct_imported_type_root_fast_path_with_context(
-                            ctx,
-                            normalized_canonical.as_str(),
-                            imported_name,
-                        )
-                    {
-                        return Some((
-                            crate::resolver_core::ImportedRootResult::Resolved {
-                                canonical_source: resolved.0,
-                                owner: resolved.1,
-                                resolved_symbol: resolved.2,
-                            },
-                            facts,
-                        ));
-                    }
-                    // Use resolve_named_type_export_target which checks
-                    // the RouteDb before doing the barrel walk. This avoids
-                    // redundant barrel walks when the route has already been
-                    // resolved by a prior query. Then collect full route
-                    // participant facts via build_named_type_export_route_entry
-                    // for proper cache invalidation on intermediate barrel changes.
-                    let (route_result, facts) = self
-                        .build_named_type_export_route_entry_with_context(
-                            ctx,
-                            normalized_canonical.as_str(),
-                            imported_name,
-                        )?;
-                    let root_result = match route_result {
-                        crate::resolver_core::RouteResult::Resolved {
-                            defining_canonical,
-                            defining_owner,
-                            defining_symbol,
-                        } => crate::resolver_core::ImportedRootResult::Resolved {
-                            canonical_source: self
-                                .normalized_analysis_canonical(defining_canonical.as_str())
-                                .into_owned(),
-                            owner: defining_owner,
-                            resolved_symbol: defining_symbol,
+                if let Some((resolved, facts)) = self
+                    .resolve_direct_imported_type_root_fast_path_with_context(
+                        ctx,
+                        session_view,
+                        normalized_canonical.as_str(),
+                        imported_name,
+                    )
+                {
+                    return Some((
+                        crate::resolver_core::ImportedRootResult::Resolved {
+                            canonical_source: resolved.0,
+                            owner: resolved.1,
+                            resolved_symbol: resolved.2,
                         },
-                        crate::resolver_core::RouteResult::Miss => {
-                            crate::resolver_core::ImportedRootResult::Miss
-                        }
-                    };
-                    Some((root_result, facts))
-                },
-            );
+                        facts,
+                    ));
+                }
+                // Use resolve_named_type_export_target which checks
+                // the RouteDb before doing the barrel walk. This avoids
+                // redundant barrel walks when the route has already been
+                // resolved by a prior query. Then collect full route
+                // participant facts via build_named_type_export_route_entry
+                // for proper cache invalidation on intermediate barrel changes.
+                let (route_result, facts) = self.build_named_type_export_route_entry_with_context(
+                    ctx,
+                    normalized_canonical.as_str(),
+                    imported_name,
+                )?;
+                let root_result = match route_result {
+                    crate::resolver_core::RouteResult::Resolved {
+                        defining_canonical,
+                        defining_owner,
+                        defining_symbol,
+                    } => crate::resolver_core::ImportedRootResult::Resolved {
+                        canonical_source: self
+                            .normalized_analysis_canonical(defining_canonical.as_str())
+                            .into_owned(),
+                        owner: defining_owner,
+                        resolved_symbol: defining_symbol,
+                    },
+                    crate::resolver_core::RouteResult::Miss => {
+                        crate::resolver_core::ImportedRootResult::Miss
+                    }
+                };
+                Some((root_result, facts))
+            },
+        );
         let (resolved, source_kind, facts) = match cached {
             Some((cached, facts)) => (cached.as_identity(), "named_export_target", facts),
             None => (
                 None,
                 "miss",
-                crate::fact_signature_helpers::empty_fact_signature(),
+                verter_type_engine::fact_signature_helpers::empty_fact_signature(),
             ),
         };
 

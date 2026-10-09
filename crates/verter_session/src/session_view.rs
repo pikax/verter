@@ -47,8 +47,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::file_artifact_store::ProjectIdentity;
-use crate::types::Hash16;
 use crate::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 
 /// Five-way environment-hash carrier (R21), dependency-neutral because it
 /// contains only four plain `Hash16` fields. Production view constructors
@@ -57,7 +57,7 @@ use crate::VerterHost;
 /// [`crate::VerterHost::host_view_env_hashes_for`]); the implicit
 /// project-identity context is held alongside on the view, not part of
 /// this bundle.
-pub use verter_semantic::resolver_core::EnvHashes;
+pub use verter_session_query::resolution::EnvHashes;
 
 /// Read-only view over the base host's source / artifact state.
 ///
@@ -134,11 +134,11 @@ pub trait SessionView: Send + Sync {
     /// which [`Self::overlay_content_hash_for`] reports `Some`. The
     /// discriminator is a non-zero [`Hash16`] derived from the view's
     /// overlay-set [`Self::fingerprint`]; it is the `parse_env_hash`
-    /// dimension of [`crate::file_artifact_store::FileArtifactKey::overlay_scoped`].
+    /// dimension of [`verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped`].
     ///
     /// Purpose: an overlay `IndexedReady` whose source bytes are
     /// identical to the base file has a content hash equal to the
-    /// base hash, so a [`crate::file_artifact_store::FileArtifactKey::base`]
+    /// base hash, so a [`verter_session_query::source::artifact_key::FileArtifactKey::base`]
     /// key for it would collide with the base artifact. The overlay
     /// materialiser can resolve a relative import to an overlay-only
     /// helper the base workspace cannot see, so the overlay's import
@@ -341,14 +341,6 @@ impl HostView {
             key_env_override: Some(env_hashes),
         }
     }
-
-    /// Borrow the underlying host. Reserved for impls that need
-    /// to reach the host directly (e.g., scheduler context
-    /// construction); resolver-tier code should not use this.
-    #[allow(dead_code)]
-    pub fn host(&self) -> &VerterHost {
-        &self.base
-    }
 }
 
 /// The one validated read of the resolve-domain store, shared by every
@@ -372,7 +364,7 @@ impl HostView {
 fn resolved_import_facts_for_view(
     base: &VerterHost,
     canonical: &str,
-    content_hash: verter_semantic::analysis::Hash16,
+    content_hash: verter_session_query::analysis::types::Hash16,
     key_env_override: Option<&EnvHashes>,
 ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
     let (view, _is_current) = base.resolver_store_view_with_currentness();
@@ -416,7 +408,7 @@ fn resolved_import_facts_for_view(
 fn current_content_hash_from_scheduler(
     base: &VerterHost,
     canonical: &str,
-) -> Option<verter_semantic::analysis::Hash16> {
+) -> Option<verter_session_query::analysis::types::Hash16> {
     base.authoritative_current_content_hash(canonical)
 }
 
@@ -472,7 +464,7 @@ impl SessionView for HostView {
 /// materialised on demand and published into
 /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
 /// under an
-/// [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+/// [`overlay_scoped`](verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped)
 /// key — the overlay content hash plus this view's overlay-set
 /// discriminator — so it stays isolated from the base artifact even
 /// when the overlay bytes are identical to the base file.
@@ -527,7 +519,7 @@ impl OverlaidView {
         let mut overlay_hashes = FxHashMap::default();
         overlay_hashes.reserve(overlays.len());
         for (canonical, source) in &overlays {
-            let hash = crate::hash::hash_16(source.as_bytes());
+            let hash = verter_semantic_source::source_hash::hash_16(source.as_bytes());
             overlay_hashes.insert(canonical.clone(), hash);
         }
         let env_hashes = base.host_view_env_hashes();
@@ -561,14 +553,6 @@ impl OverlaidView {
             // Lazy: see `Self::new`.
             overlay_set_fingerprint: std::sync::OnceLock::new(),
         }
-    }
-
-    /// Borrow the base host. Reserved for impls that need to
-    /// reach the host directly; resolver-tier code should not use
-    /// this.
-    #[allow(dead_code)]
-    pub fn host(&self) -> &VerterHost {
-        &self.base
     }
 
     /// Whether the view has an overlay for the requested canonical.
@@ -876,13 +860,6 @@ impl<'a> OverlaidViewRef<'a> {
     pub fn has_overlay(&self, canonical: &str) -> bool {
         self.overlays.contains_key(canonical)
     }
-
-    /// Borrow the base host. Reserved for internal consumer paths
-    /// that need to reach the host directly after consulting the
-    /// view.
-    pub fn host(&self) -> &VerterHost {
-        self.base
-    }
 }
 
 impl SessionView for OverlaidViewRef<'_> {
@@ -1002,7 +979,7 @@ impl SessionView for OverlaidViewRef<'_> {
     }
 }
 
-/// Derive the [`crate::file_artifact_store::FileArtifactKey::overlay_scoped`]
+/// Derive the [`verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped`]
 /// `parse_env_hash` discriminator from a view's overlay-set
 /// [`SessionView::fingerprint`].
 ///
@@ -1041,7 +1018,7 @@ pub fn session_overlay_discriminator(view: &dyn SessionView) -> Option<Hash16> {
 ///
 /// This is the SINGLE derivation every augmentation-index producer routes
 /// through, including the semantic body stitch in
-/// [`crate::project_semantic_dispatch::build::ProjectSemanticDispatch`], so
+/// [`verter_type_engine::project_semantic_dispatch::build::ProjectSemanticDispatch`], so
 /// producers cannot disagree on what
 /// [`crate::file_artifact_store::AugmentationPopulation::Session`] means.
 ///
@@ -1142,13 +1119,13 @@ fn overlay_artifact_discriminator_from_fingerprint(fingerprint: u64) -> Hash16 {
 ///
 /// `provenance` counts each FULL computation (the collect + sort + hash
 /// body, NOT the empty short-circuit) on the owning host via
-/// [`crate::types::MetaProvenance::overlay_set_fingerprint_full_computations`],
+/// [`crate::meta_provenance::MetaProvenance::overlay_set_fingerprint_full_computations`],
 /// so both the per-batch O(1) memoization AND the zero-cost analysis-only
 /// path are mechanically observable.
 fn overlay_set_fingerprint(
     overlay_hashes: &FxHashMap<String, Hash16>,
     tombstones: Option<&std::collections::HashSet<String>>,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> u64 {
     if overlay_hashes.is_empty() && tombstones.is_none_or(std::collections::HashSet::is_empty) {
         return 0;
@@ -1369,7 +1346,7 @@ mod tests {
         let mut overlay_hashes: FxHashMap<String, Hash16> = FxHashMap::default();
         overlay_hashes.insert(
             "/a.ts".to_string(),
-            crate::hash::hash_16(b"export const a = 9;"),
+            verter_semantic_source::source_hash::hash_16(b"export const a = 9;"),
         );
         let mut tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
         tombstones.insert("/b.ts".to_string());
@@ -1420,7 +1397,7 @@ mod tests {
         let mut hashes_a: FxHashMap<String, Hash16> = FxHashMap::default();
         hashes_a.insert(
             "/a.ts".to_string(),
-            crate::hash::hash_16(b"export const a = 9;"),
+            verter_semantic_source::source_hash::hash_16(b"export const a = 9;"),
         );
         let view_a = OverlaidViewRef::new(&host, &overlays_a, &hashes_a, &no_tombstones);
         let fp_a = view_a.fingerprint();
@@ -1444,7 +1421,7 @@ mod tests {
         let mut hashes_ab = hashes_a.clone();
         hashes_ab.insert(
             "/b.ts".to_string(),
-            crate::hash::hash_16(b"export const b = 8;"),
+            verter_semantic_source::source_hash::hash_16(b"export const b = 8;"),
         );
         let view_ab = OverlaidViewRef::new(&host, &overlays_ab, &hashes_ab, &no_tombstones);
         let fp_ab = view_ab.fingerprint();
@@ -1480,7 +1457,7 @@ mod tests {
         let mut hashes_a_changed: FxHashMap<String, Hash16> = FxHashMap::default();
         hashes_a_changed.insert(
             "/a.ts".to_string(),
-            crate::hash::hash_16(b"export const a = 777;"),
+            verter_semantic_source::source_hash::hash_16(b"export const a = 777;"),
         );
         let view_a_changed = OverlaidViewRef::new(
             &host,

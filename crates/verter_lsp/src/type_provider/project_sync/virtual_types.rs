@@ -4,6 +4,87 @@
 use super::*;
 
 impl ProjectSync {
+    /// API I/O owns only the path lock. The document transaction releases its
+    /// lane before calling this and validates again after reacquiring it, so
+    /// releasing the lane is what keeps an interactive repair from waiting on
+    /// this round trip. `lane` is the caller's provider priority: editor-driven
+    /// transactions write in the foreground, a bulk workspace scan in the
+    /// background so it never preempts interactive queries.
+    pub(crate) async fn deliver_api_fenced(
+        &self,
+        path: &str,
+        content: &str,
+        update: bool,
+        lane: ProviderLane,
+        fence: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<SyncedApiSurface>, TypeProviderError> {
+        let lock = self.virtual_verter_types_lock(path);
+        let _guard = lock.lock().await;
+        if !fence() || self.carrier_companion_open_suppressed() {
+            return Ok(None);
+        }
+        let disposition = self
+            .publish_provider_file(
+                path,
+                content,
+                lane,
+                if update {
+                    ProviderFileVerb::Update
+                } else {
+                    ProviderFileVerb::Open
+                },
+            )
+            .await?;
+        if disposition != verter_type_runtime::traits::FileLoadDisposition::Forwarded
+            || !self.companion_applied_verbatim(path, content)
+        {
+            return Ok(None);
+        }
+        Ok(Some(SyncedApiSurface {
+            path: Arc::from(path),
+            content: Arc::from(content),
+        }))
+    }
+
+    /// Drive held lazy demand from the background drain, then certify its exact
+    /// delivery without republishing an older snapshot over a concurrent edit.
+    pub(crate) async fn synchronize_pending_tsx(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<CarrierDelivery, TypeProviderError> {
+        self.provider.synchronize_pending_file(path).await?;
+        let lock = self.virtual_verter_types_lock(path);
+        let _guard = lock.lock().await;
+        let prepared = self.prepare_tsx_surface(path, content)?;
+        let Some(delivered) = self.certified_delivery(path, prepared.prepared) else {
+            return Ok(CarrierDelivery::Refused);
+        };
+        let receipt = SyncedTsxSurface::from_delivered(path, delivered.clone());
+        self.record_delivered_carrier_surface(path, content, delivered);
+        Ok(CarrierDelivery::Delivered(Some(receipt)))
+    }
+
+    /// Settle a carrier delivery the engine held or has not certified: while the
+    /// transaction's revision is still current, drive the held lazy demand once
+    /// ([`Self::synchronize_pending_tsx`]) so the engine can certify exactly these
+    /// bytes. A delivery refused because the revision moved stays refused — that
+    /// revision's own transaction delivers it.
+    pub(crate) async fn settle_uncertified_tsx(
+        &self,
+        path: &str,
+        content: &str,
+        delivery: Result<CarrierDelivery, TypeProviderError>,
+        still_current: &(dyn Fn() -> bool + Sync),
+    ) -> Result<CarrierDelivery, TypeProviderError> {
+        match delivery {
+            Ok(CarrierDelivery::Refused | CarrierDelivery::Delivered(None)) if still_current() => {
+                self.synchronize_pending_tsx(path, content).await
+            }
+            other => other,
+        }
+    }
+
     /// Produce the exact carrier bytes owned by this provider topology.
     ///
     /// Managed/editor-owned tsgo cannot add compiler options to a configured
@@ -125,34 +206,31 @@ impl ProjectSync {
         content: &str,
         lane: ProviderLane,
         verb: ProviderFileVerb,
-    ) -> Result<(), TypeProviderError> {
-        match (lane, verb) {
-            (ProviderLane::Foreground, ProviderFileVerb::Load) => {
-                self.provider.load_file(path, content).await
+    ) -> Result<verter_type_runtime::traits::FileLoadDisposition, TypeProviderError> {
+        let priority = match lane {
+            ProviderLane::Foreground => {
+                verter_type_runtime::provider_hub::OverlayPriority::Foreground
             }
-            (ProviderLane::Foreground, ProviderFileVerb::Open) => {
-                self.provider.open_file(path, content).await
+            ProviderLane::Normal => verter_type_runtime::provider_hub::OverlayPriority::Normal,
+            ProviderLane::Background => {
+                verter_type_runtime::provider_hub::OverlayPriority::Background
             }
-            (ProviderLane::Foreground, ProviderFileVerb::Update) => {
-                self.provider.update_file(path, content).await
+        };
+        match verb {
+            ProviderFileVerb::Load => {
+                self.provider
+                    .load_file_with_disposition(path, content, priority)
+                    .await
             }
-            (ProviderLane::Background, ProviderFileVerb::Load) => {
-                self.provider.load_file_background(path, content).await
+            ProviderFileVerb::Open => {
+                self.provider
+                    .open_file_with_disposition(path, content, priority)
+                    .await
             }
-            (ProviderLane::Background, ProviderFileVerb::Open) => {
-                self.provider.open_file_background(path, content).await
-            }
-            (ProviderLane::Background, ProviderFileVerb::Update) => {
-                self.provider.update_file_background(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Load) => {
-                self.provider.load_file_normal(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Open) => {
-                self.provider.open_file_normal(path, content).await
-            }
-            (ProviderLane::Normal, ProviderFileVerb::Update) => {
-                self.provider.update_file_normal(path, content).await
+            ProviderFileVerb::Update => {
+                self.provider
+                    .update_file_with_disposition(path, content, priority)
+                    .await
             }
         }
     }
@@ -170,8 +248,9 @@ impl ProjectSync {
     }
 
     /// [`Self::publish_tsx`] with a delivery fence: `fence` is evaluated UNDER
-    /// the per-path delivery lock, immediately before the provider write, and a
-    /// `false` answer delivers nothing and returns `Ok(false)`.
+    /// the per-path delivery lock, immediately before the provider write. A
+    /// `false` answer delivers nothing and answers
+    /// [`CarrierDelivery::Refused`].
     ///
     /// The lock serializes every writer of one provider path (the interactive
     /// repair and the debounced coordinator both deliver here), so a writer
@@ -183,16 +262,23 @@ impl ProjectSync {
     /// written to tsgo after the foreground repair had delivered the edit, so
     /// the next hover mapped fresh offsets onto a stale buffer and fell back
     /// to the Verter-only answer.
-    pub(super) async fn publish_tsx_fenced(
+    ///
+    /// A success hands back the receipt for the content THIS call delivered, so
+    /// the commit seals its own bytes instead of re-reading the path's ledger.
+    pub(crate) async fn publish_tsx_fenced(
         &self,
         tsx_path: &str,
         tsx_content: &str,
         lane: ProviderLane,
         verb: ProviderFileVerb,
         fence: Option<&(dyn Fn() -> bool + Sync)>,
-    ) -> Result<bool, TypeProviderError> {
+    ) -> Result<CarrierDelivery, TypeProviderError> {
         if self.carrier_companion_open_suppressed() {
-            return Ok(true);
+            if fence.is_some_and(|fence| !fence()) {
+                return Ok(CarrierDelivery::Refused);
+            }
+            let prepared = self.prepare_tsx_surface(tsx_path, tsx_content)?;
+            return Ok(CarrierDelivery::Published(prepared.prepared));
         }
 
         let lock = self.virtual_verter_types_lock(tsx_path);
@@ -203,7 +289,7 @@ impl ProjectSync {
                     "project_sync: not delivering {tsx_path} — its document revision moved \
                      before the provider write"
                 );
-                return Ok(false);
+                return Ok(CarrierDelivery::Refused);
             }
         }
         let prepared = self.prepare_tsx_surface(tsx_path, tsx_content)?;
@@ -222,6 +308,16 @@ impl ProjectSync {
         let result = self
             .publish_provider_file(tsx_path, prepared.prepared.content().as_ref(), lane, verb)
             .await;
+        if matches!(
+            &result,
+            Ok(verter_type_runtime::traits::FileLoadDisposition::Shadowed
+                | verter_type_runtime::traits::FileLoadDisposition::Held)
+        ) {
+            if virtual_path.is_some() && !virtual_was_live {
+                self.close_virtual_verter_types(tsx_path, lane).await?;
+            }
+            return Ok(CarrierDelivery::Refused);
+        }
         if let Err(error) = result {
             // A dependency created solely for a failed carrier publication has
             // no live consumer. Preserve an older overlay because the provider
@@ -232,6 +328,13 @@ impl ProjectSync {
             return Err(error);
         }
 
+        // The receipt is built from the content THIS delivery published, before
+        // the ledger write moves it, so the commit can never seal a different
+        // transaction's delivery of the same path. It is minted only when the
+        // serving engine certifies it accepted exactly these bytes.
+        let receipt = self
+            .certified_delivery(tsx_path, prepared.prepared.clone())
+            .map(|delivered| SyncedTsxSurface::from_delivered(tsx_path, delivered));
         self.record_delivered_carrier_surface(tsx_path, tsx_content, prepared.prepared);
 
         // When an installed package becomes available, publish the unrewritten
@@ -240,18 +343,20 @@ impl ProjectSync {
         if virtual_path.is_none() {
             self.close_virtual_verter_types(tsx_path, lane).await?;
         }
-        Ok(true)
+        Ok(CarrierDelivery::Delivered(receipt))
     }
 
     /// [`Self::sync_tsx`] guarded by a delivery fence evaluated under the
-    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). `Ok(false)`:
-    /// the fence refused and the provider received nothing.
+    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). The answer
+    /// carries the delivery's own receipt, so the caller's commit seals exactly
+    /// the bytes this call published; [`CarrierDelivery::Refused`] means the
+    /// fence refused and the provider received nothing.
     pub(crate) async fn sync_tsx_fenced(
         &self,
         tsx_path: &str,
         tsx_content: &str,
         fence: &(dyn Fn() -> bool + Sync),
-    ) -> Result<bool, TypeProviderError> {
+    ) -> Result<CarrierDelivery, TypeProviderError> {
         self.publish_tsx_fenced(
             tsx_path,
             tsx_content,
@@ -263,14 +368,16 @@ impl ProjectSync {
     }
 
     /// [`Self::open_tsx`] guarded by a delivery fence evaluated under the
-    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). `Ok(false)`:
-    /// the fence refused and the provider received nothing.
+    /// per-path delivery lock (see [`Self::publish_tsx_fenced`]). The answer
+    /// carries the delivery's own receipt, so the caller's commit seals exactly
+    /// the bytes this call published; [`CarrierDelivery::Refused`] means the
+    /// fence refused and the provider received nothing.
     pub(crate) async fn open_tsx_fenced(
         &self,
         tsx_path: &str,
         tsx_content: &str,
         fence: &(dyn Fn() -> bool + Sync),
-    ) -> Result<bool, TypeProviderError> {
+    ) -> Result<CarrierDelivery, TypeProviderError> {
         self.publish_tsx_fenced(
             tsx_path,
             tsx_content,

@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 
 use verter_type_runtime::codec::SourceIndex;
 
@@ -51,6 +51,12 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Files that have been sent to the extension via `open` command.
     opened_files: Arc<Mutex<HashSet<String>>>,
+    /// The extension language service's application receipts: per file, the
+    /// bytes it acknowledged and the newest delivery issued to it. The contents
+    /// cache above runs ahead of the extension (it is written before the
+    /// request is sent, and a `load_file` never sends anything), so it is not
+    /// evidence of what the service holds.
+    applied: Arc<parking_lot::Mutex<DeliveryLedger>>,
     /// Workspace root path (forward slashes).
     workspace_root: String,
     /// Per-project roots for per-file `projectRootPath` matching.
@@ -61,8 +67,120 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
     ownership: Arc<parking_lot::RwLock<Option<Arc<dyn ConfiguredOwnerAuthority>>>>,
 }
 
+/// The extension language service's application receipts.
+///
+/// Every content delivery replaces the service's whole buffer and is issued a
+/// ticket from one monotonic sequence. Only the settlement of a file's NEWEST
+/// issued delivery touches its receipt: an older acknowledgement landing after
+/// a newer write was issued certifies nothing, even when its bytes equal the
+/// newest ones, and an older failure withdraws nothing — the newer write
+/// replaces whatever the older one left and settles the receipt itself. Issuing
+/// different bytes withdraws the receipt at once — from the moment the write
+/// may reach the service its bytes are unknown — so a delivery whose future is
+/// dropped before it settles leaves no receipt behind. The newest-delivery
+/// check and the receipt publication are one critical section.
+#[derive(Default)]
+struct DeliveryLedger {
+    /// The last ticket issued, across every file.
+    issued: u64,
+    files: HashMap<String, FileReceipt>,
+}
+
+/// One file's application receipt.
+struct FileReceipt {
+    /// The newest delivery issued for the file.
+    newest: u64,
+    /// The bytes the service acknowledged, while no delivery of other bytes is
+    /// unsettled.
+    applied: Option<Arc<str>>,
+}
+
+/// One issued content delivery, settled once the extension answers it.
+struct DeliveryTicket {
+    file: String,
+    seq: u64,
+    content: Arc<str>,
+}
+
+impl DeliveryLedger {
+    /// Issue a delivery of `content` for `file`. The receipt survives only when
+    /// it already certifies exactly these bytes: the service holds them whether
+    /// or not this delivery lands.
+    fn issue(&mut self, file: &str, content: &Arc<str>) -> DeliveryTicket {
+        self.issued += 1;
+        let seq = self.issued;
+        let receipt = self.files.entry(file.to_string()).or_insert(FileReceipt {
+            newest: seq,
+            applied: None,
+        });
+        receipt.newest = seq;
+        if receipt
+            .applied
+            .as_ref()
+            .is_some_and(|applied| applied != content)
+        {
+            receipt.applied = None;
+        }
+        DeliveryTicket {
+            file: file.to_string(),
+            seq,
+            content: Arc::clone(content),
+        }
+    }
+
+    /// Settle `ticket`. Only the file's newest delivery settles anything — a
+    /// ticket issued before a newer delivery, or before a close, is inert. An
+    /// acknowledgement certifies its bytes; a failure leaves the service's bytes
+    /// unknown, so it withdraws the receipt.
+    fn settle(&mut self, ticket: DeliveryTicket, acknowledged: bool) {
+        let Some(receipt) = self.files.get_mut(&ticket.file) else {
+            return;
+        };
+        if receipt.newest != ticket.seq {
+            return;
+        }
+        receipt.applied = acknowledged.then_some(ticket.content);
+    }
+
+    /// Forget `file`: a closed file holds nothing, and no delivery issued
+    /// before the close can certify bytes after it.
+    fn close(&mut self, file: &str) {
+        self.files.remove(file);
+    }
+
+    fn applied(&self, file: &str) -> Option<&Arc<str>> {
+        self.files.get(file)?.applied.as_ref()
+    }
+}
+
+/// The `open` / `updateOpen`-`openFiles` entry that sets `file`'s whole
+/// buffer to `content` under its declared project.
+fn open_entry(
+    file: &str,
+    content: &str,
+    project_root: &str,
+    project_config: Option<&str>,
+) -> serde_json::Value {
+    let script_kind = if file.ends_with(".tsx") {
+        "TSX"
+    } else if file.ends_with(".jsx") {
+        "JSX"
+    } else if file.ends_with(".js") {
+        "JS"
+    } else {
+        "TS"
+    };
+    serde_json::json!({
+        "file": file,
+        "fileContent": content,
+        "scriptKindName": script_kind,
+        "projectRootPath": project_root,
+        "projectConfigPath": project_config,
+    })
+}
+
 impl ExtensionTypeProvider<LspTsQueryTransport> {
-    pub fn new(client: Arc<OnceCell<tower_lsp_server::Client>>, workspace_root: &str) -> Self {
+    pub fn new(client: crate::outbound::Outbound, workspace_root: &str) -> Self {
         Self::with_transport(LspTsQueryTransport { client }, workspace_root)
     }
 }
@@ -76,6 +194,7 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
             transport,
             contents: Arc::new(Mutex::new(HashMap::new())),
             opened_files: Arc::new(Mutex::new(HashSet::new())),
+            applied: Arc::new(parking_lot::Mutex::new(DeliveryLedger::default())),
             workspace_root: verter_span::path::canonicalize_path(workspace_root),
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             ownership: Arc::new(parking_lot::RwLock::new(None)),
@@ -100,6 +219,12 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
         verter_span::path::canonicalize_path(path)
     }
 
+    /// Issue one content delivery of `file` to the extension; settle it with
+    /// [`DeliveryLedger::settle`] once the extension answers.
+    fn issue_delivery(&self, file: &str, content: &Arc<str>) -> DeliveryTicket {
+        self.applied.lock().issue(file, content)
+    }
+
     /// Share the contents-cache handle so a scripted transport can simulate a
     /// concurrent `update_file` landing mid-request, exercising the fresh
     /// per-response snapshot the edit paths take.
@@ -112,6 +237,15 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
 impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
     fn provider_id(&self) -> &'static str {
         "extension"
+    }
+
+    /// The bytes the extension's language service acknowledged for `path`.
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        match self.applied.lock().applied(&Self::normalize_path(path)) {
+            Some(bytes) => AppliedContent::Applied(Arc::clone(bytes)),
+            None => AppliedContent::NotApplied,
+        }
     }
 
     fn supports_completion_resolve(&self) -> bool {
@@ -129,25 +263,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             // no project, so nothing may be declared for it and no later query
             // may believe it is live in one.
             let (project_root, project_config) = declared?;
+            let issued: Arc<str> = Arc::from(content.as_str());
             contents_cache
                 .lock()
                 .await
-                .insert(file.clone(), Arc::from(content.as_str()));
+                .insert(file.clone(), Arc::clone(&issued));
             opened_files.lock().await.insert(file.clone());
-            self.query(
-                "open",
-                serde_json::json!({
-                    "file": file,
-                    "fileContent": content,
-                    "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                        else if file.ends_with(".jsx") { "JSX" }
-                        else if file.ends_with(".js") { "JS" }
-                        else { "TS" },
-                    "projectRootPath": project_root,
-                    "projectConfigPath": project_config,
-                }),
-            )
-            .await?;
+            let ticket = self.issue_delivery(&file, &issued);
+            let delivered = self
+                .query(
+                    "open",
+                    open_entry(&file, &content, &project_root, project_config.as_deref()),
+                )
+                .await;
+            self.applied.lock().settle(ticket, delivered.is_ok());
+            delivered?;
             Ok(())
         })
     }
@@ -170,71 +300,31 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let declared = self.declared_project_for(&file);
         Box::pin(async move {
             let (project_root, project_config) = declared?;
-            let old_line_count = {
-                let cache = contents_cache.lock().await;
-                cache.get(&file).map(|c| c.lines().count() as u32 + 1)
-            };
-
+            let issued: Arc<str> = Arc::from(content.as_str());
             contents_cache
                 .lock()
                 .await
-                .insert(file.clone(), Arc::from(content.as_str()));
+                .insert(file.clone(), Arc::clone(&issued));
 
+            // Both arms replace the service's WHOLE buffer with `content`. A
+            // ranged edit would have to name the end of the buffer the service
+            // holds, which no local state knows: the contents cache runs ahead of
+            // the service (`load_file` and refused deliveries write it), and the
+            // receipt is withdrawn whenever an unsettled write may have landed.
+            let entry = open_entry(&file, &content, &project_root, project_config.as_deref());
             let mut opened = opened_files.lock().await;
-            if opened.contains(&file) {
+            let ticket = self.issue_delivery(&file, &issued);
+            let delivered = if opened.contains(&file) {
                 drop(opened);
-                if let Some(end_line) = old_line_count {
-                    self.query(
-                        "updateOpen",
-                        serde_json::json!({
-                            "changedFiles": [{
-                                "fileName": file,
-                                "textChanges": [{
-                                    "start": { "line": 1, "offset": 1 },
-                                    "end": { "line": end_line, "offset": 1 },
-                                    "newText": content,
-                                }]
-                            }]
-                        }),
-                    )
-                    .await?;
-                } else {
-                    self.query(
-                        "updateOpen",
-                        serde_json::json!({
-                            "closedFiles": [&file],
-                            "openFiles": [{
-                                "file": file,
-                                "fileContent": content,
-                                "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                                    else if file.ends_with(".jsx") { "JSX" }
-                                    else if file.ends_with(".js") { "JS" }
-                                    else { "TS" },
-                                "projectRootPath": project_root,
-                                "projectConfigPath": project_config,
-                            }]
-                        }),
-                    )
-                    .await?;
-                }
+                self.query("updateOpen", serde_json::json!({ "openFiles": [entry] }))
+                    .await
             } else {
                 opened.insert(file.clone());
                 drop(opened);
-                self.query(
-                    "open",
-                    serde_json::json!({
-                        "file": file,
-                        "fileContent": content,
-                        "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                            else if file.ends_with(".jsx") { "JSX" }
-                            else if file.ends_with(".js") { "JS" }
-                            else { "TS" },
-                        "projectRootPath": project_root,
-                        "projectConfigPath": project_config,
-                    }),
-                )
-                .await?;
-            }
+                self.query("open", entry).await
+            };
+            self.applied.lock().settle(ticket, delivered.is_ok());
+            delivered?;
             Ok(())
         })
     }
@@ -243,9 +333,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let file = Self::normalize_path(path);
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
+        let applied = Arc::clone(&self.applied);
         Box::pin(async move {
             contents_cache.lock().await.remove(&file);
             opened_files.lock().await.remove(&file);
+            applied.lock().close(&file);
             self.query("close", serde_json::json!({ "file": file }))
                 .await?;
             Ok(())
@@ -1398,6 +1490,9 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 };
                 let binding = self.project_binding_for(&file);
 
+                // The close and re-open are deliveries like any other: the
+                // service's bytes for the file are no longer the receipt's.
+                self.applied.lock().close(&file);
                 record(
                     self.query("close", serde_json::json!({ "file": file }))
                         .await,
@@ -1413,22 +1508,15 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     }
                 };
 
-                record(
-                    self.query(
+                let ticket = self.issue_delivery(&file, &content);
+                let delivered = self
+                    .query(
                         "open",
-                        serde_json::json!({
-                            "file": file,
-                            "fileContent": content.as_ref(),
-                            "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                                else if file.ends_with(".jsx") { "JSX" }
-                                else if file.ends_with(".js") { "JS" }
-                                else { "TS" },
-                            "projectRootPath": project_root,
-                            "projectConfigPath": project_config,
-                        }),
+                        open_entry(&file, &content, &project_root, project_config.as_deref()),
                     )
-                    .await,
-                );
+                    .await;
+                self.applied.lock().settle(ticket, delivered.is_ok());
+                record(delivered);
             }
 
             match first_error {

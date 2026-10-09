@@ -86,22 +86,22 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::{AnalyzedMacroKind, JsdocTag};
+use verter_session_query::analysis::types::{AnalyzedMacroKind, JsdocTag};
 use verter_type_expr::{TypeExpr, TypeExprScope};
 
-use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceProvenanceContext,
-};
+use crate::output_sinks::OutputProjector;
 use crate::typeinfo::framework_surface::results::{EmitsSurface, MacroSurfaceDtos, PropsSurface};
 use crate::typeinfo::framework_surface::VueSurfaceKey;
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
+use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt as _;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi,
+    SemanticQueryKey, SemanticQueryOutput,
+};
 
 mod normalize;
 mod normalize_slots;
@@ -118,7 +118,7 @@ pub(crate) use normalize_slots::{
     slots_from_typeinfo_surface,
 };
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// The Vue framework-surface executor's output-sink capability: the Vue
     /// resolution leg here (and its normalizer children) hold this to
     /// materialize a graph node into a sealed output carrier and unwrap it.
@@ -163,86 +163,8 @@ pub struct VueMacroSurface {
     /// compile-facing collector classifies each arm (import-backed vs
     /// ambient) and tiers import-backed misses as fatal; ambient names stay
     /// silent.
-    pub(crate) unresolved_surface_arms: Vec<UnresolvedSurfaceArm>,
-}
-
-/// One unresolvable SURFACE-COMPOSITION reference arm dropped during macro
-/// surface synthesis: the arm's head name plus the canonical file whose
-/// declaration authored it (the file whose import bindings classify the miss
-/// as import-backed vs ambient).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UnresolvedSurfaceArm {
-    /// The reference's head name as written (`NotFound` in `extends NotFound`).
-    pub(crate) name: Arc<str>,
-    /// Canonical id of the file whose declaration authored the arm.
-    pub(crate) owner_canonical: Arc<str>,
-    /// Exact top-level lexical owner that authored the arm.
-    pub(crate) owner: verter_type_expr::TopLevelOwnerId,
-}
-
-/// The typed partiality an UNRESOLVABLE macro-type-argument ROOT contributes.
-///
-/// `None` means the root resolved to a real surface the caller can project.
-/// Every `Some` is the resolver's OWN proof that the authored root could not
-/// be reached, so the surface the producer would publish is a SUBSET of what
-/// the author wrote — the case an empty published surface must never be
-/// confused with:
-///
-/// - an authored reference Navigate preserved as a carrier (`BareRef` /
-///   `ImportType`) — the declaration owner did not resolve, which is exactly
-///   the imported-dependency class the taxonomy already names;
-/// - a body the lowerer kept as raw text (`RawFallback`) — no structural
-///   surface was produced;
-/// - a typed failure carrier (`Opaque`), which names its own class through the
-///   shared query-error classification;
-/// - no interned node at all under the resolved id.
-fn unresolved_macro_root_partiality(
-    base: Option<&SemanticNodeData>,
-) -> Option<crate::semantic_query::PartialReasonSet> {
-    use crate::semantic_query::PartialReasonSet;
-
-    match base {
-        None => Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
-        Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
-            Some(PartialReasonSet::MISSING_DEPENDENCY)
-        }
-        Some(SemanticNodeData::RawFallback { .. }) => Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
-        Some(SemanticNodeData::Opaque(error)) => Some(
-            crate::project_semantic_dispatch::symbol_identity::query_error_partial_reasons(error),
-        ),
-        Some(_) => None,
-    }
-}
-
-/// Extract the unresolved SURFACE-COMPOSITION arm facts from a projection's
-/// walker diagnostics, name-sorted (then by declaring file) and deduplicated
-/// so consumers emit deterministically ordered reports.
-fn unresolved_surface_arms_from_diags(
-    diags: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
-) -> Vec<UnresolvedSurfaceArm> {
-    let mut arms: Vec<UnresolvedSurfaceArm> = diags
-        .iter()
-        .filter_map(|diag| match diag {
-            crate::project_semantic_dispatch::walk::ShallowDiagnostic::UnresolvedSurfaceArm {
-                name,
-                owner_canonical,
-                owner,
-            } => Some(UnresolvedSurfaceArm {
-                name: Arc::clone(name),
-                owner_canonical: Arc::clone(owner_canonical),
-                owner: *owner,
-            }),
-            _ => None,
-        })
-        .collect();
-    arms.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.owner_canonical.cmp(&b.owner_canonical))
-            .then_with(|| a.owner.cmp(&b.owner))
-    });
-    arms.dedup();
-    arms
+    pub(crate) unresolved_surface_arms:
+        Vec<verter_type_engine::project_semantic_dispatch::one_level_surface::UnresolvedSurfaceArm>,
 }
 
 impl VueMacroSurface {
@@ -265,13 +187,13 @@ impl VueMacroSurface {
     /// Falls back to the member's declaration_origin, then the SFC owner, when
     /// the value node carries no single-file scope (a structural / scope-less
     /// value node — a primitive, a shared literal-union).
-    fn member_expr_scope(
+    fn member_expr_scope<C: verter_type_engine::resolver_core::ResolverCapabilities>(
         &self,
-        host: &VerterHost,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
         member: &TypeInfoSurfaceMember,
     ) -> TypeExprScope {
         crate::typeinfo::framework_surface::scope::member_value_expr_scope(
-            host,
+            dispatch,
             member,
             self.owner_canonical.as_ref(),
         )
@@ -420,7 +342,7 @@ impl VerterHost {
         // macros, or a `.vue` carrying a USERLAND `export default` (synthesis
         // skipped) returns `None` here.
         let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
-        let crate::resolver_core::shallow_file_state::ExportTarget::Local {
+        let verter_session_query::inputs::shallow::ExportTarget::Local {
             owner: default_owner,
             symbol_name: default_name,
         } = indexed.shallow_state.exports.get("default")?
@@ -460,7 +382,7 @@ impl VerterHost {
         // empty-path `Shallow` terminal below synthesises the one-level surface
         // under publication demand.
         let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
                     Arc::from(canonical_id),
                     default_owner,
@@ -485,15 +407,16 @@ impl VerterHost {
         // to the synthesized instance members, so the structural
         // `published(Shallow)` context is correct. An INCOMPLETE projection
         // records its typed reason before surfacing the miss.
-        self.project_shallow_surface_from_base(
-            &host_ctx,
-            &dispatch,
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
+        crate::typeinfo::surface_resolution::adopt_surface(
+            crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+                &host_ctx,
+                &dispatch,
+                base,
+                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+                None,
+            ),
         )
-        .recorded()
     }
 
     /// Resolve a `.vue` macro's type-argument surface to its span-rich
@@ -539,7 +462,11 @@ impl VerterHost {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
-        self.resolve_vue_macro_surface_with_ctx(&host_ctx, request)
+        resolve_vue_macro_surface_with_ctx(
+            &host_ctx,
+            &ProjectSemanticDispatch::new(&host_ctx),
+            request,
+        )
     }
 
     /// Context-bound resolution core for [`Self::resolve_vue_macro_surface`].
@@ -548,192 +475,8 @@ impl VerterHost {
     /// argument lowering, the cross-file carrier projection, the carrier-file
     /// JSDoc source — flows through `ctx`, so an overlay session resolves the
     /// macro surface against its overlay content rather than the base host view.
-    /// The dispatcher is `ctx.dispatch()`, keeping the surface inside the single
+    /// The dispatcher is the borrowed request facade, keeping the surface inside the single
     /// resolution engine.
-    #[must_use]
-    pub(crate) fn resolve_vue_macro_surface_with_ctx(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        request: &VueMacroSurfaceRequest,
-    ) -> Option<VueMacroSurface> {
-        verter_debug_assert_eq!(
-            request.level,
-            TypeInfoQueryLevel::FullMetadata,
-            "resolve_vue_macro_surface serves the FullMetadata level"
-        );
-
-        // Structurally read-only: surface resolution runs inside the
-        // DTO producer's traced scope; fenced-ness gates admission there.
-        let indexed = ctx
-            .ensure_indexed_ready_serve(request.owner_canonical.as_ref())?
-            .indexed;
-        let mac = indexed.snapshot.macros.get(request.macro_index)?;
-        if !mac.is_type_based {
-            // A runtime-object `defineExpose({...})` / `defineProps({...})`
-            // has no type argument to lower, but the analyzer already
-            // captured its member names (`mac.expose_fields` /
-            // `mac.prop_fields` are populated for BOTH type-based and
-            // runtime macro forms). Synthesize a one-level surface directly
-            // from those already-typed facts instead of reporting an empty
-            // surface for every runtime-declared macro. See
-            // `runtime_object_macro_surface` for the structural (not
-            // name-string) kind dispatch and the honest-unknown member
-            // value policy.
-            return self.runtime_object_macro_surface(ctx, request, mac);
-        }
-
-        // `defineModel` does NOT carry a props OBJECT type argument — its type
-        // argument is the model VALUE type (`defineModel<string>()`), which has
-        // no one-level member surface. Its props come from the analyzer-
-        // synthesized model prop (`AnalyzedMacro.prop_fields`), so the macro
-        // surface is the EMPTY object surface; `props_from_typeinfo_surface`
-        // routes `DefineModel` to the analyzer-fact path.
-        if request.macro_kind == AnalyzedMacroKind::DefineModel {
-            return Some(VueMacroSurface {
-                surface: TypeInfoSurface::empty(),
-                macro_kind: request.macro_kind,
-                owner_canonical: Arc::clone(&request.owner_canonical),
-                macro_index: request.macro_index,
-                macro_call_span: mac.span,
-                level: request.level,
-                // The empty model surface projects nothing — no arms.
-                unresolved_surface_arms: Vec::new(),
-            });
-        }
-
-        let _ = mac.parsed_type_argument.as_ref()?;
-
-        // Provenance per macro axis. Props request the macro-T own-body
-        // provenance on the terminal surface synthesis so the author-declared
-        // members are flagged; emits / slots / exposed are structural
-        // (`declared_in_macro_type_arg` is a props-axis concern). The terminal
-        // `MacroTypeArgOwnBody` synthesis restamps `declared_in_macro_type_arg =
-        // true` for EXACTLY the declaration's own-body direct members — it reads
-        // the prepared decl's `member_index`, which is populated from direct
-        // Object members only and SKIPS heritage `extends` `Ref` arms
-        // (`build.rs::overlay_macro_type_arg_own_body`). Heritage-reached members
-        // are NOT in `member_index`, so they are left at the structural `false`
-        // the empty-path Shallow body lowering assigned. The surface's
-        // `merge_role` is independently baked per arm (`Heritage` for
-        // `extends`-reached members, `OwnBody` for the declaration's own body).
-        // See `props_from_typeinfo_surface`.
-        // Only `DefineProps` reaches here as a props macro: `WithDefaults` is
-        // never `is_type_based` (it bailed at the guard above) and `DefineModel`
-        // returned its empty surface above. `DefineProps` requests the macro-T
-        // own-body provenance; emits / slots / exposed are structural.
-        let terminal_context = match request.macro_kind {
-            AnalyzedMacroKind::DefineProps => ProjectionReductionContext::macro_object_surface(
-                ProjectionMode::Shallow,
-                SurfaceProvenanceContext::MacroTypeArgOwnBody,
-            ),
-            _ => ProjectionReductionContext::macro_object_surface(
-                ProjectionMode::Shallow,
-                SurfaceProvenanceContext::Structural,
-            ),
-        };
-
-        // Dispatch is bound to the active `ctx`: an overlay session threads its
-        // session view through every dispatch-tier read, so the type-argument
-        // lowering and cross-file carrier projection below read overlay content.
-        let dispatch = ctx.dispatch();
-
-        // Read the macro arg's mode-neutral mirror handle (the ONE producer),
-        // then decompose its indexed-access structure GRAPH-NATIVE. A deep
-        // indexed-access type argument (`defineProps<DeepConfig['ui']['header']>()`)
-        // lowered to nested `IndexedAccess` carrier shells; this walks those
-        // shells into `(base_node, path)` WITHOUT lowering the base a second
-        // time — the base node IS a different DEMAND on the same handle. The
-        // shared path walker runs intermediate hops in `Navigate` and the
-        // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
-        // argument decomposes to `(handle_node, [])`.
-        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            ctx,
-            request.owner_canonical.as_ref(),
-            request.macro_index,
-        )?;
-        let (base_carrier, path) =
-            crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain_node(
-                ctx,
-                product.hot.node(),
-            );
-        // Resolve the carrier base ONE Navigate hop through the shared dispatch
-        // (carrier head resolution — a `BareRef` head routes to its `DeclRef`,
-        // a `TypeOf` shell executes its value root, member values stay shallow),
-        // reproducing the eager structural-transit-Navigate base lowering. The
-        // path-precise `Shallow` projection then synthesises the one-level
-        // surface of the terminal hop.
-        let base = dispatch.resolve_hot_handle_with_context(
-            crate::semantic_query::HotTypeRef::new(base_carrier),
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        );
-        // Navigate preserves an authored reference as a carrier when its
-        // declaration cannot currently be resolved. That carrier is the
-        // resolver-owned proof that the root surface is unavailable, not an
-        // authoritative empty slot surface.
-        //
-        // Dropping the surface here publishes an EMPTY macro-DTO bundle, which
-        // is byte-identical to the bundle a component that authored no macro
-        // type at all publishes. So the drop RECORDS its typed partiality into
-        // the producer's cold-compute completeness scope: the empty bundle is
-        // returned to the caller as PARTIAL, is refused surface-store
-        // admission, and reaches the published payload as a degraded surface
-        // instead of a wrong-complete silence.
-        let unresolved_root = unresolved_macro_root_partiality(
-            crate::project_semantic_dispatch::node_data_for(ctx, base).as_deref(),
-        );
-        if let Some(reasons) = unresolved_root {
-            crate::request_context::fold_result_completeness(
-                crate::semantic_query::ResultCompleteness::partial(reasons),
-            );
-            return None;
-        }
-
-        // Collect the walker's side-band diagnostics so unresolvable
-        // SURFACE-COMPOSITION arms (heritage / intersection / union) the
-        // shallow synthesis dropped ride the resolved surface to the
-        // compile-facing collector.
-        let mut walker_diagnostics = Vec::new();
-        // The terminal-hop discharge: a projection that could not produce the
-        // demanded surface (a MISSED terminal hop on a deep indexed access, an
-        // unresolved carrier mid-path) records its typed partiality — the
-        // empty macro-DTO bundle the caller then publishes is PARTIAL, refused
-        // surface-store admission, and reaches the payload as a degraded
-        // surface instead of a wrong-complete silence. A genuinely non-object
-        // terminal stays the complete "no surface" miss.
-        let surface = self
-            .project_shallow_surface_from_base(
-                ctx,
-                &dispatch,
-                base,
-                path,
-                terminal_context,
-                Some(&mut walker_diagnostics),
-            )
-            .recorded()?;
-        let unresolved_surface_arms = unresolved_surface_arms_from_diags(&walker_diagnostics);
-        // An unresolvable SURFACE-COMPOSITION arm (a heritage / intersection /
-        // union contributor the shallow synthesis dropped) makes the published
-        // METADATA surface partial: the members behind that arm are missing,
-        // so the surface must never publish (or warm) as the complete answer.
-        // The codegen lanes keep their own diagnostic channel for these arms.
-        if !unresolved_surface_arms.is_empty() {
-            crate::request_context::fold_result_completeness(
-                crate::semantic_query::ResultCompleteness::partial(
-                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
-                ),
-            );
-        }
-        Some(VueMacroSurface {
-            surface,
-            macro_kind: request.macro_kind,
-            owner_canonical: Arc::clone(&request.owner_canonical),
-            macro_index: request.macro_index,
-            macro_call_span: mac.span,
-            level: request.level,
-            unresolved_surface_arms,
-        })
-    }
-
     /// Synthesize a one-level [`VueMacroSurface`] for a RUNTIME-OBJECT
     /// `defineExpose({...})` / `defineProps({...})` — `mac.is_type_based ==
     /// false`, so there is no type argument for the shared dispatch to lower.
@@ -741,7 +484,7 @@ impl VerterHost {
     /// The member NAMES are structural, already-typed analyzer facts
     /// (`mac.expose_fields` / `mac.prop_fields`, populated for both
     /// type-based AND runtime macro forms — see their doc comments on
-    /// [`verter_semantic::analysis::types::AnalyzedMacro`]), never a
+    /// [`verter_session_query::analysis::types::AnalyzedMacro`]), never a
     /// name-string heuristic. Each member's own type is not re-derived here
     /// (a runtime object literal's member value is an arbitrary expression —
     /// resolving its real type is the same "typeof a value binding" demand
@@ -758,100 +501,6 @@ impl VerterHost {
     /// object forms this synthesizer covers. Every other non-type-based
     /// macro kind (`DefineEmits`, `DefineSlots`, `DefineOptions`, the
     /// `WithDefaults` outer macro) returns `None`.
-    fn runtime_object_macro_surface(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        request: &VueMacroSurfaceRequest,
-        mac: &verter_semantic::analysis::types::AnalyzedMacro,
-    ) -> Option<VueMacroSurface> {
-        use crate::semantic_query::{
-            AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp, SurfaceEntry, SurfaceMember,
-            SurfaceView,
-        };
-
-        let declaration_origin = Some(Arc::clone(&request.owner_canonical));
-        let mut entries: Vec<SurfaceEntry> = Vec::new();
-        match request.macro_kind {
-            AnalyzedMacroKind::DefineExpose => {
-                for field in &mac.expose_fields {
-                    entries.push(SurfaceEntry::Member(SurfaceMember {
-                        key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
-                        // The exposed value's real type is not re-derived
-                        // here (see the doc comment above) — `unknown` is
-                        // the honest placeholder, never a fabricated shape.
-                        value: unknown_member_value_node(ctx),
-                        optional: false,
-                        readonly: false,
-                        method_kind: None,
-                        has_implementation_body: false,
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        spans: verter_type_expr::MemberSpans::name_only(
-                            field.span.unwrap_or(verter_span::Span::new(0, 0)),
-                        ),
-                        declaration_origin: declaration_origin.clone(),
-                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: MergeRoleStamp::NEUTRAL,
-                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    }));
-                }
-            }
-            AnalyzedMacroKind::DefineProps => {
-                for field in &mac.prop_fields {
-                    entries.push(SurfaceEntry::Member(SurfaceMember {
-                        key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
-                        value: unknown_member_value_node(ctx),
-                        optional: field.is_optional,
-                        readonly: false,
-                        method_kind: None,
-                        has_implementation_body: false,
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        spans: verter_type_expr::MemberSpans::name_only(field.span),
-                        declaration_origin: declaration_origin.clone(),
-                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: MergeRoleStamp::NEUTRAL,
-                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    }));
-                }
-            }
-            // Every other non-type-based macro kind has no synthesized
-            // surface here (`DefineEmits`/`DefineSlots` runtime-object forms
-            // and the `WithDefaults` outer macro).
-            _ => return None,
-        }
-        if entries.is_empty() {
-            // A bare `defineExpose()` / an object-less `defineProps()` call
-            // has genuinely nothing to surface — `None` stays correct there,
-            // distinct from the "has members but they were dropped" defect.
-            return None;
-        }
-
-        let base = ctx.project_type_store().semantic_graph().intern_node(
-            crate::semantic_query::SemanticNodeData::Object(SurfaceView::from_entries(
-                entries, None, false,
-            )),
-        );
-        let dispatch = ctx.dispatch();
-        let surface = self
-            .project_shallow_surface_from_base(
-                ctx,
-                &dispatch,
-                base,
-                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-                ProjectionReductionContext::published(ProjectionMode::Shallow),
-                None,
-            )
-            .recorded()?;
-        Some(VueMacroSurface {
-            surface,
-            macro_kind: request.macro_kind,
-            owner_canonical: Arc::clone(&request.owner_canonical),
-            macro_index: request.macro_index,
-            macro_call_span: mac.span,
-            level: request.level,
-            unresolved_surface_arms: Vec::new(),
-        })
-    }
-
     /// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
     /// ([`MacroSurfaceDtos`]), consulting the host-owned framework-surface store
     /// first.
@@ -862,8 +511,16 @@ impl VerterHost {
     /// from the content-addressed cache. Returns an empty (default) bundle when
     /// the macro surface cannot be resolved — the same "no surface" outcome the
     /// eager rail produced for an unresolvable macro.
-    #[must_use]
-    pub fn vue_macro_dtos(&self, request: &VueMacroSurfaceRequest) -> Arc<MacroSurfaceDtos> {
+    ///
+    /// # Errors
+    ///
+    /// [`MacroDtosRefusal`](crate::typeinfo::framework_surface::MacroDtosRefusal)
+    /// when the host does not admit the Vue adapter or the owner is another
+    /// framework's carrier; nothing is computed or cached.
+    pub fn vue_macro_dtos(
+        &self,
+        request: &VueMacroSurfaceRequest,
+    ) -> Result<Arc<MacroSurfaceDtos>, crate::typeinfo::framework_surface::MacroDtosRefusal> {
         // Base-view query-RETURNER. It returns AND content-addressed caches the
         // DTO bundle, so it MUST resolve against a PROVEN-CURRENT snapshot — a
         // non-current execution must never warm the cache. On sustained churn
@@ -871,7 +528,7 @@ impl VerterHost {
         // anything. Overlay-bearing production callers MUST call
         // `vue_macro_dtos_with_ctx` with their active session context.
         let Some(current_view) = crate::typeinfo::current_store_view_for_query(self) else {
-            return Arc::new(MacroSurfaceDtos::default());
+            return Ok(Arc::new(MacroSurfaceDtos::default()));
         };
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx =
@@ -879,23 +536,9 @@ impl VerterHost {
         // Base-view returner: hand back the DTO bundle. A partial surface is
         // already refused store admission inside `vue_macro_dtos_with_ctx`;
         // this direct query has no request-result completeness to fold.
-        vue_macro_dtos_with_ctx(&host_ctx, request).dtos
+        vue_macro_dtos_with_ctx(&host_ctx, &ProjectSemanticDispatch::new(&host_ctx), request)
+            .map(|read| read.dtos)
     }
-}
-
-/// Intern (or reuse the interned) `unknown` primitive node — the honest
-/// placeholder value for a runtime-object macro member whose real type is
-/// not re-derived by [`VerterHost::runtime_object_macro_surface`]. Content-
-/// addressed like every other `intern_node` call: repeated calls across
-/// members / requests collapse onto the same node.
-fn unknown_member_value_node(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-) -> crate::semantic_query::SemanticNodeId {
-    ctx.project_type_store().semantic_graph().intern_node(
-        crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Unknown,
-        ),
-    )
 }
 
 /// Navigate an authored type-payload REF to its one-level object
@@ -916,14 +559,17 @@ fn unknown_member_value_node(
 /// under the current view or the projection walks into an unresolved
 /// carrier: a failed resolution is never an authoritative empty surface.
 ///
-/// Bound to `ctx` (`ctx.dispatch()`), so an overlay session resolves the
+/// Bound to `ctx` (the borrowed request facade), so an overlay session resolves the
 /// slot-param object against its OVERLAY content.
-pub(crate) fn navigate_param_to_object_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn navigate_param_to_object_surface<
+    C: crate::session_attachment::SessionCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     scope_canonical: &str,
     payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
-    let dispatch = ctx.dispatch();
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+    let claims = dispatch.host_attachment().surface_claims();
     let scope_owner = match &payload.locator {
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
         verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(body) => {
@@ -946,7 +592,7 @@ pub(crate) fn navigate_param_to_object_surface(
     let Some(base) = dispatch
         .raise_semantic_type_source_to_hot(
             &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: scope_canonical,
                 scope_owner,
                 context: ProjectionReductionContext::structural_transit_with_mode(
@@ -958,9 +604,9 @@ pub(crate) fn navigate_param_to_object_surface(
         .at_optional_boundary()
         .map(|raised| raised.node())
     else {
-        return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(
-            crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                crate::semantic_query::PartialReason::MissingDependency,
+        return claims.incomplete(
+            verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
+                verter_type_engine::semantic_query::PartialReason::MissingDependency,
             ),
         );
     };
@@ -975,26 +621,30 @@ pub(crate) fn navigate_param_to_object_surface(
     // fault carrier) is an INCOMPLETE resolution with its typed reason. A
     // LOCAL authored-reference mirror passes through — the projection's
     // carrier-head resolution resolves it (or classifies its own terminal).
-    if let Some(reasons) = crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
-        ctx,
-        crate::project_semantic_dispatch::node_data_for(ctx, base).as_deref(),
-    ) {
-        return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(reasons);
+    if let Some(reasons) =
+        verter_type_engine::semantic_query::surface_resolution::stable_member_carrier_partiality(
+            ctx,
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), base)
+                .as_deref(),
+        )
+    {
+        return claims.incomplete(reasons);
     }
-    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(&dispatch, base) {
+    if verter_type_engine::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
+        dispatch, base,
+    ) {
         // The open-generic gate DECLINES a committed surface by design — a
         // complete negative answer, not a failure.
-        return crate::typeinfo::surface_resolution::SurfaceResolution::no_surface();
+        return claims.no_surface();
     }
-    ctx.host_for_fact_tracer_install()
-        .project_shallow_surface_from_base(
-            ctx,
-            &dispatch,
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            None,
-        )
+    crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+        ctx,
+        dispatch,
+        base,
+        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+        None,
+    )
 }
 
 /// Slice a [`CanonicalSpan`]'s byte range out of its file's cache-owned RAW
@@ -1005,10 +655,20 @@ pub(crate) fn navigate_param_to_object_surface(
 /// synthetic span). This is the single source-slicing primitive the normalizers
 /// use to materialize display text from a span at the consumer boundary — it
 /// does NOT re-resolve or re-parse.
-pub(super) fn slice_canonical_span(host: &VerterHost, cspan: &CanonicalSpan) -> Option<String> {
-    let indexed = host
-        .ensure_indexed_ready_serve(cspan.file.as_ref())?
-        .indexed;
+///
+/// The read is the BASE-STORE artifact
+/// ([`verter_type_engine::resolver_core::request_ports::IndexedInputs::base_indexed_ready_serve`]),
+/// not the request view's overlay-priority candidate: published member JSDoc
+/// must stay byte-identical across an API reshape, so this primitive keeps the
+/// source authority it has always had rather than following whichever candidate
+/// the calling request would resolve.
+pub(super) fn slice_canonical_span<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    cspan: &CanonicalSpan,
+) -> Option<String> {
+    // `base_indexed_ready_serve` is an `IndexedInputs` port method; the trait
+    // object `&dyn ResolverContext` carries the whole port surface.
+    let indexed = ctx.base_indexed_ready_serve(cspan.file.as_ref())?.indexed;
     let source = Arc::clone(&indexed.raw_source);
     let start = cspan.span.start as usize;
     let end = cspan.span.end as usize;
@@ -1050,12 +710,12 @@ pub(crate) fn normalize_jsdoc_body(raw: &str) -> String {
 /// ([`member_jsdoc_from_spans`]) and the call-signature emit path
 /// ([`signature_jsdoc_from_spans`]) — both anchor JSDoc on the typeinfo
 /// surface's spans, never a reparse.
-fn jsdoc_from_spans(
-    host: &VerterHost,
+fn jsdoc_from_spans<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     description_span: Option<&CanonicalSpan>,
     tag_spans: &[crate::typeinfo::surface::JsdocTagSpan],
 ) -> (Option<String>, Vec<JsdocTag>) {
-    let slice = |cspan: &CanonicalSpan| -> Option<String> { slice_canonical_span(host, cspan) };
+    let slice = |cspan: &CanonicalSpan| -> Option<String> { slice_canonical_span(ctx, cspan) };
 
     let description = description_span
         .and_then(&slice)
@@ -1083,12 +743,14 @@ fn jsdoc_from_spans(
 }
 
 /// Slice a surface MEMBER's leading-JSDoc spans into `(description, tags)`.
-pub(super) fn member_jsdoc_from_spans(
-    host: &VerterHost,
+pub(super) fn member_jsdoc_from_spans<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     member: &TypeInfoSurfaceMember,
 ) -> (Option<String>, Vec<JsdocTag>) {
     jsdoc_from_spans(
-        host,
+        ctx,
         member.jsdoc_description_span.as_ref(),
         &member.jsdoc_tag_spans,
     )
@@ -1096,19 +758,21 @@ pub(super) fn member_jsdoc_from_spans(
 
 /// Slice a call-SIGNATURE's leading-JSDoc spans into `(description, tags)` (the
 /// call-signature emit path).
-pub(super) fn signature_jsdoc_from_spans(
-    host: &VerterHost,
+pub(super) fn signature_jsdoc_from_spans<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     sig: &crate::typeinfo::surface::TypeInfoSurfaceSignature,
 ) -> (Option<String>, Vec<JsdocTag>) {
     jsdoc_from_spans(
-        host,
+        ctx,
         sig.jsdoc_description_span.as_ref(),
         &sig.jsdoc_tag_spans,
     )
 }
 
 /// Raise a member's value node to a [`TypeExpr`] through the shared structural
-/// raiser bound to the ACTIVE `ctx` (`ctx.dispatch()`), so an overlay session
+/// raiser bound to the ACTIVE `ctx` (the borrowed request facade), so an overlay session
 /// raises against overlay content rather than a fresh base host view. `None`
 /// when the node has no raisable shape.
 ///
@@ -1117,20 +781,22 @@ pub(super) fn signature_jsdoc_from_spans(
 /// `framework_surface` sibling cannot forge a `&TypeInfoSurfaceMember` and
 /// reverse-materialize a `TypeExpr` here. The forgeable-input boundary is
 /// closed at the normalizer (it requires a [`ResolvedVueSurface`] token).
-pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value<
+    C: crate::session_attachment::SessionCapabilities,
+>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
 ) -> Option<TypeExpr> {
     // Publication sink (DTO surface): materialize into a sealed carrier and
     // unwrap via the typeinfo output capability.
-    let dispatch = ctx.dispatch();
-    let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
+
+    let cap = TypeinfoVueSurfaceOutputCap::new(dispatch);
     cap.materialize_output_type_expr(member.value)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
 }
 
 /// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
-/// ([`MacroSurfaceDtos`]) through the active [`crate::resolver_core::ResolverContext`].
+/// ([`MacroSurfaceDtos`]) through the active [`verter_type_engine::resolver_core::ResolverContext`].
 ///
 /// This is the SINGLE DTO resolution core: it materializes the macro surface
 /// ONCE per `(canonical, content, macro, level)` (resolving the surface through
@@ -1145,9 +811,9 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
 ///   a base session can never read or poison an overlay entry (or vice-versa);
 /// - the cold surface resolution
 ///   ([`VerterHost::resolve_vue_macro_surface_with_ctx`], whose dispatch is
-///   `ctx.dispatch()`) — so the type-argument lowering and cross-file carrier
+///   the borrowed request facade) — so the type-argument lowering and cross-file carrier
 ///   projection read overlay content;
-/// - warm validation ([`ctx.store_view`]) — so a carrier edit invalidates the
+/// - warm validation ([`FactValidation`]) — so a carrier edit invalidates the
 ///   entry lazily against the SAME view the surface was resolved under.
 ///
 /// The cold producer populates EXACTLY the surface matching the macro kind
@@ -1155,18 +821,24 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
 /// `slots` for `DefineSlots`); the others stay `None`. Returns an empty
 /// (default) bundle when the macro surface cannot be resolved.
 ///
-/// [`ctx.ensure_indexed_ready_serve`]: crate::resolver_core::ResolverContext::ensure_indexed_ready_serve
-/// [`ctx.dispatch()`]: crate::resolver_core::ResolverContext::dispatch
-/// [`ctx.store_view`]: crate::resolver_core::ResolverContext::store_view
-#[must_use]
-pub(crate) fn vue_macro_dtos_with_ctx(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+/// [`ctx.ensure_indexed_ready_serve`]: verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve
+/// [`FactValidation`]: verter_type_engine::resolver_core::fact_validation_port::FactValidation
+pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapabilities>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
-) -> crate::typeinfo::framework_surface::MacroDtosRead {
-    use crate::semantic_query::ResultCompleteness;
-    use crate::typeinfo::framework_surface::MacroDtosRead;
+) -> Result<
+    crate::typeinfo::framework_surface::MacroDtosRead,
+    crate::typeinfo::framework_surface::MacroDtosRefusal,
+> {
+    use crate::typeinfo::framework_surface::{MacroDtosRead, MacroDtosRefusal};
+    use verter_type_engine::semantic_query::ResultCompleteness;
 
-    let host = ctx.host_for_fact_tracer_install();
+    // Refuse BEFORE any DTO is computed: a host that does not admit the Vue
+    // adapter has no Vue surface store, and no surface is served for it.
+    let Some(surfaces) = dispatch.host_attachment().vue_surfaces() else {
+        return Err(MacroDtosRefusal::VueNotAdmitted);
+    };
 
     // Load the CURRENT (overlay-aware) `IndexedReady` BEFORE touching the
     // cache. The request's `root_identity` (a `whole_hash` hint) and
@@ -1183,16 +855,21 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         // bundle WITHOUT publishing (we have no validated key) keeps the cache
         // free of entries keyed on an unvalidated identity. A default bundle is
         // a COMPLETE empty surface (no fuse tripped), not a partial.
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::new(MacroSurfaceDtos::default()),
             completeness: ResultCompleteness::Complete,
-        };
+        });
     };
+    // The owner must be a Vue carrier or a plain script; another framework's
+    // carrier or adapter module is refused rather than read as Vue.
+    if !is_vue_compatible_owner(&indexed.file_language) {
+        return Err(MacroDtosRefusal::IncompatibleCarrier);
+    }
     let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::new(MacroSurfaceDtos::default()),
             completeness: ResultCompleteness::Complete,
-        };
+        });
     };
     let whole_hash = indexed.whole_hash;
     let macro_kind = mac.kind;
@@ -1213,24 +890,28 @@ pub(crate) fn vue_macro_dtos_with_ctx(
             macro_kind,
         },
     };
-    let store = host.vue_surface_store();
     // Warm read against the SAME `ctx` view the surface resolves under. The
     // content-addressed key covers the SFC's OWN content, but the resolved DTOs
     // read CROSS-FILE carrier types; validating the recorded fact signature +
     // project generation against the live view invalidates the entry lazily on a
     // carrier edit.
-    let generation = ctx.project_type_store().current_project_generation();
-    if let Some(cached) = store.get_with_view(&key, ctx.store_view(), generation) {
+    let generation = ctx.request_flags().current_project_generation();
+    if let Some(cached) = crate::framework::surface_store::read_framework_surface(
+        surfaces,
+        &key,
+        |facts| dispatch.validates_fact_signature(facts),
+        generation,
+    ) {
         // Bubble the cached entry's cross-file carrier fact signature into any
         // active outer fact tracer so an outer component-meta cold trace inherits
         // the DTO's carrier facts on this warm hit.
         cached.read_set_signature.bubble_via_tls();
         // Only `Complete` bundles ever enter the store (see the cold-compute
         // gate below), so a warm hit is always complete.
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::clone(&cached.dto_bundle),
             completeness: ResultCompleteness::Complete,
-        };
+        });
     }
 
     // Resolve the surface through a request carrying the VALIDATED identity
@@ -1256,11 +937,12 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     // by construction (the calling flight's thread); on drop the scope bubbles
     // its completeness into any enclosing compute scope, so an outer
     // component-meta cold compute inherits this surface's partiality.
-    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let (dtos, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+    let _completeness_scope =
+        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+    let (dtos, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
         || {
-            match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
+            match resolve_vue_macro_surface_with_ctx(ctx, dispatch, &validated_request) {
                 Some(macro_surface) => {
                     // Mint the policy-admitted framework-surface token from the
                     // RESOLVED surface; the normalizers consume the token, never a
@@ -1274,8 +956,10 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                             // the surface's index signatures (key/value raised through
                             // `ctx`) for `define_props_shape` to publish.
                             props: Some(PropsSurface {
-                                fields: props_from_typeinfo_surface(ctx, &resolved),
-                                index_signatures: index_signatures_from_surface(ctx, &resolved),
+                                fields: props_from_typeinfo_surface(ctx, dispatch, &resolved),
+                                index_signatures: index_signatures_from_surface(
+                                    ctx, dispatch, &resolved,
+                                ),
                                 ..Default::default()
                             }),
                             ..MacroSurfaceDtos::default()
@@ -1287,7 +971,7 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                             // the `model` slot carries the binding(s) the MODEL framework
                             // surface reads. `model_prop_fields` is the shared synthesis
                             // source for both, so the two slots stay in lock-step.
-                            let prop_fields = props_from_typeinfo_surface(ctx, &resolved);
+                            let prop_fields = props_from_typeinfo_surface(ctx, dispatch, &resolved);
                             let bindings = prop_fields
                                 .iter()
                                 .map(|row| {
@@ -1300,7 +984,9 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                             MacroSurfaceDtos {
                                 props: Some(PropsSurface {
                                     fields: prop_fields,
-                                    index_signatures: index_signatures_from_surface(ctx, &resolved),
+                                    index_signatures: index_signatures_from_surface(
+                                        ctx, dispatch, &resolved,
+                                    ),
                                     ..Default::default()
                                 }),
                                 model: Some(
@@ -1318,19 +1004,22 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                             // surfaced it, so dropping it on the dispatch path was a
                             // regression.
                             emits: Some(EmitsSurface {
-                                fields: emits_from_typeinfo_surface(ctx, &resolved),
-                                index_signatures: index_signatures_from_surface(ctx, &resolved),
+                                fields: emits_from_typeinfo_surface(ctx, dispatch, &resolved),
+                                index_signatures: index_signatures_from_surface(
+                                    ctx, dispatch, &resolved,
+                                ),
                             }),
                             ..MacroSurfaceDtos::default()
                         },
                         AnalyzedMacroKind::DefineSlots => {
-                            let slots = slots_from_typeinfo_surface(ctx, &resolved);
+                            let slots = slots_from_typeinfo_surface(ctx, dispatch, &resolved);
                             let slot_return_publications =
                                 slot_return_publications_from_typeinfo_surface(
                                     ctx, &resolved, &slots,
                                 );
-                            let slot_member_types =
-                                slot_member_types_from_typeinfo_surface(ctx, &resolved, &slots);
+                            let slot_member_types = slot_member_types_from_typeinfo_surface(
+                                dispatch, &resolved, &slots,
+                            );
                             MacroSurfaceDtos {
                                 slots: Some(slots),
                                 slot_return_publications,
@@ -1347,7 +1036,9 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                         AnalyzedMacroKind::DefineOptions => MacroSurfaceDtos {
                             options: Some(
                                 crate::typeinfo::framework_surface::results::OptionsSurface {
-                                    members: object_members_from_typeinfo_surface(ctx, &resolved),
+                                    members: object_members_from_typeinfo_surface(
+                                        dispatch, &resolved,
+                                    ),
                                 },
                             ),
                             ..MacroSurfaceDtos::default()
@@ -1355,14 +1046,16 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                         AnalyzedMacroKind::DefineExpose => MacroSurfaceDtos {
                             expose: Some(
                                 crate::typeinfo::framework_surface::results::ExposeSurface {
-                                    members: object_members_from_typeinfo_surface(ctx, &resolved),
+                                    members: object_members_from_typeinfo_surface(
+                                        dispatch, &resolved,
+                                    ),
                                 },
                             ),
                             // The component-meta extract layer needs the richer
                             // `AnalyzedExposeField` shape (scope + JSDoc) the neutral
                             // `ExposeSurface` pass-through drops, so resolve it here
                             // alongside the wire surface from the SAME macro surface.
-                            exposed_fields: exposed_from_typeinfo_surface(ctx, &resolved),
+                            exposed_fields: exposed_from_typeinfo_surface(ctx, dispatch, &resolved),
                             ..MacroSurfaceDtos::default()
                         },
                         // `WithDefaults` is not a props-surface source on this path: the
@@ -1378,54 +1071,60 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     );
     let non_cacheable_read_observed = matches!(
         &finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     // This surface's OWN completeness — folded from the cold compute's
     // contributing reads via the scope entered above. A genuine partial (a
     // tripped projection budget / fatal `QueryError`) is refused store
     // admission below; the bundle still returns to the caller.
-    let completeness = crate::request_context::current_cold_compute_completeness();
+    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
 
     // ReturnOnly never publishes — fenced-serve arm: DTOs resolved from
     // a served-without-publication artifact must not enter the shared
     // metadata store (their carrier facts validate against the live
     // view). Return the freshly-computed bundle WITHOUT caching.
     if non_cacheable_read_observed {
-        return MacroDtosRead {
+        return Ok(MacroDtosRead {
             dtos: Arc::new(dtos),
             completeness,
-        };
+        });
     }
-    match finalise {
+    Ok(match finalise {
         // A `Complete` result with a sound fact signature is the ONLY bundle
         // admitted into the store. A `Partial` (budget exhaustion / fatal
         // `QueryError` mid-surface-resolution) is returned but NEVER cached —
         // caching a partial would launder a warm complete replay (re-running
         // the budget-constrained owner against warm per-arm memos no longer
         // re-trips the fuse).
-        crate::resolver_core::FactReadSetFinalise::Ok(facts) if !completeness.is_partial() => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
+            if !completeness.is_partial() =>
+        {
             let entry = StoredSurfaceDto {
                 dto_bundle: Arc::new(dtos),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                    facts,
+                ),
                 validated_at_generation: generation,
             };
             MacroDtosRead {
-                dtos: Arc::clone(&store.insert(key, entry).dto_bundle),
+                dtos: Arc::clone(&surfaces.insert(key, entry).dto_bundle),
                 completeness,
             }
         }
         // Genuine partial (`Ok` finalise but partial completeness): valid
         // bundle, refused store admission. A repeat request recomputes against
         // the fresh budget.
-        crate::resolver_core::FactReadSetFinalise::Ok(_) => MacroDtosRead {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_) => MacroDtosRead {
             dtos: Arc::new(dtos),
             completeness,
         },
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => MacroDtosRead {
-            dtos: Arc::new(dtos),
-            completeness,
-        },
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+            MacroDtosRead {
+                dtos: Arc::new(dtos),
+                completeness,
+            }
+        }
         // Tracer overflowed: the DTOs are valid but cannot be admitted safely
         // (the observation set was truncated). Return the freshly-computed
         // bundle WITHOUT caching — a repeat request recomputes, never serves an
@@ -1433,11 +1132,28 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         // Neither an over-cap nor a mutation-unstable scope yields a
         // signature the bundle can be admitted under; both serve the DTOs
         // and publish nothing.
-        crate::resolver_core::FactReadSetFinalise::Overflow
-        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => MacroDtosRead {
-            dtos: Arc::new(dtos),
-            completeness,
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            MacroDtosRead {
+                dtos: Arc::new(dtos),
+                completeness,
+            }
+        }
+    })
+}
+
+/// Whether `language` may own a `.vue` macro surface: a Vue carrier (or Vue
+/// template / adapter module) or a plain script. Another framework's carrier,
+/// template or adapter module is not.
+fn is_vue_compatible_owner(language: &verter_language::FileLanguage) -> bool {
+    let vue = verter_language::FrameworkAdapterId::vue();
+    match language {
+        verter_language::FileLanguage::Script { flavor, .. } => match flavor {
+            verter_language::ScriptFlavor::Plain => true,
+            verter_language::ScriptFlavor::AdapterModule { adapter_id, .. } => *adapter_id == vue,
         },
+        verter_language::FileLanguage::Framework { adapter_id, .. }
+        | verter_language::FileLanguage::FrameworkTemplate { adapter_id, .. } => *adapter_id == vue,
     }
 }
 
@@ -1462,6 +1178,47 @@ fn surface_kind_for_macro(
     }
 }
 
+pub(crate) fn resolve_vue_macro_surface_with_ctx<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+    request: &VueMacroSurfaceRequest,
+) -> Option<VueMacroSurface> {
+    verter_debug_assert_eq!(
+        request.level,
+        TypeInfoQueryLevel::FullMetadata,
+        "resolve_vue_macro_surface serves the FullMetadata level"
+    );
+
+    // The ONE macro surface producer (shared with the semantic-source raise
+    // replay): indexed-access decomposition, macro provenance, root
+    // normalization, unresolved-root partiality, one-level projection and
+    // incomplete-arm folding all run there. This adapter pairs the graph
+    // surface with its declaration-file spans and hydrates JSDoc.
+    let projected =
+        verter_type_engine::project_semantic_dispatch::one_level_surface::project_macro_argument_surface(
+            ctx,
+            dispatch,
+            &request.owner_canonical,
+            request.macro_index,
+            request.macro_kind,
+        )?;
+    let surface = crate::typeinfo::shallow_surface::with_member_jsdoc_spans_from_ctx(
+        ctx,
+        TypeInfoSurface::from_one_level(dispatch.graph(), &projected.surface),
+    );
+    Some(VueMacroSurface {
+        surface,
+        macro_kind: request.macro_kind,
+        owner_canonical: Arc::clone(&request.owner_canonical),
+        macro_index: request.macro_index,
+        macro_call_span: projected.macro_call_span,
+        level: request.level,
+        unresolved_surface_arms: projected.unresolved_surface_arms,
+    })
+}
+
 #[cfg(test)]
 mod partial_admission_tests {
     //! Vue lane: a degraded output or a present-but-unraisable fold `None`
@@ -1471,27 +1228,29 @@ mod partial_admission_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-    use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
-    use crate::resolver_core::FactReadSetFinalise;
-    use crate::semantic_query::{
+    use crate::output_sinks::OutputProjector;
+    use crate::VerterHost;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{
         PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
     };
-    use crate::VerterHost;
 
     fn surface_with_broken_member(value: SemanticNodeId) -> SurfaceView {
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(
                 vec![SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("broken"),                    value,
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("broken"),                    value,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 }]
@@ -1521,13 +1280,15 @@ mod partial_admission_tests {
         let broken_obj =
             graph.intern_node(SemanticNodeData::Object(surface_with_broken_member(absent)));
         let _scope = ColdComputeCompletenessScope::enter();
-        let (_tree, facts) =
-            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+        let (_tree, facts) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || {
                 let sealed = cap
                     .materialize_output_type_expr(broken_obj)
                     .expect("the object raises (degraded member)");
-                sealed.into_type_expr(&cap)
-            });
+                sealed.into_type_expr(cap.authority())
+            },
+        );
         assert!(
             matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),
             "a degraded output must finalise NON-CACHEABLE (OutputMaterializationLoss)"
@@ -1540,15 +1301,15 @@ mod partial_admission_tests {
         // Fold None: a present-but-unraisable composite fails the fold — the
         // seam notes the loss before returning `None`, completeness Complete.
         let union_absent = graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 vec![str_id, absent].into_boxed_slice(),
             )),
         ));
         let _scope = ColdComputeCompletenessScope::enter();
-        let (_raised, facts) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                cap.materialize_output_type_expr(union_absent)
-            });
+        let (_raised, facts) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || cap.materialize_output_type_expr(union_absent),
+        );
         assert!(_raised.is_none(), "the composite fold fails");
         assert!(
             matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),

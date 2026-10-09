@@ -1,0 +1,5 @@
+error[E0599]: no method named `decl_bodies` found for struct `Arc<verter_session_query::inputs::shallow::ShallowInputRecord>` in the current scope
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/engine_ports_route_no_worker.rs
+  |
+  |         record.decl_bodies();
+  |                ^^^^^^^^^^^ method not found in `Arc<verter_session_query::inputs::shallow::ShallowInputRecord>`

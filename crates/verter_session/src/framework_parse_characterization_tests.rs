@@ -297,7 +297,9 @@ const TORN_IDENTITY_SOURCE_B: &str = concat!(
     "<template><div>{{ betaExport }}</div></template>\n",
 );
 
-fn export_names_of(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
+fn export_names_of(
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> Vec<String> {
     snapshot
         .export_signatures
         .iter()
@@ -502,7 +504,7 @@ fn source_stage_executor(host: &VerterHost) -> crate::host_executor::HostStageEx
 #[test]
 fn pre_publication_semantic_catalog_miss_is_stage_error_without_publish() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use verter_scheduler::executor::{StageErrorKind, StageExecutor};
+    use verter_scheduler::execution::executor::{StageErrorKind, StageExecutor};
 
     let source = concat!(
         "<script setup lang=\"ts\">\n",
@@ -515,7 +517,7 @@ fn pre_publication_semantic_catalog_miss_is_stage_error_without_publish() {
     let before = host.carrier_publication.publication_store.audit_snapshot();
     let result = catch_unwind(AssertUnwindSafe(|| {
         crate::parse::with_forced_catalog_eval_source_miss(|| {
-            executor.execute_source("Miss.vue", FileLanguage::vue(), Arc::from(source), 1)
+            executor.execute_source("Miss.vue", FileLanguage::vue(), Arc::from(source), 1, 1)
         })
     }));
     let stage = result.unwrap_or_else(|_| {
@@ -618,7 +620,7 @@ fn script_facts_reuse_indexed_ready_eval_source_without_recatalog() {
 #[test]
 fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
     use crate::resolver_core::ComponentMetaResolutionPurpose;
-    use crate::resolver_core::ResolverContext;
+    use verter_type_engine::resolver_core::ResolverContext;
 
     let source = concat!(
         "<script setup lang=\"ts\">\n",
@@ -636,7 +638,7 @@ fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
         .expect("analysis after IndexedReady");
     let before = crate::parse::catalog_eval_source_call_count();
     let from_captured = VerterHost::clone_owner_eval_source_arc(
-        &host as &dyn ResolverContext,
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         "EvalEnv.vue",
         Some(&indexed.eval_source),
     )
@@ -645,15 +647,24 @@ fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
         Arc::ptr_eq(&from_captured, &indexed.eval_source),
         "captured eval-env compute must clone IndexedReady.eval_source, not to_string"
     );
-    let from_fallthrough =
-        VerterHost::clone_owner_eval_source_arc(&host as &dyn ResolverContext, "EvalEnv.vue", None)
-            .expect("fallthrough clones IndexedReady");
+    let from_fallthrough = VerterHost::clone_owner_eval_source_arc(
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        "EvalEnv.vue",
+        None,
+    )
+    .expect("fallthrough clones IndexedReady");
     assert!(
         Arc::ptr_eq(&from_fallthrough, &indexed.eval_source),
         "uncaptured eval-env compute must clone IndexedReady.eval_source, not recatalog or to_string"
     );
+
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        );
     let computed = host.compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
-        &host as &dyn ResolverContext,
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        &fixture_dispatch_0,
         "EvalEnv.vue",
         &snapshot,
         None,
@@ -767,7 +778,10 @@ fn route_owned_eval_state_carries_parse_payload_for_vue() {
         parse_payload.is_some(),
         "a .vue route-owned entry must carry its parse payload"
     );
-    assert_eq!(whole_hash, crate::hash::hash_16(vue_src.as_bytes()));
+    assert_eq!(
+        whole_hash,
+        verter_semantic_source::source_hash::hash_16(vue_src.as_bytes())
+    );
 
     // Non-SFC route-owned eval state: no parse payload.
     let (_, parse_payload, _) = host
@@ -807,7 +821,7 @@ fn ide_virtual_output_for_fixture_sfc_is_byte_stable() {
     // compiler's own `optional_boolean_prop_emits_no_default` /
     // `optional non-Boolean prop keeps the official dev shape` assertions
     // in `crates/verter_compiler/src/script/tests.rs`.
-    let hash_hex: String = crate::hash::hash_16(content.as_bytes())
+    let hash_hex: String = verter_semantic_source::source_hash::hash_16(content.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
@@ -992,7 +1006,7 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             source,
             verter_semantic::analysis::AnalysisScope::LSP,
             &FileLanguage::vue(),
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
         .expect("Vue carrier dispatch yields a snapshot");
         let alloc_b = oxc_allocator::Allocator::new();
@@ -1077,7 +1091,7 @@ fn rehoused_carrier_artifact_stamps_exact_parse_key() {
         source,
         verter_semantic::analysis::AnalysisScope::LSP,
         &FileLanguage::vue(),
-        &crate::types::MetaProvenance::default(),
+        &crate::meta_provenance::MetaProvenance::default(),
     )
     .expect("Vue carrier dispatch yields a snapshot");
     let language = FileLanguage::vue();

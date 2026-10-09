@@ -22,11 +22,11 @@
 
 use std::sync::Arc;
 
-use verter_session::component_meta_caches::{
+use verter_type_engine::capture_token::CaptureToken;
+use verter_type_engine::component_meta_caches::{
     ImportedRegistryDb, ImportedRegistryEntry, ImportedRegistryKey,
 };
-use verter_session::for_tests::CaptureToken;
-use verter_session::invalidation_domain::InvalidationByCanonical;
+use verter_type_engine::invalidation_domain::InvalidationByCanonical;
 
 #[test]
 fn invalidate_canonical_touches_only_indexed_entries() {

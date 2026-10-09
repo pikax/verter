@@ -11,21 +11,21 @@
 //!
 //! The harness is the sole entry point for tests that need a mined
 //! footprint. Direct callers of `get_component_meta_with_resolution`
-//! get a `RequestAuditRecord` via `take_audit_record(request_id)` but
+//! get a `RequestAuditRecord` via `take_record(request_id)` but
 //! must manage context/accumulator themselves.
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 use verter_workspace::WorkspaceAccess;
 
 use crate::component_meta_audit::RequestAuditRecord;
 use crate::meta_resolve::ResolvedComponentMetaState;
-use crate::request_context::{
-    nested_audit_in_progress, requests_created_snapshot, reset_requests_created, NestedAuditGuard,
-};
 use crate::types::AnalysisLevel;
 use crate::{HostConfig, VerterHost};
+use verter_type_engine::request_context::{
+    nested_audit_in_progress, requests_created_snapshot, reset_requests_created, NestedAuditGuard,
+};
 
 /// Errors surfaced by [`AuditedRequestBuilder::resolve_component_meta`]
 /// and [`AuditedRequestBuilder::run_custom`].
@@ -282,7 +282,7 @@ impl AuditedRequestBuilder {
         // `AuditRequestRegistration::Noop` arm). Surface that as
         // `Ok((value, None))` so callers can branch on it without a
         // type error.
-        let record = host.take_audit_record(request_id);
+        let record = host.host_audit_runtime().take_record(request_id);
         Ok((value, record))
     }
 
@@ -370,7 +370,8 @@ where
     }
 
     let record = host
-        .take_audit_record(resolution.request_id)
+        .host_audit_runtime()
+        .take_record(resolution.request_id)
         .ok_or(AuditedRequestError::AuditRecordMissing)?;
 
     Ok((analysis, resolution, record))

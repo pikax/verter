@@ -57,8 +57,8 @@
 //! The skeleton folds header SHAPE only — it never inspects declaration
 //! bodies (no member value types, no lowered clauses).
 
-use verter_semantic::analysis::decl_headers::MemberHeader;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::header_index::MemberHeader;
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::project_type_store::IndexedReady;
@@ -76,8 +76,35 @@ const SEP: u8 = 0u8;
 /// Invariant under cosmetic edits; changes under decl-shape edits.
 #[must_use]
 pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
+    let script_regions = indexed
+        .framework_parse
+        .as_deref()
+        .map(|parse| parse.script_regions());
+    compute_parse_stable_hash_parts(&indexed.shallow_state, script_regions.as_deref())
+}
+/// The same hash, computed from a request-input record rather than the
+/// canonical artifact. The request-input carrier is the port-shaped
+/// projection of the artifact, so the two must agree; the only caller is
+/// the fact-validation proof surface, which is compiled only under `test` /
+/// `test-support`. A shipped (no test-support) build — the wasm32 lane among
+/// them — therefore has no reader.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn compute_parse_stable_hash_inputs(
+    indexed: &verter_session_query::inputs::indexed::IndexedInputRecord,
+) -> Hash16 {
+    compute_parse_stable_hash_parts(
+        &indexed.shallow_state,
+        indexed
+            .framework_parse
+            .as_ref()
+            .map(|facts| facts.script_regions()),
+    )
+}
+fn compute_parse_stable_hash_parts(
+    shallow: &verter_session_query::inputs::shallow::ShallowInputAssembly,
+    script_regions: Option<&[verter_language::ScriptRegion]>,
+) -> Hash16 {
     verter_audit::attribute!(ParseStableHash);
-    let shallow = &indexed.shallow_state;
 
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     buf.extend_from_slice(SALT);
@@ -85,7 +112,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
 
     // ── Section: type symbols (HEADER inventory — no body lowering) ──
     write_section(&mut buf, b"types");
-    let headers = shallow.decl_bodies().header_index();
+    let headers = &shallow.headers;
     let mut type_keys: Vec<_> = headers.type_headers.keys().collect();
     type_keys.sort_unstable();
     for key in type_keys {
@@ -237,8 +264,8 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     // the region KIND and source dialect, but not byte spans: offsets move
     // under cosmetic carrier edits and are not semantic shape.
     write_section(&mut buf, b"carrier_script_regions");
-    if let Some(parse) = indexed.framework_parse.as_deref() {
-        for region in parse.script_regions() {
+    if let Some(script_regions) = script_regions {
+        for region in script_regions {
             write_script_region_kind(&mut buf, region.kind);
             write_script_source_type(&mut buf, region.source_type);
             buf.push(SEP);
@@ -322,9 +349,9 @@ fn write_member_header(buf: &mut Vec<u8>, member: &MemberHeader) {
 
 fn write_export_target(
     buf: &mut Vec<u8>,
-    target: &crate::resolver_core::shallow_file_state::ExportTarget,
+    target: &verter_session_query::inputs::shallow::ExportTarget,
 ) {
-    use crate::resolver_core::shallow_file_state::ExportTarget;
+    use verter_session_query::inputs::shallow::ExportTarget;
     match target {
         ExportTarget::Local { owner, symbol_name } => {
             buf.push(b'L');
@@ -347,8 +374,8 @@ fn write_export_target(
     }
 }
 
-fn kind_str_type(kind: &verter_semantic::analysis::type_eval::TypeDeclKind) -> &'static str {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
+fn kind_str_type(kind: &verter_session_query::declarations::TypeDeclKind) -> &'static str {
+    use verter_session_query::declarations::TypeDeclKind;
     match kind {
         TypeDeclKind::Alias => "type",
         TypeDeclKind::Interface => "interface",
@@ -356,8 +383,8 @@ fn kind_str_type(kind: &verter_semantic::analysis::type_eval::TypeDeclKind) -> &
     }
 }
 
-fn kind_str_value(kind: &verter_semantic::analysis::type_eval::ValueDeclKind) -> &'static str {
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
+fn kind_str_value(kind: &verter_session_query::declarations::ValueDeclKind) -> &'static str {
+    use verter_session_query::declarations::ValueDeclKind;
     match kind {
         ValueDeclKind::Var => "var",
         ValueDeclKind::Let => "let",

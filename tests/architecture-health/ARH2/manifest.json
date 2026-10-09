@@ -40,7 +40,7 @@
       "twins": [
         "clean products",
         "hotspot-missing",
-        "hotspot-crate-unknown (the lane's crate is a live workspace member)",
+        "hotspot-crate-unknown (the lane's crate, the row's or a pin's own when its witnesses compile in another package, is a live workspace member)",
         "hotspot-without-pins",
         "pin-command-not-canonical (canonical form is cargo nextest run -p <crate> <filter>)",
         "pin-filter-malformed",
@@ -58,6 +58,7 @@
         "route-without-pins",
         "route-surface-drift (the scheduler field items, the pub fn test_* hook names, and the ARH1-CUT-4 bulk retainedTypes/retainedAssocItems/consumersAffected join the ARH1 narrowing populations exactly)",
         "route-surface-not-live (a characterized narrowed field must still be a live pub field: the surface is characterized BEFORE narrowing)",
+        "route-required-witness-missing (the ARH1-CUT-2 scheduler field route pins every incarnation-rejection, removal-drain, source-witness and deferred-blocker witness; a pin may carry more, never fewer)",
         "ac3-concern-missing",
         "ac3-concern-without-evidence",
         "ac3-concern-invented"

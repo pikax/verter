@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
-use crate::resolver_core::{
-    FactVersionRef, ResolverContext, SingleflightGroup, StoreView, ValidatedFactCache,
-};
+use crate::resolver_core::{SingleflightGroup, ValidatedFactCache};
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Result of resolving an imported type root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,11 +43,9 @@ impl ImportedRootResult {
         }
     }
 
-    pub fn as_identity(
-        &self,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    pub fn as_identity(&self) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolved().map(|(canonical, owner, symbol)| {
-            verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+            verter_session_query::type_solver::ResolvedRootIdentity::new_in_owner(
                 canonical, owner, symbol,
             )
         })
@@ -79,16 +77,16 @@ impl ImportedRootResult {
 /// the flight is what lets an adopting follower re-mark its own thread instead
 /// of silently inheriting an empty fact signature that an enclosing memo would
 /// then observe as "nothing to invalidate on".
-struct ImportedRootFlightOutcome {
-    root: Arc<ImportedRootResult>,
-    facts: Arc<[FactVersionRef]>,
-    admitted: bool,
+pub(crate) struct ImportedRootFlightOutcome {
+    pub(crate) root: Arc<ImportedRootResult>,
+    pub(crate) facts: Arc<[FactVersionRef]>,
+    pub(crate) admitted: bool,
 }
 
 /// Shared DB for imported type-root proofs.
 pub struct ImportedRootDb {
-    roots: ValidatedFactCache<(String, String), ImportedRootResult>,
-    singleflight: SingleflightGroup<(String, String), ImportedRootFlightOutcome, ()>,
+    pub(crate) roots: ValidatedFactCache<(String, String), ImportedRootResult>,
+    pub(crate) singleflight: SingleflightGroup<(String, String), ImportedRootFlightOutcome, ()>,
 }
 
 impl ImportedRootDb {
@@ -135,14 +133,15 @@ impl ImportedRootDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
-        self.get_or_resolve_returning_facts_with_context(
-            provider_canonical,
-            imported_name,
-            view,
-            host,
-            resolve,
-        )
-        .map(|(arc, _)| arc)
+        crate::host_manage::source_request::ImportedRootRequestDriver::new(self)
+            .get_or_resolve_returning_facts_with_context(
+                provider_canonical,
+                imported_name,
+                view,
+                host,
+                resolve,
+            )
+            .map(|(arc, _)| arc)
     }
 
     /// Like [`Self::get_or_resolve_with_facts`] but ALSO returns the
@@ -164,227 +163,14 @@ impl ImportedRootDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
-        self.get_or_resolve_returning_facts_with_context(
-            provider_canonical,
-            imported_name,
-            view,
-            host,
-            resolve,
-        )
-    }
-
-    pub(crate) fn get_or_resolve_returning_facts_with_context<V, F>(
-        &self,
-        provider_canonical: &str,
-        imported_name: &str,
-        view: &V,
-        ctx: &dyn ResolverContext,
-        resolve: F,
-    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
-    {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-            |probe| {
-                self.get_or_resolve_returning_facts_in_scope(
-                    provider_canonical,
-                    imported_name,
-                    view,
-                    probe,
-                    resolve,
-                )
-            },
-        )
-        .0
-    }
-
-    fn get_or_resolve_returning_facts_in_scope<V, F>(
-        &self,
-        provider_canonical: &str,
-        imported_name: &str,
-        view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
-        resolve: F,
-    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
-    {
-        let key = (provider_canonical.to_owned(), imported_name.to_owned());
-
-        if let Some(hit) = self.roots.get_if_valid_with_facts(&key, view) {
-            // Per-request audit attribution: warm-cache hit. The
-            // closure body did not run — this is a true reuse.
-            if let Some(obs) = verter_audit::current_observer() {
-                obs.record_event(verter_audit::AuditEvent::ImportedRootWarm);
-            }
-            return Some(hit);
-        }
-
-        let run_result = self.resolve_root_singleflight_inner(key, view, probe, resolve)?;
-        Some((
-            Arc::clone(&run_result.value.root),
-            Arc::clone(&run_result.value.facts),
-        ))
-    }
-
-    /// Shared singleflight orchestrator for the cold-path root resolve.
-    ///
-    /// Retention MIRRORS admission (the same bounded re-validation loop the
-    /// route lane uses): an ADMITTED outcome is retained as a joinable
-    /// rendezvous for the burst; an UNADMITTED outcome serves only the LEADER,
-    /// while a FOLLOWER re-runs `resolve` against fresh state on a fresh lane.
-    ///
-    /// EVERY unadmitted outcome — leader-produced or follower-adopted — marks
-    /// the non-cacheability rail of the thread it is served to. Both refusal
-    /// reasons need it, for different halves of the same hazard:
-    ///
-    /// - `probe.non_cacheable()` (fenced serve / broken lease / unrootable
-    ///   route): the reads that set it already fanned out to every tracer on
-    ///   the LEADER's stack, so the leader's re-mark is a harmless no-op — but
-    ///   an ADOPTING FOLLOWER never ran that walk, and nothing has marked its
-    ///   tracers.
-    /// - `facts.is_empty()`: the RESULT is unrootable and NO non-cacheable read
-    ///   need have occurred at all, so NEITHER thread is marked. An empty
-    ///   signature also FANS NOTHING, so an enclosing traced compute observes
-    ///   no fact for the root, warm-admits a result folding a root it cannot
-    ///   root, and revalidates against the live view forever.
-    ///
-    /// Marking on `!admitted` — rather than per reason — is the structural
-    /// floor: no unadmitted value leaves this funnel without marking the thread
-    /// that receives it, whatever refused it and whichever producer supplied
-    /// it. The mark is cache non-admission only, never request partiality: the
-    /// value served is VALID (Complete).
-    fn resolve_root_singleflight_inner<V, F>(
-        &self,
-        key: (String, String),
-        view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
-        resolve: F,
-    ) -> Option<crate::resolver_core::SingleflightRunResult<ImportedRootFlightOutcome>>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
-    {
-        let flight_body = || {
-            if let Some(hit) = self.roots.get_if_valid_with_facts(&key, view) {
-                return Ok(ImportedRootFlightOutcome {
-                    root: hit.0,
-                    facts: hit.1,
-                    admitted: true,
-                });
-            }
-            // Per-request audit attribution: cold path running the
-            // expensive `resolve()` closure. Joiners that block on
-            // this singleflight do NOT re-enter — the counter
-            // reflects unique cold work, not per-waiter overhead.
-            if let Some(obs) = verter_audit::current_observer() {
-                obs.record_event(verter_audit::AuditEvent::ImportedRootCold);
-            }
-            match resolve() {
-                Some((result, facts)) => {
-                    let arc = Arc::new(result);
-                    // Admission is TWO independent gates, both fail-closed:
-                    //
-                    // - a non-empty fact signature (an empty one has nothing a
-                    //   warm read could validate against);
-                    // - the cacheability verdict of the scope enclosing this
-                    //   resolve, sampled AFTER it ran. A fenced serve, a broken
-                    //   decl-body lease, an unrootable route or an unobservable
-                    //   contributor source env consumed anywhere in the walk
-                    //   means the value's basis cannot be soundly rooted — and
-                    //   three of those four are CONTENT-NEUTRAL, so the entry
-                    //   would root on the LIVE hash and validate forever.
-                    //
-                    // The route surface is still returned to the caller either
-                    // way; only the persist is refused.
-                    let admitted = !facts.is_empty() && !probe.non_cacheable();
-                    if admitted {
-                        self.roots.insert_arc_with_kind(
-                            key.clone(),
-                            arc.clone(),
-                            facts.clone(),
-                            "imported_root_db.roots",
-                        );
-                    }
-                    Ok(ImportedRootFlightOutcome {
-                        root: arc,
-                        facts: Arc::from(facts),
-                        admitted,
-                    })
-                }
-                None => Err(()),
-            }
-        };
-        const MAX_FLIGHT_ATTEMPTS: usize = 3;
-        let mut last_unadmitted: Option<
-            crate::resolver_core::SingleflightRunResult<ImportedRootFlightOutcome>,
-        > = None;
-        for _attempt in 0..MAX_FLIGHT_ATTEMPTS {
-            let run_result = self
-                .singleflight
-                .run_retaining(key.clone(), view.compat_token(), flight_body, |outcome| {
-                    outcome.admitted
-                })
-                .ok()?;
-            if run_result.value.admitted {
-                return Some(run_result);
-            }
-            if matches!(
-                run_result.role,
-                crate::resolver_core::SingleflightRole::Leader
-            ) {
-                // Unadmitted leader: serve its own caller, and carry the
-                // non-cacheability onto that caller's rails.
-                //
-                // The mark is NOT redundant with "the resolve ran on this
-                // thread". That reasoning covers only ONE of the two refusal
-                // reasons. `admitted = !facts.is_empty() && !probe.non_cacheable()`:
-                //
-                // - `probe.non_cacheable()` — the walk consumed a fenced serve /
-                //   broken lease / unrootable route. Each of those fanned out to
-                //   EVERY tracer on this thread's stack at the point of the read,
-                //   before the funnel ever sampled the probe. Re-marking here is a
-                //   harmless no-op (the rail is a bool).
-                // - `facts.is_empty()` — the RESULT is unrootable. NO non-cacheable
-                //   read need have occurred: a route walk whose participants yield
-                //   neither a whole-hash nor a route-surface hash (an evicted
-                //   provider with no resolvable surface) returns a real route under
-                //   an EMPTY signature, and an empty signature FANS NOTHING. Without
-                //   this mark the enclosing traced compute observes no fact for the
-                //   route at all, warm-admits a result folding a route it cannot
-                //   root, and revalidates against the live view forever — nothing
-                //   moved.
-                //
-                // Marking on `!admitted` (rather than on the empty-facts reason
-                // alone) is the structural floor: no unadmitted value leaves this
-                // funnel without marking the thread that receives it, whatever
-                // reason refused it and whichever producer supplied it. This is a
-                // VALID (Complete) root, NOT a partial result — cache non-admission
-                // only, never request partiality.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
-                );
-                return Some(run_result);
-            }
-            last_unadmitted = Some(run_result);
-        }
-        if last_unadmitted.is_some() {
-            // Sustained-churn bounded fallback (FOLLOWER adoption): the adopted
-            // root is unadmitted — derived from a basis that cannot be rooted —
-            // and this thread never ran the resolve that produced it. Carry the
-            // non-cacheability by hand so an enclosing traced cold compute
-            // refuses shared-cache admission of any result folding a root it
-            // cannot root. This is a VALID (Complete) adopted root, NOT a
-            // partial result — cache non-admission only, never request
-            // partiality.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
-            );
-        }
-        last_unadmitted
+        crate::host_manage::source_request::ImportedRootRequestDriver::new(self)
+            .get_or_resolve_returning_facts_with_context(
+                provider_canonical,
+                imported_name,
+                view,
+                host,
+                resolve,
+            )
     }
 
     /// **Test-only.** Strong-reference count of the in-flight singleflight state
@@ -503,20 +289,20 @@ impl Default for ImportedRootDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for ImportedRootDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for ImportedRootDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ResolverState, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.clear();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for ImportedRootDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for ImportedRootDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         self.evict_provider(canonical_id);
         0
@@ -535,7 +321,8 @@ fn test_host() -> &'static crate::VerterHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{FactVersionRef, StoreView, StoreViewCompatToken};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
     struct TestView {
         token: StoreViewCompatToken,

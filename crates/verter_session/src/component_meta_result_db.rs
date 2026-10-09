@@ -27,7 +27,7 @@
 //!   session.
 //! - **Candidate payload:** an immutable `Arc` payload — the native
 //!   component-meta result and any strictly projected derivatives — plus
-//!   the exact [`crate::fact_signature_helpers::ReadSetSignature`] the
+//!   the exact [`verter_session_query::facts::fact_cache::ReadSetSignature`] the
 //!   build observed. Lookups revalidate that signature against the live
 //!   host.
 //! - **`options_fingerprint` is a stable `Hash16`** produced from a
@@ -40,11 +40,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
-use crate::bounded_query_retention::BoundedCandidateMap;
-use crate::resolver_core::StoreView;
-use crate::types::ProjectionMode;
+use verter_type_engine::bounded_query_retention::BoundedCandidateMap;
 
 /// Stable fingerprint over output-affecting options. Constructed by the
 /// caller from an explicitly versioned serialization; the type alias
@@ -90,9 +88,9 @@ pub struct ComponentMetaResultKey {
 /// path-precise fact signature.
 ///
 /// `read_set_signature.facts` is the path-precise signature produced
-/// by the `with_fact_tracer` scope wrapping the cold compute — the
+/// by the engine-owned raw fact-tracer scope wrapping cold compute — the
 /// primary cache-validity rail. Warm-hit reads gate on
-/// [`StoreView::validates_fact_signature`]: a fact-version bump on any
+/// the request-bound `FactValidation::validates_fact_signature`: a fact-version bump on any
 /// cross-file dep invalidates the warm hit.
 ///
 /// `validated_at_generation` is the project-generation snapshot the
@@ -103,17 +101,13 @@ pub struct ComponentMetaResultKey {
 /// this stamp a stale-by-project-generation entry that raced a
 /// `bump_project_generation_and_evict` cold-publish window would
 /// validate forever on file-content terms.
-/// [`ComponentMetaResultDb::get_with_view`] is the view-aware
-/// production read path — it rejects the entry when
-/// `validated_at_generation` differs from the live
-/// [`crate::project_type_store::ProjectTypeStore::current_project_generation`]
-/// before consulting the carrier rail. [`ComponentMetaResultDb::get`]
-/// is the candidate-version-only lookup (no view, no generation gate)
-/// reached only by test fixtures and synthetic publishes; production
-/// readers MUST go through `get_with_view`.
+/// The facade's `MemoRead` rejects entries whose generation or fact signature
+/// no longer validates through the request's `FactValidation` port. The
+/// passive test-only [`ComponentMetaResultDb::get`] checks only the candidate
+/// version; production reads use the selected `MemoRead` capability.
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
-    pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
     pub validated_at_generation: u64,
 }
 
@@ -124,57 +118,28 @@ pub struct ComponentMetaResultEntry<P> {
 /// keeps alive. These are ACCOUNTING estimates: they decide whether the
 /// process may RETAIN an entry, never whether a retained entry is valid.
 /// An imprecise constant therefore costs hit rate, never correctness.
-mod footprint {
+pub mod footprint {
     /// A surface record with a resolved type descriptor: a prop, event,
     /// slot, model, exposed member, or accepted-surface entry.
-    pub(super) const SURFACE_RECORD_BYTES: usize = 512;
+    pub const SURFACE_RECORD_BYTES: usize = 512;
     /// A lighter structural record: an import, binding, template ref,
     /// component usage, API call, or style block.
-    pub(super) const STRUCTURAL_RECORD_BYTES: usize = 192;
+    pub const STRUCTURAL_RECORD_BYTES: usize = 192;
     /// A resolved type-registry analysis, which carries an expanded
     /// member list and is the heaviest per-record family.
-    pub(super) const TYPE_RECORD_BYTES: usize = 1024;
+    pub const TYPE_RECORD_BYTES: usize = 1024;
     /// One observed dependency fact on the entry's validity rail.
-    pub(super) const FACT_BYTES: usize = 64;
+    pub const FACT_BYTES: usize = 64;
 }
 
-impl crate::semantic_retention_account::RetainedFootprint for CachedComponentMetaResult {
-    fn retained_footprint_bytes(&self) -> usize {
-        let analysis = &self.analysis;
-        let surfaces = analysis.props.len()
-            + analysis.events.len()
-            + analysis.slots.len()
-            + analysis.models.len()
-            + analysis.exposed.len()
-            + analysis.accepted_props.len()
-            + analysis.accepted_events.len();
-        let structural = analysis.components.len()
-            + analysis.template_refs.len()
-            + analysis.imports.len()
-            + analysis.bindings.len()
-            + analysis.vue_api_calls.len()
-            + analysis.styles.len();
-        let types = analysis.type_registry.len()
-            + self.resolution_template.resolved_type_registry.len()
-            + self.resolution_template.resolved_type_registry_meta.len()
-            + self.resolution_template.resolved_macros.len();
-        surfaces * footprint::SURFACE_RECORD_BYTES
-            + structural * footprint::STRUCTURAL_RECORD_BYTES
-            + types * footprint::TYPE_RECORD_BYTES
-            + self.resolution_template.fact_versions.len() * footprint::FACT_BYTES
-            + self.canonical_id.len()
-            + std::mem::size_of::<Self>()
-    }
-}
-
-impl<P> crate::semantic_retention_account::RetainedFootprint for ComponentMetaResultEntry<P>
+impl<P> verter_session_query::retention::RetainedFootprint for ComponentMetaResultEntry<P>
 where
-    P: crate::semantic_retention_account::RetainedFootprint,
+    P: verter_session_query::retention::RetainedFootprint,
 {
     fn retained_footprint_bytes(&self) -> usize {
         self.payload.retained_footprint_bytes()
             + self.read_set_signature.facts.len() * footprint::FACT_BYTES
-            + crate::semantic_retention_account::ENTRY_OVERHEAD_BYTES
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
     }
 }
 
@@ -193,8 +158,8 @@ pub(crate) struct AdmittedComponentMetaResult<P> {
 
 /// Caller-supplied, value-side portion of a component-meta admission
 /// decision. It deliberately carries no fact signature: only
-/// [`ComponentMetaResultDb::compute_and_admit`] can attach the evidence
-/// finalized from the tracer scope it owns.
+/// the selected engine `MemoPublish` can attach finalized evidence from its
+/// request-local tracer scope.
 pub(crate) enum ComponentMetaPublishDecision<P> {
     /// The cold result is complete and its publish fence is still live.
     Publish {
@@ -204,7 +169,7 @@ pub(crate) enum ComponentMetaPublishDecision<P> {
         validated_at_generation: u64,
     },
     /// A valid caller-visible value must not warm this cache.
-    ReturnOnly(crate::cache_runtime::NonAdmissionReason),
+    ReturnOnly(verter_audit::NonAdmissionReason),
     /// The cold computation produced no result to retain.
     NoValue,
 }
@@ -226,7 +191,7 @@ impl<P> ComponentMetaPublishDecision<P> {
     }
 
     #[inline]
-    pub(crate) fn return_only(reason: crate::cache_runtime::NonAdmissionReason) -> Self {
+    pub(crate) fn return_only(reason: verter_audit::NonAdmissionReason) -> Self {
         Self::ReturnOnly(reason)
     }
 
@@ -239,18 +204,18 @@ impl<P> ComponentMetaPublishDecision<P> {
 /// Remove only the owner's non-round-tripping route-derived fact before the
 /// final-result signature is stored. Cross-file route facts and the owner's
 /// whole-hash root remain part of the validating evidence.
-fn strip_owner_route_fact(
+pub(crate) fn strip_owner_route_fact(
     owner_canonical: &str,
-    facts: &[crate::resolver_core::FactVersionRef],
-) -> Arc<[crate::resolver_core::FactVersionRef]> {
+    facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) -> Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> {
     facts
         .iter()
         .filter(|fact| {
             !matches!(
                 fact,
-                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
                     canonical_id,
-                    kind: crate::resolver_core::DerivedFactKind::Route,
+                    kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                     ..
                 } if canonical_id == owner_canonical
             )
@@ -258,149 +223,6 @@ fn strip_owner_route_fact(
         .cloned()
         .collect::<Vec<_>>()
         .into()
-}
-
-/// Sanitized snapshot of a
-/// [`crate::meta_resolve::ResolvedComponentMetaState`] suitable for
-/// cross-request reuse. Excludes per-request fields (`request_id`,
-/// `compute_audit`) and the [`FileAnalysisSnapshot`] (reloaded from
-/// `ProjectTypeStore::indexed()` at rehydrate time).
-///
-/// Field-by-field partition (per D4.1):
-///
-/// - **EXCLUDED — per-request, never cached:**
-///   - `request_id: u64` (allocated per request).
-///   - `compute_audit: Option<...>` (request-specific timings/counters).
-///
-/// - **EXCLUDED — snapshot-derived, reloaded from host:**
-///   - `snapshot: FileAnalysisSnapshot` (reload via
-///     `ProjectTypeStore::indexed().get(canonical, whole_hash)`).
-///
-/// - **INCLUDED — content-addressed via `dep_signature`:**
-///   - `mode`, `whole_hash`.
-///   - `resolved_macros`, `resolved_type_registry`,
-///     `resolved_type_registry_meta`.
-///   - `evaluated_types`.
-///   - `fact_versions`.
-///   - `surface_identities` (audit sidecar; cache, do not rehydrate as
-///     None).
-///   - `origin_graph` (audit sidecar; cache).
-#[derive(Debug, Clone)]
-pub struct ResolutionTemplate {
-    pub mode: ProjectionMode,
-    pub whole_hash: Hash16,
-    pub resolved_macros: Vec<crate::meta_resolve::ResolvedMacroMeta>,
-    pub resolved_type_registry:
-        Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
-    pub resolved_type_registry_meta: Vec<crate::meta_resolve::ResolvedTypeRegistryMeta>,
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
-    pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
-    pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
-    /// Per-result completeness preserved across the template round-trip.
-    /// Only `Complete` results are admitted to `ComponentMetaResultDb` (the
-    /// publication gate refuses partials), so a cached template is `Complete`
-    /// in production; preserving the typed value keeps rehydrate honest
-    /// rather than independently resetting the suppression bool to `false`.
-    pub completeness: crate::semantic_query::ResultCompleteness,
-}
-
-/// Cached component-meta payload AND its sanitized
-/// resolution sidecar. The DB generic migrates from
-/// `ComponentMetaResultDb<ComponentMetaAnalysis>` to
-/// `ComponentMetaResultDb<CachedComponentMetaResult>` so warm-cache
-/// hits on the audit-enabled path
-/// (`VerterHost::get_component_meta_with_resolution`) can rehydrate
-/// both halves without rerunning the cold resolver.
-#[derive(Debug, Clone)]
-pub struct CachedComponentMetaResult {
-    pub analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    pub resolution_template: ResolutionTemplate,
-    /// Owner canonical id used to reload `snapshot` via
-    /// [`ProjectTypeStore::indexed()`] on rehydrate.
-    pub canonical_id: Arc<str>,
-    /// Owner whole-hash this template was produced against.
-    pub whole_hash: Hash16,
-}
-
-impl ResolutionTemplate {
-    /// Build a template by sanitizing a freshly-resolved
-    /// [`crate::meta_resolve::ResolvedComponentMetaState`]. Strips
-    /// `request_id`, `snapshot`, and `compute_audit`; keeps the
-    /// content-addressed sidecars.
-    #[must_use]
-    pub fn from_resolved_state(resolved: &crate::meta_resolve::ResolvedComponentMetaState) -> Self {
-        Self {
-            mode: resolved.mode,
-            whole_hash: resolved.whole_hash,
-            resolved_macros: resolved.resolved_macros.clone(),
-            resolved_type_registry: resolved.resolved_type_registry.clone(),
-            resolved_type_registry_meta: resolved.resolved_type_registry_meta.clone(),
-            evaluated_types: resolved.evaluated_types.clone(),
-            fact_versions: resolved.fact_versions.clone(),
-            surface_identities: resolved.surface_identities.clone(),
-            origin_graph: resolved.origin_graph.clone(),
-            completeness: resolved.completeness,
-        }
-    }
-
-    /// Rehydrate the template into a per-request
-    /// [`crate::meta_resolve::ResolvedComponentMetaState`]:
-    ///
-    /// - **`snapshot`** reloaded from `host.project_type_store().indexed()`
-    ///   at `(canonical_id, whole_hash)`. Returns `None` on a bounded
-    ///   eviction race (snapshot evicted between the dep_signature
-    ///   validation and the reload); callers fall through to the cold
-    ///   resolver.
-    /// - **`request_id`** is the caller-allocated fresh id.
-    /// - **`compute_audit`** stays `None` on warm-cache hits — the
-    ///   audit-record consumer observes `from_cache = true` and
-    ///   `total_ms = 0` instead.
-    /// - All other fields are restored from the cached template.
-    pub fn rehydrate(
-        &self,
-        host: &crate::VerterHost,
-        canonical_id: &str,
-        whole_hash: Hash16,
-        request_id: u64,
-    ) -> Option<crate::meta_resolve::ResolvedComponentMetaState> {
-        let key = host.authoritative_current_artifact_key(canonical_id)?;
-        if key.content_hash != whole_hash {
-            return None;
-        }
-        let indexed = host.project_type_store().indexed().get(
-            canonical_id,
-            whole_hash,
-            &key.parse_key,
-            &key.file_language_id,
-        )?;
-        let snapshot = (*indexed.snapshot).clone();
-        Some(crate::meta_resolve::ResolvedComponentMetaState {
-            snapshot,
-            mode: self.mode,
-            whole_hash: self.whole_hash,
-            resolved_macros: self.resolved_macros.clone(),
-            resolved_type_registry: self.resolved_type_registry.clone(),
-            resolved_type_registry_meta: self.resolved_type_registry_meta.clone(),
-            evaluated_types: self.evaluated_types.clone(),
-            fact_versions: self.fact_versions.clone(),
-            compute_audit: None,
-            surface_identities: self.surface_identities.clone(),
-            origin_graph: self.origin_graph.clone(),
-            request_id,
-            // Rehydrated state was synthesised cold; suppression decisions
-            // already applied at publish time. Synthesis diagnostics live
-            // on the cached `ComponentMetaAnalysis.macro_expansion_diagnostics`.
-            synthesis_diagnostics: Vec::new(),
-            // Preserve the cached completeness; do NOT independently reset
-            // suppression to `false`. `synthesis_should_suppress` is the bool
-            // projection of `completeness` (a cached template is `Complete` in
-            // production — only complete results admit — but rehydrate stays
-            // honest to the stored value rather than fabricating one).
-            completeness: self.completeness,
-            synthesis_should_suppress: self.completeness.is_partial(),
-        })
-    }
 }
 
 impl<P> Clone for ComponentMetaResultEntry<P> {
@@ -436,27 +258,46 @@ pub struct ComponentMetaResultDb<P> {
     /// "stale sweep" counter.
     stale_sweeps: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
+    /// [`verter_type_engine::cache_schema`] for the contract.
     schema_version: u32,
     /// The aggregate retained-byte account this cache admits against.
     ///
     /// There is no account-less result cache: the field carries a
-    /// [`StoreAccount`](crate::semantic_retention_account::StoreAccount),
+    /// [`StoreAccount`](verter_session_query::retention::StoreAccount),
     /// whose `Default` is the ONE process-local account. A Db built
     /// outside a [`crate::project_type_store::ProjectTypeStore`] therefore
     /// admits against the same ceiling rather than retaining entries that
     /// consume no aggregate headroom.
-    retention_account: crate::semantic_retention_account::StoreAccount,
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl<P> ComponentMetaResultDb<P> {
+    pub(crate) fn is_current_schema(&self) -> bool {
+        self.schema_version == verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
+    }
+    pub(crate) fn candidate(
+        &self,
+        key: &ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+    ) -> Option<
+        Arc<
+            verter_type_engine::bounded_query_retention::RetentionCandidate<
+                Hash16,
+                ComponentMetaResultEntry<P>,
+            >,
+        >,
+    > {
+        self.inner.get_candidate(key, &owner_whole_hash)
+    }
+
     /// Per-slot candidate cap. One owner + one options fingerprint is one
     /// slot; concurrent content versions of that owner are candidates in
     /// the slot, capped here. A fifth version evicts the oldest. Four
     /// covers the `{current, previous, two concurrent overlay}` working
     /// set (architecture rule R20 multi-candidate model) — the shared
-    /// substrate's [`crate::bounded_query_retention::DEFAULT_CANDIDATE_CAP`].
-    pub const PER_SLOT_CANDIDATE_CAP: usize = crate::bounded_query_retention::DEFAULT_CANDIDATE_CAP;
+    /// substrate's [`verter_type_engine::bounded_query_retention::DEFAULT_CANDIDATE_CAP`].
+    pub const PER_SLOT_CANDIDATE_CAP: usize =
+        verter_type_engine::bounded_query_retention::DEFAULT_CANDIDATE_CAP;
 
     /// Global total-candidate budget across every slot. A long-lived
     /// editor session touching many distinct owners caps here before
@@ -476,8 +317,8 @@ impl<P> ComponentMetaResultDb<P> {
         Self::with_counters_and_schema_version(
             live_counter,
             stale_sweeps,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-            crate::semantic_retention_account::StoreAccount::default(),
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            verter_session_query::retention::StoreAccount::default(),
         )
     }
 
@@ -487,13 +328,13 @@ impl<P> ComponentMetaResultDb<P> {
     pub(crate) fn with_counters_and_account(
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        retention_account: verter_session_query::retention::StoreAccount,
     ) -> Self {
         Self::with_counters_and_schema_version(
             live_counter,
             stale_sweeps,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-            crate::semantic_retention_account::StoreAccount::new(retention_account),
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            retention_account,
         )
     }
 
@@ -502,7 +343,7 @@ impl<P> ComponentMetaResultDb<P> {
     #[must_use]
     pub(crate) fn retention_account(
         &self,
-    ) -> &Arc<crate::semantic_retention_account::SemanticRetentionAccount> {
+    ) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
         self.retention_account.get()
     }
 
@@ -512,12 +353,12 @@ impl<P> ComponentMetaResultDb<P> {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_account_for_test(
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self::with_counters_and_account(
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
-            retention_account,
+            verter_session_query::retention::StoreAccount::new(retention_account),
         )
     }
 
@@ -529,7 +370,7 @@ impl<P> ComponentMetaResultDb<P> {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             schema_version,
-            crate::semantic_retention_account::StoreAccount::default(),
+            verter_session_query::retention::StoreAccount::default(),
         )
     }
 
@@ -537,7 +378,7 @@ impl<P> ComponentMetaResultDb<P> {
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
         schema_version: u32,
-        retention_account: crate::semantic_retention_account::StoreAccount,
+        retention_account: verter_session_query::retention::StoreAccount,
     ) -> Self {
         Self {
             inner: BoundedCandidateMap::with_caps(
@@ -594,7 +435,7 @@ impl<P> ComponentMetaResultDb<P> {
     /// the live host.
     ///
     /// Lookups against a Db whose `schema_version` does not match the
-    /// current [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]
+    /// current [`verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]
     /// return `None`.
     #[must_use]
     #[cfg(any(test, feature = "test-support"))]
@@ -603,14 +444,14 @@ impl<P> ComponentMetaResultDb<P> {
         key: &ComponentMetaResultKey,
         owner_whole_hash: Hash16,
     ) -> Option<ComponentMetaResultEntry<P>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self
             .inner
             .get_candidate(key, &owner_whole_hash)
             .map(|c| c.value.clone());
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .component_meta
@@ -624,244 +465,6 @@ impl<P> ComponentMetaResultDb<P> {
             }
         }
         result
-    }
-
-    /// View-aware lookup. Returns the cached entry only when a candidate
-    /// matches the owner content version AND that candidate's
-    /// `read_set_signature` validates under the supplied [`StoreView`]
-    /// AND its `validated_at_generation` still equals the live project
-    /// generation; otherwise returns `None` (caller falls through to
-    /// cold recompute).
-    ///
-    /// Fact-precise validation gates file-content edits: a fact-version
-    /// shift on any transitively observed cross-file dep invalidates
-    /// the warm hit. The project-generation gate is the project-shape
-    /// counterpart: a `ProjectGeneration` reset (tsconfig / path-alias /
-    /// SDK / workspace-folder change) bumps no file content, so the
-    /// carrier alone cannot detect it — a `bump_project_generation_and_
-    /// evict` racing a cold publish can otherwise strand a stale entry
-    /// whose carrier still validates on file-content terms.
-    ///
-    /// Increments [`crate::types::MetaProvenance::component_meta_result_cache_hits`]
-    /// on a validated warm return and
-    /// [`crate::types::MetaProvenance::component_meta_result_cache_misses`]
-    /// on every miss path (absent candidate, fact-validation failure,
-    /// or project-generation mismatch).
-    ///
-    /// Accepts ONLY a [`crate::resolver_store::CurrentHostStoreView`] —
-    /// the `StoreViewManager`'s type-level proof that the view was
-    /// published under a live-matching token. A known-stale
-    /// `StoreViewRead::ReturnOnly` snapshot CANNOT reach this validator by
-    /// construction, so it can never false-positive a superseded cache
-    /// entry against an already-mutated dependency.
-    /// Record a warm-lookup MISS without a candidate probe.
-    ///
-    /// Used by the consumer warm-validation entry points when the
-    /// store-view read is NON-CURRENT (`StoreViewRead::ReturnOnly`): a
-    /// known-stale view can never serve a sound warm hit, so the lookup
-    /// short-circuits to a miss BEFORE building a `CurrentHostStoreView`.
-    /// Keeping the miss accounting here (rather than only inside
-    /// [`Self::get_with_view`]) means the non-current short-circuit is
-    /// attributed exactly like a fact-validation miss.
-    pub(crate) fn record_non_current_view_miss(&self, host: &crate::VerterHost) {
-        host.provenance()
-            .component_meta_result_cache_misses
-            .fetch_add(1, Ordering::Relaxed);
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.cache_counters
-                .component_meta
-                .misses
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn get_with_view(
-        &self,
-        host: &crate::VerterHost,
-        current_view: &crate::resolver_store::CurrentHostStoreView,
-        key: &ComponentMetaResultKey,
-        owner_whole_hash: Hash16,
-    ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
-        let view = current_view.view();
-        let bump_miss = |host: &crate::VerterHost| {
-            host.provenance()
-                .component_meta_result_cache_misses
-                .fetch_add(1, Ordering::Relaxed);
-            // Keep the per-request `cache_layers.component_meta` audit
-            // counter in sync with the `.get()` accessor so
-            // joiner-accounting assertions continue to attribute a miss
-            // to the cold winner.
-            if let Some(ctx) = crate::request_context::current_request_context() {
-                ctx.cache_counters
-                    .component_meta
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        };
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
-            bump_miss(host);
-            return None;
-        }
-        // Clone the candidate `Arc` out of the slot before validating —
-        // a concurrent eviction cannot invalidate this borrow.
-        let candidate = match self.inner.get_candidate(key, &owner_whole_hash) {
-            Some(c) => c,
-            None => {
-                bump_miss(host);
-                return None;
-            }
-        };
-        // Project-generation gate. The carrier validates only
-        // file-content whole-hashes; a `ProjectGeneration` reset bumps
-        // no file content, so an entry whose `validated_at_generation`
-        // no longer equals the live generation is stale even though its
-        // carrier still validates. Reject before the fact rail so the
-        // miss is attributed correctly.
-        if candidate.value.validated_at_generation
-            != host.project_type_store().current_project_generation()
-        {
-            bump_miss(host);
-            return None;
-        }
-        // Fact-precise validation: every entry in the signature must
-        // validate under the live view. An empty signature trivially
-        // passes (entries published outside an installed tracer scope —
-        // typically test fixtures — fall through to the legacy validator
-        // on the caller side).
-        if !view.validates_fact_signature(&candidate.value.read_set_signature.facts) {
-            bump_miss(host);
-            return None;
-        }
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.cache_counters
-                .component_meta
-                .hits
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        host.provenance()
-            .component_meta_result_cache_hits
-            .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::new(candidate.value.clone()))
-    }
-
-    /// Run a complete component-meta cold computation inside the DB-owned
-    /// fact-tracer scope, finalize its evidence, classify the returned value,
-    /// and perform the sole production write when every gate admits.
-    ///
-    /// The caller supplies only the computation and a value-side decision.
-    /// It cannot attach or substitute a fact signature: this owner finalizes
-    /// the tracer after the closure returns and constructs the stored carrier
-    /// immediately before [`Self::insert_owned`].
-    pub(crate) fn compute_and_admit<R, Compute, Decide>(
-        &self,
-        host: &crate::VerterHost,
-        canonical: &str,
-        path_label: &str,
-        compute: Compute,
-        decide: Decide,
-    ) -> R
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: crate::semantic_retention_account::RetainedFootprint,
-    {
-        self.compute_and_admit_with_entry(host, canonical, path_label, compute, decide)
-            .0
-    }
-
-    /// Variant of [`Self::compute_and_admit`] that also returns the exact
-    /// entry admitted by this invocation. A refused or non-cacheable result
-    /// returns no carrier even though its fresh value remains caller-visible.
-    pub(crate) fn compute_and_admit_with_entry<R, Compute, Decide>(
-        &self,
-        host: &crate::VerterHost,
-        canonical: &str,
-        path_label: &str,
-        compute: Compute,
-        decide: Decide,
-    ) -> (R, Option<AdmittedComponentMetaResult<P>>)
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: crate::semantic_retention_account::RetainedFootprint,
-    {
-        let (value, read_set) =
-            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, compute);
-        let finalise = read_set.finalise();
-        let mut admitted = None;
-        match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
-                ComponentMetaPublishDecision::Publish {
-                    key,
-                    owner_whole_hash,
-                    payload,
-                    validated_at_generation,
-                } => {
-                    let admitted_facts = strip_owner_route_fact(&key.owner_canonical, &facts);
-                    let entry = Arc::new(ComponentMetaResultEntry {
-                        payload,
-                        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                            admitted_facts,
-                        ),
-                        validated_at_generation,
-                    });
-                    // A retention refusal leaves `admitted` unset: the
-                    // caller keeps its complete value, and no evidence
-                    // carrier claims an entry the cache never stored.
-                    if self.insert_owned(key.clone(), owner_whole_hash, entry.as_ref().clone()) {
-                        admitted = Some(AdmittedComponentMetaResult {
-                            key,
-                            owner_whole_hash,
-                            entry,
-                        });
-                    }
-                }
-                ComponentMetaPublishDecision::ReturnOnly(reason) => {
-                    crate::cache_runtime::admission::propagate_non_admission(reason);
-                    tracing::debug!(
-                        target: "verter::audit::record",
-                        file = %canonical,
-                        path = %path_label,
-                        reason = %reason,
-                        "skipping component-meta cache promotion: typed admission refusal",
-                    );
-                }
-                ComponentMetaPublishDecision::NoValue => {}
-            },
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
-                let reason = crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: cold compute consumed a non-cacheable read",
-                );
-            }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
-                let reason = crate::cache_runtime::NonAdmissionReason::SignatureOverflow;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: fact-signature overflowed cap",
-                );
-            }
-            crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
-                let reason = crate::cache_runtime::NonAdmissionReason::MutationUnstable;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: a compaction domain advanced \
-                     mid-compute",
-                );
-            }
-        }
-        (value, admitted)
     }
 
     /// Insert a final result entry for the given owner content version.
@@ -880,26 +483,26 @@ impl<P> ComponentMetaResultDb<P> {
     /// returned to its caller, the cache simply does not keep it. No
     /// stale candidate is substituted and no partial is fabricated — the
     /// slot is left exactly as it was.
-    fn insert_owned(
+    pub(crate) fn publish_core(
         &self,
         key: ComponentMetaResultKey,
         owner_whole_hash: Hash16,
         entry: ComponentMetaResultEntry<P>,
     ) -> bool
     where
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
         let bytes = {
-            use crate::semantic_retention_account::RetainedFootprint as _;
+            use verter_session_query::retention::RetainedFootprint as _;
             entry.retained_footprint_bytes()
         };
         let charge = match self.retention_account().reserve(
-            crate::semantic_retention_account::ChargeClass::Retained,
+            verter_session_query::retention::ChargeClass::Retained,
             bytes,
         ) {
-            crate::semantic_retention_account::RetentionAdmission::Admitted(charge) => charge,
-            crate::semantic_retention_account::RetentionAdmission::Refused(refusal) => {
-                crate::cache_runtime::admission::propagate_non_admission(
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
+            verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
+                verter_type_engine::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
                 );
                 tracing::debug!(
@@ -925,8 +528,8 @@ impl<P> ComponentMetaResultDb<P> {
     }
 
     /// Test-support seed seam. Production admission must route through
-    /// [`Self::compute_and_admit`] so the DB owns tracing, finalization, and
-    /// the only write.
+    /// the selected engine `MemoPublish`, which owns tracing, finalization,
+    /// and the admission decision before passive storage accepts the record.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert(
         &self,
@@ -934,9 +537,9 @@ impl<P> ComponentMetaResultDb<P> {
         owner_whole_hash: Hash16,
         entry: ComponentMetaResultEntry<P>,
     ) where
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
-        self.insert_owned(key, owner_whole_hash, entry);
+        self.publish_core(key, owner_whole_hash, entry);
     }
 
     /// Remove the candidate for one owner content version. Returns the
@@ -1019,88 +622,14 @@ impl<P> ComponentMetaResultDb<P> {
         key: ComponentMetaResultKey,
         payload: P,
     ) where
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             validated_at_generation: 0,
         };
         self.insert(key, [0u8; 16], entry);
-    }
-}
-
-impl ComponentMetaResultDb<CachedComponentMetaResult> {
-    /// Test-only accessor returning the merged carrier dep_signature
-    /// canonicals for an owner. Used by the dep-signature regression
-    /// tests — the slot-binding merge test
-    /// `slot_bindings_dep_signature_merges_carrier_deps`, the
-    /// component-meta surface-equivalence cross-file tests, and the
-    /// warm-invalidation oracle test — to inspect the dep-signature
-    /// carriers stored alongside the cached entry. Returns an empty vec
-    /// when the owner has no cached entry.
-    ///
-    /// Constructs the lookup key with the same options fingerprint
-    /// the production `publish_component_meta_cache_entry` writes
-    /// (the default `ComponentMetaOptions` fingerprint), so the
-    /// lookup matches the published entry. A bare
-    /// `ComponentMetaOptionsFingerprint::default()` (= zeros) would
-    /// silently miss every published entry, masking real cache-key
-    /// drift behind a permanently empty result.
-    #[cfg(test)]
-    pub fn dep_signature_for_owner_in_test(
-        host: &crate::VerterHost,
-        owner_canonical: &str,
-    ) -> Vec<std::sync::Arc<str>> {
-        let store = host.project_type_store();
-        let whole_hash = host
-            .ensure_indexed_ready(owner_canonical)
-            .map(|ir| ir.whole_hash)
-            .unwrap_or_default();
-        // Build the lookup key through the SAME production builder
-        // `publish_component_meta_cache_entry` writes, so these
-        // host-backed accessors address the exact published slot
-        // (env axes included). A hand-rolled 2-field key would silently
-        // miss every published entry after the R21 env-axis migration.
-        let key = host.component_meta_result_key(
-            owner_canonical,
-            &crate::host_manage::ComponentMetaOptions::default(),
-        );
-        let backing = store.component_meta_results();
-        match backing.get(&key, whole_hash) {
-            Some(entry) => entry.read_set_signature.canonical_ids(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Test-only accessor returning whether the owner has a cached
-    /// entry. Used by the slot-binding regression
-    /// `slot_bindings_skip_cache_on_budget_exceeded` to assert that
-    /// fatal-suppression synthesis runs do not warm the cache.
-    ///
-    /// Constructs the lookup key with the same options fingerprint
-    /// the production `publish_component_meta_cache_entry` writes
-    /// (the default `ComponentMetaOptions` fingerprint).
-    #[cfg(test)]
-    pub fn has_owner_entry_in_test(host: &crate::VerterHost, owner_canonical: &str) -> bool {
-        let store = host.project_type_store();
-        let whole_hash = host
-            .ensure_indexed_ready(owner_canonical)
-            .map(|ir| ir.whole_hash)
-            .unwrap_or_default();
-        // Build the lookup key through the SAME production builder
-        // `publish_component_meta_cache_entry` writes, so these
-        // host-backed accessors address the exact published slot
-        // (env axes included). A hand-rolled 2-field key would silently
-        // miss every published entry after the R21 env-axis migration.
-        let key = host.component_meta_result_key(
-            owner_canonical,
-            &crate::host_manage::ComponentMetaOptions::default(),
-        );
-        store
-            .component_meta_results()
-            .get(&key, whole_hash)
-            .is_some()
     }
 }
 
@@ -1110,7 +639,7 @@ impl<P> Default for ComponentMetaResultDb<P> {
     }
 }
 
-impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
+impl<P> verter_type_engine::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -1130,23 +659,25 @@ impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
     }
 }
 
-impl<P> crate::invalidation_domain::ParticipatesInInvalidation for ComponentMetaResultDb<P>
+impl<P> verter_type_engine::invalidation_domain::ParticipatesInInvalidation
+    for ComponentMetaResultDb<P>
 where
     P: Send + Sync,
 {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ComponentMeta, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.invalidate_all();
         }
     }
 }
 
-impl<P> crate::invalidation_domain::InvalidationByCanonical for ComponentMetaResultDb<P>
+impl<P> verter_type_engine::invalidation_domain::InvalidationByCanonical
+    for ComponentMetaResultDb<P>
 where
     P: Send + Sync,
 {
@@ -1177,23 +708,54 @@ mod tests {
         let base_producer = include_str!("host_manage/component_meta_entry.rs");
         let resolution_producer = include_str!("host_manage/component_meta_entry_resolution.rs");
 
-        let compute_start = db_source
-            .find("\n    pub(crate) fn compute_and_admit")
-            .expect("ComponentMetaResultDb must own the cold trace/finalise/admit funnel");
-        let compute_end = db_source[compute_start..]
-            .find("\n    /// Insert a final result entry")
-            .map(|offset| compute_start + offset)
-            .expect("compute-and-admit method must end before the test seed seam");
-        let compute_body = &db_source[compute_start..compute_end];
+        let engine_source =
+            include_str!("../../verter_type_engine/src/project_semantic_dispatch/memo.rs");
+        let trace_start = engine_source
+            .find("    pub fn traced_compute<R>(")
+            .expect("the engine must export the traced cold-compute operation");
+        let trace_end = engine_source[trace_start..]
+            .find("\n\n")
+            .map(|offset| trace_start + offset)
+            .expect("the traced compute must have a bounded implementation");
+        let trace_body = &engine_source[trace_start..trace_end];
         assert!(
-            compute_body.contains("host.with_fact_tracer"),
-            "the DB-owned funnel must install the tracer around the caller's cold closure"
+            trace_body.contains("resolver_context::with_fact_tracer_cell")
+                && trace_body.contains("AggregateBasisSeed::Unvouched")
+                && trace_body.contains("read_set.finalise()"),
+            "the engine operation must install the original raw tracer around cold compute \
+             and finalise its read set"
+        );
+        let driver_source = include_str!("component_meta_result_admission.rs");
+        let compute_start = driver_source
+            .find("    pub(crate) fn compute_and_admit_with_entry")
+            .expect("the result facade must own trace/admit sequencing");
+        let compute_end = driver_source[compute_start..]
+            .find("    pub(crate) fn compute_and_admit<")
+            .map(|offset| compute_start + offset)
+            .expect("the result driver must have a bounded implementation");
+        let compute_body = &driver_source[compute_start..compute_end];
+        let compact_compute: String = compute_body
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let finalise = compact_compute
+            .find("self.dispatch.traced_compute(")
+            .unwrap();
+        let publish = compact_compute.find("self.db.publish_core(").unwrap();
+        assert!(
+            finalise < publish,
+            "finalized evidence must precede passive publication"
         );
         assert!(
             db_source
                 .lines()
-                .any(|line| line.trim_start().starts_with("fn insert_owned(")),
-            "the production write must be a private DB implementation detail"
+                .any(|line| line.trim_start().starts_with("pub(crate) fn publish_core(")),
+            "the passive production write must remain crate-private"
+        );
+        assert!(
+            !db_source.contains("\n    pub(crate) fn compute_and_admit(")
+                && !db_source.contains("\n    pub(crate) fn get_with_view("),
+            "storage must not own callback compute or request-view validation"
         );
         let test_insert = db_source
             .find("\n    pub fn insert(")
@@ -1204,21 +766,23 @@ mod tests {
             "the raw seed insert must compile only for tests or explicit test-support"
         );
         assert!(
-            compute_body.contains("self.insert_owned("),
-            "only the DB-owned funnel may consume finalized evidence into storage"
+            compact_compute.contains("self.db.publish_core("),
+            "only the result facade may consume finalized evidence into storage"
         );
         assert!(
-            !base_producer.contains("component_meta_results().insert("),
+            !base_producer.contains("component_meta_results().insert(")
+                && !base_producer.contains(".publish_core("),
             "the base/view producer must not reach the raw result-cache write"
         );
         assert!(
-            !resolution_producer.contains("component_meta_results().insert("),
+            !resolution_producer.contains("component_meta_results().insert(")
+                && !resolution_producer.contains(".publish_core("),
             "the resolution producer must not reach the raw result-cache write"
         );
     }
 
-    fn empty_sig() -> crate::fact_signature_helpers::ReadSetSignature {
-        crate::fact_signature_helpers::ReadSetSignature::empty()
+    fn empty_sig() -> verter_session_query::facts::fact_cache::ReadSetSignature {
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty()
     }
 
     /// Build a slot key with zero env axes — the substrate-level DB unit
@@ -1244,17 +808,22 @@ mod tests {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
         let key = mk_result_key("/w/owner.vue", [0u8; 16]);
         let owner_hash = [7u8; 16];
-        let owner_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+        let owner_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/w/owner.vue".to_string(),
             hash: owner_hash,
         };
 
-        let value = db.compute_and_admit(
-            &host,
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let results =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let value = results.compute_and_admit(
             "/w/owner.vue",
             "unit-test",
             || {
-                crate::resolver_core::resolver_context::observe_fan_out(owner_fact.clone());
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
                 41u32
             },
             |_value| {
@@ -1269,13 +838,12 @@ mod tests {
 
         let refused_key = mk_result_key("/w/refused.vue", [0u8; 16]);
         let refused_hash = [8u8; 16];
-        let refused_value = db.compute_and_admit(
-            &host,
+        let refused_value = results.compute_and_admit(
             "/w/refused.vue",
             "unit-test",
             || {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 42u32
             },
@@ -1299,7 +867,7 @@ mod tests {
     fn insert_and_get_roundtrip() {
         #[derive(Clone, PartialEq, Eq, Debug)]
         struct MockPayload(u32);
-        impl crate::semantic_retention_account::RetainedFootprint for MockPayload {
+        impl verter_session_query::retention::RetainedFootprint for MockPayload {
             fn retained_footprint_bytes(&self) -> usize {
                 std::mem::size_of::<Self>()
             }
@@ -1308,12 +876,14 @@ mod tests {
         let key = mk_result_key("/w/Accordion.vue", [9u8; 16]);
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(MockPayload(42)),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
-                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/w/Accordion.vue".to_string(),
-                    hash: [1u8; 16],
-                }],
-            )),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                Arc::from(vec![
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: "/w/Accordion.vue".to_string(),
+                        hash: [1u8; 16],
+                    },
+                ]),
+            ),
             validated_at_generation: 0,
         };
         db.insert(key.clone(), [1u8; 16], entry);

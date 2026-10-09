@@ -29,17 +29,17 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::flow_completion_inventory::{
+use crate::types::{HostConfig, UpsertRequest};
+use crate::VerterHost;
+use verter_session_query::flow::completion::{
     coverage, CompletionConstruction, CompletionDischarge, CompletionTransport,
     FlowCompletionCarrier, FlowCompletionFact, FlowCompletionRole, TransportsCompletion,
 };
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
     FlowReturnKey, QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     SemanticQueryValue,
 };
-use crate::types::{HostConfig, UpsertRequest};
-use crate::VerterHost;
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr};
 
@@ -81,21 +81,22 @@ fn host() -> Arc<VerterHost> {
 }
 
 /// The whole-return demand point.
-fn whole_return_demand() -> crate::semantic_query::ReturnProjectionDemand {
-    crate::semantic_query::ReturnProjectionDemand::whole_return()
+fn whole_return_demand() -> verter_type_engine::semantic_query::ReturnProjectionDemand {
+    verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return()
 }
 
 /// The single-named-member demand point — the authored
 /// `ReturnType<typeof f>['b']` shape.
-fn member_demand(member: &str) -> crate::semantic_query::ReturnProjectionDemand {
-    crate::semantic_query::ReturnProjectionDemand {
+fn member_demand(member: &str) -> verter_type_engine::semantic_query::ReturnProjectionDemand {
+    verter_type_engine::semantic_query::ReturnProjectionDemand {
         point: {
-            let mut point = crate::semantic_query::demand::Demand::identity();
-            point.projection.path = crate::semantic_query::demand::ProjectionPath::from_segments([
-                crate::semantic_query::PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier(member),
-                ),
-            ]);
+            let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
+            point.projection.path =
+                verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                    verter_type_engine::semantic_query::PathSegment::Member(
+                        verter_type_engine::semantic_query::PropertyKey::identifier(member),
+                    ),
+                ]);
             point
         },
     }
@@ -106,7 +107,7 @@ fn member_demand(member: &str) -> crate::semantic_query::ReturnProjectionDemand 
 fn evaluate(
     host: &Arc<VerterHost>,
     name: &str,
-    demand: crate::semantic_query::ReturnProjectionDemand,
+    demand: verter_type_engine::semantic_query::ReturnProjectionDemand,
 ) -> Option<TypeExpr> {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -123,9 +124,9 @@ fn evaluate(
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(PROBES),
         demand,
-        input: crate::semantic_query::FlowInputContext::empty(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract:
-            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+            verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
     };
     match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
         QueryResult::Value(SemanticQueryOutput {
@@ -351,9 +352,11 @@ pub(crate) fn every_site_row_is_reached_and_every_reached_row_is_listed() {
         let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let graph = dispatch.graph();
-        let node = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
+        let node = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
         let _ = crate::for_tests::flow_return_result_for_tests(graph, node);
         let _ = crate::for_tests::degraded_flow_return_result_for_tests(graph, node);
     });
@@ -398,7 +401,7 @@ pub(crate) fn every_site_row_is_reached_and_every_reached_row_is_listed() {
 /// Every transport row names the real type that stores the fact.
 ///
 /// The match is EXHAUSTIVE, so a new [`CompletionTransport`] variant does
-/// not compile until a type claims it through the sealed
+/// not compile until a type claims it through its registered
 /// [`TransportsCompletion`] impl — which is what keeps the row list
 /// code-first rather than a name someone wrote down.
 #[test]
@@ -413,19 +416,19 @@ fn transport_rows_bind_to_their_carrier_types() {
     for row in CompletionTransport::ALL.iter().copied() {
         match row {
             CompletionTransport::SliceRegion => {
-                bound::<crate::flow_slice_content::SliceRegion>(row);
+                bound::<verter_session_query::flow::slice::SliceRegion>(row);
             }
             CompletionTransport::SliceContent => {
-                bound::<crate::flow_slice_content::SliceContent>(row);
+                bound::<verter_session_query::flow::slice::SliceContent>(row);
             }
             CompletionTransport::SliceSwitchCase => {
-                bound::<crate::flow_slice_content::SliceSwitchCase>(row);
+                bound::<verter_session_query::flow::slice::SliceSwitchCase>(row);
             }
             CompletionTransport::BodyCompletionObservations => {
-                bound::<crate::flow_completion_inventory::BodyCompletionObservations>(row);
+                bound::<verter_session_query::flow::completion::BodyCompletionObservations>(row);
             }
             CompletionTransport::FlowReturnResult => {
-                bound::<crate::semantic_query::FlowReturnResult>(row);
+                bound::<verter_type_engine::semantic_query::FlowReturnResult>(row);
             }
         }
     }

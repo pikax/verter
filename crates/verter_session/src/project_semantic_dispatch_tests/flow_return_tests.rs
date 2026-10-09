@@ -1,0 +1,12027 @@
+//! @ai-generated - Direct-dispatch `FlowReturn` executor tests: symbolic
+//! call carriers, the `this`-call fallback, loop transparency, degraded
+//! shapes, recursion discharge (base-plus-recursion admits; the empty
+//! cycle is ReturnOnly and never `never`), primitive widening, key
+//! identity (overload ordinals, value-env exclusion), and family warm hits.
+
+use std::sync::Arc;
+
+use super::*;
+use crate::types::{HostConfig, UpsertRequest};
+use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnKey, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
+use verter_type_expr::facts::FunctionPartIdentity;
+
+const FLOW_EXEC_FIXTURE: &str = r#"
+export declare function subLog(value: number): void;
+
+export function subCallee(): { ok: string } {
+  return { ok: "yes" };
+}
+
+export function subCallReturn() {
+  return subCallee();
+}
+
+export function subCallAfterLoop() {
+  for (let i = 0; i < 3; i++) subLog(i);
+  return subCallee();
+}
+
+export class SubThisCall {
+  helper(): number {
+    return 1;
+  }
+  run() {
+    return this.helper();
+  }
+}
+
+export function subLoopReturn(n: number) {
+  while (n > 0) {
+    return n;
+  }
+  return 0;
+}
+
+export function subInvokedWrite(n: number) {
+  let x = n;
+  (() => {
+    x = 0;
+  })();
+  return x;
+}
+
+export function subSwitchReturn(value: number) {
+  switch (value) {
+    case 1:
+      return "a";
+    default:
+      return "b";
+  }
+}
+
+export function subTryReturn() {
+  try {
+    return "a";
+  } finally {
+  }
+}
+
+export function subBaseRecursion(n: number) {
+  if (n <= 0) return 0;
+  return subBaseRecursion(n - 1);
+}
+
+export function subEmptyRecursion() {
+  return subEmptyRecursion();
+}
+
+export function subLiteral() {
+  return 1;
+}
+
+export function subParam(a: number) {
+  return a;
+}
+
+export function subLocalConst() {
+  const x = 1;
+  return x;
+}
+
+export function subOverloaded(a: string): void;
+export function subOverloaded(a: number) {
+  return a;
+}
+
+/** Documented.
+ * @returns {string} the documented payload
+ */
+export function subJsdocReturn() {
+  return "doc";
+}
+
+export function subNonCallableCall() {
+  const notFn = { a: 1 };
+  return notFn();
+}
+
+export function subObservesBrokenInit() {
+  const x = subInvokedWrite(1);
+  return x;
+}
+
+export function subIgnoresBrokenInit() {
+  const x = subInvokedWrite(1);
+  return 2;
+}
+
+export function subInner() {
+  return { pay: "load" };
+}
+
+export function subOuterCallsInner() {
+  return subInner();
+}
+
+export declare const sideMarker: { tag: string };
+
+export function subMemberWiden() {
+  const other = sideMarker;
+  const b = 1;
+  return { a: other, b };
+}
+
+export function subMemberConstAssert() {
+  const b = 1 as const;
+  return { a: "s", b };
+}
+
+export function subMixedBareValue(flag: boolean) {
+  if (flag) return 1;
+  return;
+}
+
+export function subMemberBareMix(flag: boolean) {
+  if (flag) return { b: 1 };
+  return;
+}
+
+export function subShadowedOuterInit(notFn: number) {
+  const x = notFn();
+  {
+    const x = 1;
+    return x;
+  }
+}
+
+export function subUnappliedParamWrite(x: string | number) {
+  return { a: (x = "s"), b: x };
+}
+
+export function subCompoundParamWrite(x: string | number) {
+  x += "s";
+  return x;
+}
+
+export function subLogicalParamWrite(x: string | number) {
+  while ((x = "s")) { break; }
+  return x;
+}
+
+export function subWriteToUnreadSlot(x: number) {
+  let dead = 0;
+  dead = x;
+  return 1;
+}
+
+export function subStandalonePrecedingWrite(x: string | number) {
+  x = "s";
+  return x;
+}
+
+export function subSourceOrderReadBeforeWrite(x: string | number) {
+  return { b: x, a: (x = "s") };
+}
+
+export function subSourceOrderDeferredRead(x: string | number) {
+  return { b: () => x, a: (x = "s") };
+}
+
+export declare const q: number;
+
+export function subBlockLetVsOuterConst() {
+  {
+    let q = 0;
+    q = 1;
+  }
+  return q;
+}
+
+export function subHoistedVarBlock() {
+  {
+    var y = 1;
+  }
+  return y;
+}
+
+export function subBranchVarAny(flag: boolean) {
+  if (flag) var x: any = 1;
+  else var x: any = "s";
+  return x;
+}
+
+export function subBranchVarUndef(flag: boolean) {
+  if (flag) {
+    var y: number | undefined = 1;
+  }
+  return y;
+}
+
+export function subBranchVarOneArm(flag: boolean) {
+  if (flag) {
+    var w = 1;
+  }
+  return w;
+}
+
+export function subNestedBlockVar() {
+  {
+    {
+      var y = 1;
+    }
+  }
+  return y;
+}
+
+export function subEmptyIfThenVar(flag: boolean) {
+  if (flag) {
+  }
+  var y = 1;
+  return y;
+}
+
+export function subRedeclaredVar() {
+  var y = 1;
+  var y = 2;
+  return y;
+}
+
+export function subVarShadowedByBlockLet() {
+  var y = 1;
+  {
+    let y = "s";
+  }
+  return y;
+}
+
+export function subVarAnnotatedNoInit() {
+  {
+    var y: number | undefined;
+  }
+  return y;
+}
+
+export function subLetAnnotatedNoInit() {
+  let y: number | undefined;
+  return y;
+}
+
+export function subAnnotatedConstLiteral() {
+  const y: string = "s";
+  return y;
+}
+
+export function subAnnotatedConstLiteralPinned() {
+  const y: "s" = "s";
+  return y;
+}
+
+export function subRedeclareParamVar(x: string | number) {
+  var x: string | number = "s";
+  return x;
+}
+
+export function subRedeclareParamVarNested(x: string | number) {
+  {
+    var x: string | number = "s";
+  }
+  return x;
+}
+
+export function subForwardVarOverParam(x: string) {
+  return x;
+  var x = "s";
+}
+
+export function subLoopBodyVar(flag: boolean) {
+  while (flag) {
+    var v = 1;
+  }
+  return v;
+}
+
+export function subLoopBodyLet(flag: boolean) {
+  while (flag) {
+    let v = 1;
+  }
+  return 1;
+}
+"#;
+
+const CANONICAL: &str = "/ws/flow-exec.ts";
+
+fn make_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.to_string()),
+        input_id: CANONICAL.to_string(),
+        source: Arc::from(FLOW_EXEC_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn with_dispatch<R>(
+    host: &Arc<VerterHost>,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
+) -> R {
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    f(&dispatch)
+}
+
+fn flow_result_for_file(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) -> (verter_type_expr::TypeExpr, bool) {
+    let key = FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    };
+    flow_result(dispatch, host, key)
+}
+
+fn flow_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+    part: FunctionPartIdentity,
+    overload_ordinal: u32,
+) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(CANONICAL),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            part,
+            overload_ordinal,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(CANONICAL),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+fn execute_flow(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    key: FlowReturnKey,
+) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>> {
+    dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+}
+
+fn flow_result(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    key: FlowReturnKey,
+) -> (verter_type_expr::TypeExpr, bool) {
+    let QueryResult::Value(SemanticQueryOutput {
+        value: SemanticQueryValue::FlowReturn(result),
+        ..
+    }) = execute_flow(dispatch, key)
+    else {
+        panic!("FlowReturn must produce a complete result");
+    };
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    (expr, result.can_fall_through.reaches_end_for_assertion())
+}
+
+/// The POSITIONAL fail-closed assertion: the demanded return is a
+/// DEGRADED SUCCESS whose value is the typed unmodelled-position MARKER —
+/// never the wrong binding's value, never warm.
+///
+/// A whole-return position that the substrate cannot model is a POSITION
+/// like any other; it is only "the whole frame" because there is nothing
+/// else in the return. The load-bearing half is the same in either
+/// spelling: whatever value the mis-binding WOULD have published is
+/// absent, and nothing admits.
+#[track_caller]
+fn assert_whole_return_is_unmodeled_marker(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    canonical: &str,
+    what: &str,
+) {
+    match dispatch.execute_function_return_source(
+        &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+        canonical,
+    ) {
+        super::flow_return::FunctionReturnNode::Flow(result) => {
+            assert!(
+                matches!(
+                    dispatch.graph().node_data(result.return_type()).as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
+                ),
+                "{what}: the position carries the typed marker, got {:?}",
+                dispatch.graph().node_data(result.return_type())
+            );
+            assert_eq!(
+                result.degradation(),
+                Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+                "{what}: the positional degradation reason"
+            );
+        }
+        other => panic!("{what}: a degraded positional success, got {other:?}"),
+    }
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                dispatch.flow_return_key_for(identity)
+            ))),
+        0,
+        "{what}: a degraded success is ReturnOnly — nothing warms"
+    );
+}
+
+/// Assert a whole-return position evaluates CLEAN to the primitive
+/// `expected` and warms.
+#[track_caller]
+fn assert_whole_return_is_clean(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    canonical: &str,
+    what: &str,
+    expected: PrimitiveKind,
+) {
+    match dispatch.execute_function_return_source(
+        &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+        canonical,
+    ) {
+        super::flow_return::FunctionReturnNode::Flow(result) => {
+            assert_eq!(
+                dispatch.graph().node_data(result.return_type()).as_deref(),
+                Some(&SemanticNodeData::Primitive(expected)),
+                "{what}: the return"
+            );
+            assert_eq!(result.degradation(), None, "{what}: clean");
+        }
+        other => panic!("{what}: a clean success, got {other:?}"),
+    }
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                dispatch.flow_return_key_for(identity)
+            ))),
+        1,
+        "{what}: a clean success warms"
+    );
+}
+
+fn flow_is_miss(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    key: FlowReturnKey,
+) -> bool {
+    matches!(
+        execute_flow(dispatch, key),
+        QueryResult::Error(QueryError::Miss)
+    )
+}
+
+pub(crate) fn object_prop<'a>(
+    expr: &'a verter_type_expr::TypeExpr,
+    name: &str,
+) -> &'a verter_type_expr::TypeExpr {
+    let verter_type_expr::TypeExpr::Object(object) = expr else {
+        panic!("expected object type, got {expr:?}");
+    };
+    object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.string_name() == Some(name) => {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected prop {name} in {expr:?}"))
+}
+
+#[test]
+fn flow_return_symbolic_call_resolves_complete() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subCallReturn",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        assert!(!fallthrough);
+    });
+}
+
+/// `return this.helper()` reads `helper` off the class's receiver and
+/// resolves the call over its signature: the method's own class member,
+/// read where it is declared, so the reading member never re-enters its
+/// own return. Complete and warm.
+///
+/// Oracle (TypeScript 7.0.2 `tsc`): `ReturnType<SubThisCall['run']>` is
+/// `number`.
+#[test]
+fn flow_return_this_call_reads_the_receiver_member() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "SubThisCall",
+            FunctionPartIdentity::Member {
+                member_path: Arc::from(vec![1u32].into_boxed_slice()),
+            },
+            0,
+        );
+        let (expr, _) = flow_result(dispatch, &host, key.clone());
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "SubThisCall is complete and warm"
+        );
+    });
+}
+
+#[test]
+fn flow_return_return_free_loop_stays_transparent() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subCallAfterLoop",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+#[test]
+fn flow_return_return_bearing_loop_switch_and_try_resolve() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        // A return-bearing LOOP joins its body's return with the return
+        // past it at the loop's fixed point: TypeScript 7.0.2 `tsc`:
+        // `number` (the `0` is absorbed by `n`'s `number`). The clean
+        // result admits warm.
+        let key = flow_key(
+            dispatch,
+            "subLoopReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the clean result projects"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean loop result admits warm"
+        );
+        // A `switch` joins its arms' returns; both fresh literals stay
+        // pinned (the multi-contributor join widens nothing). TypeScript
+        // 7.0.2 `tsc`: `"a" | "b"`.
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subSwitchReturn",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                    "b".to_string()
+                )),
+                verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                    "a".to_string()
+                )),
+            ])
+        );
+        assert!(!fallthrough);
+        // A `try` whose block returns contributes the lone fresh literal,
+        // which widens to its primitive. tsgo: `string`.
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subTryReturn",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        assert!(!fallthrough);
+    });
+}
+
+#[test]
+fn flow_return_base_plus_recursion_admits_widened_number() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subBaseRecursion",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert!(!fallthrough);
+    });
+}
+
+#[test]
+fn flow_return_empty_cycle_is_return_only_and_never_never() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subEmptyRecursion",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(
+            flow_is_miss(dispatch, key.clone()),
+            "an empty recursive cycle is ReturnOnly"
+        );
+        // Never admitted: the warm read misses, and nothing in the result is
+        // `never`.
+        assert!(
+            dispatch
+                .graph()
+                .get_flow_return_result(dispatch.ctx, &key)
+                .map(|served| served.value)
+                .is_none(),
+            "an empty recursive cycle admits no family value"
+        );
+        assert!(flow_is_miss(dispatch, key), "still cold on the next demand");
+    });
+}
+
+#[test]
+fn flow_return_literal_widens_at_return_position() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subLiteral",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        // The return-argument position widens a fresh top-level literal to
+        // its base primitive (the flow IR's declaration lowering encodes the
+        // positional rule); a `const`-asserted or arrow-body literal keeps
+        // its literal node.
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+#[test]
+fn flow_return_parameter_reference_substitutes_its_annotation() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subParam",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+#[test]
+fn flow_return_local_const_reaching_definition() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subLocalConst",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        // A WIDENING-literal `const` binding widens at the return join —
+        // TS7 oracle (`tsc 7.0.2 --declaration`):
+        // `function f(){ const x = 1; return x; }` declares `(): number`.
+        // (`1 as const` / an annotated `const x: 1` stay pinned — see
+        // `flow_return_member_demand_preserves_const_asserted_local`.)
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+#[test]
+fn flow_return_distinct_overload_ordinals_are_distinct_keys() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let bodiless = flow_key(
+            dispatch,
+            "subOverloaded",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let implementation = flow_key(
+            dispatch,
+            "subOverloaded",
+            FunctionPartIdentity::DeclarationBody,
+            1,
+        );
+        assert_ne!(
+            bodiless, implementation,
+            "distinct overload ordinals produce distinct keys"
+        );
+        // The bodiless overload has no served body — degraded, never confused
+        // with the implementation's admitted result.
+        assert!(flow_is_miss(dispatch, bodiless));
+        let (expr, _) = flow_result(dispatch, &host, implementation);
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+#[test]
+fn flow_return_key_carries_no_value_environment() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        // Two demands of the same function under the same context produce the
+        // identical key (value bindings never enter it) — the second is a warm
+        // family hit.
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let first = execute_flow(dispatch, key.clone());
+        assert!(matches!(first, QueryResult::Value(_)));
+        // The warm read runs against a FRESH view (the artifact the cold
+        // build materialized is now visible).
+        let warm_key = key.clone();
+        with_dispatch(&host, |fresh| {
+            let warm = fresh
+                .graph()
+                .get_flow_return_result(fresh.ctx, &warm_key)
+                .map(|served| served.value);
+            assert!(
+                warm.is_some(),
+                "the second demand of the same function identity is a warm family hit"
+            );
+        });
+        // The substitution axis is TYPE-ONLY: an empty substitution is the
+        // only context the substrate constructs; a type-param binding changes
+        // the key.
+        let mut typed = key.clone();
+        typed.context.type_substitution =
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
+                verter_type_engine::semantic_query::SemanticNodeId(7),
+                verter_type_engine::semantic_query::SemanticNodeId(8),
+            )]);
+        assert_ne!(typed, key, "a type substitution fork is a distinct key");
+    });
+}
+
+/// Key axes: `P R T L J`, the TYPE-ONLY substitution, the function slot
+/// (name / part / overload ordinal), and the normalized type args are ALL
+/// family identity. Two keys differing in any single axis are distinct
+/// and never warm-hit each other. Mutation recipe: dropping any axis from
+/// the key fails the distinctness half; failing the fresh-view family
+/// lookup fails the isolation half.
+#[test]
+pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let base = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let with_env = |mutate: fn(&mut verter_type_engine::semantic_query::FlowReturnContext)| {
+            let mut key = base.clone();
+            mutate(&mut key.context);
+            key
+        };
+        for (axis, variant) in [
+            ("P", with_env(|context| context.parse_env_hash = [0xAA; 16])),
+            (
+                "R",
+                with_env(|context| context.resolve_env_hash = [0xBB; 16]),
+            ),
+            ("T", with_env(|context| context.type_env_hash = [0xCC; 16])),
+            ("L", with_env(|context| context.lib_env_hash = [0xDD; 16])),
+            (
+                "J",
+                with_env(|context| context.project_identity = [0xEE; 16]),
+            ),
+        ] {
+            assert_ne!(
+                variant, base,
+                "a key differing only in the {axis} env axis must be distinct"
+            );
+        }
+        let part_fork = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::Initializer,
+            0,
+        );
+        assert_ne!(part_fork, base, "the function part is key identity");
+        let ordinal_fork = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            1,
+        );
+        assert_ne!(ordinal_fork, base, "the overload ordinal is key identity");
+        let mut args_fork = base.clone();
+        args_fork.normalized_type_args = Arc::from(
+            vec![verter_type_engine::semantic_query::SemanticNodeId(9)].into_boxed_slice(),
+        );
+        assert_ne!(args_fork, base, "the normalized type args are key identity");
+
+        // Warm isolation: compute the base, then prove a shifted-env key
+        // does NOT warm-hit the base's family entry.
+        let first = execute_flow(dispatch, base.clone());
+        assert!(matches!(first, QueryResult::Value(_)));
+        let shifted = with_env(|context| context.parse_env_hash = [0xAA; 16]);
+        assert!(
+            dispatch
+                .graph()
+                .get_flow_return_result(dispatch.ctx, &shifted)
+                .map(|served| served.value)
+                .is_none(),
+            "a shifted-env key must not warm-hit the base entry"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The sealed function-return consumer entry
+// ---------------------------------------------------------------------------
+
+fn return_identity(
+    name: &str,
+    part: FunctionPartIdentity,
+    overload_ordinal: u32,
+) -> verter_type_expr::facts::FlowFunctionReturnIdentity {
+    verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(name),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: part,
+        overload_ordinal,
+    }
+}
+
+fn declared_return_slot(name: &str) -> verter_type_expr::locators::TypeBodySlot {
+    verter_type_expr::locators::TypeBodySlot {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(name),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        path: Arc::from(
+            vec![
+                verter_type_expr::locators::TypeBodyPathStep::ValueSignature { ordinal: 0 },
+                verter_type_expr::locators::TypeBodyPathStep::FunctionReturn,
+            ]
+            .into_boxed_slice(),
+        ),
+    }
+}
+
+/// The sealed helper's Flow arm constructs the IDENTICAL `FlowReturnKey` the
+/// direct dispatch uses — the consumer-identity contract at the helper
+/// boundary. Mutation recipe: deriving the slot or the context anywhere but
+/// the one choke point forks the key and fails the equality half.
+#[test]
+fn function_return_helper_flow_arm_builds_the_identical_key() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let identity = return_identity("subCallReturn", FunctionPartIdentity::DeclarationBody, 0);
+        let direct = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert_eq!(
+            dispatch.flow_return_key_for(&identity),
+            direct,
+            "the sealed helper constructs the identical FlowReturnKey"
+        );
+        let source = verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone());
+        let super::flow_return::FunctionReturnNode::Flow(result) =
+            dispatch.execute_function_return_source(&source, CANONICAL)
+        else {
+            panic!("a Flow source is served by the FlowReturn producer");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        assert!(!result.can_fall_through.reaches_end_for_assertion());
+        // The demand admitted under the helper-constructed key: a fresh view
+        // warm-reads the same family entry.
+        let key = dispatch.flow_return_key_for(&identity);
+        with_dispatch(&host, |fresh| {
+            assert!(
+                fresh
+                    .graph()
+                    .get_flow_return_result(fresh.ctx, &key)
+                    .map(|served| served.value)
+                    .is_some(),
+                "the helper's demand admits under the identical key"
+            );
+        });
+    });
+}
+
+/// The Declared arm lowers through the memoized locator rail — an authored
+/// TS annotation and a JSDoc `@returns` recovery both deref their slot.
+#[test]
+fn function_return_helper_declared_arm_raises_authored_and_jsdoc() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let authored = verter_type_expr::facts::FunctionReturnSource::Declared(
+            verter_type_expr::locators::FunctionReturnLocator::Authored(declared_return_slot(
+                "subCallee",
+            )),
+        );
+        let super::flow_return::FunctionReturnNode::Declared(hot) =
+            dispatch.execute_function_return_source(&authored, CANONICAL)
+        else {
+            panic!("an authored return lowers through the locator rail");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(hot.node())
+            .expect("declared return node must project to TypeExpr");
+        assert_eq!(
+            object_prop(&expr, "ok"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        let jsdoc = verter_type_expr::facts::FunctionReturnSource::Declared(
+            verter_type_expr::locators::FunctionReturnLocator::Jsdoc(declared_return_slot(
+                "subJsdocReturn",
+            )),
+        );
+        let super::flow_return::FunctionReturnNode::Declared(hot) =
+            dispatch.execute_function_return_source(&jsdoc, CANONICAL)
+        else {
+            panic!("a JSDoc return lowers through the locator rail");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(hot.node())
+            .expect("JSDoc return node must project to TypeExpr");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+/// The DECLARED rail keeps an authored literal-union member INTACT. An
+/// annotated function's return is served from the authored-annotation
+/// locator rail — the authorship gate (`type_eval_build`) never routes an
+/// annotated return to the body-derived producer — and the union the
+/// checker keeps reaches every consumer of the sealed entry. The negative
+/// control is the same body WITHOUT the annotation: it routes `Flow` and
+/// the fresh literal widens to its primitive, so the rail selection, not
+/// the body evaluation, is what carries the union.
+#[test]
+fn function_return_declared_rail_keeps_the_literal_union_member() {
+    const UNION_CANONICAL: &str = "/ws/declared-union-member.ts";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(UNION_CANONICAL.to_string()),
+        input_id: UNION_CANONICAL.to_string(),
+        source: Arc::from(
+            "function ccAnnotated(): { mode: \"a\" | \"b\" } { return { mode: \"a\" } }\n\
+             function ccPlain() { return { mode: \"a\" } }\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(UNION_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let member_node = |node: SemanticNodeId, name: &str| {
+            let data = dispatch.graph().node_data(node);
+            let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
+                panic!("the return node is an Object, got {data:?}");
+            };
+            let member = surface
+                .positive_members()
+                .iter()
+                .find(|m| m.key.as_string() == Some(name))
+                .unwrap_or_else(|| panic!("member `{name}` is present"));
+            dispatch.graph().node_data(member.value)
+        };
+        let anchor = |symbol: &str| verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(UNION_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(symbol),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        };
+
+        let declared = verter_type_expr::facts::FunctionReturnSource::Declared(
+            verter_type_expr::locators::FunctionReturnLocator::Authored(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: anchor("ccAnnotated"),
+                    path: Arc::from(
+                        vec![
+                            verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
+                                ordinal: 0,
+                            },
+                            verter_type_expr::locators::TypeBodyPathStep::FunctionReturn,
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                },
+            ),
+        );
+        let super::flow_return::FunctionReturnNode::Declared(hot) =
+            dispatch.execute_function_return_source(&declared, UNION_CANONICAL)
+        else {
+            panic!("an authored return lowers through the locator rail");
+        };
+        assert!(
+            matches!(
+                member_node(hot.node(), "mode").as_deref(),
+                Some(SemanticNodeData::Union(_))
+            ),
+            "the declared rail keeps the checker's `\"a\" | \"b\"` union at the member"
+        );
+
+        // NEGATIVE CONTROL: the same body with no annotation routes Flow,
+        // and the fresh literal widens to its primitive — the union above
+        // came from the rail selection, not from the body evaluation.
+        let plain = verter_type_expr::facts::FunctionReturnSource::Flow(
+            verter_type_expr::facts::FlowFunctionReturnIdentity {
+                anchor: anchor("ccPlain"),
+                function_part: FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            },
+        );
+        let super::flow_return::FunctionReturnNode::Flow(result) =
+            dispatch.execute_function_return_source(&plain, UNION_CANONICAL)
+        else {
+            panic!("an unannotated return is served by the FlowReturn producer");
+        };
+        assert!(
+            matches!(
+                member_node(result.return_type(), "mode").as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "the unannotated twin widens the fresh literal to `string`"
+        );
+    });
+}
+
+/// A degraded Flow evaluation surfaces the typed failure (never the
+/// absent arm, never a fabricated node); `Absent` reports the absent
+/// carrier.
+#[test]
+fn function_return_helper_degraded_and_absent_arms() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let invoked_source = verter_type_expr::facts::FunctionReturnSource::Flow(return_identity(
+            "subInvokedWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ));
+        // The machinery root admits nothing; the TYPED failure rides the
+        // transaction's root-failure channel to the caller (`Unresolved`
+        // only when the cold build never ran).
+        match dispatch.execute_function_return_source(&invoked_source, CANONICAL) {
+            super::flow_return::FunctionReturnNode::NoValue(
+                verter_type_engine::semantic_query::FlowReturnFailure::Unsupported(
+                    verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+                ),
+            ) => {}
+            other => {
+                panic!("an invoked closure's write degrades with the typed failure, got {other:?}")
+            }
+        }
+        let absent = verter_type_expr::facts::FunctionReturnSource::Absent;
+        assert!(matches!(
+            dispatch.execute_function_return_source(&absent, CANONICAL),
+            super::flow_return::FunctionReturnNode::Absent
+        ));
+    });
+}
+
+/// An INLINE no-value close folds the no-surface rails into the enclosing
+/// build, exactly like the machinery root's build output and the
+/// consumer-side hold arm: the inline path produces no memo read, so
+/// without the close-site fold the universal read funnel never sees the
+/// failure and the request-partial sticky is lost to any composition that
+/// absorbs the typed failure into a usable answer.
+///
+/// The fixture composes it naturally: evaluating `subObservesBrokenInit`
+/// as the machinery root opens its frame, and its binding initializer's
+/// callee (`subInvokedWrite`, whose invoked closure writes a captured
+/// binding — a typed no-value failure) evaluates INLINE under that open frame and closes as its own
+/// failed component root. The OUTER build degrades positionally
+/// (`FLOW_RETURN_UNINFERRED` — its member set is faithful); the observed
+/// completeness must ALSO carry the inner failure's
+/// `FLOW_RETURN_NO_SURFACE` class. Mutation: removing the inline
+/// close-site fold keeps every other assertion green and loses exactly
+/// the no-surface class.
+#[test]
+fn inline_no_value_close_folds_the_no_surface_rails() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+        let key = flow_key(
+            dispatch,
+            "subObservesBrokenInit",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+        scope.discard();
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the outer's degraded success stays usable, got {:?}",
+            read.value
+        );
+        assert!(
+            observed
+                .reasons()
+                .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+            "the inner inline no-value close folds its class into the enclosing build, \
+             got {:?}",
+            observed.reasons()
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an answer composed around the inline failure never warms"
+        );
+    });
+}
+
+/// A mixed relation <-> flow component's batched member publish rides the
+/// UNION carrier: the published flow member's family entry self-roots on
+/// every component file — its own file AND the files of the relation
+/// members' nodes. Mutation recipe: publishing the member with the root's
+/// relation-only self-root set (the pre-union behavior) drops its own
+/// file from the carrier.
+#[test]
+fn mixed_component_member_entry_self_roots_cover_all_component_files() {
+    let host = make_host();
+    for (canonical, source) in [
+        (
+            "/ws/mixed_b.ts",
+            "import type { RootBox } from \"/ws/mixed_a\";\nexport interface NextBox {\n  next(): RootBox;\n}\n",
+        ),
+        (
+            "/ws/mixed_c.ts",
+            "import type { NextBox } from \"/ws/mixed_b\";\nexport declare function makeBox(): NextBox;\nexport class Worker {\n  run() {\n    return makeBox();\n  }\n}\n",
+        ),
+        (
+            "/ws/mixed_a.ts",
+            "import { Worker } from \"/ws/mixed_c\";\nexport declare const worker: Worker;\nexport class RootBox {\n  next() {\n    return worker.run();\n  }\n}\n",
+        ),
+    ] {
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(canonical)
+                .static_resolution(),
+            aliases: Vec::new(),
+        });
+    }
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/root.ts".to_string()),
+        input_id: "/ws/root.ts".to_string(),
+        source: Arc::from(
+            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = RootBox extends NextBox ? \"yes\" : \"no\";\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/root.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let (expr, _) = host
+        .evaluate_type_expression_with_audit(
+            crate::typeinfo::types::EvaluateTypeExpressionRequest {
+                scope: "/ws/root.ts".to_string(),
+                expression: "RootAssign".to_string(),
+                extra_imports: Vec::new(),
+                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                cacheable: false,
+            },
+        )
+        .into_parts();
+    let node = expr.ok().flatten().expect("RootAssign resolves");
+    let projected = host
+        .project_node_to_type_expr_for_test(node)
+        .expect("RootAssign projects");
+    assert_eq!(
+        projected,
+        verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+            "yes".to_string()
+        ))
+    );
+    with_dispatch(&host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from("/ws/mixed_c.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("Worker"),
+                FunctionPartIdentity::Member {
+                    member_path: Arc::from(vec![0u32].into_boxed_slice()),
+                },
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let roots = dispatch
+            .graph()
+            .entry_self_root_canonicals_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+            .expect("the batched flow member's family entry is published");
+        // The member's own file AND every relation member's node file
+        // (the relation root's own demanding file is not a relation input
+        // and is not part of the component's roots).
+        for file in ["/ws/mixed_a.ts", "/ws/mixed_b.ts", "/ws/mixed_c.ts"] {
+            assert!(
+                roots.iter().any(|root| root.as_ref() == file),
+                "the union carrier covers {file}: {roots:?}"
+            );
+        }
+    });
+}
+
+/// Block-scoped bindings never escape their region: the `if` arm's
+/// shadowing `const` does not leak past the arm — the outer `let`
+/// binding's reaching definition answers the trailing `return x`.
+/// Mutation recipe: a flat locals map across regions yields `string`
+/// here.
+#[test]
+fn flow_return_block_scoped_shadowing_does_not_escape() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/shadow.ts".to_string()),
+        input_id: "/ws/shadow.ts".to_string(),
+        source: Arc::from(
+            "export function shadow(c: boolean) {\n  let x = 1;\n  if (c) { const x = \"s\"; }\n  return x;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("shadow"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        let super::flow_return::FunctionReturnNode::Flow(result) = dispatch
+            .execute_function_return_source(
+                &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                "/ws/shadow.ts",
+            )
+        else {
+            panic!("the shadowed return evaluates complete");
+        };
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node projects");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// A member-call self-recursion through the symbolic rail
+/// (`return obj.f()` inside `obj.f`) propagates the nested demand's
+/// degradation as a typed failure — the semantic-miss signature return is
+/// NEVER counted as a contributor (a pre-fix evaluation published
+/// `Complete` with the miss inside it). Mutation recipe: contributing the
+/// miss-return node admits a `Complete` family value here.
+#[test]
+fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/member-recur.ts".to_string()),
+        input_id: "/ws/member-recur.ts".to_string(),
+        source: Arc::from("export const obj = {\n  f() {\n    return obj.f();\n  },\n};\n"),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/member-recur.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/member-recur.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("obj"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::Member {
+                member_path: Arc::from(vec![0u32].into_boxed_slice()),
+            },
+            overload_ordinal: 0,
+        };
+        assert_whole_return_is_unmodeled_marker(
+            dispatch,
+            &identity,
+            "/ws/member-recur.ts",
+            "the recursive member call",
+        );
+        // Nothing admitted: the family entry never materializes, and a
+        // repeat demand runs cold.
+        assert!(dispatch
+            .graph()
+            .get_flow_return_result(dispatch.ctx, &dispatch.flow_return_key_for(&identity))
+            .map(|served| served.value)
+            .is_none());
+    });
+}
+
+/// A direct call to a callee with a DECLARED return serves the declared
+/// carrier (never the narrowed body): `d(): string | number { return 1 }`
+/// — the caller's contribution is `string | number`, not `number`.
+/// Mutation recipe: always executing the callee's flow return narrows this
+/// to `number`.
+#[test]
+fn flow_return_direct_call_prefers_the_callees_declared_return() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/declared-callee.ts".to_string()),
+        input_id: "/ws/declared-callee.ts".to_string(),
+        source: Arc::from(
+            "export function d(): string | number {\n  return 1;\n}\nexport function c() {\n  return d();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/declared-callee.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/declared-callee.ts", "c");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the declared union must survive, got {expr:?}");
+        };
+        assert_eq!(arms.len(), 2);
+    });
+}
+
+/// A parameter that shadows the callee name makes the call an ordinary
+/// parameter call — NEVER a self-recursive flow edge.
+/// `function f(f: () => string) { return f() }` → `string` (not the empty
+/// self-cycle's ReturnOnly). Mutation recipe: firing the DirectCall edge
+/// on the shadowed name degrades this to a miss.
+#[test]
+fn flow_return_direct_call_respects_parameter_shadowing() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/shadowed-callee.ts".to_string()),
+        input_id: "/ws/shadowed-callee.ts".to_string(),
+        source: Arc::from("export function f(f: () => string) {\n  return f();\n}\n"),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/shadowed-callee.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/shadowed-callee.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+/// A namespace-local binding shadows the file-global one for a bare
+/// callee inside the namespace: `N.g(){ return f() }` binds `N.f`
+/// (string), never the global `f` (number). Mutation recipe: the
+/// globally-highest overload ordinal binding flips this to `number`.
+#[test]
+fn flow_return_direct_call_prefers_the_namespace_local_binding() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/ns-callee.ts".to_string()),
+        input_id: "/ws/ns-callee.ts".to_string(),
+        source: Arc::from(
+            "export function f() {\n  return 1;\n}\nnamespace N {\n  export function f() {\n    return \"s\";\n  }\n  export function g() {\n    return f();\n  }\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/ns-callee.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/ns-callee.ts", "N.g");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+    });
+}
+
+/// An unused declaration whose initializer cannot be modeled binds `any`
+/// and never poisons the function (declarations are not return
+/// contributions): `const unused = <unsupported>; return 2` stays
+/// `number`. Mutation recipe: propagating the initializer's failure
+/// degrades the whole function to a miss.
+#[test]
+fn flow_return_unused_binding_failure_binds_any_without_poisoning() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/unused-binding.ts".to_string()),
+        input_id: "/ws/unused-binding.ts".to_string(),
+        source: Arc::from(
+            "export function broken(v: number) {\n  switch (v) {\n    default:\n      return v;\n  }\n}\nexport function survive() {\n  const unused = broken(1);\n  return 2;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/unused-binding.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/unused-binding.ts", "survive");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// A nested generic arrow keeps its own binder: `return <T>(x: T) => x`
+/// composes a signature with one type parameter whose identity the
+/// parameter type resolves to. Mutation recipe: dropping nested type
+/// parameters interns the signature with an empty generic clause (and the
+/// parameter as an unbound `T` reference).
+#[test]
+fn flow_return_nested_generic_arrow_keeps_its_type_parameters() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-generic.ts".to_string()),
+        input_id: "/ws/nested-generic.ts".to_string(),
+        source: Arc::from("export function outer() {\n  return <T>(x: T) => x;\n}\n"),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-generic.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/nested-generic.ts", "outer");
+        let verter_type_expr::TypeExpr::Function(function) = &expr else {
+            panic!("the nested value is a function type, got {expr:?}");
+        };
+        assert_eq!(
+            function.type_parameters.len(),
+            1,
+            "the nested generic keeps its binder: {expr:?}"
+        );
+        assert_eq!(function.type_parameters[0].name, "T");
+        let verter_type_expr::TypeExpr::TypeParameter(param_ty) = &function.parameters[0].ty else {
+            panic!(
+                "the parameter resolves to the nested binder, got {:?}",
+                function.parameters[0].ty
+            );
+        };
+        assert_eq!(param_ty.name, "T");
+    });
+}
+
+/// A long acyclic DirectCall chain charges the connected-demand ledger
+/// one unit per inline frame: beyond the limit the chain degrades with a
+/// typed budget failure instead of recursing unbounded. Mutation recipe:
+/// dropping the inline-open charge lets the chain resolve.
+#[test]
+fn flow_return_direct_call_chain_charges_connected_work() {
+    let host = make_host();
+    let mut source = String::new();
+    for index in 0..8 {
+        source.push_str(&format!(
+            "export function chain{index}() {{\n  return chain{}();\n}}\n",
+            index + 1
+        ));
+    }
+    source.push_str("export function chain8() {\n  return 1;\n}\n");
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/chain.ts".to_string()),
+        input_id: "/ws/chain.ts".to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/chain.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        dispatch.set_connected_limits_for_tests(4, u16::MAX);
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/chain.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("chain0"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        match dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/chain.ts",
+        ) {
+            super::flow_return::FunctionReturnNode::NoValue(
+                verter_type_engine::semantic_query::FlowReturnFailure::Budget(_),
+            ) => {}
+            other => panic!("the over-limit chain degrades with Budget, got {other:?}"),
+        }
+    });
+}
+
+/// A callee hold registered from inside a COMPOSITE is dropped on the
+/// VALUE arm too, not only on the hold arm.
+///
+/// `settle_composite_part`'s own contract states the rule: "a hold is a
+/// promise the SCC fixed point will union the hold TARGET's whole admitted
+/// return into this entry's result. Inside a composite that promise is
+/// false: the callee's return is not this object's value, it is one member
+/// of it." The `Positional::Hold` arm truncated; the `Positional::Value`
+/// arm did not — and the direct-call site registers a hold on the value
+/// arm too whenever the callee popped as a PROVISIONAL member of the same
+/// component. So the fixed point unioned the callee's whole return into
+/// the composite anyway, exactly as the docstring says it must not.
+///
+/// `t3a` returns an object UNCONDITIONALLY, so a bare `1` arm is
+/// impossible for any input: the union `1 | { m: 1 }` cannot be produced
+/// by any execution of this program. (tsc types this pair `TS7023` —
+/// implicit `any` from circular inference — so there is no checker answer
+/// to disagree with; the falsifiable claim is the one the substrate makes
+/// about its OWN composition, and `1` is not in `t3a`'s range.)
+///
+/// Mutation recipe: removing `self.holds.truncate(holds_before)` from the
+/// `Positional::Value` arm restores `Union([Literal(1), Object{m}])`.
+#[test]
+fn a_composite_member_call_never_unions_the_callee_whole_return() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/composite-hold.ts".to_string()),
+        input_id: "/ws/composite-hold.ts".to_string(),
+        source: Arc::from(
+            "export function t3a() {\n  return { m: t3b(true) };\n}\nexport function t3b(c: boolean) {\n  if (c) return t3a();\n  return 1;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/composite-hold.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/composite-hold.ts", "t3a");
+        if let verter_type_expr::TypeExpr::Union(arms) = &expr {
+            panic!(
+                "`t3a` returns an object literal UNCONDITIONALLY — its return can never be a \
+                 union with a bare callee arm; the composite leaked the member call's hold. \
+                 Got {arms:?}"
+            );
+        }
+    });
+}
+
+/// The sealed consumer entry classifies its fold by the OUTCOME, not by
+/// the arm — so a budget edge never rides the FAITHFUL class, and the
+/// runtime macro projection still faults on it.
+///
+/// The fold used to record ONE class for every non-`Clean` outcome. That
+/// made a budget-truncated evaluation indistinguishable from "the surface
+/// this substrate produced is faithful, only one position is marked", and
+/// the runtime lane's containment then subtracted it: a budget trip
+/// stopped faulting the `props: {...}` projection, which would publish a
+/// runtime option object derived from an evaluation that never finished.
+/// The budget edge is production-reachable through
+/// `MAX_CONNECTED_PROJECTION_WORK`, not a test-only edge.
+///
+/// The TSC lane deliberately CONTAINS it — a budget-truncated class-member
+/// inference leaves the authored declaration intact, and the file-level
+/// aggregate still reports the precise budget class and warms nothing
+/// (`tsc_class_inference_budget_is_exact_partial_and_non_cacheable`). So
+/// the discriminating assertion is about the FAITHFUL class specifically,
+/// not about containment in general.
+///
+/// Mutation recipe: mapping every `FlowReturnFailure` to
+/// `FLOW_RETURN_UNINFERRED` (the pre-classification fold) fails both
+/// assertions.
+#[test]
+fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    let mut source = String::new();
+    for index in 0..8 {
+        source.push_str(&format!(
+            "export function chain{index}() {{\n  return chain{}();\n}}\n",
+            index + 1
+        ));
+    }
+    source.push_str("export function chain8() {\n  return 1;\n}\n");
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/budget-class.ts".to_string()),
+        input_id: "/ws/budget-class.ts".to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/budget-class.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        dispatch.set_connected_limits_for_tests(4, u16::MAX);
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/budget-class.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("chain0"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+        let node = dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/budget-class.ts",
+        );
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+        scope.discard();
+
+        assert!(
+            matches!(
+                node,
+                super::flow_return::FunctionReturnNode::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::Budget(_)
+                )
+            ),
+            "the over-limit chain still degrades with Budget, got {node:?}"
+        );
+        let reasons = observed.reasons();
+        assert!(
+            !reasons.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED),
+            "a budget-truncated evaluation produced NO surface — it must never ride the \
+             FAITHFUL class, which both macro lanes contain; got {reasons:?}"
+        );
+        assert!(
+            !reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "nor the degraded-success class whose member set is COMPLETE by definition — \
+             the runtime lane contains that one, so riding it would let a no-surface \
+             producer publish through any sibling contribution; got {reasons:?}"
+        );
+        assert!(
+            reasons.contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+            "it rides the TSC-only class instead, so the runtime `props` projection still \
+             refuses while the authored TSC splice stays intact; got {reasons:?}"
+        );
+    });
+}
+
+/// ONE lexical binding authority: a hoisted nested function declaration
+/// shadows the outer same-name callee, and the call is the nested
+/// declaration's own return, never the outer `g(): number`. TypeScript
+/// 7.0.2 (all four `strictNullChecks` × `noImplicitAny` settings):
+/// `ReturnType<typeof f>` is `string`. Mutation recipe: firing the index
+/// DirectCall edge on the shadowed name admits `number` here.
+#[test]
+fn flow_return_direct_call_reads_the_shadowing_nested_function_declaration() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/fn-shadow.ts".to_string()),
+        input_id: "/ws/fn-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f() {\n  function g() {\n    return \"x\";\n  }\n  return g();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/fn-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/fn-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("f"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        assert_whole_return_is_clean(
+            dispatch,
+            &identity,
+            "/ws/fn-shadow.ts",
+            "the shadowed direct call",
+            PrimitiveKind::String,
+        );
+    });
+}
+
+/// The same authority covers the self name: a nested `function f(): number`
+/// inside `f` shadows the self-recursion hold, so the call is the nested
+/// declaration's declared return, never a self edge. TypeScript 7.0.2 (all
+/// four settings): `ReturnType<typeof f>` is `number`. Mutation recipe:
+/// treating the call as a DirectSelfCall degrades this with EmptyCycle
+/// instead.
+#[test]
+fn flow_return_self_call_shadowed_by_nested_function_declaration_reads_it() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/self-fn-shadow.ts".to_string()),
+        input_id: "/ws/self-fn-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function f() {\n  function f(): number {\n    return 1;\n  }\n  return f();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/self-fn-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/self-fn-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("f"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        assert_whole_return_is_clean(
+            dispatch,
+            &identity,
+            "/ws/self-fn-shadow.ts",
+            "the shadowed self call",
+            PrimitiveKind::Number,
+        );
+    });
+}
+
+/// A hoisted `var` is in scope from the function's first statement: a call
+/// before its declarator binds the LOCAL (unbound at evaluation — `any`),
+/// never the outer same-name callee's declared `number`. Mutation recipe:
+/// dropping the hoisted-`var` scope seed admits `number` here.
+#[test]
+fn flow_return_forward_var_call_binds_the_unbound_local_not_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/forward-var.ts".to_string()),
+        input_id: "/ws/forward-var.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f() {\n  return g();\n  var g = () => 1;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/forward-var.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/forward-var.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+        );
+    });
+}
+
+/// A region pre-declares its own lexical names: a call before a `const`
+/// declarator binds the LOCAL (unbound — the TDZ-honest `any`), never the
+/// outer same-name callee. Mutation recipe: dropping the region
+/// pre-declare admits the outer `number` here.
+#[test]
+fn flow_return_forward_const_call_binds_the_unbound_local_not_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/forward-const.ts".to_string()),
+        input_id: "/ws/forward-const.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f() {\n  return g();\n  const g = () => 1;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/forward-const.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/forward-const.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+        );
+    });
+}
+
+/// The pre-declare is ONE LEVEL deep: a `const` inside a nested block
+/// stays block-local and never shadows the outer callee after the block —
+/// the trailing `g()` still binds the outer `g(): number`. Mutation
+/// recipe: pre-declaring across nested blocks flips this to `any`.
+#[test]
+fn flow_return_block_local_const_does_not_shadow_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/block-const.ts".to_string()),
+        input_id: "/ws/block-const.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function f(c: boolean) {\n  if (c) {\n    const g = () => \"s\";\n  }\n  return g();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/block-const.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/block-const.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// A root generic binder is in scope for the body's parameters and leaves:
+/// `function id<T extends string>(x: T) { return x }` returns the BINDER
+/// `T` (constraint `string`), never the file-scope alias `type T =
+/// number`. Mutation recipe: lowering params without the binder env
+/// resolves `T` to the alias and returns `number` here.
+#[test]
+fn flow_return_root_generic_binder_shadows_the_file_alias() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/root-binder.ts".to_string()),
+        input_id: "/ws/root-binder.ts".to_string(),
+        source: Arc::from(
+            "export type T = number;\nexport function id<T extends string>(x: T) {\n  return x;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/root-binder.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/root-binder.ts", "id");
+        let verter_type_expr::TypeExpr::TypeParameter(param) = &expr else {
+            panic!("the return is the root binder T, got {expr:?}");
+        };
+        assert_eq!(param.name, "T");
+        assert_eq!(
+            param.constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            )),
+            "the binder keeps its `string` constraint: {expr:?}"
+        );
+    });
+}
+
+/// A return-free loop inside a NESTED function value stays transparent:
+/// the nested body's control skeleton comes from the SAME single
+/// inventory walk, never an empty skeleton. Mutation recipe: serving an
+/// empty control skeleton for nested values degrades this to a miss.
+#[test]
+fn flow_return_nested_function_value_return_free_loop_stays_transparent() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-loop.ts".to_string()),
+        input_id: "/ws/nested-loop.ts".to_string(),
+        source: Arc::from(
+            "export function f() {\n  return (() => {\n    let x = 7;\n    for (let i = 0; i < 1; i++) {}\n    return x;\n  })();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-loop.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/nested-loop.ts", "f");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// The lexical binding authority reaches INSIDE nested function values: a
+/// hoisted nested declaration in the nested value's own body shadows the
+/// outer same-name callee, and the call is that declaration's return,
+/// never the outer `g(): number`. TypeScript 7.0.2 (all four settings):
+/// `ReturnType<typeof outer>` is `string`. Mutation recipe: seeding the
+/// nested Lowerer with an empty shadow set admits `number` here.
+#[test]
+fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-fn-shadow.ts".to_string()),
+        input_id: "/ws/nested-fn-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function g(): number {\n  return 1;\n}\nexport function outer() {\n  return (() => {\n    function g() {\n      return \"x\";\n    }\n    return g();\n  })();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-fn-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/nested-fn-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("outer"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        assert_whole_return_is_clean(
+            dispatch,
+            &identity,
+            "/ws/nested-fn-shadow.ts",
+            "the nested-value shadowed call",
+            PrimitiveKind::String,
+        );
+    });
+}
+
+/// The same authority covers a nested value's OWN name: an inner hoisted
+/// declaration of the nested function's name shadows it — the call is
+/// NEVER a DirectSelfCall (no self edge, no EmptyCycle); it calls the inner
+/// declaration. TypeScript 7.0.2 (all four `strictNullChecks` ×
+/// `noImplicitAny` settings): `ReturnType<typeof outer>` is `number`.
+/// Mutation recipe: an empty nested shadow set fires the DirectSelfCall arm
+/// and degrades with EmptyCycle instead.
+#[test]
+fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/nested-self-shadow.ts".to_string()),
+        input_id: "/ws/nested-self-shadow.ts".to_string(),
+        source: Arc::from(
+            "export function outer() {\n  return (function helper() {\n    function helper(): number {\n      return 1;\n    }\n    return helper();\n  })();\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/nested-self-shadow.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/nested-self-shadow.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("outer"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        assert_whole_return_is_clean(
+            dispatch,
+            &identity,
+            "/ws/nested-self-shadow.ts",
+            "the nested-value self-name shadow",
+            PrimitiveKind::Number,
+        );
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Key axes (SCC-1), the split result model (SCC-2), the fourth budget
+// layer, the sole warm rail (SCC-9), and the recorded materialised point.
+// ────────────────────────────────────────────────────────────────────────
+
+fn flow_result_value(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    key: FlowReturnKey,
+) -> verter_type_engine::semantic_query::FlowReturnResult {
+    let QueryResult::Value(SemanticQueryOutput {
+        value: SemanticQueryValue::FlowReturn(result),
+        ..
+    }) = execute_flow(dispatch, key)
+    else {
+        panic!("expected a FlowReturn SUCCESS carrier");
+    };
+    (*result).clone()
+}
+
+fn key_hash(key: &FlowReturnKey) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// SCC-1 (`flow_return_key_covers_input_context_and_projection_demand`):
+/// the key RETAINS the demand and input axes — two keys differing ONLY in
+/// `ReturnProjectionDemand` (the walked projection path) or ONLY in
+/// `FlowInputContext` (the contextual input identity) hash unequal and are
+/// distinct identities (the family key embeds the full `FlowReturnKey`,
+/// so distinct hashes ARE distinct candidate slots). The canonical
+/// whole-return / empty-input point is one stable identity.
+#[test]
+pub(crate) fn flow_return_key_covers_input_context_and_projection_demand() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let base = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(base.demand.is_whole_return());
+        assert!(base.input.is_empty());
+
+        // Demand axis: same function/env/input, narrower projection path.
+        let mut narrower = base.clone();
+        narrower.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+            point: {
+                let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
+                point.projection.path =
+                    verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "b",
+                            )),
+                        ),
+                    ]);
+                point
+            },
+        };
+        assert_ne!(
+            base, narrower,
+            "the demand axis is identity, not decoration"
+        );
+        assert_ne!(
+            key_hash(&base),
+            key_hash(&narrower),
+            "two keys differing only in the demand point must hash unequal"
+        );
+
+        // Input axis: same function/env/demand, a contextual input binding.
+        let contextual = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
+        let mut with_input = base.clone();
+        with_input.input = verter_type_engine::semantic_query::FlowInputContext {
+            contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
+        };
+        assert_ne!(
+            base, with_input,
+            "the input axis is identity, not decoration"
+        );
+        assert_ne!(
+            key_hash(&base),
+            key_hash(&with_input),
+            "two keys differing only in the contextual input must hash unequal"
+        );
+
+        // The canonical point is stable: two independent constructions of
+        // the whole-return / empty-input point are the SAME identity.
+        let again = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert_eq!(base, again);
+        assert_eq!(key_hash(&base), key_hash(&again));
+    });
+}
+
+/// A narrower-than-whole-return demand point fails CLOSED with a typed
+/// no-value outcome — never a silently widened whole-return result, never
+/// a sibling materialisation the narrower demand did not ask for.
+#[test]
+fn flow_return_narrower_demand_point_fails_closed_unmodeled() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let mut key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+            point: {
+                let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
+                point.projection.path =
+                    verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "b",
+                            )),
+                        ),
+                    ]);
+                point
+            },
+        };
+        assert!(
+            flow_is_miss(dispatch, key.clone()),
+            "an unmodeled demand point is a typed no-value outcome"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an unmodeled demand point admits nothing"
+        );
+    });
+}
+
+/// SCC-2 — the split result/carrier model. A DEGRADED SUCCESS (a usable
+/// value whose evaluation substituted a modeled-`any`) returns through
+/// the SUCCESS carrier with its typed reason and admits NOTHING (memo,
+/// facts, reverse index all untouched — candidate count stays zero); a
+/// NO-VALUE failure returns through `Error(Miss)` and admits nothing; a
+/// clean COMPLETE result admits warm. The two degraded shapes are
+/// DIFFERENT public outcomes: one is a value, the other is not.
+#[test]
+fn flow_return_degraded_success_returns_value_and_admits_nothing() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        // Degraded SUCCESS: calling a non-callable binding.
+        let degraded_key = flow_key(
+            dispatch,
+            "subNonCallableCall",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, degraded_key.clone());
+        assert_eq!(
+            result.degradation(),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::NonCallableBinding),
+            "a usable degraded value carries its typed reason on the SUCCESS carrier"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("a degraded success is a USABLE value");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    degraded_key.clone()
+                ))),
+            0,
+            "a degraded success is ReturnOnly: zero memo entries"
+        );
+        // A second demand recomputes (still a value, still not admitted).
+        let again = flow_result_value(dispatch, degraded_key.clone());
+        assert_eq!(again.degradation(), result.degradation());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    degraded_key
+                ))),
+            0
+        );
+
+        // NO-VALUE failure: an invoked closure writing a captured binding.
+        let failure_key = flow_key(
+            dispatch,
+            "subInvokedWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(
+            flow_is_miss(dispatch, failure_key.clone()),
+            "a no-value failure is Error(Miss), never a fabricated value"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    failure_key
+                ))),
+            0,
+            "a no-value failure admits nothing"
+        );
+
+        // Clean COMPLETE: admits warm.
+        let clean_key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let clean = flow_result_value(dispatch, clean_key.clone());
+        assert_eq!(clean.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(clean_key))),
+            1,
+            "a clean complete result is the warm-admissible arm"
+        );
+    });
+}
+
+/// Lexical binding identity (defect D): a read resolves to its
+/// NEAREST-ENCLOSING-REGION binding, so an irrelevant same-named OUTER
+/// declarator (whose initializer would degrade) never enters the slice —
+/// the result is clean, correct, and warm-admissible. Before the fix the
+/// name-keyed fan-out selected + lowered the outer `const x = notFn()`
+/// declarator too, forcing a spurious `NonCallableBinding` degradation
+/// (perpetual `ReturnOnly`) onto a clean program.
+#[test]
+fn flow_return_shadowed_outer_initializer_stays_clean_and_admits() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subShadowedOuterInit",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the shadowed outer initializer is lexically unreachable from the \
+             inner read — selecting/lowering it is the defect-D fan-out"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "a clean complete result admits warm — a spurious degradation would \
+             hold it at ReturnOnly forever"
+        );
+    });
+}
+
+/// A statement-position COMPOUND write (`x += "s"`) retypes its target to
+/// the base type of what it held — the checker's flow type for a compound
+/// assignment, whatever the operand (TypeScript 7.0.2 `tsc`: `string |
+/// number` here, the parameter's own type) — and publishes clean.
+#[test]
+fn flow_return_compound_write_applies_the_base_type() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subCompoundParamWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key);
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the clean result projects"),
+            verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ])
+        );
+    });
+}
+
+/// Unapplied write effects (defect B rail): a whole-slot write the
+/// evaluator has NO evaluation-order application for — a write inside
+/// a `while` TEST (`while ((x = "s")) { break; }`), which neither the
+/// statement, the expression nor the `if`-test application models — MUST fail closed as the
+/// `UnappliedWriteEffect` DEGRADED SUCCESS: a usable value, ReturnOnly,
+/// never warm-admitted. (The plain-`=` statement and expression positions
+/// APPLY their writes in source/evaluation order — see
+/// `flow_return_standalone_preceding_write_applies_and_publishes_clean`
+/// and `flow_return_source_order_object_read_before_write_publishes_clean`
+/// — and a statement-position compound write applies its base type, so the
+/// rail is the residual guard for everything they do not model.)
+#[test]
+fn flow_return_unapplied_write_effect_degrades_and_admits_nothing() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLogicalParamWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
+            "a slice with an unapplied write effect into a value-selected \
+             parameter slot must degrade (fail closed), never publish a \
+             wrong type as complete"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "the degraded success is ReturnOnly: zero memo entries"
+        );
+        // The value is still usable (degraded SUCCESS, not a no-value
+        // failure).
+        assert!(host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .is_some());
+    });
+}
+
+/// The B fail-closed rail is SLICE-scoped, not skeleton-scoped: a
+/// whole-slot write into a binding the demanded path never reads
+/// (`subWriteToUnreadSlot`: `dead = x` before `return 1`) stays outside
+/// the lowered slice's effect obligations, so the result stays clean,
+/// non-degraded, and warm-admissible. An over-broad rail scanning the
+/// SKELETON's write summary (instead of the slice's lowered effects)
+/// would spuriously degrade this — the D-class harm all over again.
+#[test]
+fn flow_return_write_to_unread_slot_stays_clean() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subWriteToUnreadSlot",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a write outside the demanded slice cannot degrade the result"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
+        );
+    });
+}
+
+/// R1 — a STANDALONE preceding whole-slot write (`x = "s"; return x`)
+/// is APPLIED by the evaluator in source order: the parameter's read
+/// after the statement resolves to the written value, so the result is
+/// the checker's own `string`, clean and warm-admissible. The planner
+/// half of this row is unchanged: the slot hub's reverse eval-effect
+/// edge still selects the write site (before it, the write site's only
+/// edge ran INTO the hub and `lower_slice_plan` silently dropped the
+/// write), which is what lets the content half lower the assignment at
+/// all.
+#[test]
+fn flow_return_standalone_preceding_write_applies_and_publishes_clean() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subStandalonePrecedingWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the applied statement-position write retypes the parameter exactly where the \
+             unapplied-write rail once refused: tsc's own answer (`string`), no degradation"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            "oracle: `string`"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            1,
+            "the clean result admits warm"
+        );
+    });
+}
+
+/// R4 companion (the R1 + R4 unit): a sibling-block `let q` with a
+/// block-local write must NOT degrade a root-region `return q` that
+/// reads the file-scope `declare const q: number` — block-scoped
+/// bindings never hoist, so the all-same-name fallback may not
+/// value-select the block hub (which R1's reverse effect edge would
+/// then turn into a spurious `UnappliedWriteEffect`). Oracle: clean
+/// `number`, warm-admissible.
+#[test]
+fn flow_return_block_let_write_stays_clean_for_root_read_of_outer_const() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subBlockLetVsOuterConst",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the block-scoped `let q` is lexically unreachable from the root \
+             read — a kind-blind hoisting fallback spuriously degrades this"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean complete result admits warm"
+        );
+    });
+}
+
+/// R3 — a `var` inside a block is FUNCTION-scoped: the evaluator's
+/// block restore must not clobber it (`{ var y = 1 } return y` is
+/// `number` per tsc, not a silently-clean `any`). The content producer
+/// already hoists the name; this pins the evaluator's kind-aware
+/// scoping end-to-end (the graph-level fallback test only asserts edge
+/// existence and cannot catch the evaluator wipe).
+#[test]
+fn flow_return_block_var_binding_hoists_to_the_function_scope() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subHoistedVarBlock",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "a hoisted var read is clean");
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the function-scoped `var` survives the block exit (oracle: `number`)"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean complete result admits warm"
+        );
+    });
+}
+
+/// The `FailedBindingInitializer` degradation fires only when the failed
+/// binding is OBSERVED: `return x` over a broken initializer is a
+/// degraded success; ignoring the broken binding entirely stays a clean
+/// complete result.
+#[test]
+fn flow_return_failed_binding_initializer_degrades_only_when_observed() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let observed = flow_result_value(
+            dispatch,
+            flow_key(
+                dispatch,
+                "subObservesBrokenInit",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            observed.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FailedBindingInitializer
+            )
+        );
+
+        let ignored_key = flow_key(
+            dispatch,
+            "subIgnoresBrokenInit",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let ignored = flow_result_value(dispatch, ignored_key.clone());
+        assert_eq!(
+            ignored.degradation(),
+            None,
+            "an unobserved failed binding degrades nothing"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    ignored_key
+                ))),
+            1,
+            "the clean sibling still admits warm"
+        );
+    });
+}
+
+/// The FOURTH budget non-admission layer: an over-budget demand slice is
+/// refused at the `SemanticGraphStore` memo — the result is a typed
+/// no-value Budget failure, ZERO memo candidates, ZERO slice-node
+/// entries (the first three layers), and the SAME demand under the
+/// restored armed budget completes and admits (the discrimination that
+/// the budget, and nothing else, caused the refusal).
+#[test]
+pub(crate) fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
+    use verter_session_query::flow::peeker::FlowSliceBudget;
+    let host = make_host();
+    host.project_type_store()
+        .flow_slice()
+        .set_budget_for_test(FlowSliceBudget {
+            max_selected_nodes: 1,
+            ..FlowSliceBudget::default()
+        });
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLocalConst",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(
+            flow_is_miss(dispatch, key.clone()),
+            "an over-budget slice is a typed Budget failure, never a value"
+        );
+        let store = host.project_type_store();
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "layer 4: the SemanticGraphStore memo admits nothing for an over-budget slice"
+        );
+        assert_eq!(
+            store.flow_slice().hash_node().entry_count(),
+            0,
+            "the hash node publishes nothing (ReturnOnly)"
+        );
+        assert_eq!(
+            store.flow_slice().lowered_node().entry_count(),
+            0,
+            "no slice hash exists, so the lowered store is unaddressable and empty"
+        );
+
+        // Restore the armed budget: the SAME key completes and admits —
+        // the budget, and nothing else, caused the refusal.
+        store
+            .flow_slice()
+            .set_budget_for_test(FlowSliceBudget::default());
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1
+        );
+    });
+}
+
+/// SCC-9 (sole warm rail, behavioral half): a warm `FlowReturn` read
+/// validates through the `FlowBody` rooting + the unioned consumed facts
+/// ONLY — it consults NO slice state. Discriminating probe: evict every
+/// flow-slice artifact after the cold build; a fresh request's warm read
+/// still serves (and rebuilds NO graph — a slice consult on the warm
+/// path would have had to rebuild the evicted graph and republish the
+/// evicted hash entry).
+#[test]
+fn flow_return_warm_read_consults_no_slice_state() {
+    let host = make_host();
+    let cold = with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        flow_result_value(dispatch, key)
+    });
+    let store = host.project_type_store();
+    let builds_after_cold = store.flow_slice().graphs().build_count();
+    assert!(builds_after_cold >= 1, "the cold path built the flow graph");
+
+    // Drop EVERY flow-slice artifact for the canonical.
+    store.flow_slice().remove_canonical(CANONICAL);
+    assert_eq!(store.flow_slice().hash_node().entry_count(), 0);
+
+    // A FRESH request (live store view) warm-reads the published entry.
+    let warm = with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let warm_read = dispatch
+            .graph()
+            .get_flow_return_result(dispatch.ctx, &key)
+            .map(|served| served.value)
+            .expect("the published FlowReturn entry warm-validates on a live view");
+        assert_eq!(warm_read, cold);
+        flow_result_value(dispatch, key)
+    });
+    assert_eq!(warm, cold, "the warm read serves the published result");
+    assert_eq!(
+        store.flow_slice().graphs().build_count(),
+        builds_after_cold,
+        "the warm path re-derived NO slice state (no graph rebuild, no re-plan)"
+    );
+    assert_eq!(
+        store.flow_slice().hash_node().entry_count(),
+        0,
+        "the warm path re-published NO slice artifact"
+    );
+}
+
+/// Plan-once: ONE cold FlowReturn demand runs the demand planner exactly
+/// once — the lowered-body node lowers the hash node's RETAINED plan (no
+/// re-plan, no demand-plan replan) — and a clean warm replay plans nothing
+/// at all.
+#[test]
+fn flow_return_cold_demand_plans_the_slice_once_and_warm_replay_never_plans() {
+    use verter_session_query::flow::peeker::return_path_peeker_plan_thread_invocations;
+
+    let host = make_host();
+    let plans_before = return_path_peeker_plan_thread_invocations();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key);
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the clean literal body completes"
+        );
+    });
+    let store = host.project_type_store();
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before + 1,
+        "one cold FlowReturn demand plans its slice exactly once: the hash \
+         node plans, the lowered node lowers the RETAINED plan"
+    );
+    assert_eq!(store.flow_slice().hash_node().entry_count(), 1);
+    assert_eq!(store.flow_slice().lowered_node().entry_count(), 1);
+
+    // A clean warm replay (a fresh dispatch over the same store) adds
+    // zero plans.
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let warm = flow_result_value(dispatch, key);
+        assert_eq!(warm.degradation(), None);
+    });
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before + 1,
+        "a clean warm replay adds zero plans"
+    );
+}
+
+/// §3.4 recorded-point identity: a published `FlowReturn` entry's
+/// `satisfied_projection` is the point set the compute ACTUALLY produced
+/// — the whole-return demand point — never an empty set and never a
+/// synthetic slot preset detached from the key's own demand axis.
+#[test]
+fn flow_return_publishes_compute_recorded_whole_return_point() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        let recorded = dispatch
+            .graph()
+            .entry_satisfied_projection_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                key.clone(),
+            )))
+            .expect("the clean complete result published");
+        let points = recorded.points();
+        assert_eq!(points.len(), 1, "one materialised point: the whole return");
+        assert_eq!(
+            points[0].point(),
+            &key.demand.point,
+            "the recorded point IS the whole-return demand point the compute served"
+        );
+        assert!(
+            points[0].path().is_empty(),
+            "the whole-return point materialises at the empty path"
+        );
+
+        // The MEMBER publish rail: a nested callee published at the SCC
+        // drain carries ITS compute-recorded point (threaded through the
+        // pending ledger — there is no publish-time default on the
+        // member path).
+        let root = flow_key(
+            dispatch,
+            "subOuterCallsInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        // The typed entry (the production consumer path) drains the
+        // SCC-closed member batch onto the root's carrier.
+        let step = dispatch.execute_flow_return(root);
+        assert!(matches!(
+            step,
+            verter_type_engine::semantic_query::FlowReturnStep::Complete(_)
+        ));
+        let member = flow_key(
+            dispatch,
+            "subInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let member_recorded = dispatch
+            .graph()
+            .entry_satisfied_projection_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                member.clone(),
+            )))
+            .expect("the drained member published its own family entry");
+        let member_points = member_recorded.points();
+        assert_eq!(member_points.len(), 1);
+        assert_eq!(
+            member_points[0].point(),
+            &member.demand.point,
+            "the member entry's recorded point is the point ITS compute served"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Member-projection demand (`ReturnType<typeof f>['b']` rail)
+// ---------------------------------------------------------------------------
+
+/// The single-named-member `ReturnProjectionDemand` point for one
+/// declaration-body function.
+fn member_flow_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+    member: &str,
+) -> FlowReturnKey {
+    let mut key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+    key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+        point: verter_type_engine::semantic_query::demand::Demand::navigate(
+            verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                verter_type_engine::semantic_query::PathSegment::Member(
+                    verter_type_engine::semantic_query::PropertyKey::identifier(member),
+                ),
+            ]),
+        ),
+    };
+    key
+}
+
+/// Whether any dispatched key under the capture names `needle` (the
+/// sibling-materialisation detector for the member-demand tests).
+fn capture_touches(
+    snapshot: &verter_type_engine::capture_token::CaptureSnapshot,
+    needle: &str,
+) -> bool {
+    snapshot
+        .dispatch_log
+        .iter()
+        .any(|entry| format!("{:?}", entry.key).contains(needle))
+}
+
+/// The member demand evaluates ONLY the demanded member: `b` (a
+/// widening-literal local read) projects the widened `number`, and the
+/// sibling binding's value root (`sideMarker`) never enters a dispatch
+/// key. The whole-return demand on the SAME function is the positive
+/// control: it DOES materialise the sibling, so the detector is proven
+/// able to see a sibling materialisation.
+#[test]
+fn flow_return_member_demand_projects_widened_member_and_skips_sibling_binding() {
+    // Member demand: sibling stays cold.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let guard =
+            verter_type_engine::capture_token::CaptureToken::start_for_query("flow_member_demand");
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberWiden", "b"),
+        );
+        let snapshot = guard.end();
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the demanded member widens its literal local read to number"
+        );
+        assert!(
+            !capture_touches(&snapshot, "sideMarker"),
+            "the elided sibling's value root must never enter a dispatch key"
+        );
+    });
+
+    // Positive control on a FRESH host: the whole-return demand
+    // materialises the sibling — the detector is discriminating.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let guard =
+            verter_type_engine::capture_token::CaptureToken::start_for_query("flow_member_control");
+        let (expr, _) = flow_result(
+            dispatch,
+            &control,
+            flow_key(
+                dispatch,
+                "subMemberWiden",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        let snapshot = guard.end();
+        assert_eq!(
+            object_prop(&expr, "b"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert!(
+            capture_touches(&snapshot, "sideMarker"),
+            "positive control: the WHOLE-return evaluation materialises the sibling, \
+             so a member-demand leak would have been visible to the detector"
+        );
+    });
+}
+
+/// `as const` preservation through the member demand: a const-asserted
+/// literal local read stays the pinned literal — TS7 oracle
+/// (`tsc 7.0.2 --declaration`): `const x = 1 as const; return { x }`
+/// declares `{ x: 1 }`.
+#[test]
+fn flow_return_member_demand_preserves_const_asserted_local() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberConstAssert", "b"),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+    });
+}
+
+/// A member demand over a NON-OBJECT return fails closed with a typed
+/// no-value outcome — never a silently widened whole-return result.
+#[test]
+fn flow_return_member_demand_on_non_object_return_is_typed_miss() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert!(flow_is_miss(
+            dispatch,
+            member_flow_key(dispatch, "subLiteral", "b")
+        ));
+    });
+}
+
+/// A member demand for a key the returned object does not carry fails
+/// closed — never a fabricated `undefined` member.
+#[test]
+fn flow_return_member_demand_missing_member_is_typed_miss() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert!(flow_is_miss(
+            dispatch,
+            member_flow_key(dispatch, "subMemberWiden", "missing")
+        ));
+    });
+}
+
+/// A member demand over a body with a bare return / fallthrough arm
+/// fails closed (the `undefined` arm cannot fold into a member access).
+#[test]
+fn flow_return_member_demand_with_bare_return_arm_is_typed_miss() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert!(flow_is_miss(
+            dispatch,
+            member_flow_key(dispatch, "subMemberBareMix", "b")
+        ));
+    });
+}
+
+/// Bare-return-as-void keeps its OTHER half: a bare return ALONGSIDE a
+/// value return contributes `undefined` (never `void`, never dropped).
+/// The `undefined` arm is a CONTRIBUTOR, so the value return's fresh
+/// literal is no longer alone and stays pinned — TypeScript 7.0.2 on
+/// `subMixedBareValue` is `1 | undefined`, not `number | undefined`.
+#[test]
+fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subMixedBareValue",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("expected `1 | undefined`, got {expr:?}");
+        };
+        assert!(arms.contains(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Undefined
+        )));
+        assert!(
+            arms.contains(&verter_type_expr::TypeExpr::Literal(
+                verter_type_expr::LiteralValue::Number(1.0)
+            )),
+            "the value return's literal stays pinned beside the \
+             `undefined` arm: {expr:?}"
+        );
+    });
+}
+
+/// A leaf whose evaluation trips the flow-return work budget: a `satisfies`
+/// over a conditional holding a 5,000-element array literal
+/// ([`budget_tripping_content_trips_when_lowered`]).
+fn budget_tripping_content() -> String {
+    format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    )
+}
+
+/// The budget-tripping content trips when it IS lowered: returned, the
+/// function's evaluation answers the leaf lowering's typed budget failure.
+/// The two tests below read it unlowered, which only this makes a proof.
+#[test]
+fn budget_tripping_content_trips_when_lowered() {
+    let source = format!(
+        "export function pf() {{ return {}; }}\n",
+        budget_tripping_content()
+    );
+    assert_eq!(
+        super::checker_probe_lane_tests::flow_return_outcome_in(Default::default(), &source, "pf"),
+        Err(crate::host_flow_return_audit::FlowReturnError::Failure(
+            verter_type_engine::semantic_query::FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            )
+        ))
+    );
+}
+
+/// The demand slice is the ONLY lowered content: an UNREAD binding's
+/// initializer is outside every selected slot, so its content never
+/// lowers — a work-budget edge inside it cannot exist, and the
+/// whole-return evaluation stays complete. Mutation recipe: lowering the
+/// whole body (a pre-slice whole-function evaluator) charges the unread
+/// initializer against the connected-work rail in `flow_return.rs` and the
+/// `SEMANTIC_INFERENCE_TRAVERSAL_BUDGET` traversal cap, degrading the
+/// function to a miss.
+#[test]
+fn flow_return_unread_binding_content_never_lowers() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/unread-content.ts".to_string()),
+        input_id: "/ws/unread-content.ts".to_string(),
+        source: Arc::from(format!(
+            "export function sliced() {{\n  const unused = {};\n  return 2;\n}}\n",
+            budget_tripping_content()
+        )),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/unread-content.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/unread-content.ts", "sliced");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the unread binding's initializer stays unlowered; its budget edge cannot poison"
+        );
+    });
+}
+
+/// The member demand lowers ONLY the demanded member's content: an
+/// elided sibling member whose value would trip the leaf-lowering
+/// budget never lowers, so the demanded member still projects complete.
+/// Mutation recipe: lowering every member of the returned object (a
+/// pre-slice whole-function evaluator) trips the budget on the sibling
+/// and degrades the member demand to a miss.
+#[test]
+fn flow_return_member_demand_never_lowers_elided_sibling_content() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/member-sibling-content.ts".to_string()),
+        input_id: "/ws/member-sibling-content.ts".to_string(),
+        source: Arc::from(format!(
+            "export function memberSliced() {{\n  return {{ a: {}, b: 1 }};\n}}\n",
+            budget_tripping_content()
+        )),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/member-sibling-content.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let mut key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from("/ws/member-sibling-content.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("memberSliced"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for("/ws/member-sibling-content.ts"),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+            point: verter_type_engine::semantic_query::demand::Demand::navigate(
+                verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                    verter_type_engine::semantic_query::PathSegment::Member(
+                        verter_type_engine::semantic_query::PropertyKey::identifier("b"),
+                    ),
+                ]),
+            ),
+        };
+        let (expr, _) = flow_result(dispatch, &host, key);
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the elided sibling's content stays unlowered; its budget edge cannot poison"
+        );
+    });
+}
+
+/// The whole-return and single-member demand points COEXIST as distinct
+/// family candidates: neither satisfies the other (the §3.4 two-gate
+/// hit over the RECORDED materialised point), and a warm re-read of the
+/// whole point after the member publish still serves the whole object.
+#[test]
+fn flow_return_member_and_whole_demands_coexist_as_candidates() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (whole, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subMemberWiden",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert!(matches!(&whole, verter_type_expr::TypeExpr::Object(_)));
+        let (member, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberWiden", "b"),
+        );
+        assert_eq!(
+            member,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        // Warm re-reads serve each point's own candidate.
+        let (whole_again, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subMemberWiden",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert!(matches!(
+            &whole_again,
+            verter_type_expr::TypeExpr::Object(_)
+        ));
+        let (member_again, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberWiden", "b"),
+        );
+        assert_eq!(
+            member_again,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    });
+}
+
+/// Registry-live guard (`GuardId::FlowReturnRoutesThroughProjectSemanticDispatch`)
+/// — the `SemanticQueryKey::FlowReturn` arm dispatches through
+/// `ProjectSemanticDispatch::execute → SemanticGraphStore`, and the stored
+/// result IS the dispatched result: the same key read back from the graph
+/// store serves the identical published `FlowReturnResult`, and the
+/// consumer-facing function-return helper builds the IDENTICAL dispatch
+/// key (`function_return_helper_flow_arm_builds_the_identical_key`), so
+/// every consumer route funnels into this one dispatch. The
+/// no-second-constructor half is held by review pending a structural
+/// construction confinement on `FlowReturnResult` (its production
+/// constructors all live on the `build_flow_return` compute path today).
+#[test]
+pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
+    let host = make_host();
+    let (key, dispatched) = with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLocalConst",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        // Cold: the ONLY producing route is `execute` on the dispatch.
+        let dispatched = flow_result_value(dispatch, key.clone());
+        assert_eq!(dispatched.degradation(), None);
+        (key, dispatched)
+    });
+
+    // Against a FRESH view (the cold build's artifact is now visible):
+    // the graph store — the dispatch's sole publication surface — serves
+    // the SAME result for the same key, and re-execution serves the
+    // published candidate (no second producer path constructs a
+    // divergent result).
+    with_dispatch(&host, |fresh| {
+        let stored = fresh
+            .graph()
+            .get_flow_return_result(fresh.ctx, &key)
+            .map(|served| served.value)
+            .expect("the dispatched FlowReturn published to the graph store");
+        assert_eq!(
+            stored, dispatched,
+            "the stored candidate is the dispatched result — dispatch → \
+             SemanticGraphStore is the one serving path"
+        );
+        let warm = flow_result_value(fresh, key.clone());
+        assert_eq!(warm, dispatched);
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Function-scoped (`var`) reaching definitions: conditional-definition
+// fail-closed, declarator annotations, parameter redeclaration, and the
+// loop-body `var`.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Assert one function's flow return is CLEAN (no degradation), projects
+/// to `expected`, and admits exactly one warm candidate.
+fn assert_clean_warm(
+    host: &Arc<VerterHost>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+    expected: &verter_type_expr::TypeExpr,
+) {
+    let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+    let result = flow_result_value(dispatch, key.clone());
+    assert_eq!(result.degradation(), None, "{name} must stay clean");
+    let projected = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .unwrap_or_else(|| panic!("{name} must project"));
+    assert_eq!(&projected, expected, "{name} return type");
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        1,
+        "{name} must admit warm"
+    );
+}
+
+/// Assert one function's flow return is a DEGRADED success carrying
+/// `reason` — a usable value, ReturnOnly, zero warm candidates.
+fn assert_degraded_return_only(
+    host: &Arc<VerterHost>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+    reason: verter_type_engine::semantic_query::FlowReturnDegradation,
+) {
+    let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+    let result = flow_result_value(dispatch, key.clone());
+    assert_eq!(result.degradation(), Some(reason), "{name} must degrade");
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name} degraded success is ReturnOnly: zero memo entries"
+    );
+    assert!(
+        host.project_node_to_type_expr_for_test(result.return_type())
+            .is_some(),
+        "{name} degraded success still carries a usable value"
+    );
+}
+
+/// D13 / CONDITIONAL-VAR-BRANCH-JOIN — `branchVar`: the function-scoped
+/// `var` layer joins over the ONE shared product lattice at the `if`'s
+/// branch join. Both arms of `if (flag) var x: any = 1; else var x: any =
+/// "s"; return x` define `x` on every continuing path, so the join's
+/// reaching definition (`any`) publishes CLEAN and warm-admissible — the
+/// checker's own answer, where the pre-join substrate degraded to the
+/// last-evaluated arm's value or failed closed.
+#[test]
+fn flow_return_branch_var() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subBranchVarAny",
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any),
+        );
+    });
+}
+
+/// D13 / CONDITIONAL-VAR-BRANCH-JOIN — `branchVarUndef`: the one-armed
+/// `if (flag) { var y: number | undefined = 1; } return y` folds the
+/// never-assigned path's DECLARED authority into the branch join
+/// (`number | undefined`), publishing the checker's answer CLEAN and
+/// warm-admissible. The declared authority is what makes the fold sound;
+/// without it the negative below keeps the typed refusal.
+#[test]
+fn flow_return_branch_var_undef() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subBranchVarUndef",
+            &verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+            ]),
+        );
+    });
+}
+
+/// The one-armed `var` WITHOUT a declared annotation stays degraded:
+/// `if (flag) { var w = 1; } return w` has a never-assigned path no
+/// declared authority covers, and tsc REJECTS that program outright
+/// (TS2454, used before being assigned) — fail closed is the contract.
+#[test]
+fn flow_return_conditionally_defined_var_degrades_at_observation() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert_degraded_return_only(
+            &host,
+            dispatch,
+            "subBranchVarOneArm",
+            verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        );
+    });
+}
+
+/// D13 / R2-UNAPPLIED-WRITE-EFFECT-SOURCE-ORDER — the expression-position
+/// whole-slot write applies with EVALUATION-ORDER reasoning. Object
+/// members evaluate left-to-right, so `{ b: x, a: (x = "s") }` reads `b`
+/// BEFORE the write (`string | number`, the parameter's own reaching) and
+/// applies the write AT `a` — publishing `{ b: string | number; a: string }`,
+/// the checker's own answer, CLEAN and warm-admissible. The
+/// write-then-read twin (`subUnappliedParamWrite`) publishes
+/// `{ a: string; b: string }` the same way. A span-comparison suppression
+/// ("drop the degradation when every read precedes the write") is
+/// unsound and stays rejected — the deferred-read negative below is the
+/// counterexample.
+#[test]
+fn flow_return_source_order_object_read_before_write_publishes_clean() {
+    let host = make_host();
+    let string_or_number = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    ]);
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subSourceOrderReadBeforeWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the in-order-applied expression write degrades nothing"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(object_prop(&projected, "b"), &string_or_number);
+        assert_eq!(object_prop(&projected, "a"), &string);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
+        );
+
+        let key = flow_key(
+            dispatch,
+            "subUnappliedParamWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the write-then-read twin applies the write before `b` reads it"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(object_prop(&projected, "a"), &string);
+        assert_eq!(object_prop(&projected, "b"), &string);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
+        );
+    });
+}
+
+/// The R2 DEFERRED-READ negative: a closure created inside the same
+/// object literal observes the write that evaluates AFTER it — the
+/// checker's deferred-read rule — so `{ b: () => x, a: (x = "s") }`
+/// publishes `b: () => string`, NOT the statement-entry
+/// `() => string | number` a span-order suppression would publish. This
+/// is exactly why suppressing the write rail by comparing read and write
+/// spans was ruled unsound.
+#[test]
+fn flow_return_source_order_deferred_read_still_observes_the_write() {
+    let host = make_host();
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    let returns_string = verter_type_expr::TypeExpr::Function(std::sync::Arc::new(
+        verter_type_expr::FunctionExpr::synthetic(
+            Vec::new(),
+            Some(std::sync::Arc::new(string.clone())),
+            Vec::new(),
+        ),
+    ));
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subSourceOrderDeferredRead",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the capture look-ahead observes the write and publishes the checker's answer"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(object_prop(&projected, "b"), &returns_string);
+        assert_eq!(object_prop(&projected, "a"), &string);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
+        );
+    });
+}
+
+const OWNER_PROBE_CANONICAL: &str = "/ws/owner-probe.ts";
+
+const OWNER_PROBE_FIXTURE: &str = r#"
+export function ownerAbsentClassCarrier() {
+  class FrameOnly {}
+  const g = (v: FrameOnly): FrameOnly => v;
+  return g;
+}
+
+export function ownerAbsentEnumCarrier() {
+  enum FrameEnum {
+    A,
+  }
+  const h = (v: FrameEnum): FrameEnum => v;
+  return h;
+}
+
+export class FrameCollision {}
+
+export function ownerCollisionClass() {
+  class FrameCollision {}
+  const g = (v: FrameCollision): FrameCollision => v;
+  return g;
+}
+"#;
+
+/// D13 / TYPE-SPACE-OWNER-PROBE-CARRIER-SETTLEMENT — the owner-side probe
+/// settles through the shared head-resolution authority. An owner-absent
+/// class or enum name the frame owns is a GENUINE MISS in owner scope
+/// (its carrier-mode probe lowers to a `BareRef` carrier, which the
+/// demand-point settlement proves unresolved), so the frame gate stays
+/// silent and the signature PRESERVES the unchanged unresolved carrier —
+/// never the unmodelled-position marker substitution the old
+/// carrier-counts-as-answered probe forced. A REAL owner-scope
+/// collision (a module-scope class of the same name) still fails closed:
+/// the positions carry the marker, the result is degraded, and nothing
+/// warm-publishes a wrong value.
+#[test]
+fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(OWNER_PROBE_CANONICAL.to_string()),
+        input_id: OWNER_PROBE_CANONICAL.to_string(),
+        source: Arc::from(OWNER_PROBE_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(OWNER_PROBE_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        for (name, carrier) in [
+            ("ownerAbsentClassCarrier", "FrameOnly"),
+            ("ownerAbsentEnumCarrier", "FrameEnum"),
+        ] {
+            let key = FlowReturnKey {
+                function: dispatch.flow_function_slot_for(
+                    Arc::from(OWNER_PROBE_CANONICAL),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from(name),
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                ),
+                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
+                demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+                result_contract: super::flow_solve::flow_return_result_contract_id(),
+            };
+            let result = flow_result_value(dispatch, key.clone());
+            assert_eq!(
+                result.degradation(),
+                None,
+                "{name}: an owner-absent frame-owned name never trips the frame gate"
+            );
+            let projected = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("the signature projects");
+            let verter_type_expr::TypeExpr::Function(function) = &projected else {
+                panic!("{name}: a function value, got {projected:?}");
+            };
+            let expected = verter_type_expr::TypeExpr::Ref {
+                name: Arc::from(carrier),
+                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+            };
+            assert_eq!(
+                function.parameters[0].ty, expected,
+                "{name}: the parameter keeps the unchanged unresolved carrier"
+            );
+            assert_eq!(
+                function.return_type.as_deref(),
+                Some(&expected),
+                "{name}: the return keeps the unchanged unresolved carrier"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                1,
+                "{name}: the carrier-preserving result admits warm"
+            );
+        }
+
+        let collision = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(OWNER_PROBE_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("ownerCollisionClass"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let result = flow_result_value(dispatch, collision.clone());
+        assert_eq!(
+            result.degradation(),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+            "a real owner-scope collision fails closed"
+        );
+        // POSITIONAL: the signature keeps its shape and every slot that
+        // referenced the colliding name carries the typed marker — never
+        // the outer class's value.
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the degraded signature projects");
+        let verter_type_expr::TypeExpr::Function(function) = &projected else {
+            panic!("the collision keeps the signature shape, got {projected:?}");
+        };
+        let marker = verter_type_expr::TypeExpr::Unknown(
+            verter_type_expr::UnknownValue::compatibility_projection("unmodeledPosition"),
+        );
+        assert_eq!(
+            function.parameters[0].ty, marker,
+            "the collision substitutes the typed marker at the parameter, never the outer class's value"
+        );
+        assert_eq!(
+            function.return_type.as_deref(),
+            Some(&marker),
+            "the collision substitutes the typed marker at the return, never the outer class's value"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(collision))),
+            0,
+            "the collision never warm-publishes a wrong value"
+        );
+    });
+}
+
+/// The conditional-definition rail is CONDITIONAL-DEPTH keyed, not
+/// nesting keyed: a plain block executes unconditionally, so every one of
+/// these `var` bindings keeps its reaching definition and stays clean +
+/// warm. A blanket "any nested `var` degrades" rule breaks all of them.
+#[test]
+fn flow_return_unconditional_var_definitions_stay_clean_and_warm() {
+    let host = make_host();
+    let number = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+    with_dispatch(&host, |dispatch| {
+        // `{ var y = 1 } return y`
+        assert_clean_warm(&host, dispatch, "subHoistedVarBlock", &number);
+        // `{ { var y = 1 } } return y`
+        assert_clean_warm(&host, dispatch, "subNestedBlockVar", &number);
+        // `if (flag) { } var y = 1; return y`
+        assert_clean_warm(&host, dispatch, "subEmptyIfThenVar", &number);
+        // `var y = 1; var y = 2; return y`
+        assert_clean_warm(&host, dispatch, "subRedeclaredVar", &number);
+        // `var y = 1; { let y = "s"; } return y`
+        assert_clean_warm(&host, dispatch, "subVarShadowedByBlockLet", &number);
+    });
+}
+
+/// A declarator's authored TS annotation is the binding's DECLARED type.
+/// An initializer-less declarator seeds from it (`var y: number |
+/// undefined;` is `number | undefined`, not the unbound implicit `any`),
+/// and an annotated `const` publishes the annotation instead of its
+/// initializer's pinned literal (`const y: string = "s"` is `string`, not
+/// `"s"`) — the annotation SUPPLIES the type rather than merely
+/// suppressing widening. A literal annotation still pins (`const y: "s" =
+/// "s"` stays `"s"`).
+#[test]
+fn flow_return_declarator_annotation_supplies_the_binding_type() {
+    let host = make_host();
+    let number_or_undefined = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subVarAnnotatedNoInit",
+            &number_or_undefined,
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subLetAnnotatedNoInit",
+            &number_or_undefined,
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subAnnotatedConstLiteral",
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subAnnotatedConstLiteralPinned",
+            &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                "s".to_string(),
+            )),
+        );
+    });
+}
+
+/// A hoisted `var` that REDECLARES a parameter name rebinds that name for
+/// the whole function: the declarator's reaching definition wins over the
+/// parameter's declared type (`function f(x: string | number) { var x:
+/// string | number = "s"; return x }` is `string`). A read the declarator
+/// never reached still resolves to the PARAMETER, never a fabricated
+/// `any`.
+#[test]
+fn flow_return_hoisted_var_redeclaring_a_parameter_wins_over_the_parameter() {
+    let host = make_host();
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(&host, dispatch, "subRedeclareParamVar", &string);
+        assert_clean_warm(&host, dispatch, "subRedeclareParamVarNested", &string);
+        // `return x; var x = "s"` — the declarator is unreachable, so the
+        // read resolves to the parameter.
+        assert_clean_warm(&host, dispatch, "subForwardVarOverParam", &string);
+    });
+}
+
+/// A return-free loop is fall-through TRANSPARENT only while it binds
+/// nothing that outlives it. A `var` declared in its body is
+/// function-scoped and escapes the loop: `while (flag) { var v = 1 } return
+/// v` published a clean, warm `any` where the oracle is `number` (with
+/// TS2454, used before being assigned). The loop lowers structurally, and
+/// the `var` the entering path never defines keeps the
+/// conditional-definition degradation, exactly like an `if` arm's. A loop
+/// binding only block-scoped names stays transparent.
+#[test]
+fn flow_return_return_free_loop_declaring_a_var_degrades() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let result = flow_result_value(
+            dispatch,
+            flow_key(
+                dispatch,
+                "subLoopBodyVar",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition
+            ),
+            "a `var` a loop body first defines is conditionally defined past the loop"
+        );
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(result.return_type())
+                .expect("the degraded result projects"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subLoopBodyLet",
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        );
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Public-API SCC flight release
+// ────────────────────────────────────────────────────────────────────────
+
+const SCC_CANONICAL: &str = "/ws/flow-scc.ts";
+
+/// Two mutual components. `scCleanA`/`scCleanB` close cleanly (both
+/// members admit warm); `scDegradedA`/`scDegradedB` carry an unapplied
+/// write effect, so the whole component is a degraded success —
+/// `ReturnOnly`, never warm. The write sits in a `while` test: a plain
+/// `=` or compound write at statement position, a write inside a
+/// logical operand and one inside an `if` test are applied by the
+/// evaluator and stay clean, so the degradation fixture rides the
+/// loop-test position nobody applies.
+const SCC_FIXTURE: &str = r#"
+export function scCleanA(c: boolean) {
+  if (c) return 1;
+  return scCleanB(c);
+}
+
+export function scCleanB(c: boolean) {
+  if (c) return 2;
+  return scCleanA(c);
+}
+
+export function scDegradedA(c: boolean) {
+  if (c) return 1;
+  return scDegradedB(c);
+}
+
+export function scDegradedB(c: boolean) {
+  let z = 1;
+  while ((z = 2)) { break; }
+  return scDegradedA(!!z);
+}
+
+export function scResA(c: boolean) {
+  if (c) return scResB(c);
+  return 0;
+}
+
+export function scResB(c: boolean) {
+  return scResA(c);
+}
+
+export function scRingX(c: boolean) {
+  if (c) return scRingY(c);
+  return 0;
+}
+
+export function scRingY(c: boolean) {
+  return scRingZ(c);
+}
+
+export function scRingZ(c: boolean) {
+  return scRingX(c);
+}
+"#;
+
+fn make_scc_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(SCC_CANONICAL.to_string()),
+        input_id: SCC_CANONICAL.to_string(),
+        source: Arc::from(SCC_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(SCC_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn scc_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(SCC_CANONICAL),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(SCC_CANONICAL),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// Mint the proof a re-staged member carries: the fenced-publish
+/// machinery tests stage members by hand, and the publish boundary is
+/// proof-typed — the member's payload must be a `CompleteFlowResult`
+/// naming the member's OWN key (the batch vetoes a proof minted for
+/// another key). Test-only mint; production proofs come from the
+/// finalizer alone.
+fn staged_flow_proof(
+    key: &FlowReturnKey,
+    value: verter_type_engine::semantic_query::FlowReturnResult,
+) -> super::flow_solve::CompleteFlowResult {
+    use super::dispatch_txn::flow_obligation_state::{
+        FlowConvergenceEvidence, FlowEvaluationProvenance,
+    };
+    use super::flow_solve::{CompleteFlowResult, FlowConvergencePolicy, FlowDemandBasis};
+    let file_language = crate::LanguageRegistry::global()
+        .classify_static(SCC_CANONICAL)
+        .static_resolution();
+    let parse_key = verter_language::default_parse_identity_for(SCC_FIXTURE, &file_language)
+        .expect("the SCC fixture derives a parse identity")
+        .1;
+    let basis = FlowDemandBasis {
+        ancestry: Default::default(),
+        graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
+            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            function: verter_session_query::function_program::FunctionProgramKey {
+                declaration: verter_session_query::function_program::FunctionDeclarationRef {
+                    owner: key.function.declaration_slot.owner,
+                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    space: verter_session_query::facts::SymbolSpace::Value,
+                },
+                part: key.function.function_part.clone(),
+                overload_ordinal: key.function.overload_ordinal,
+            },
+            flow_body_stable_hash: [0; 16],
+            flow_body_exact_hash: [0; 16],
+            parse_env_hash: key.context.parse_env_hash,
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
+        },
+        query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+        input_basis: verter_identity::identity::InputBasisId::from_canonical(
+            &FlowEvaluationProvenance::new(1, 1, 1, 0),
+        ),
+        result_contract: key.result_contract.clone(),
+    };
+    CompleteFlowResult::for_tests(
+        basis,
+        value,
+        FlowConvergenceEvidence::for_tests(FlowConvergencePolicy { max_iterations: 16 }, 1, true),
+    )
+    .expect("a clean re-staged value mints a proof")
+}
+
+/// A flow result completed on the transaction answers a later demand on it
+/// with its proven value, and REPLAYS what its evaluation read into the
+/// scopes live at the demanding site — the fact into the live tracer, the
+/// canonical self-root onto the live build frame, and the
+/// canonical-evidence epoch — so a build that consumes the reused value is
+/// rooted exactly as if it had re-evaluated it.
+#[test]
+fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
+    reused_flow_result_replays(verter_session_query::facts::reuse::ReuseClass::Shared);
+}
+
+/// A completed result whose persistent admission was refused for a typed,
+/// deterministic reason still answers the rest of its transaction — its
+/// completion does not depend on its retention — and the refusal travels
+/// with it: the live tracer that consumes it is refused too, and its reads
+/// are replayed as for any other completed result.
+#[test]
+fn a_request_only_flow_result_answers_its_transaction_and_replays_its_refusal() {
+    reused_flow_result_replays(verter_session_query::facts::reuse::ReuseClass::RequestOnly(
+        verter_session_query::facts::reuse::NonCacheableRefusal::new(
+            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
+        ),
+    ));
+}
+
+/// An incomplete result, or one refused for a transient or unattributed
+/// reason, never enters the transaction's result table: a later demand
+/// evaluates it again rather than freezing a degraded answer.
+#[test]
+fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
+    use verter_session_query::facts::reuse::{NoReuseCause, ReuseClass};
+    let host = make_scc_host();
+    with_dispatch(&host, |dispatch| {
+        let key = scc_key(dispatch, "scCleanA");
+        let value = flow_result_value(dispatch, key.clone());
+        for reuse in [
+            ReuseClass::NoReuse(NoReuseCause::Incomplete),
+            ReuseClass::NoReuse(NoReuseCause::TransientRefusal(
+                verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
+            )),
+            ReuseClass::NoReuse(NoReuseCause::UnattributedRefusal(
+                verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
+            )),
+        ] {
+            let mut txn = dispatch.dispatch_txn.borrow_mut();
+            txn.flow.results.complete(
+                key.clone(),
+                super::dispatch_txn::TransactionFlowResult {
+                    value: value.clone(),
+                    reuse,
+                    replay: super::dispatch_txn::FlowMemberReuse {
+                        reads:
+                            verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
+                                facts: Arc::from(Vec::new()),
+                                non_cacheable: false,
+                            },
+                        observed_self_roots: Vec::new(),
+                        canonical_evidence_deposited: false,
+                    },
+                },
+            );
+            assert!(
+                !txn.flow.results.contains(&key),
+                "{reuse:?} must not answer a later demand on the transaction"
+            );
+        }
+    });
+}
+
+fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseClass) {
+    let host = make_scc_host();
+    with_dispatch(&host, |dispatch| {
+        let key = scc_key(dispatch, "scCleanA");
+        let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
+        let value = flow_result_value(dispatch, key.clone());
+        // Unpublished, as a member queued behind its machinery root is.
+        dispatch.graph().evict_family_for_tests(&query);
+        let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: "/ws/replayed.ts".to_string(),
+            hash: [5; 16],
+        };
+        let root: verter_type_engine::semantic_query_memo::ObservedGraphSelfRoot =
+            (Arc::from("/ws/replayed.ts"), [6; 16]);
+        dispatch.dispatch_txn.borrow_mut().flow.results.complete(
+            key.clone(),
+            super::dispatch_txn::TransactionFlowResult {
+                value: value.clone(),
+                reuse,
+                replay: super::dispatch_txn::FlowMemberReuse {
+                    reads: verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
+                        facts: Arc::from(vec![fact.clone()]),
+                        non_cacheable: false,
+                    },
+                    observed_self_roots: vec![root.clone()],
+                    canonical_evidence_deposited: true,
+                },
+            },
+        );
+        let epoch = dispatch.canonical_evidence_epoch.get();
+        let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+        let (step, read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || dispatch.execute_flow_return(key.clone()),
+        );
+        let observed = frame.finish();
+        match step {
+            verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => assert_eq!(
+                result.return_type(),
+                value.return_type(),
+                "the demand is answered with the member's proven value"
+            ),
+            other => panic!("a reusable member answers Complete, got {other:?}"),
+        }
+        let signature = match (read_set.finalise(), reuse.is_shared()) {
+            (
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(signature),
+                true,
+            ) => signature,
+            (
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+                    signature,
+                ),
+                false,
+            ) => signature,
+            (other, shared) => panic!(
+                "a {} result seals the live tracer {}, got {other:?}",
+                if shared { "shared" } else { "request-only" },
+                if shared { "cacheable" } else { "non-cacheable" }
+            ),
+        };
+        assert!(
+            signature.contains(&fact),
+            "the recorded fact reaches the live tracer: {signature:?}"
+        );
+        assert!(
+            observed.observed_self_roots.contains(&root),
+            "the recorded self-root reaches the live build frame"
+        );
+        assert_ne!(
+            dispatch.canonical_evidence_epoch.get(),
+            epoch,
+            "the recorded canonical evidence advances the epoch"
+        );
+    });
+}
+
+/// One PUBLIC-API demand: a fresh top-level dispatch per call, exactly as
+/// an external `SemanticQueryApi` consumer issues it.
+fn scc_public_demand(
+    host: &Arc<VerterHost>,
+    name: &str,
+) -> (
+    QueryResult<SemanticQueryOutput<SemanticQueryValue>>,
+    usize,
+    Vec<SemanticQueryKey>,
+) {
+    with_dispatch(host, |dispatch| {
+        let key = scc_key(dispatch, name);
+        let result = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        let candidates = dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+        let retained = dispatch.graph().retained_claimed_flight_keys_for_tests();
+        (result, candidates, retained)
+    })
+}
+
+#[track_caller]
+fn scc_expect_value(
+    host: &Arc<VerterHost>,
+    name: &str,
+) -> (
+    verter_type_engine::semantic_query::FlowReturnResult,
+    usize,
+    Vec<SemanticQueryKey>,
+) {
+    let (result, candidates, retained) = scc_public_demand(host, name);
+    let QueryResult::Value(SemanticQueryOutput {
+        value: SemanticQueryValue::FlowReturn(payload),
+        ..
+    }) = result
+    else {
+        panic!("{name} must answer through the public API, got {result:?}");
+    };
+    ((*payload).clone(), candidates, retained)
+}
+
+/// The public `execute(FlowReturn)` entry MUST release the component's
+/// drained member flights, in EITHER demand order.
+///
+/// The machinery root is the only place a flow SCC's deferred member
+/// batch is published or retired. Before the fix only
+/// `execute_flow_return_root` did that, and the public
+/// `SemanticQueryApi::execute` reached the family cold build through the
+/// generic dispatch instead — so after the first demand closed, every
+/// non-root member of the component was left with a CLAIMED, uncompleted
+/// in-flight entry whose owner registration had already dropped. The next
+/// demand of that member joined the stale entry, `register_wait`
+/// reported a cycle against an inactive owner, and the caller received a
+/// PERMANENT false `QueryResult::Recursive` — an incorrect public result
+/// AND persistent lifecycle poison.
+///
+/// Both orders run on SEPARATE FRESH HOSTS so neither leg can be carried
+/// by the other's warm state.
+#[test]
+fn flow_return_public_execute_releases_drained_members_both_orders() {
+    for (first, second) in [("scCleanA", "scCleanB"), ("scCleanB", "scCleanA")] {
+        let host = make_scc_host();
+
+        let (first_result, first_candidates, first_retained) = scc_expect_value(&host, first);
+        assert_eq!(
+            first_result.degradation(),
+            None,
+            "{first} closes its component cleanly"
+        );
+        assert_eq!(
+            first_candidates, 1,
+            "{first} is the machinery root and admits warm"
+        );
+        assert!(
+            first_retained.is_empty(),
+            "{first} must leave no claimed/uncompleted flight: {first_retained:?}"
+        );
+
+        // The DRAINED member, demanded through the public API on the same
+        // host. A stale member flight surfaces here as a permanent false
+        // `Recursive`.
+        let (second_raw, second_candidates, second_retained) = scc_public_demand(&host, second);
+        assert!(
+            !matches!(second_raw, QueryResult::Recursive(_)),
+            "{second} must never surface a false Recursive after {first} drained it"
+        );
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(second_result),
+            ..
+        }) = second_raw
+        else {
+            panic!("{second} must answer through the public API");
+        };
+        assert_eq!(
+            second_result.degradation(),
+            None,
+            "{second} closes its component cleanly"
+        );
+        assert_eq!(
+            second_candidates, 1,
+            "{second} was drained onto the root's carrier and reads warm"
+        );
+        assert!(
+            second_retained.is_empty(),
+            "{second} must leave no claimed/uncompleted flight: {second_retained:?}"
+        );
+
+        // Each member publishes ITS OWN return sites in source order
+        // (own literal first, the component contribution second) — and
+        // the SAME value whichever member was demanded first, which is
+        // the order-independence half of the contract.
+        for name in ["scCleanA", "scCleanB"] {
+            let (result, _, _) = scc_expect_value(&host, name);
+            let projected = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("a component member projects");
+            let verter_type_expr::TypeExpr::Union(arms) = &projected else {
+                panic!("{name} publishes the component union, got {projected:?}");
+            };
+            // Every member of a mutual component shares the component's
+            // fixed point, so both publish the SAME arm set in either
+            // demand order. Arm ORDER follows the root's accumulation
+            // order and is not part of this contract.
+            let mut arms: Vec<String> = arms.iter().map(|arm| format!("{arm:?}")).collect();
+            arms.sort();
+            assert_eq!(
+                arms,
+                vec![
+                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(1.0)),
+                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(2.0)),
+                ],
+                "{name} publishes the component's exact fixed point (demand order {first} → {second})"
+            );
+        }
+    }
+
+    // The DEGRADED leg: the whole component is a degraded success, so the
+    // batch is ABORTED and RETIRED rather than published. Nothing warms,
+    // and no member flight is retained.
+    for (first, second) in [
+        ("scDegradedA", "scDegradedB"),
+        ("scDegradedB", "scDegradedA"),
+    ] {
+        let host = make_scc_host();
+
+        let (first_result, first_candidates, first_retained) = scc_expect_value(&host, first);
+        assert!(
+            first_result.degradation().is_some(),
+            "{first} carries the component's typed degradation"
+        );
+        assert_eq!(
+            first_candidates, 0,
+            "{first} is a degraded success: ReturnOnly, zero memo entries"
+        );
+        assert!(
+            first_retained.is_empty(),
+            "{first} must retire every member flight: {first_retained:?}"
+        );
+
+        let (second_raw, second_candidates, second_retained) = scc_public_demand(&host, second);
+        assert!(
+            !matches!(second_raw, QueryResult::Recursive(_)),
+            "{second} must never surface a false Recursive after {first} aborted the batch"
+        );
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(second_result),
+            ..
+        }) = second_raw
+        else {
+            panic!("{second} must answer through the public API");
+        };
+        assert!(
+            second_result.degradation().is_some(),
+            "{second} carries the component's typed degradation"
+        );
+        assert_eq!(
+            second_candidates, 0,
+            "{second} never warms off an aborted batch: zero memo entries, zero backfill"
+        );
+        assert!(
+            second_retained.is_empty(),
+            "{second} must retire every member flight: {second_retained:?}"
+        );
+    }
+}
+
+/// A drained SCC member's flight must be RETIRED FROM THE TABLE IT WAS
+/// CLAIMED IN — the ordinary `inflight` table.
+///
+/// `begin_inline_flow_return_flight` inserts into `inflight`, so the
+/// publish must retire from `inflight`. Retiring from the
+/// `independent_inflight` table instead leaves the completed entry
+/// resident forever. The damage is not a stale value (a joiner does fork
+/// on a generation bump) — it is that the key can NEVER re-warm:
+/// admission finds the resident entry and takes the joiner branch on
+/// every later demand, so once the warm family is dropped (the global
+/// `memo_budget` FIFO drain) the flight table becomes an ungated shadow
+/// cache with no generation gate, no bounded retention, and no
+/// reverse-index participation, holding the member's `Arc` payload and
+/// full carrier forever.
+///
+/// `retained_claimed_flight_keys_for_tests` cannot see this: it filters
+/// on `completed.is_none()`, and the leaked entry is COMPLETED. The
+/// probe here deliberately ignores completion state.
+#[test]
+fn flow_return_drained_member_retires_from_the_table_it_claimed() {
+    for (first, second) in [("scCleanA", "scCleanB"), ("scCleanB", "scCleanA")] {
+        let host = make_scc_host();
+        let (_, first_candidates, _) = scc_expect_value(&host, first);
+        assert_eq!(first_candidates, 1, "{first} admits warm as machinery root");
+
+        let resident = with_dispatch(&host, |dispatch| {
+            dispatch.graph().resident_flight_keys_for_tests()
+        });
+        assert!(
+            resident.is_empty(),
+            "the closed component must leave NO resident flight entry \
+             (demand order {first} → {second}), found {resident:?}"
+        );
+
+        // The re-warm direction: drop the member's warm family exactly as
+        // the global `memo_budget` FIFO drain does, leaving the in-flight
+        // table alone. A correctly retired flight lets the next demand
+        // re-admit cold and warm again; a leaked one makes the key join a
+        // corpse forever.
+        with_dispatch(&host, |dispatch| {
+            let key = SemanticQueryKey::FlowReturn(Box::new(scc_key(dispatch, second)));
+            dispatch.graph().evict_family_for_tests(&key);
+        });
+        let (_, second_candidates, _) = scc_expect_value(&host, second);
+        assert_eq!(
+            second_candidates, 1,
+            "{second} must RE-WARM after its family is dropped; a leaked flight \
+             makes admission join the retained completed entry forever"
+        );
+    }
+}
+
+/// Every member of a resurrected flow SCC must publish a READABLE entry.
+///
+/// A member whose own evaluation failed `EmptyCycle` has no seed of its
+/// own, so its evaluation records `MaterializedSet::empty()`. The
+/// component discharge then RESURRECTS it to `Complete` from its hold
+/// targets — but the resurrection copies only the outcome, so the
+/// published entry keeps the empty materialised set. `cached_satisfies`
+/// is an `.any(...)` over that set, so `∅` satisfies NOTHING: the
+/// candidate occupies a slot, a reverse-index registration and a FIFO
+/// budget admission while being permanently unreadable.
+///
+/// Candidate count alone does NOT discriminate — a zombie satisfies it.
+/// The discriminating assertions are the recorded materialised set and
+/// the actual warm read.
+#[test]
+fn flow_return_resurrected_member_publishes_a_readable_entry() {
+    // The two-cycle: whichever member is demanded first, the other one
+    // is the seedless `EmptyCycle` member the discharge resurrects.
+    for (first, rest) in [
+        ("scResA", ["scResB"].as_slice()),
+        ("scResB", ["scResA"].as_slice()),
+        // The three-cycle demanded at its only seeded member leaves BOTH
+        // other members resurrected in the SAME drain.
+        ("scRingX", ["scRingY", "scRingZ"].as_slice()),
+    ] {
+        let host = make_scc_host();
+        let (first_result, _, _) = scc_expect_value(&host, first);
+        assert_eq!(
+            first_result.degradation(),
+            None,
+            "{first} closes its component cleanly"
+        );
+
+        for name in rest {
+            let (materialized, warm) = with_dispatch(&host, |dispatch| {
+                let key = scc_key(dispatch, name);
+                let materialized = dispatch.graph().entry_satisfied_projection_for_tests(
+                    &SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+                );
+                let warm = dispatch
+                    .graph()
+                    .get_flow_return_result(dispatch.ctx, &key)
+                    .map(|served| served.value);
+                (materialized, warm)
+            });
+            let materialized =
+                materialized.unwrap_or_else(|| panic!("{name} must publish a candidate"));
+            assert!(
+                !materialized.is_empty(),
+                "{name} (resurrected in {first}'s drain) must record the point its \
+                 published result actually serves — an empty set satisfies nothing"
+            );
+            assert!(
+                warm.is_some(),
+                "{name} (resurrected in {first}'s drain) must be WARM-READABLE; \
+                 an entry that occupies a slot but can never be read is a zombie"
+            );
+        }
+    }
+}
+
+/// An SCC's deferred members must publish ONLY onto a root candidate
+/// that is still live, and they must publish ATOMICALLY.
+///
+/// The relation publisher takes the root's admission token and, under
+/// the SAME `entries` lock it will publish with, refuses when the root
+/// family no longer holds that exact candidate. Three of the four
+/// member-publish sites had no such fence: a member drained onto a root
+/// an invalidation had already swept would publish anyway and serve a
+/// live warm read from a component whose root no longer exists.
+///
+/// The invalidation abort sweep cannot cover this — `affected_pairs`
+/// comes from the reverse-index drain, and a deferred, never-published
+/// member's flight holds no registration.
+///
+/// Atomicity is the second half: publishing each member under its own
+/// `entries` hold lets an invalidation land BETWEEN members and leave a
+/// partially-published component. The contract is that a superseded root
+/// releases the ENTIRE component with ZERO member publication, so this
+/// drives a THREE-member component and requires both members to refuse
+/// together.
+///
+/// Mutation recipe: dropping the root-witness check from the batched
+/// publish restores `publish -> true` with both members warm-readable
+/// under a swept root.
+#[test]
+fn flow_scc_members_never_publish_onto_a_superseded_root() {
+    for invalidate_root in [false, true] {
+        let host = make_scc_host();
+        // Warm the component so the root's published carrier exists and
+        // both members carry real results.
+        let (_, root_candidates, _) = scc_expect_value(&host, "scRingX");
+        assert_eq!(root_candidates, 1, "the root must warm before the drain");
+
+        with_dispatch(&host, |dispatch| {
+            let graph = dispatch.graph();
+            let root_key = scc_key(dispatch, "scRingX");
+            let root_query = SemanticQueryKey::FlowReturn(Box::new(root_key.clone()));
+            let carrier = graph
+                .published_carrier_for_tests(&root_query)
+                .expect("the root publishes a carrier");
+
+            // Re-stage both members exactly as the SCC drain does: drop
+            // the warm entry, then claim the ordinary family flight.
+            let mut staged = Vec::new();
+            for name in ["scRingY", "scRingZ"] {
+                let key = scc_key(dispatch, name);
+                let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
+                let result = graph
+                    .get_flow_return_result(dispatch.ctx, &key)
+                    .map(|served| served.value)
+                    .unwrap_or_else(|| panic!("{name} must be warm before re-staging"));
+                let materialized = graph
+                    .entry_satisfied_projection_for_tests(&query)
+                    .unwrap_or_else(|| panic!("{name} must record its materialised point"));
+                graph.evict_family_for_tests(&query);
+                let flight = graph
+                    .begin_inline_flow_return_flight(&key)
+                    .unwrap_or_else(|| panic!("{name} must claim its family flight"));
+                staged.push((name, key, query, result, materialized, flight));
+            }
+
+            // The invalidation lands with both flights already claimed —
+            // the exact production ordering, and the one the abort sweep
+            // cannot see.
+            if invalidate_root {
+                graph.invalidate_canonical(SCC_CANONICAL);
+                assert_eq!(
+                    graph.slot_candidate_count_for_tests(&root_query),
+                    0,
+                    "the root candidate must be swept before the drain resumes"
+                );
+            }
+
+            let pending: Vec<_> = staged
+                .iter()
+                .cloned()
+                .map(|(_, key, _, result, materialized, flight)| {
+                    verter_type_engine::semantic_query_memo::PendingFlowReturnMember {
+                        result: staged_flow_proof(&key, result),
+                        key,
+                        materialized,
+                        flight,
+                    }
+                })
+                .collect();
+            let published_any = graph.publish_scc_members_fenced_for_tests(
+                Some(dispatch.ctx),
+                &verter_type_engine::semantic_query_memo::SccRootWitness::flow_return(
+                    root_key.clone(),
+                    carrier.admission_seq,
+                ),
+                &carrier.read_set_signature,
+                &carrier.self_root_canonicals,
+                carrier.validated_at_generation,
+                Vec::new(),
+                pending,
+                Vec::new(),
+            );
+
+            for (name, key, query, ..) in &staged {
+                let candidates = graph.slot_candidate_count_for_tests(query);
+                let warm = graph
+                    .get_flow_return_result(dispatch.ctx, key)
+                    .map(|served| served.value)
+                    .is_some();
+                if invalidate_root {
+                    assert!(
+                        !published_any,
+                        "no member may publish onto a swept root ({name})"
+                    );
+                    assert_eq!(
+                        candidates, 0,
+                        "{name} must leave no candidate behind a swept root"
+                    );
+                    assert!(
+                        !warm,
+                        "{name} must not serve a warm read from a component whose root is gone"
+                    );
+                } else {
+                    assert!(published_any, "the positive control must publish ({name})");
+                    assert_eq!(candidates, 1, "{name} publishes onto the live root");
+                    assert!(warm, "{name} serves its published result warm");
+                }
+            }
+
+            let retained = graph.retained_claimed_flight_keys_for_tests();
+            assert!(
+                retained.is_empty(),
+                "every member flight must be released either way: {retained:?}"
+            );
+            let resident = graph.resident_flight_keys_for_tests();
+            assert!(
+                resident.is_empty(),
+                "every member flight must be retired either way: {resident:?}"
+            );
+        });
+    }
+}
+
+// ── Control-flow join precision (corpus twins: X22–X28) ────────────────
+
+/// Evaluate `makeProps` from an ad-hoc script, returning the projected
+/// return type and the typed degradation.
+fn flow_expr_for_script(
+    script: &str,
+) -> (
+    verter_type_expr::TypeExpr,
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
+) {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let result = flow_result_value(dispatch, key);
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        (expr, result.degradation())
+    })
+}
+
+/// The `name` member's type from each union arm that declares it (or from
+/// the single object), sorted for an order-insensitive comparison.
+fn member_types(expr: &verter_type_expr::TypeExpr, name: &str) -> Vec<verter_type_expr::TypeExpr> {
+    let mut out: Vec<verter_type_expr::TypeExpr> = match expr {
+        verter_type_expr::TypeExpr::Union(arms) => arms
+            .iter()
+            .filter_map(|arm| {
+                let verter_type_expr::TypeExpr::Object(object) = arm else {
+                    return None;
+                };
+                object.properties.iter().find_map(|member| match member {
+                    verter_type_expr::ObjectMember::Property(prop)
+                        if prop.string_name() == Some(name) =>
+                    {
+                        Some(prop.ty.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .collect(),
+        other => vec![object_prop(other, name).clone()],
+    };
+    out.sort_by_key(|ty| format!("{ty:?}"));
+    out.dedup();
+    out
+}
+
+fn string_literal(value: &str) -> verter_type_expr::TypeExpr {
+    verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(value.to_string()))
+}
+
+#[track_caller]
+fn projected_function_return(expr: &verter_type_expr::TypeExpr) -> &verter_type_expr::TypeExpr {
+    let verter_type_expr::TypeExpr::Function(function) = expr else {
+        panic!("expected a projected function type, got {expr:?}");
+    };
+    function
+        .return_type
+        .as_deref()
+        .unwrap_or_else(|| panic!("expected the function return in {expr:?}"))
+}
+
+/// A case that exits via `break` passes NO state to the next case: case 1
+/// is reachable only by the dispatch edge, so `x` there reads the entry
+/// value. TypeScript 7.0.2: `{ v: "a" } | { v: "b" }` — joining
+/// the broken-off arm's end state into the next case's start publishes
+/// `{ v: "a" | "b" }` where the checker has `"a"`.
+#[test]
+fn flow_return_switch_case_entry_excludes_broken_off_arm_state() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(v: number) { let x: \"a\" | \"b\" = \"a\"; switch (v) { case 0: x = \"b\"; break; case 1: return { v: x }; default: return { v: x } } return { v: x } }",
+    );
+    assert_eq!(degradation, None);
+    // The case-1 arm reads the entry value `"a"` EXACTLY (the broken-off
+    // arm's write never reaches it), while the trailing arm publishes the
+    // assignment-reduced `"b"` constituent.
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![string_literal("a"), string_literal("b")]
+    );
+}
+
+/// A `var` defined only on a fall-through edge has no reaching definition
+/// on the dispatch edge: the read must degrade, never publish the
+/// fall-through arm's value clean. tsgo: `{ v: "a" | undefined } | { v: string }`.
+#[test]
+fn flow_return_switch_fallthrough_only_var_is_flagged_conditional() {
+    let (_, degradation) = flow_expr_for_script(
+        "function makeProps(v: number) { switch (v) { case 0: var x: \"a\" | undefined = \"a\"; case 1: return { v: x } } return { v: \"z\" } }",
+    );
+    assert_eq!(
+        degradation,
+        Some(verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
+    );
+}
+
+/// A binding WRITTEN in the try and read in the catch: the throw can
+/// precede the write, so the catch reads the entry value and the written
+/// one — the catch is entered from the try's entry and from every mutation
+/// in it. tsc 7.0.2: `{ v: "before" | "inside" }`.
+#[test]
+fn flow_return_try_written_binding_joins_at_catch_read() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps() { let x: \"before\" | \"inside\" = \"before\"; try { x = \"inside\"; throw 0 } catch { return { v: x } } return { v: x } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            string_literal("before"),
+            string_literal("inside"),
+        ])]
+    );
+}
+
+/// An assertion narrow established inside the try reaches neither the
+/// catch nor the try/catch join: both reads see the declared union.
+/// tsgo: `{ caught: string | number }`.
+#[test]
+fn flow_return_try_assertion_narrow_stays_clause_scoped() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function assertString(v: unknown): asserts v is string { if (typeof v !== \"string\") throw 0 }\ndeclare function mayThrow(): void\nfunction makeProps(p: string | number) { try { assertString(p); mayThrow() } catch { return { caught: p } } return { caught: p } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "caught"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
+    );
+}
+
+/// The switch twin: an assertion narrow established in one case must not
+/// leak into a sibling case. tsgo: `{ c: string | number }` — case 0's own
+/// narrowed `{ c: string }` arm subtype-reduces away against the
+/// unnarrowed arms, so ONE object survives and the narrow is visible only
+/// as its absence from the surviving member's type.
+#[test]
+fn flow_return_switch_assertion_narrow_stays_case_scoped() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function assertString(v: unknown): asserts v is string { if (typeof v !== \"string\") throw 0 }\nfunction makeProps(v: number, p: string | number) { switch (v) { case 0: assertString(p); return { c: p }; case 1: return { c: p }; default: return { c: p } } }",
+    );
+    assert_eq!(degradation, None);
+    let string_or_number = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    ]);
+    assert_eq!(member_types(&expr, "c"), vec![string_or_number]);
+}
+
+/// A CONDITIONAL-returning finally absorbs the pending break only on the
+/// paths where it actually returns: its fall-through path lets the break
+/// proceed, so the trailing return contributes. tsgo:
+/// `{ one: number; s?: undefined } | { one?: undefined; s: string }`.
+#[test]
+fn flow_return_conditional_finally_keeps_pending_break_on_fallthrough() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(c: boolean) { L: { try { break L } finally { if (c) { return { one: 1 } } } } return { s: \"x\" } }",
+    );
+    assert_eq!(degradation, None);
+    let verter_type_expr::TypeExpr::Union(_) = &expr else {
+        panic!("the finally return and the trailing return join as a union, got {expr:?}");
+    };
+    // Each arm carries the other's property as `?: undefined`.
+    assert_eq!(
+        member_types(&expr, "one"),
+        vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+        ]
+    );
+    assert_eq!(
+        member_types(&expr, "s"),
+        vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+        ]
+    );
+}
+
+/// A destructured element DEFAULT drops the member's authored `undefined`
+/// arm. tsgo: `{ v: number }` — keeping the arm publishes
+/// `number | undefined`.
+#[test]
+fn flow_return_destructured_default_drops_authored_undefined() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps({ x = 1 }: { x: number | undefined }) { return { v: x } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        )]
+    );
+}
+
+/// The state at a try-return edge enters a crossing finally. This is below
+/// the corpus's union-discriminant granularity: the graph is a `Union` both
+/// before and after the repair, so the literal `"b"` arm is asserted here.
+#[test]
+fn flow_return_finally_entry_includes_pending_return_state() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(flag: boolean, c: boolean) { let x: \"a\" | \"b\" = \"a\"; try { if (flag) { x = \"b\"; return 0 as const } } finally { if (c) return x } }",
+    );
+    assert_eq!(degradation, None);
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the return aggregate must be a union, got {expr:?}");
+    };
+    assert!(
+        arms.iter().any(|arm| arm == &string_literal("b")),
+        "the pending return's pre-state contributes the `\"b\"` arm: {expr:?}"
+    );
+    assert!(
+        arms.iter().any(|arm| arm == &string_literal("a")),
+        "positive control: the ordinary finally-entry path keeps `\"a\"`: {expr:?}"
+    );
+    assert!(
+        !arms.iter().any(|arm| arm == &string_literal("not-present")),
+        "negative control: the literal-arm probe must distinguish an absent arm"
+    );
+}
+
+/// An unannotated assignment keeps ordinary widening even though the RHS is
+/// preserved until the evaluator can inspect the target declaration.
+#[test]
+fn flow_return_unannotated_assignment_still_widens() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(k: boolean) { var v = 1; if (k) { v = 2 } return v }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+/// Closing one arm restores an outer declaration's assignment authority
+/// before the sibling arm evaluates.
+#[test]
+fn flow_return_if_arm_restores_shadowed_declared_type() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; if (flag) { let x: \"c\" | \"d\" = \"c\"; x = \"d\" } else { x = \"b\" } return x }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
+    );
+}
+
+/// The graph-node corpus can see only `Union`; this probe pins both literal
+/// contributors and proves that the finally-authored break reaches its label.
+#[test]
+fn flow_return_abrupt_finally_keeps_its_own_break_exit() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps() { L: { try { return \"a\" as const } finally { break L } } return \"b\" as const }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
+    );
+    assert_ne!(
+        expr,
+        string_literal("a"),
+        "the trailing edge must not vanish"
+    );
+}
+
+/// The corpus's `Literal` discriminant does not carry its value. Pin the
+/// assignment-selected constituent, plus controls for the overwritten union
+/// and ordinary primitive widening.
+#[test]
+fn flow_return_initializerless_var_does_not_reset_a_reaching_write() {
+    let (expr, degradation) =
+        flow_expr_for_script("function makeProps() { x = \"b\"; var x: \"a\" | \"b\"; return x }");
+    assert_eq!(degradation, None);
+    assert_eq!(expr, string_literal("b"));
+    assert_ne!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
+    );
+    assert_ne!(
+        expr,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+}
+
+/// The corpus's primitive member discriminant intentionally erases the
+/// primitive kind, so assert the exact predicate-recovered member here.
+#[test]
+fn flow_return_negated_conjunction_recovers_the_positive_predicate() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function isStr(v: string | number): v is string { return typeof v === \"string\" }\nfunction makeProps(x: string | number, n: number) { if (!(isStr(x) && n > 0)) throw 0; return { v: x } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )]
+    );
+    assert_ne!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
+    );
+}
+
+#[derive(Debug)]
+enum FlowSourceProbe {
+    Value {
+        expr: verter_type_expr::TypeExpr,
+        degradation: Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
+        candidates: usize,
+    },
+    NoValue {
+        error: verter_type_engine::semantic_query::FlowReturnFailure,
+        candidates: usize,
+    },
+}
+
+/// Exercise the served return source through the sealed consumer and retain
+/// the exact projected graph value for distinctions coarser corpus shapes
+/// intentionally erase.
+fn flow_source_probe(script: &str) -> FlowSourceProbe {
+    flow_source_probe_observed(script, false).0
+}
+
+fn flow_source_probe_observed(
+    script: &str,
+    observe: bool,
+) -> (
+    FlowSourceProbe,
+    Vec<super::flow_return::FlowJoinObservation>,
+) {
+    flow_source_probe_configured(script, |host| {
+        host.flow_fault_injection
+            .observe_product_joins
+            .store(observe, std::sync::atomic::Ordering::Relaxed);
+    })
+}
+
+fn flow_source_probe_configured(
+    script: &str,
+    configure: impl FnOnce(&VerterHost),
+) -> (
+    FlowSourceProbe,
+    Vec<super::flow_return::FlowJoinObservation>,
+) {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-source-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    configure(&host);
+    let result = with_dispatch(&host, |dispatch| {
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let prepared = host
+            .prepared_value_decl_in(canonical, owner, "makeProps")
+            .expect("makeProps has a prepared value declaration");
+        let [signature] = prepared.signatures.as_slice() else {
+            panic!("makeProps has one served signature")
+        };
+        let mut source = signature.return_source.clone();
+        let verter_type_expr::facts::FunctionReturnSource::Flow(identity) = &mut source else {
+            panic!("makeProps serves a flow return source")
+        };
+        identity.anchor.canonical_id = Arc::from(canonical);
+        identity.anchor.owner = owner;
+        let identity = identity.clone();
+        let candidate_key =
+            SemanticQueryKey::FlowReturn(Box::new(dispatch.flow_return_key_for(&identity)));
+        match dispatch.execute_function_return_source(&source, canonical) {
+            super::flow_return::FunctionReturnNode::Flow(result) => {
+                let expr = host
+                    .project_node_to_type_expr_for_test(result.return_type())
+                    .expect("the flow graph node projects to an exact type expression");
+                FlowSourceProbe::Value {
+                    expr,
+                    degradation: result.degradation(),
+                    candidates: dispatch
+                        .graph()
+                        .slot_candidate_count_for_tests(&candidate_key),
+                }
+            }
+            super::flow_return::FunctionReturnNode::NoValue(error) => FlowSourceProbe::NoValue {
+                error,
+                candidates: dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&candidate_key),
+            },
+            other => panic!("makeProps must execute its flow source, got {other:?}"),
+        }
+    });
+    let joins = std::mem::take(&mut *host.flow_fault_injection.product_joins.lock().unwrap());
+    (result, joins)
+}
+
+#[track_caller]
+fn expect_clean_flow_value(script: &str) -> verter_type_expr::TypeExpr {
+    match flow_source_probe(script) {
+        FlowSourceProbe::Value {
+            expr,
+            degradation,
+            candidates,
+        } => {
+            assert_eq!(degradation, None, "the graph result must be clean");
+            assert_eq!(candidates, 1, "the clean graph result admits once");
+            expr
+        }
+        other => panic!("expected a clean graph value, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn expect_refused_flow_as(
+    script: &str,
+    expected: verter_type_engine::semantic_query::FlowReturnUnsupported,
+) {
+    match flow_source_probe(script) {
+        FlowSourceProbe::NoValue { error, candidates } => {
+            assert_eq!(
+                error,
+                verter_type_engine::semantic_query::FlowReturnFailure::Unsupported(expected)
+            );
+            assert_eq!(candidates, 0, "a refusal must not admit a candidate");
+        }
+        other => panic!("expected a fail-closed flow refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn flow_return_guard_union_joins_each_alternatives_final_overlay() {
+    let expected = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+    ]);
+    for script in [
+        "function makeProps(x: string | number | boolean) { if (!((typeof x !== \"boolean\" && typeof x === \"string\") || typeof x === \"boolean\")) throw 0; return { v: x } }",
+        "function makeProps(x: string | number | boolean) { if (!!((typeof x !== \"boolean\" && typeof x === \"string\") || typeof x === \"boolean\")) return { v: x }; throw 0 }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        assert_eq!(member_types(&expr, "v"), vec![expected.clone()]);
+        assert_ne!(
+            member_types(&expr, "v"),
+            vec![verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::String,
+                ),
+                verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Number,
+                ),
+                verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Boolean,
+                ),
+            ])]
+        );
+    }
+}
+
+/// The corpus can assert only that `v` is a union. Pin the exact surviving
+/// arms: an impossible conjunction contributes no intermediate `string`
+/// overlay to the enclosing three-way disjunction.
+#[test]
+fn flow_return_guard_union_omits_impossible_conjunction_alternative() {
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: string | number | boolean) { if (!((typeof x === \"string\" && typeof x === \"number\") || typeof x === \"number\" || typeof x === \"boolean\")) throw 0; return { v: x } }",
+    );
+    let expected = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+    ]);
+    assert_eq!(member_types(&expr, "v"), vec![expected]);
+    assert_ne!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        ])]
+    );
+}
+
+/// A disjunction over a member path reads each disjunct from the
+/// member's STANDING fact. Inside `typeof x.v === "string" && (typeof x.v
+/// === "string" || typeof x.v === "number")` the second disjunct narrows
+/// the already-`string` member to `never`, so `x.v` reads `string`
+/// (TypeScript 7.0.2: `{ r: string; }`, with and without
+/// `strictNullChecks`). Reading the disjuncts from the root's projection
+/// instead publishes `string | number`, a type the enclosing conjunct
+/// already excluded. Disjuncts that each narrow the member contribute
+/// their union: `typeof x.v !== "boolean" && (typeof x.v === "string" ||
+/// typeof x.v === "number")` over `string | number | boolean` reads
+/// `string | number` (TypeScript 7.0.2: `{ r: string | number; }`).
+#[test]
+fn flow_return_guard_union_reads_each_disjunct_from_the_standing_member_fact() {
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: { v: string | number }) { if (typeof x.v === \"string\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
+    );
+    assert_eq!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]
+    );
+    let expr = expect_clean_flow_value(
+        "function makeProps(x: { v: string | number | boolean }) { if (typeof x.v !== \"boolean\" && (typeof x.v === \"string\" || typeof x.v === \"number\")) return { r: x.v }; throw 0 }",
+    );
+    assert_eq!(
+        member_types(&expr, "r"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        ])]
+    );
+}
+
+#[test]
+fn flow_return_declared_authority_is_seeded_before_forward_reads_and_writes() {
+    let forward = expect_clean_flow_value(
+        "function makeProps() { const y = x; var x: \"a\" | undefined = \"a\"; return { v: y } }",
+    );
+    assert_eq!(
+        member_types(&forward, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            string_literal("a"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined,),
+        ])]
+    );
+
+    let destructured = expect_clean_flow_value(
+        "function makeProps({ x }: { x: \"a\" | \"b\" }) { x = \"b\"; return { v: x } }",
+    );
+    assert_eq!(member_types(&destructured, "v"), vec![string_literal("b")]);
+    assert_ne!(
+        member_types(&destructured, "v"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        )]
+    );
+}
+
+/// The corpus can assert only that the returned value is a union. Pin the
+/// authored mutable-capture authority, including a declaration after closure
+/// creation, rather than accepting a broad primitive or an opaque position.
+#[test]
+fn flow_return_mutable_closures_use_declared_capture_authority() {
+    let expected =
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]);
+    for script in [
+        "function makeProps() { var x: \"a\" | \"b\" = \"a\"; const read = () => x; return read() }",
+        "function makeProps() { const read = () => x; let x: \"a\" | \"b\" = \"a\"; return read() }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        assert_eq!(expr, expected);
+        assert_ne!(expr, string_literal("a"));
+    }
+}
+
+#[test]
+fn flow_return_transitive_capture_annotation_uses_its_original_generic_binder() {
+    let late = expect_clean_flow_value(
+        "function makeProps<T extends string>() { const mid = <T extends number>() => () => x; let x: T; return mid; }",
+    );
+    let terminal = match flow_source_probe(
+        "function makeProps<T extends string>() { return <T extends number>() => () => x; var x: T; }",
+    ) {
+        FlowSourceProbe::Value { expr, degradation, candidates } => {
+            assert_eq!(degradation, None);
+            assert_eq!(candidates, 0, "an unexecuted parent declaration supplies no runtime proof");
+            expr
+        }
+        other => panic!("selected capture authority supplies a value: {other:?}"),
+    };
+    for expr in [late, terminal] {
+        let verter_type_expr::TypeExpr::Function(intermediate) = &expr else {
+            panic!("intermediate signature: {expr:?}");
+        };
+        assert_eq!(
+            intermediate.type_parameters[0].constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::Number
+            ))
+        );
+        let Some(verter_type_expr::TypeExpr::Function(inner)) = intermediate.return_type.as_deref()
+        else {
+            panic!("inner signature: {expr:?}");
+        };
+        let Some(verter_type_expr::TypeExpr::TypeParameter(captured)) =
+            inner.return_type.as_deref()
+        else {
+            panic!("captured binder: {expr:?}");
+        };
+        assert_eq!(
+            captured.constraint.as_deref(),
+            Some(&verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            )),
+            "a declaration hydrated later retains original outer T, never the intermediate T"
+        );
+    }
+}
+
+#[test]
+fn flow_return_finally_write_kills_entering_narrowing_even_when_type_is_unchanged() {
+    for body in [
+        "x = 1",
+        "if (flag) { x = 1 } else { x = 1 }",
+        "x = 1; x = 1",
+    ] {
+        let source = format!("function makeProps(x: string | number, flag: boolean) {{ if (typeof x === 'string') {{ try {{}} finally {{ {body}; }} return x; }} throw 0; }}");
+        assert_eq!(
+            expect_clean_flow_value(&source),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    }
+}
+
+#[test]
+fn flow_return_continuation_join_preserves_post_write_guard_facts() {
+    for source in [
+        "function assertString(x:unknown):asserts x is string{} function makeProps(flag:boolean,y:string|number){let x=y;if(flag){x=y;assertString(x);}else{x=y;assertString(x);}return x;}",
+        "function makeProps(x:string|number){if(typeof x==='string'){throw 0;}else{x='written';}return x;}",
+    ] {
+        assert_eq!(expect_clean_flow_value(source), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String), "{source}");
+    }
+}
+
+#[test]
+fn flow_return_finally_alias_write_kills_the_canonical_guard_root() {
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(x:string|number){if(typeof x!=='string'){throw 0;}try{}finally{var x=1;}return x;}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+#[test]
+fn flow_return_canonical_write_uses_later_alias_declared_authority() {
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(){var x=0 as 0|1;var x:0|1=0;x=1;return x;}"),
+        verter_type_expr::TypeExpr::number_literal(1.0)
+    );
+}
+
+#[test]
+fn flow_return_effect_only_transitive_capture_does_not_hydrate_its_annotation() {
+    let expr = expect_clean_flow_value("type Local=string;function makeProps(){type Local=number;let x:Local;return()=>()=>{x=1;return 0;};}");
+    let verter_type_expr::TypeExpr::Function(outer) = &expr else {
+        panic!("outer closure");
+    };
+    let Some(verter_type_expr::TypeExpr::Function(inner)) = outer.return_type.as_deref() else {
+        panic!("inner closure");
+    };
+    assert_eq!(
+        inner.return_type.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
+    );
+}
+
+#[test]
+fn flow_return_switch_merges_actual_predecessors_in_one_canonical_batch() {
+    let (result, joins) = flow_source_probe_observed("function makeProps(a:boolean,b:boolean){const tag=a?0:b?1:2;let out:number|string|boolean=0;switch(tag){case 0:out=1;break;case 1:out='x';break;case 2:out=true;break;}return out;}", true);
+    assert!(
+        matches!(
+            result,
+            FlowSourceProbe::Value {
+                degradation: None,
+                candidates: 1,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        joins.len(),
+        1,
+        "one actual switch exit must not construct binary prefixes: {joins:?}"
+    );
+    assert_eq!(joins[0].predecessors, 3);
+    assert!(joins[0].unions.iter().all(|width| *width == 3), "{joins:?}");
+    // One bounded inspection per subject carrying literal provenance:
+    // `tag`'s fresh arms, and `out`'s fresh `true` (a fresh boolean
+    // literal the declared union keeps fresh).
+    assert_eq!(
+        joins[0].provenance,
+        [3, 3],
+        "all literal predecessor provenance must share one bounded inspection per subject"
+    );
+}
+
+#[test]
+fn flow_return_labeled_catch_and_finally_merge_original_predecessors() {
+    // A catch merges the try's entry with the state after each write and at
+    // each throw point of its block: `0`, `x = 1`, `x = 'b'`, `x = true`
+    // and the three throws are its seven predecessors. A finally merges the
+    // normal completion and the entry with each write and throw of the try
+    // and each pending return: seven again.
+    for (source, predecessors) in [
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0; L:{if(a){x=1;break L;}if(b){x='b';break L;}x=true;}return x;}", 3),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x=1;throw 0;}if(b){x='b';throw 0;}x=true;throw 0;}catch{return x;}}", 7),
+        ("function makeProps(a:boolean,b:boolean){let x:number|string|boolean=0;try{if(a){x='a';return 0;}if(b){x=true;throw 0;}x=1;}finally{x=2;}return x;}", 7),
+    ] {
+        let (result, joins) = flow_source_probe_observed(source, true);
+        assert!(matches!(result, FlowSourceProbe::Value { .. }), "{source}: {result:?}");
+        assert_eq!(joins.len(), 1, "one actual continuation, no union prefixes: {source}: {joins:?}");
+        assert_eq!(joins[0].predecessors, predecessors, "{source}: {joins:?}");
+        assert!(!joins[0].unions.is_empty(), "distinct predecessor values reached canonical algebra: {source}");
+    }
+}
+
+#[test]
+fn flow_return_switch_fallthrough_keeps_successive_control_merges_separate() {
+    let source = "function makeProps(a:boolean,b:boolean){const tag=a?0:b?1:2;let x:number|string|boolean=0;switch(tag){case 0:x='s';case 1:x=true;break;case 2:x=1;}return x;}";
+    let (result, joins) = flow_source_probe_observed(source, true);
+    let FlowSourceProbe::Value {
+        expr,
+        degradation: None,
+        candidates: 1,
+    } = result
+    else {
+        panic!("{result:?}");
+    };
+    // TypeScript 7.0.2 `tsc`: `number | true` — `x = true` keeps the
+    // `true` constituent of the declared `boolean`.
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])
+    );
+    assert_eq!(
+        joins
+            .iter()
+            .map(|join| join.predecessors)
+            .collect::<Vec<_>>(),
+        [2, 2],
+        "case entry merges before its executed write, then switch exit merges: {joins:?}"
+    );
+}
+
+#[test]
+fn flow_return_class_local_callee_cannot_borrow_a_free_function_receipt() {
+    let result = flow_source_probe("function check():void{} function makeProps(x:string|number){class C{static{const check=(v:unknown):asserts v is string=>{};check(x);}}return x;}");
+    assert!(
+        matches!(
+            result,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn flow_return_effect_capture_requires_completed_walk_but_reader_requires_value_evidence() {
+    use std::sync::atomic::Ordering;
+    let writer = "function makeProps(){let x:number;return()=>()=>{x=1;return 0;};}";
+    let (short, _) = flow_source_probe_configured(writer, |host| {
+        host.flow_fault_injection
+            .short_nested_execution_ledger
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            short,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "{short:?}"
+    );
+    let (without_values, _) = flow_source_probe_configured(writer, |host| {
+        host.flow_fault_injection
+            .drop_binding_domain_product
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            without_values,
+            FlowSourceProbe::Value {
+                degradation: None,
+                candidates: 1,
+                ..
+            }
+        ),
+        "effect-only proof consumes no value receipts: {without_values:?}"
+    );
+    let reader = "function makeProps(){let x:number=0;const writer=()=>{x=1;return 0;};const reader=()=>x;return {writer,reader};}";
+    let (without_reader, _) = flow_source_probe_configured(reader, |host| {
+        host.flow_fault_injection
+            .drop_binding_domain_product
+            .store(true, Ordering::Relaxed);
+    });
+    assert!(
+        matches!(
+            without_reader,
+            FlowSourceProbe::Value {
+                degradation: Some(_),
+                candidates: 0,
+                ..
+            }
+        ),
+        "a writer receipt cannot discharge the reader: {without_reader:?}"
+    );
+}
+
+#[test]
+fn flow_return_abrupt_finally_over_pending_break_contributes_undefined() {
+    let expected = verter_type_expr::TypeExpr::union(vec![
+        string_literal("a"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+    for script in [
+        "function makeProps() { L: try { break L; } finally { return \"a\" as const; } }",
+        "function makeProps() { OUT: INNER: { try { break OUT; } finally { return \"a\" as const; } } }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        assert_eq!(expr, expected);
+        assert_ne!(expr, string_literal("a"));
+    }
+}
+
+/// A pending break whose destination this lowering cannot classify never
+/// reaches a consumer as a complete answer.
+///
+/// One base program, seven suffix spellings. The break's destination is the
+/// statement AFTER the labeled statement, so the suffix decides whether
+/// that destination reaches the function end (an implicit `undefined`
+/// contributor) or an authored return. The suffix classifier recognises
+/// `return` / block / `if` and nothing else, so before this guard a LABELED,
+/// `try`, `throw` or `switch` suffix answered "does not return" from a
+/// coverage gap and published `"a" | undefined` CLEAN: merely LABELING a
+/// block changed the answer from `"a" | "b"`, and the wrong answer warmed
+/// with nothing marking it.
+///
+/// The proved spellings are the positive control. They must stay clean and
+/// keep their exact values, or a blanket degrade would satisfy the negative
+/// half while telling us nothing.
+///
+/// The remaining, separately owed work is the VALUE: the fabricated
+/// `undefined` is still derived, and removing it needs the abrupt-completion
+/// topology the demanded `FunctionFlowGraph` owes. Until then this boundary
+/// is admission, which is why the gap — not a wider syntax match — is the
+/// fix: a syntax-only classifier for completion is the second completion
+/// authority this substrate must not have.
+#[test]
+pub(crate) fn a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_contributor() {
+    let base = "OUT: INNER: { try { break INNER; } finally { return \"a\" as const; } }";
+    let script = |suffix: &str| format!("function makeProps() {{ {base}{suffix} }}");
+    let a_or_undefined = verter_type_expr::TypeExpr::union(vec![
+        string_literal("a"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+
+    // A destination this lowering PROVES reaches an authored return keeps
+    // its exact answer, clean and admitted.
+    for (suffix, expected) in [
+        (
+            " return \"b\" as const;",
+            verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]),
+        ),
+        (
+            " { return \"b\" as const; }",
+            verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")]),
+        ),
+        (
+            " if (true) { return \"b\" as const; } else { return \"c\" as const; }",
+            verter_type_expr::TypeExpr::union(vec![
+                string_literal("c"),
+                string_literal("b"),
+                string_literal("a"),
+            ]),
+        ),
+    ] {
+        assert_eq!(
+            expect_clean_flow_value(&script(suffix)),
+            expected,
+            "a proved destination keeps its answer: {suffix}"
+        );
+    }
+
+    // A destination it cannot classify returns the same derivation it
+    // always did and is refused admission. No path reaches the
+    // destination (the finally's return ends every path through the
+    // label), so its own return joins as unreachable code's does — the
+    // checker aggregates it (TypeScript 7.0.2 `tsc`: `"a" | "b"` for the
+    // returning suffixes, `"a"` for the throwing one) — while the
+    // undecided pending break keeps its `undefined` behind the typed gap.
+    let b_a_or_undefined = verter_type_expr::TypeExpr::union(vec![
+        string_literal("b"),
+        string_literal("a"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+    for (suffix, expected) in [
+        (" S: { return \"b\" as const; }", &b_a_or_undefined),
+        (
+            " try { return \"b\" as const; } finally { }",
+            &b_a_or_undefined,
+        ),
+        (" throw new Error();", &a_or_undefined),
+        (
+            " switch (1) { default: return \"b\" as const; }",
+            &b_a_or_undefined,
+        ),
+    ] {
+        match flow_source_probe(&script(suffix)) {
+            FlowSourceProbe::Value {
+                expr,
+                degradation,
+                candidates,
+            } => {
+                assert_eq!(
+                    degradation,
+                    Some(
+                        verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                            verter_session_query::flow::policy::FlowGap::AbruptCompletion
+                        )
+                    ),
+                    "an undecided destination fails closed: {suffix}"
+                );
+                assert_eq!(candidates, 0, "a gapped result never warms: {suffix}");
+                assert_eq!(
+                    &expr, expected,
+                    "the returned value is the unchanged derivation: {suffix}"
+                );
+            }
+            other => panic!("the value still returns for {suffix}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn flow_return_assignment_uses_fresh_literal_to_select_the_most_specific_union_arm() {
+    let expr = expect_clean_flow_value(
+        "function makeProps() { let x: { kind: string } | { kind: \"b\"; b: number }; x = { kind: \"b\", b: 2 }; return x }",
+    );
+    assert!(
+        matches!(expr, verter_type_expr::TypeExpr::Object(_)),
+        "the graph node is the selected object arm, got {expr:?}"
+    );
+    assert_eq!(member_types(&expr, "kind"), vec![string_literal("b")]);
+    assert_eq!(
+        member_types(&expr, "b"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number,
+        )]
+    );
+
+    let sibling = expect_clean_flow_value(
+        "function makeProps(x: { kind: \"a\" } | { kind: \"b\" }) { x = { kind: \"b\" }; return { v: x } }",
+    );
+    let v = member_types(&sibling, "v");
+    let [v] = v.as_slice() else {
+        panic!("the assignment selects one object constituent, got {v:?}")
+    };
+    assert!(matches!(v, verter_type_expr::TypeExpr::Object(_)));
+    assert_eq!(member_types(v, "kind"), vec![string_literal("b")]);
+
+    for script in [
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", a: 1 }; return x }",
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; const key = \"a\" as const; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", [key]: 1 }; return x }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        let verter_type_expr::TypeExpr::Ref { name, .. } = &expr else {
+            panic!("the fresh exact-key witness must select WithA, got {expr:?}");
+        };
+        assert_eq!(name.as_ref(), "WithA");
+    }
+
+    // Spread construction does not provide a closed exact-key witness. Keep
+    // the declared union for inline, computed, and named spread sources.
+    for script in [
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", ...{ a: 1 } }; return x }",
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; const key = \"a\" as const; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", ...{ [key]: 1 } }; return x }",
+        "type Broad = { kind: \"x\" }; type WithA = { kind: \"x\"; a?: number }; type WithB = { kind: \"x\"; b?: number }; const patch = { a: 1 }; function makeProps() { let x: Broad | WithA | WithB; x = { kind: \"x\", ...patch }; return x }",
+    ] {
+        let expr = expect_clean_flow_value(script);
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("a spread assignment must preserve the declared union, got {expr:?}");
+        };
+        let mut names = arms
+            .iter()
+            .map(|arm| match arm {
+                verter_type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
+                other => panic!("the declared union arm must stay a reference, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Broad", "WithA", "WithB"]);
+    }
+}
+
+#[test]
+fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachability() {
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { let x: \"a\" | \"b\" = \"a\"; while (false) { x = \"b\" } return x }",
+        ),
+        string_literal("a")
+    );
+    assert_eq!(
+        expect_clean_flow_value(
+            "declare function sink(cb: () => void): void; function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { sink(() => { x = \"b\" }) } while (false); return x }",
+        ),
+        string_literal("a")
+    );
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { let o: { x: 0 | 1; y: \"a\" | \"b\" } = { x: 0, y: \"a\" }; do { o.x = 1 } while (false); return o.y }",
+        ),
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
+    );
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { if (false) x = \"b\" } while (false); return x }",
+        ),
+        string_literal("a")
+    );
+
+    expect_refused_flow_as(
+        "function makeProps(x: string | number) { do { (() => { if (typeof x !== \"string\") throw 0 })() } while (false); return { v: x } }",
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+    );
+
+    expect_refused_flow_as(
+        "function makeProps(x: string | number) { (() => { if (typeof x !== \"string\") throw 0 })(); return { v: x } }",
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+    );
+
+    // Negative control: a directly invoked write remains effectful and
+    // fails closed.
+    expect_refused_flow_as(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+    );
+    // A reachable write inside the loop body joins the entering value at
+    // the loop's exit (TypeScript 7.0.2 `tsc`: `"a" | "b"`).
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps(flag: boolean) { let x: \"a\" | \"b\" = \"a\"; do { if (flag) x = \"b\" } while (false); return x }",
+        ),
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
+    );
+}
+
+#[test]
+fn flow_return_sequence_wrapped_iife_effect_fails_closed() {
+    expect_refused_flow_as(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; ((() => { x = \"b\" })(), (() => { x = \"b\" })()); return x }",
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+    );
+}
+
+#[test]
+fn flow_return_impossible_predicate_edges_contribute_no_return_value() {
+    let expected =
+        verter_type_expr::TypeExpr::union(vec![string_literal("no"), string_literal("ok")]);
+    let ternary = "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { return isA(x) ? (isB(x) ? x : \"ok\" as const) : \"no\" as const }";
+    assert_eq!(expect_clean_flow_value(ternary), expected);
+
+    let statements = "type A = { kind: \"a\"; a: number }; type B = { kind: \"b\"; b: number }; function isA(x: A | B): x is A { return x.kind === \"a\" } function isB(x: A | B): x is B { return x.kind === \"b\" } function makeProps(x: A | B) { if (isA(x)) { if (isB(x)) return x; return \"ok\" as const } return \"no\" as const }";
+    assert_eq!(expect_clean_flow_value(statements), expected);
+}
+
+#[test]
+fn flow_return_structurally_possible_predicate_intersection_survives() {
+    let expr = expect_clean_flow_value(
+        "type A = { a: number }; type B = { b: number }; function isA(x: A | B): x is A { return \"a\" in x } function isB(x: A | B): x is B { return \"b\" in x } function makeProps(x: A | B) { return isA(x) ? (isB(x) ? x : \"ok\" as const) : \"no\" as const }",
+    );
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the possible intersection must join the literal arms");
+    };
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, verter_type_expr::TypeExpr::Intersection(_))),
+        "the structurally possible intersection must survive in {expr:?}"
+    );
+    assert!(arms.contains(&string_literal("ok")));
+    assert!(arms.contains(&string_literal("no")));
+}
+
+#[test]
+fn flow_return_required_property_does_not_dominate_optional_union_arm() {
+    let expr = expect_clean_flow_value(
+        "type Opt = { kind: \"x\"; a?: number }; type Req = { kind: \"x\"; a: number }; function makeProps() { let x: Opt | Req; x = { kind: \"x\", a: 1 } as const; return x }",
+    );
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the declared Opt | Req union must survive, got {expr:?}");
+    };
+    let mut names = arms
+        .iter()
+        .map(|arm| match arm {
+            verter_type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
+            other => panic!("the declared arm must remain a reference, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, vec!["Opt", "Req"]);
+}
+
+#[test]
+fn flow_return_nested_capture_state_matches_the_closure_position() {
+    let written = expect_clean_flow_value(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; return () => { x = \"b\"; return x } }",
+    );
+    assert_eq!(projected_function_return(&written), &string_literal("b"));
+
+    let read_only = expect_clean_flow_value(
+        "function makeProps() { let x: \"a\" | \"b\" = \"a\"; return () => x }",
+    );
+    assert_eq!(projected_function_return(&read_only), &string_literal("a"));
+}
+
+#[test]
+fn flow_return_nested_destructured_capture_uses_its_parent_parameter_input() {
+    let value = expect_clean_flow_value(
+        "function makeProps({ x }: { x: \"a\" | \"b\" }) { return () => x }",
+    );
+    assert_eq!(
+        projected_function_return(&value),
+        &verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
+    );
+}
+
+#[test]
+fn flow_return_one_expression_imports_a_wide_capture_environment() {
+    let declarations = (0..16)
+        .map(|index| format!("const value{index} = {index};"))
+        .collect::<String>();
+    let expression = (0..16)
+        .map(|index| format!("value{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value = expect_clean_flow_value(&format!(
+        "function makeProps() {{ {declarations} return () => ({{ {expression} }}); }}"
+    ));
+    let returned = projected_function_return(&value);
+    for index in 0..16 {
+        assert_eq!(
+            object_prop(returned, &format!("value{index}")),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "every exact captured input fits the closure's execution policy"
+        );
+    }
+}
+
+#[test]
+fn flow_return_nested_label_inherits_the_enclosing_suffix_return() {
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps() { OUT: INNER: { try { break INNER } finally { return \"a\" as const } } return \"b\" as const }",
+        ),
+        verter_type_expr::TypeExpr::union(vec![string_literal("b"), string_literal("a")])
+    );
+}
+
+/// The `ReturnType<typeof f>["m"]` member rail is a PROBE with a
+/// structured fall-through: a spread-provisioned member is beyond the
+/// modeled member point, so the member-demand evaluation declines with a
+/// typed miss — and the DECLINE must leak nothing into the enclosing
+/// observation channels (the build-local taint frame, the
+/// per-cold-compute completeness scope, the request partial sticky),
+/// because the generic `Instantiate` unwrap fall-through re-derives the
+/// member cleanly from the whole return. A leaked decline collapsed the
+/// runtime constructor of a published prop derived through this shape to
+/// `Unknown` (`type: null`) even though its value resolved to `string`.
+///
+/// The rails stay FULLY visible to a direct member-demand consumer (the
+/// second half): the isolation lives at the rail's fall-through decision,
+/// never in the `FlowReturn` build's own output — stripping the build's
+/// rails instead would let a no-surface producer publish around.
+#[test]
+fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/spread-member.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base(), n: 1 } }\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(canonical), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let typeof_node = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::new_typeof(
+                verter_type_engine::semantic_query::ValueRootKey {
+                    scope: verter_type_engine::semantic_query::ScopeId {
+                        canonical_id: Arc::from(canonical),
+                        owner,
+                        local_scope: None,
+                        binder_scope_id:
+                            verter_type_engine::semantic_query::BinderScopeId::file_scope(owner),
+                    },
+                    name: Arc::from("makeProps"),
+                },
+                Arc::from([]),
+                Arc::from([]),
+            ),
+        );
+
+        let completeness_scope =
+            verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+        let observation = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        let projected = dispatch.flow_return_member_projection(
+            typeof_node,
+            &verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier("label"),
+            ),
+        );
+        let observed = observation.finish();
+        let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
+        completeness_scope.discard();
+
+        assert!(
+            projected.is_none(),
+            "the spread-provisioned member demand declines to the generic unwrap route"
+        );
+        assert!(
+            !observed.result_is_partial && !observed.cache_suppress,
+            "the declined probe folds nothing into the enclosing build frame: {observed:?}"
+        );
+        assert!(
+            !completeness.is_partial(),
+            "the declined probe leaves the enclosing cold-compute scope Complete: \
+             {completeness:?}"
+        );
+        assert!(
+            !verter_type_engine::request_context::current_request_result_is_partial(),
+            "the declined probe never marks the request partial sticky"
+        );
+
+        // A DIRECT member-demand consumer still sees the full typed rails.
+        let mut key = flow_key(
+            dispatch,
+            "makeProps",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.function = dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            owner,
+            Arc::from("makeProps"),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.context = dispatch.flow_return_context_for(canonical);
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+            point: verter_type_engine::semantic_query::demand::Demand::navigate(
+                verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                    verter_type_engine::semantic_query::PathSegment::Member(
+                        verter_type_engine::semantic_query::PropertyKey::identifier("label"),
+                    ),
+                ]),
+            ),
+        };
+        let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
+        assert!(
+            matches!(
+                read.value,
+                verter_type_engine::semantic_query::QueryResult::Error(
+                    verter_type_engine::semantic_query::QueryError::Miss
+                )
+            ),
+            "the member demand itself fails closed with the typed miss, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "a direct member-demand consumer keeps the no-surface rails"
+        );
+        assert!(
+            read.partial_reasons.contains(
+                verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE
+            ),
+            "the decline rides the no-surface class, got {:?}",
+            read.partial_reasons
+        );
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// The flow-proof admission boundary: root proof gate, missing-obligation
+// refusal, degraded-finalizer non-warming, and once-per-cold-demand
+// planning.
+// ────────────────────────────────────────────────────────────────────────
+
+/// The per-request cold-compute counter, read from the installed
+/// `RequestContext`.
+fn flow_cold_computes() -> u32 {
+    verter_type_engine::request_context::current_request_context()
+        .expect("the test installs a RequestContext")
+        .flow_return_cold_computes
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Root warm admission of a `FlowReturn` result requires the finalizer's
+/// `CompleteFlowResult` proof token — the boolean rails alone are NOT the
+/// positive completeness authority. A clean raw value with both boolean
+/// flags clear but no proof yields ZERO candidates (the memo's flow-proof
+/// gate vetoes); the identical value with the finalizer token publishes,
+/// and the second request is a warm family hit. Deleting the proof check
+/// (`flow_proof_ok` at the memo admission) fails the negative leg.
+#[test]
+fn flow_root_publish_requires_complete_flow_proof() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        // Negative leg: the SAME clean value, flags clear, proof stripped.
+        {
+            let _strip = inject::Guard::arm(&host.flow_fault_injection.strip_root_proof);
+            let result = flow_result_value(dispatch, key.clone());
+            assert_eq!(result.degradation(), None, "the value itself is clean");
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                        key.clone()
+                    ))),
+                0,
+                "a clean value WITHOUT the finalizer's proof token must not admit — \
+                 the boolean rails are not the positive completeness authority"
+            );
+        }
+
+        // Positive leg: the identical demand with the proof publishes.
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            1,
+            "the proof-bearing build admits exactly one candidate"
+        );
+        key
+    });
+    // The warm read runs against a FRESH view (the artifacts the cold
+    // build materialized are now visible to validation).
+    let warm_key = with_dispatch(&host, |dispatch| {
+        flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+    });
+    with_dispatch(&host, |fresh| {
+        assert!(
+            fresh
+                .graph()
+                .get_flow_return_result(fresh.ctx, &warm_key)
+                .map(|served| served.value)
+                .is_some(),
+            "the second request is a warm family hit"
+        );
+    });
+}
+
+/// A production plan whose discharge leaves ONE planned obligation
+/// pending finalizes Partial: the usable value still returns (twice), the
+/// cold-compute counter increments on BOTH demands (nothing warmed), and
+/// the family slot holds zero candidates. The injected fault only DROPS a
+/// discharge claim — it can refuse more, never mint — so a green negative
+/// leg here proves the seal discriminates a pending obligation rather
+/// than riding the report's say-so.
+#[test]
+fn production_missing_obligation_returns_only_and_recomputes() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let _drop_claim = inject::Guard::arm(&host.flow_fault_injection.drop_last_discharge_claim);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        let first = flow_result_value(dispatch, key.clone());
+        assert_eq!(flow_cold_computes(), 1);
+        let second = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            flow_cold_computes(),
+            2,
+            "an unproven demand never warms, so the second request recomputes"
+        );
+        assert_eq!(
+            first.return_type(),
+            second.return_type(),
+            "both demands return the same usable value"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a pending planned obligation is ReturnOnly: zero candidates"
+        );
+    });
+}
+
+/// A NATURAL degraded success never warms — root and SCC legs. The root
+/// leg (a call on a non-callable binding) returns its usable payload
+/// twice with two cold computations and zero candidates; the SCC leg (a
+/// mutual component carrying an unapplied write effect) leaves ZERO
+/// candidates on BOTH member slots. The universal read funnel — not any
+/// consumer-side fold — carries the degradation class to the sealed
+/// consumer entry (the enclosing-component propagation is proven
+/// end-to-end by `flow_return_public_execute_releases_drained_members_
+/// both_orders`' degraded leg).
+#[test]
+fn degraded_flow_finalizer_never_warms_root_or_scc() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    // Root leg.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let key = flow_key(
+            dispatch,
+            "subNonCallableCall",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let first = flow_result_value(dispatch, key.clone());
+        assert!(first.degradation().is_some(), "a natural degraded success");
+        assert_eq!(flow_cold_computes(), 1);
+        let second = flow_result_value(dispatch, key.clone());
+        assert_eq!(flow_cold_computes(), 2, "degraded never warms: recompute");
+        assert_eq!(first.return_type(), second.return_type());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "zero root candidates"
+        );
+
+        // The universal rail: consuming the degraded value through the
+        // sealed consumer entry folds its class through the read funnel.
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+        let node = dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: Arc::from("subNonCallableCall"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+            ),
+            CANONICAL,
+        );
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+        scope.discard();
+        assert!(
+            matches!(node, super::flow_return::FunctionReturnNode::Flow(_)),
+            "the degraded value stays usable at the consumer, got {node:?}"
+        );
+        assert!(
+            observed
+                .reasons()
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the universal read funnel carries the degradation class to the \
+             consumer — no consumer-side fold exists to carry it; got {:?}",
+            observed.reasons()
+        );
+    });
+
+    // SCC leg: a degraded component publishes NEITHER member.
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let root = scc_key(dispatch, "scDegradedA");
+        let peer = scc_key(dispatch, "scDegradedB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert!(
+            result.degradation().is_some(),
+            "the component's typed degradation reaches the root"
+        );
+        for (name, key) in [("scDegradedA", root), ("scDegradedB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: a degraded component member never enters the SCC publish batch"
+            );
+        }
+    });
+}
+
+/// One cold flow demand plans EXACTLY once (one demand plan, one graph
+/// build); a warm replay of the same demand adds zero of either; an
+/// ordinary non-flow query and both pending typed-gap roots
+/// (`FlowNarrowingAt` / `ContextualTypeAt`) add zero graph builds, zero
+/// plans, and touch no flow-demand storage (the zero-capacity half is
+/// pinned by `unused_flow_runtime_reserves_no_demand_storage`).
+#[test]
+fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
+    let host = make_host();
+    // Cold demand: exactly one plan over exactly one built graph.
+    with_dispatch(&host, |dispatch| {
+        let flow_slice = host.project_type_store().flow_slice();
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key);
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "one cold demand plans once"
+        );
+        assert_eq!(
+            flow_slice.graphs().build_count(),
+            1,
+            "one graph build per content version"
+        );
+    });
+
+    // Warm replay (against a fresh view, where the published artifacts
+    // validate): zero additional plans, zero additional builds — then the
+    // non-flow and pending typed-gap dispatches on the same view.
+    with_dispatch(&host, |dispatch| {
+        let flow_slice = host.project_type_store().flow_slice();
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key);
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "warm replay never re-plans"
+        );
+        assert_eq!(flow_slice.graphs().build_count(), 1);
+
+        // An ordinary non-flow query.
+        let member = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
+        let _ = dispatch.execute(SemanticQueryKey::ReduceUnion {
+            members: Arc::from(vec![member].into_boxed_slice()),
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        });
+
+        // The pending typed-gap roots: a typed refusal, never a graph or
+        // a plan.
+        let analysis_context = verter_type_engine::semantic_query::ProgramAnalysisContext {
+            parse_env_hash: [0; 16],
+            resolve_env_hash: [0; 16],
+            type_env_hash: [0; 16],
+            lib_env_hash: [0; 16],
+            project_identity: 0,
+            substitution: verter_type_engine::semantic_query::SubstitutionCanonicalHash::empty(),
+        };
+        let pending_roots = [
+            SemanticQueryKey::FlowNarrowingAt {
+                point: verter_type_engine::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(CANONICAL),
+                    offset: 0,
+                },
+                flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
+                context: analysis_context,
+            },
+            SemanticQueryKey::ContextualTypeAt {
+                point: verter_type_engine::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(CANONICAL),
+                    offset: 0,
+                },
+                contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
+                context: analysis_context,
+            },
+        ];
+        for pending in pending_roots {
+            let result = dispatch.execute(pending);
+            assert!(
+                matches!(
+                    result,
+                    QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
+                ),
+                "a pending typed-gap root is a typed miss, got {result:?}"
+            );
+        }
+
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "non-flow queries and pending typed-gap roots never plan"
+        );
+        assert_eq!(
+            flow_slice.graphs().build_count(),
+            1,
+            "non-flow queries and pending typed-gap roots never build a graph"
+        );
+    });
+}
+
+/// A pending flow root (`FlowNarrowingAt` / `ContextualTypeAt`) surfaces
+/// its OPERATION-SPECIFIC typed gap on the read's diagnostic rail — the
+/// typed reason the answer is absent is recorded, not just the generic
+/// no-surface class. The rails stay the typed refusal: `Error(Miss)` +
+/// partial + ReturnOnly.
+#[test]
+fn pending_flow_roots_surface_their_operation_specific_gap() {
+    use verter_session_query::flow::policy::FlowGap;
+    use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let analysis_context = verter_type_engine::semantic_query::ProgramAnalysisContext {
+            parse_env_hash: [0; 16],
+            resolve_env_hash: [0; 16],
+            type_env_hash: [0; 16],
+            lib_env_hash: [0; 16],
+            project_identity: 0,
+            substitution: verter_type_engine::semantic_query::SubstitutionCanonicalHash::empty(),
+        };
+        let pending_roots = [
+            (
+                SemanticQueryKey::FlowNarrowingAt {
+                    point: verter_type_engine::semantic_query::ProgramPointId {
+                        canonical_id: Arc::from(CANONICAL),
+                        offset: 0,
+                    },
+                    flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
+                    context: analysis_context,
+                },
+                FlowGap::GuardNarrowing,
+            ),
+            (
+                SemanticQueryKey::ContextualTypeAt {
+                    point: verter_type_engine::semantic_query::ProgramPointId {
+                        canonical_id: Arc::from(CANONICAL),
+                        offset: 0,
+                    },
+                    contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
+                    context: analysis_context,
+                },
+                FlowGap::UnmodeledExpression,
+            ),
+        ];
+        for (key, gap) in pending_roots {
+            let read = dispatch.execute_via_cold_build_helper(key);
+            assert!(
+                matches!(read.value, QueryResult::Error(QueryError::Miss)),
+                "a pending typed-gap root is a typed miss, got {:?}",
+                read.value
+            );
+            assert!(
+                read.result_is_partial && read.cache_suppress,
+                "a pending typed-gap root is a typed partial, ReturnOnly"
+            );
+            assert!(
+                read.partial_reasons
+                    .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+                "the no-surface partial class, got {:?}",
+                read.partial_reasons
+            );
+            assert!(
+                read.walker_diagnostics
+                    .contains(&ShallowDiagnostic::PendingFlowRoot { gap }),
+                "the operation-specific typed gap is surfaced on the read, got {:?}",
+                read.walker_diagnostics
+            );
+        }
+    });
+}
+
+/// The memo's flow-proof gate is a veto fence, not a silent refusal: a
+/// `FlowReturn` build whose proof token was stripped (clean value, clean
+/// boolean flags) is refused AND the returned read carries the
+/// partial/suppression rails, so an enclosing composition can never warm
+/// around the veto — the winner's read and every joiner's inherited state
+/// propagate the same taint. Mutation: veto the publication without
+/// forcing the rails; the rail assertions fail while zero candidates
+/// still hold.
+#[test]
+fn flow_root_proof_gate_veto_marks_the_read_partial() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _strip = inject::Guard::arm(&host.flow_fault_injection.strip_root_proof);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the usable value still flows to the caller, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "the proof-gate veto marks the read partial + suppressed"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the veto records the unverified class, got {:?}",
+            read.partial_reasons
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "the vetoed build never admits"
+        );
+    });
+}
+
+/// An obligation-budget planning refusal is a statement about the
+/// REQUEST — the same axis as the slice budget — and must take the
+/// faulting `BUDGET_EXCEEDED` class, never the contained degraded-success
+/// `FLOW_RETURN_UNVERIFIED` class it previously merged into with the
+/// unplannable-demand cause. The distinction is consumer-observable:
+/// every Vue macro projection lane CONTAINS the unverified class (its
+/// member set is complete by definition), so a budget refusal landing
+/// there let a value-deriving lane publish `type: null` for every member,
+/// compute an empty residual, read Complete, and warm-admit the codegen
+/// artifact — while the sibling slice-budget axis faulted the same lanes
+/// for the same user-visible cause.
+///
+/// The production cap is a fixed constant (1024 obligations), so the
+/// refusal is exercised through the refuse-only zero-budget fault slot:
+/// the planner returns its typed `ObligationBudget` error through the
+/// EXACT production preparation path, just under a shrunk constant.
+/// Mutation: collapsing `plan_refusal_reason_class` back to the merged
+/// `FLOW_RETURN_UNVERIFIED` fails the two class assertions while the
+/// value, suppression, and zero-candidate assertions still pass.
+#[test]
+fn obligation_budget_refusal_takes_the_faulting_request_class() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _zero = inject::Guard::arm(&host.flow_fault_injection.zero_obligation_budget);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the usable value still flows to the caller, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "the budget refusal marks the read partial + suppressed"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(PartialReasonSet::BUDGET_EXCEEDED),
+            "a budget edge is a statement about the request and takes the faulting class, \
+             got {:?}",
+            read.partial_reasons
+        );
+        assert!(
+            !read
+                .partial_reasons
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the refusal must not ride the contained degraded-success class every macro \
+             projection lane publishes through, got {:?}",
+            read.partial_reasons
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "the refused build never admits"
+        );
+    });
+}
+
+/// A production build can obtain discharge/convergence evidence only
+/// from the private, one-shot evaluation outcome `evaluate_flow_return`
+/// mints: production finalization triangulates the evidence's
+/// provenance against the installed carrier and the dispatch's CURRENT
+/// mint, so evidence that did not originate from THIS evaluation is a
+/// typed partial and never publishes. Raw per-obligation mutators and
+/// test helpers cannot reach production finalization: the runtime the
+/// dispatch finalizes against is transaction-internal (a foreign
+/// runtime's handle fails closed —
+/// `flow_demand_handle_fails_closed_on_a_foreign_runtime`), and the
+/// sealed-witness / proof constructors are compile-time private (the
+/// `complete_flow_result_constructor_is_private` and
+/// `flow_solve_sealed_witnesses_not_constructible` compile-fail
+/// fixtures).
+#[test]
+fn production_flow_proof_has_evaluator_origin() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Negative leg: evidence whose provenance is not this evaluation's
+    // one-shot mint refuses finalization — the usable value still flows,
+    // nothing publishes.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "evidence not minted by this evaluation's outcome never publishes"
+        );
+    });
+
+    // Matched control: the evaluator-minted evidence publishes.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the evaluator-minted proof is the one production admission source"
+        );
+    });
+}
+
+/// Finalization never fabricates convergence: a demand whose convergence
+/// evidence shows ZERO observed iterations (a claim the discharge driver
+/// never produced) is a typed partial — the usable value still flows,
+/// nothing warms. The unarmed control proves the production SOLO root is
+/// driven through the real fixed point (one observed stable pass) and
+/// warms. Mutation: restore the `iterations.max(1)` fabrication; the armed
+/// leg admits and fails.
+#[test]
+fn unobserved_convergence_never_seals() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _unobserved = inject::Guard::arm(&host.flow_fault_injection.unobserved_convergence);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "zero-iteration convergence evidence is refused, never fabricated up"
+        );
+    });
+
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the solo root's driver-observed convergence seals"
+        );
+    });
+}
+
+/// A DEFERRED (non-root) SCC member finalizes only AFTER its per-key
+/// substitution: the member's proof covers the INSTANTIATED value, not
+/// the raw component-fixed-point outcome its pop deposited. The
+/// caller-return clone substituted at the pop either way; the proof is
+/// the boundary this pins. Mutation: finalize the member over the raw
+/// deposited outcome; the proof's value still mentions the binder and
+/// the final assertion fails.
+#[test]
+fn deferred_scc_member_finalizes_after_per_key_substitution() {
+    const SUB_CANONICAL: &str = "/ws/flow-member-substitution.ts";
+    const SUB_FIXTURE: &str =
+        "export function rootFn() { return 1; }\nexport function memberFn<T>(x: T) { return x; }\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(SUB_CANONICAL.to_string()),
+        input_id: SUB_CANONICAL.to_string(),
+        source: Arc::from(SUB_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(SUB_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        use super::dispatch_txn::flow_obligation_state::{
+            FlowDischargeEntry, FlowDischargeReport, FlowSuboperationEvidence, ObligationState,
+        };
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        // The binder exactly as the member frame's own clause interns it.
+        let whole_hash = dispatch
+            .ctx
+            .shallow_file_state(SUB_CANONICAL)
+            .map(|state| state.whole_hash)
+            .unwrap_or_default();
+        let scope = verter_type_engine::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(SUB_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash,
+            local_scope: None,
+        };
+        let binder = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: verter_type_engine::semantic_query::DeclIdentity::from_scope(
+                &scope,
+                Arc::from("T"),
+            ),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let key_of = |name: &str| FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(SUB_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(name),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(SUB_CANONICAL),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let root_key = key_of("rootFn");
+        let mut member_key = key_of("memberFn");
+        member_key.context.type_substitution =
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
+                binder, number,
+            )]);
+
+        // Open both frames and prepare BOTH demands for real.
+        let root_idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(root_key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&root_key, root_idx);
+        let member_idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(member_key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&member_key, member_idx);
+        // The SCC edge: the member assumed the in-flight root.
+        dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .obligations
+            .record_assumption(root_idx);
+
+        // The discharge claim set of one prepared frame: every obligation
+        // this fixture's evaluation completed (all of them).
+        let discharge_of = |key: &FlowReturnKey| {
+            let carrier = dispatch
+                .flow_demand_carrier_of(key)
+                .expect("the frame's demand is installed");
+            let txn = dispatch.dispatch_txn.borrow();
+            let records = txn
+                .obligations
+                .flow_obligations(carrier.handle)
+                .expect("the installed demand's records");
+            let entries = carrier
+                .plan
+                .obligation_specs()
+                .iter()
+                .filter(|spec| {
+                    records.iter().any(|record| {
+                        record.spec.id() == spec.id()
+                            && matches!(record.state, ObligationState::Pending)
+                    })
+                })
+                .map(|spec| FlowDischargeEntry {
+                    obligation: spec.id(),
+                    dependencies: Arc::from(spec.expected_dependencies()),
+                    suboperations: spec
+                        .expected_suboperations()
+                        .iter()
+                        .map(|operation| FlowSuboperationEvidence {
+                            operation: *operation,
+                            result_contract: carrier.plan.basis().result_contract.clone(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            FlowDischargeReport::new(entries)
+        };
+
+        // The member pops PROVISIONAL: the caller-return clone substitutes
+        // at the pop; the deposited outcome stays raw.
+        let raw_member = verter_type_engine::semantic_query::FlowReturnResult::new(
+            graph,
+            binder,
+            verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
+            None,
+        );
+        let step = dispatch.flow_frame_close_with_evidence_for_tests(
+            member_idx,
+            super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(raw_member),
+            Vec::new(),
+            Some(discharge_of(&member_key)),
+        );
+        assert!(
+            matches!(step, verter_type_engine::semantic_query::FlowReturnStep::Complete(ref result) if result.return_type() == number),
+            "the caller-return clone substitutes at the pop"
+        );
+
+        // The root closes the component: the member finalizes there.
+        let _ = dispatch.flow_frame_close_with_evidence_for_tests(
+            root_idx,
+            super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(
+                verter_type_engine::semantic_query::FlowReturnResult::new(
+                    graph,
+                    number,
+                    verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
+                        false,
+                    ),
+                    None,
+                ),
+            ),
+            Vec::new(),
+            Some(discharge_of(&root_key)),
+        );
+
+        let txn = dispatch.dispatch_txn.borrow();
+        let member = txn
+            .flow
+            .completed_members
+            .iter()
+            .find(|member| member.key == member_key)
+            .expect("the deferred member proves and queues for the batch");
+        assert_eq!(
+            member.result.value().return_type(),
+            number,
+            "the member finalizes over its INSTANTIATED value, not the raw outcome"
+        );
+    });
+}
+
+/// Value, discharge report, convergence, and demand handle share ONE
+/// opaque evaluation provenance (semantic-store identity + request
+/// generation + the demand's OWN ledger ordinal — demand-unique). A
+/// demand carrier stamped with a provenance from another store or a
+/// stale generation makes the whole solve a typed partial/ReturnOnly:
+/// the usable value still flows, and NEITHER the root nor any SCC member
+/// produces a candidate; so does evaluation evidence from ANOTHER demand
+/// of the SAME store and generation (the demand-ordinal axis).
+#[test]
+fn foreign_flow_value_provenance_is_rejected() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Root leg.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _stale = inject::Guard::arm(&host.flow_fault_injection.stale_demand_carrier);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a foreign-provenance demand carrier never yields a root candidate"
+        );
+    });
+
+    // SCC leg: a clean mutual component under a foreign-provenance
+    // carrier publishes NEITHER member.
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let _stale = inject::Guard::arm(&scc_host.flow_fault_injection.stale_demand_carrier);
+        let root = scc_key(dispatch, "scCleanA");
+        let peer = scc_key(dispatch, "scCleanB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the component value stays usable"
+        );
+        for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: foreign provenance produces zero SCC candidates"
+            );
+        }
+    });
+
+    // Same-generation foreign-demand leg: evidence carrying the carrier's
+    // OWN store/generation but ANOTHER demand's ordinal is refused —
+    // root and SCC members alike. The demand-unique axis is what
+    // distinguishes it; a store/generation-only token could not.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_demand_provenance);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a same-generation foreign demand's evidence never yields a root candidate"
+        );
+    });
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let _foreign = inject::Guard::arm(&scc_host.flow_fault_injection.foreign_demand_provenance);
+        let root = scc_key(dispatch, "scCleanA");
+        let peer = scc_key(dispatch, "scCleanB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the component value stays usable"
+        );
+        for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: a same-generation foreign demand's evidence produces zero SCC candidates"
+            );
+        }
+    });
+}
+
+/// A call in an `if`/ternary TEST is a narrowing CONTROL: when the
+/// callee is a same-file OVERLOADED type predicate, signature selection
+/// decides which predicate target narrows. Taking the first
+/// declaration's target narrows WRONG (`pred`'s first overload says `x
+/// is string`), so the guard reads the predicate of the overload the
+/// call executor SELECTS: `(x: string)` does not accept `string |
+/// number`, the second overload's `x is number` narrows, and
+/// `makeProps` returns `number | false` (measured on 7.0.2). The call's
+/// evidence is recorded at guard application, so the demand proves and
+/// warms.
+#[test]
+fn overloaded_same_file_predicate_narrows_through_the_selected_overload() {
+    const PRED_CANONICAL: &str = "/ws/overloaded-predicate.ts";
+    const PRED_FIXTURE: &str = r#"
+function pred(x: string): x is string;
+function pred(x: string | number): x is number;
+function pred(x: string | number): boolean {
+  return typeof x === "number";
+}
+
+export function makeProps(x: string | number) {
+  if (pred(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(PRED_CANONICAL.to_string()),
+        input_id: PRED_CANONICAL.to_string(),
+        source: Arc::from(PRED_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(PRED_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, PRED_CANONICAL, "makeProps");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        let has_primitive = |name: verter_type_expr::PrimitiveName| {
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(name))
+        };
+        assert!(
+            has_primitive(verter_type_expr::PrimitiveName::Number),
+            "the first overload's `x is string` target must not narrow the \
+             consequent — the number arm survives, got {expr:?}"
+        );
+        assert!(
+            !has_primitive(verter_type_expr::PrimitiveName::String),
+            "the selected overload's `x is number` narrows the string arm \
+             away, got {expr:?}"
+        );
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(PRED_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(PRED_CANONICAL),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the selected overload's narrow is evidence-backed and warms"
+        );
+    });
+}
+
+/// The positive control for the control-position call certification: a
+/// call in an `if` test whose callee is a MODULE-LOCAL, NON-EXPORTED,
+/// SINGLE-declaration function with an authored NON-predicate return
+/// annotation provably establishes no narrowing — the file is a module
+/// (top-level `export` syntax), so the callee is not a script global; the
+/// binding is not exported, so no module augmentation can merge a further
+/// signature into it; and its one signature's return is not a type
+/// predicate. Both arms join conservatively — which IS the checker's
+/// answer — and the call is decided above: the demand still proves and
+/// warms.
+#[test]
+fn annotated_non_predicate_control_call_stays_decided_above_and_warm() {
+    const CHECK_CANONICAL: &str = "/ws/boolean-check-control.ts";
+    const CHECK_FIXTURE: &str = r#"
+function check(x: string | number): boolean {
+  return typeof x === "number";
+}
+
+export function makeChecked(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CHECK_CANONICAL.to_string()),
+        input_id: CHECK_CANONICAL.to_string(),
+        source: Arc::from(CHECK_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(CHECK_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, CHECK_CANONICAL, "makeChecked");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        assert!(
+            arms.iter().any(|arm| *arm
+                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+            "the unnarrowed parameter joins, got {expr:?}"
+        );
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(CHECK_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeChecked"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(CHECK_CANONICAL),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "a provably non-narrowing control call stays decided above and warms"
+        );
+    });
+}
+
+/// Upsert one plain-TS file into `host`.
+fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+/// The whole-return `FlowReturnKey` of a top-level function of `canonical`.
+fn whole_return_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+    name: &str,
+) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// Assert that a control-test callee whose declaration closure is NOT
+/// provable from the file establishes no narrowing and never warms: the
+/// join keeps BOTH arms of the unnarrowed `string | number` parameter,
+/// the demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[track_caller]
+fn assert_control_callee_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: no narrow is established for a callee whose checker-visible \
+             signature set this file cannot enumerate — the {primitive:?} arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
+        "{name}: the control test degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable control callee never warms"
+    );
+}
+
+/// Assert that `name`'s control call narrows through the callee's own
+/// resolved signature: the join carries `false` and exactly the
+/// `present` primitive arms, none of the `absent` ones, is complete, and
+/// warms.
+fn assert_control_callee_narrows_warm(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    present: &[verter_type_expr::PrimitiveName],
+    absent: &[verter_type_expr::PrimitiveName],
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    let has = |primitive: verter_type_expr::PrimitiveName| {
+        arms.iter()
+            .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive))
+    };
+    for primitive in present {
+        assert!(
+            has(*primitive),
+            "{name}: the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    for primitive in absent {
+        assert!(
+            !has(*primitive),
+            "{name}: the {primitive:?} arm is narrowed away, got {expr:?}"
+        );
+    }
+    assert_eq!(result.degradation(), None, "{name}: the narrow is complete");
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        1,
+        "{name}: the evidence-backed control call warms"
+    );
+}
+
+/// Assert that a class-evaluation-time effect applied in the enclosing
+/// frame: the return's read is exactly `expected`, clean, and admitted warm.
+#[track_caller]
+fn assert_class_evaluation_applies_warm(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    expected: verter_type_expr::PrimitiveName,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    assert_eq!(
+        expr,
+        verter_type_expr::TypeExpr::Primitive(expected),
+        "{name}: the class-evaluation effect applies to the read"
+    );
+    assert_eq!(
+        result.degradation(),
+        None,
+        "{name}: the applied effect is complete"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        1,
+        "{name}: the complete result warms"
+    );
+}
+
+/// Control-call certification and predicate selection are proofs over
+/// the callee's CHECKER-VISIBLE declaration set, which is not the current
+/// file's text: a file with no top-level module syntax is a SCRIPT whose
+/// top-level functions are GLOBAL symbols, merging with every other
+/// script's and every `declare global` block's same-name declarations —
+/// a set no single parse snapshot can enumerate. Here a sibling
+/// declaration file contributes a PREDICATE overload to both callees:
+/// the checker narrows the consequent through the merged overload group,
+/// while the current file alone shows exactly one declaration —
+/// `check`'s a non-predicate `boolean`, `isNum`'s an `x is number`
+/// predicate whose target the merged group need not select. Neither
+/// route may self-certify from the local declaration: both demands keep
+/// the unnarrowed join, carry the typed gap, and hold zero candidates.
+#[test]
+fn script_file_control_callee_never_self_certifies_against_global_merge() {
+    const GLOBALS_CANONICAL: &str = "/ws/script-merge/globals.d.ts";
+    const GLOBALS_FIXTURE: &str = r#"
+declare function check(x: string | number): x is number;
+declare function isNum(x: string | number): x is string;
+"#;
+    const MAIN_CANONICAL: &str = "/ws/script-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+function check(x: string | number): boolean {
+  return true;
+}
+
+function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+
+function make(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+
+function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, GLOBALS_CANONICAL, GLOBALS_FIXTURE);
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+    });
+}
+
+/// A MODULE file's EXPORTED function is augmentable: a `declare module
+/// "./main"` block in any file merges further call signatures into the
+/// export symbol, and the checker resolves even the SAME-FILE call of an
+/// `export`-modified declaration through that merged symbol, trying the
+/// augmenting block's overloads first. Here the augmenter adds a predicate
+/// overload to both exported callees: `make` returns `number | false` and
+/// `pick` `string | false` on 7.0.2, each narrowed by the augmenting
+/// predicate, complete and warm.
+#[test]
+fn exported_module_function_control_callee_resolves_through_its_augmentations() {
+    const MAIN_CANONICAL: &str = "/ws/module-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+export function check(x: string | number): boolean {
+  return true;
+}
+
+export function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+
+export function make(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+
+export function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    const AUG_CANONICAL: &str = "/ws/module-merge/augment.ts";
+    const AUG_FIXTURE: &str = r#"
+import "./main";
+
+declare module "./main" {
+  export function check(x: string | number): x is number;
+  export function isNum(x: string | number): x is string;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "make",
+            &[verter_type_expr::PrimitiveName::Number],
+            &[verter_type_expr::PrimitiveName::String],
+        );
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "pick",
+            &[verter_type_expr::PrimitiveName::String],
+            &[verter_type_expr::PrimitiveName::Number],
+        );
+    });
+}
+
+/// An IMPORTED function guard is another module's export, and a `declare
+/// module` block in any file adds overloads to it: here `augment.ts`
+/// adds `x is string` beside the module's own `x is number`, and the
+/// checker tries the augmenting (later) declaration first, so `pick`
+/// returns `string | false` on 7.0.2 — whatever order the files load in.
+/// The served value is the merged overload set, so the guard narrows
+/// through the augmenting predicate, complete and warm.
+#[test]
+fn imported_function_guard_narrows_through_its_augmentations() {
+    const GUARDS_CANONICAL: &str = "/ws/import-merge/guards.ts";
+    const GUARDS_FIXTURE: &str = r#"
+export function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+"#;
+    const AUG_CANONICAL: &str = "/ws/import-merge/augment.ts";
+    const AUG_FIXTURE: &str = r#"
+import "./guards";
+declare module "./guards" {
+  export function isNum(x: string | number): x is string;
+}
+"#;
+    const MAIN_CANONICAL: &str = "/ws/import-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+import { isNum } from "./guards";
+export function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, GUARDS_CANONICAL, GUARDS_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            MAIN_CANONICAL,
+            "pick",
+            &[verter_type_expr::PrimitiveName::String],
+            &[verter_type_expr::PrimitiveName::Number],
+        );
+    });
+}
+
+/// A call to an EXPORTED function reads the export's merged overload set
+/// whichever file makes it: `augment.ts` adds `conv(x: string): 1` beside
+/// the module's own `conv(x: string): number`, and the checker tries the
+/// augmenting declaration first, so `viaCall` (in the module) and
+/// `viaImport` (importing it) both return `1` on 7.0.2, complete.
+#[test]
+fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
+    const MAIN_CANONICAL: &str = "/ws/call-merge/main.ts";
+    const MAIN_FIXTURE: &str = "export function conv(x: string): number { return 1; }\n\
+                                export function viaCall(x: string) { return conv(x); }\n";
+    const AUG_CANONICAL: &str = "/ws/call-merge/augment.ts";
+    const AUG_FIXTURE: &str = "import \"./main\";\n\
+                               declare module \"./main\" {\n  export function conv(x: string): 1;\n}\n";
+    const USE_CANONICAL: &str = "/ws/call-merge/use.ts";
+    const USE_FIXTURE: &str = "import { conv } from \"./main\";\n\
+                               export function viaImport(x: string) { return conv(x); }\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    upsert_ts(&host, USE_CANONICAL, USE_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        for (canonical, name) in [(MAIN_CANONICAL, "viaCall"), (USE_CANONICAL, "viaImport")] {
+            let result = flow_result_value(dispatch, whole_return_key(dispatch, canonical, name));
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            assert_eq!(
+                expr,
+                verter_type_expr::TypeExpr::number_literal(1.0),
+                "{name}: the augmenting overload answers first"
+            );
+            assert_eq!(result.degradation(), None, "{name}: the call is complete");
+        }
+    });
+}
+
+/// A NAMESPACE-OWNED call site binds its bare callee through the
+/// enclosing block's scope first — the block-local `check` / `isNum`
+/// shadow the module-scope declarations of the same name, exactly as the
+/// function index binds `N.check` over the file-global `check` for a
+/// direct call. The checker narrows `N.make`'s consequent through the
+/// block-local PREDICATE while the module scope holds a non-predicate
+/// `boolean` `check`, and narrows `N.pick`'s to `number` while the
+/// module-scope `isNum` says `string`. Neither route may resolve the
+/// callee at the top level: both demands keep the unnarrowed join, carry
+/// the typed gap, and hold zero candidates. The top-level caller of the
+/// same file keeps its provable closure — its `check` is the single
+/// unexported module-local declaration — so that call is certified and
+/// the demand warms.
+#[test]
+fn namespace_owned_control_callee_never_resolves_at_top_level() {
+    const MAIN_CANONICAL: &str = "/ws/namespace-shadow/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+export {};
+
+function check(x: string | number): boolean {
+  return true;
+}
+
+function isNum(x: string | number): x is string {
+  return typeof x === "string";
+}
+
+namespace N {
+  function check(x: string | number): x is number {
+    return typeof x === "number";
+  }
+
+  function isNum(x: string | number): x is number {
+    return typeof x === "number";
+  }
+
+  export function make(x: string | number) {
+    if (check(x)) return x;
+    return false;
+  }
+
+  export function pick(x: string | number) {
+    if (isNum(x)) return x;
+    return false;
+  }
+}
+
+function makeTop(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "N.make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "N.pick");
+
+        let key = whole_return_key(dispatch, MAIN_CANONICAL, "makeTop");
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the top-level call site's callee closure is provable: no gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the certified top-level control call warms"
+        );
+    });
+}
+
+/// A same-file predicate whose target names the CALLEE's own type
+/// parameter — `function isSame<T>(x: T): x is T` — is instantiated by
+/// the call: the checker binds `T` to the argument's `string | number`
+/// and the predicate is a tautology, so `f` returns `string | number |
+/// boolean`. Resolving `T` through the CALLER's environment binds the
+/// unrelated owner-scope alias `type T = number` and narrows `string`
+/// away. The guard reads the predicate of the signature the call executor
+/// instantiates, so both arms survive, complete and warm.
+#[test]
+fn generic_predicate_target_never_resolves_in_the_caller_environment() {
+    const CANONICAL: &str = "/ws/generic-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type T = number;
+
+function isSame<T>(x: T): x is T { return true }
+
+function f(x: string | number) {
+  if (isSame(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            &[
+                verter_type_expr::PrimitiveName::String,
+                verter_type_expr::PrimitiveName::Number,
+            ],
+            &[],
+        );
+    });
+}
+
+/// A nested namespace member is served from ITS OWN body: `N.M.make`
+/// returns `"x"`, `N.make` returns `111`. A locator that keeps only the
+/// inner block's statement ordinal resolves that ordinal in the OUTER
+/// block and certifies the outer body's `number` under the inner
+/// function's key — a wrong-complete result that would warm.
+#[test]
+fn nested_namespace_function_is_served_from_its_own_body() {
+    const CANONICAL: &str = "/ws/nested-namespace/main.ts";
+    const FIXTURE: &str = r#"
+namespace N {
+  function make() { return 111 }
+
+  namespace M {
+    function make() { return "x" }
+  }
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let inner_key = whole_return_key(dispatch, CANONICAL, "N.M.make");
+        let inner = flow_result_value(dispatch, inner_key.clone());
+        let inner_expr = host
+            .project_node_to_type_expr_for_test(inner.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            inner_expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            "the inner function's own body is served"
+        );
+        assert_eq!(inner.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(inner_key))),
+            1,
+            "the correctly served inner body certifies and warms"
+        );
+
+        let (outer_expr, _) = flow_result_for_file(dispatch, &host, CANONICAL, "N.make");
+        assert_eq!(
+            outer_expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the outer function keeps its own body"
+        );
+    });
+}
+
+/// `x instanceof A` narrows by the VALUE `A` denotes at the test. A
+/// parameter `A: typeof B` shadows the owner-scope `class A`, and the
+/// checker narrows to `B` — `f` returns `B | boolean`. An owner-scope type
+/// reference for the constructor narrows to the class `A` instead, and
+/// with no call in the test nothing else stops that wrong narrowing from
+/// completing and warming. The frame-bound right-hand side is refused at
+/// lowering: the demand keeps both class arms unnarrowed, carries the
+/// typed gap, and holds zero candidates.
+#[test]
+fn instanceof_shadowed_by_a_parameter_never_narrows_through_the_owner_class() {
+    const CANONICAL: &str = "/ws/instanceof-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class A { a = 1 }
+class B { b = 1 }
+
+function f(x: A | B, A: typeof B) {
+  if (x instanceof A) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        for class in ["A", "B"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+                )),
+                "no narrow is established through the shadowed constructor name — the \
+                 `{class}` arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
+            "the shadowed constructor test degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an unprovable constructor binding never warms"
+        );
+    });
+}
+
+/// D10 lib-global control for the `"k" in x` unknown-key positive edge:
+/// a module-local `type Record<K, V>` is IRRELEVANT to it.
+///
+/// `in`-narrowing is a compiler-internal operation. The checker reaches
+/// its own global symbol table for the utility
+/// (`getGlobalRecordSymbol()`, then a type-alias instantiation over that
+/// symbol) and never resolves the identifier `Record` in the narrowed
+/// expression's scope, so the narrow is the same `(subject) &
+/// Record<"c", unknown>` whether or not the module declares a type of
+/// that name. Routing the mint through owner scope made a local
+/// declaration change the operation — and rejecting the shadowed
+/// resolution (the first repair) suppressed a narrow the checker still
+/// performs. `lower_lib_global` takes the lib environment directly.
+#[test]
+fn in_key_unknown_key_positive_edge_ignores_a_userland_record_shadow() {
+    const CANONICAL: &str = "/ws/in-key-record-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type Record<K extends string, V> = { shadowed: true };
+
+function makeProps(x: { a: number } | { b: string }) {
+  return { v: "c" in x ? x : 0 };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "makeProps");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
+        assert!(
+            printed.contains("Record"),
+            "the lib `Record` mints regardless of a same-named local type, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("shadowed"),
+            "the LOCAL `Record` must never be the utility that mints, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a compiler-internal global is not shadowable, so the narrow is exact"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the exact unknown-key narrow warms"
+        );
+    });
+}
+
+/// D10 lib-global control for the `typeof x === "function"` positive edge
+/// over `object`: a module-scoped `interface Function` is IRRELEVANT to
+/// it.
+///
+/// The checker narrows against `globalFunctionType`, read from its own
+/// global symbol table, not by resolving the identifier `Function` in the
+/// narrowed expression's scope — so `x: object` still reads the lib
+/// `Function` inside the guard. The shadowing interface remains the type
+/// an AUTHORED `x: Function` annotation would mean; the two routes are
+/// deliberately different, and only the authored one is lexical.
+#[test]
+fn typeof_function_over_object_ignores_a_userland_function_shadow() {
+    const CANONICAL: &str = "/ws/typeof-function-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+interface Function { shadowed: true }
+
+function makeProps(x: object) {
+  if (typeof x === "function") { return x; }
+  return 0 as const;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "makeProps");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
+        assert!(
+            printed.contains("Function"),
+            "the lib `Function` narrows regardless of a same-named local interface, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("shadowed"),
+            "the LOCAL `Function` must never be the narrowed surface, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a compiler-internal global is not shadowable, so the narrow is exact"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the exact typeof-function narrow warms"
+        );
+    });
+}
+
+/// The FAIL-CLOSED half of the lib-global contract, at both guard mints:
+/// when the environment provides no such global, the narrow is not
+/// performed — the subject stays exactly as declared behind the typed
+/// `GuardNarrowing` gap and never warms. It is never a narrow fabricated
+/// over a global the environment did not provide.
+///
+/// This is the checker's own behaviour: `narrowByInKeyword` mints the
+/// intersection only `if recordSymbol != nil`, and a missing
+/// `globalFunctionType` leaves `typeof x === "function"` with nothing to
+/// narrow to.
+///
+/// Reaching the case needs the fault slot because the environment's two
+/// providers (a registered ambient declaration, or verter's own
+/// implementation) cannot BOTH be withdrawn by any project configuration
+/// this session models: verter reduces `Record<K, V>` natively and
+/// carries `Function` as a terminal runtime nominal, so they are
+/// available in every project today. When a project-scoped TS lib
+/// selection (tsconfig `lib` / `noLib`) is modelled, it becomes the
+/// production route into exactly this assertion.
+#[test]
+fn guard_narrows_gap_when_the_environment_provides_no_lib_global() {
+    const CANONICAL: &str = "/ws/lib-global-unavailable/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+function inKey(x: { a: number } | { b: string }) {
+  return { v: "c" in x ? x : 0 };
+}
+
+function typeofFunction(x: object) {
+  if (typeof x === "function") { return x; }
+  return 0 as const;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    host.flow_fault_injection
+        .lib_global_unavailable
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    with_dispatch(&host, |dispatch| {
+        for (function, global, narrowed) in [
+            ("inKey", "Record", "Intersection"),
+            ("typeofFunction", "Function", "Function"),
+        ] {
+            let key = whole_return_key(dispatch, CANONICAL, function);
+            let result = flow_result_value(dispatch, key.clone());
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            let printed = format!("{expr:?}");
+            assert!(
+                !printed.contains(global) && !printed.contains(narrowed),
+                "`{function}` must not mint `{global}` when the environment provides \
+                 none, got {expr:?}"
+            );
+            assert_eq!(
+                result.degradation(),
+                Some(
+                    verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                    )
+                ),
+                "`{function}` keeps the typed guard gap when `{global}` is unavailable"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "a narrow that could not reach `{global}` never warms"
+            );
+        }
+    });
+}
+
+/// The availability question itself, at the one place that asks it: a
+/// name NO provider of the environment carries mints nothing at all — not
+/// a `__builtin__` carrier over a name verter does not implement, not an
+/// unresolved shell. `Record` and `Function` are the control: both
+/// providers-or-nothing, same call, same scope.
+///
+/// This pins the MINT arms, which is a weaker property than the
+/// availability gate itself — an unprovided name reaches neither arm and
+/// would fall through to `None` even without the gate. The discriminating
+/// control for the gate is
+/// [`guard_narrows_gap_when_the_environment_provides_no_lib_global`]:
+/// remove the gate and it mints `Record<"c", unknown>` clean over an
+/// environment that provides no `Record`.
+#[test]
+fn lower_lib_global_mints_only_a_global_the_environment_provides() {
+    const CANONICAL: &str = "/ws/lib-global-availability/main.ts";
+    const FIXTURE: &str = "export {};\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let lower = |name: &str, args: Vec<SemanticNodeId>| {
+            dispatch.lower_lib_global(
+                CANONICAL,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &Arc::from(name),
+                Arc::from(args.into_boxed_slice()),
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
+            )
+        };
+        let unknown = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Unknown,
+            ),
+        );
+
+        assert!(
+            lower("Function", Vec::new()).is_some(),
+            "verter implements the `Function` global, so the environment provides it"
+        );
+        assert!(
+            lower("Record", vec![unknown, unknown]).is_some(),
+            "verter implements the `Record` utility, so the environment provides it"
+        );
+        assert!(
+            lower("NotALibGlobalAnywhere", Vec::new()).is_none(),
+            "a name no provider carries mints nothing — never a `__builtin__` carrier \
+             over a global that does not exist"
+        );
+    });
+}
+
+/// The D10 heritage controls for `instanceof` derivation: the
+/// declaration-identity chain decides both edges, a STRUCTURAL TWIN with
+/// no heritage relation takes the checker's OWN subtype fallback (clean,
+/// warm), a twin of a class WITH heritage takes the same fallback through
+/// the heritage carrier (clean, warm), the cold walk reads one heritage
+/// bundle per visited ancestor, and an identical warm demand adds zero
+/// dispatches of any class.
+#[test]
+fn instanceof_heritage_decides_both_edges_and_bounds_its_reads() {
+    use super::flow_return::INSTANCEOF_HERITAGE_READS;
+    use super::semantic_operand_tests::{class_count, dispatch_classes_since, trace_len};
+
+    const CANONICAL: &str = "/ws/instanceof-heritage/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class K { k = 1 }
+class KSub extends K { s = 1 }
+class Twin { k = 1; s = 1 }
+class Solo { p = 1 }
+class SoloTwin { p = 1 }
+class Chain1 { c = 1 }
+class Chain2 extends Chain1 { d = 1 }
+class Chain3 extends Chain2 { e = 1 }
+
+function keep(x: K | KSub) { if (x instanceof K) return x; return 0; }
+function down(x: K) { if (x instanceof KSub) return x; return 0; }
+function negated(x: K | KSub) { if (!(x instanceof K)) return x; return 0; }
+function twin(x: SoloTwin) { if (x instanceof Solo) return x; return 0; }
+function carrierTwin(x: Twin) { if (x instanceof KSub) return x; return 0; }
+function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0; }
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        // (1) The subclass arm survives as itself: `K | KSub` under
+        // `instanceof K` keeps the whole union, CLEAN, warm.
+        let key = whole_return_key(dispatch, CANONICAL, "keep");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            ))),
+            "the subclass arm survives the matching-family test, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the matching-family test is clean"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean matching-family result warms"
+        );
+
+        // (2) The base arm downcasts: `K` under `instanceof KSub`
+        // publishes `KSub`, CLEAN, warm.
+        let key = whole_return_key(dispatch, CANONICAL, "down");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "K"
+            ))),
+            "the base arm narrows TO the subclass instance type, got {expr:?}"
+        );
+        assert_eq!(result.degradation(), None, "the downcast is clean");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean downcast warms"
+        );
+
+        // (3) The negated edge drops the whole tested family: both `K`
+        // and `KSub` are instances of `K`, so the guarded subject reads
+        // `never` and ONLY the fall-through `return 0` contributes — the
+        // `never` return drops beside it and the lone fresh literal widens:
+        // TypeScript 7.0.2 (all four settings) answers `number`.
+        let key = whole_return_key(dispatch, CANONICAL, "negated");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the negated family drop leaves only the widened fall-through arm"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the heritage-proved family drop is clean"
+        );
+
+        // (4) STRUCTURAL TWIN control: `SoloTwin` is shape-identical to
+        // `Solo` with NO heritage relation, and heritage PROVES that in
+        // both directions (two readable, heritage-free classes). The
+        // checker's per-arm derivation map is therefore empty and its
+        // union-level fallback decides: `isTypeSubtypeOf(Solo,
+        // SoloTwin)` holds, so the positive edge publishes `Solo` — the
+        // checker's own subtype fallback, CLEAN and warm, never a gap.
+        let key = whole_return_key(dispatch, CANONICAL, "twin");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Solo"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "SoloTwin"
+            ))),
+            "the heritage-free twin takes the checker's subtype fallback, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a heritage-PROVED unrelated pair decided by the relation authority is clean"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean subtype fallback warms"
+        );
+
+        // (5) The same fallback over a tested class that HAS heritage:
+        // `Twin` is shape-identical to `KSub`'s composed instance
+        // surface (`K & { s }`) and heritage proves the two unrelated, so
+        // the checker's subtype fallback narrows the subject to the tested
+        // class — TypeScript 7.0.2 (`tsc --declaration
+        // --emitDeclarationOnly --strict`) returns `0 | KSub` from
+        // `carrierTwin`. The relation reads the heritage carrier through
+        // its declaration, so the narrow is clean and warms.
+        let key = whole_return_key(dispatch, CANONICAL, "carrierTwin");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert!(
+            matches!(&expr, verter_type_expr::TypeExpr::Union(arms)
+            if arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "KSub"
+            )) && !arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Twin"
+            ))),
+            "the structural twin narrows to the tested class, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            None,
+            "a decided structural fallback is clean"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean structural fallback warms"
+        );
+
+        // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
+        // edge. `Chain3 | string` under `instanceof Chain1` runs the
+        // guard over a THREE-level hierarchy, and the depth is invisible
+        // to the bound — the recursive walk lives in the heritage
+        // authority behind the single read and is memoized per dispatch,
+        // so the guard pays one read for `Chain3`, one for the tested
+        // class, and NONE for the declaration-less `string` arm, on each
+        // of the two edges the guard applies. Nothing is charged per
+        // ancestor, per member, per relation, or per re-ask.
+        let key = whole_return_key(dispatch, CANONICAL, "chain");
+        INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
+        let result = flow_result_value(dispatch, key.clone());
+        let cold_reads = INSTANCEOF_HERITAGE_READS.with(|reads| reads.get());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the three-level chain decides the arm cleanly"
+        );
+        assert_eq!(
+            cold_reads, COLD_CHAIN_HERITAGE_READS,
+            "the cold guard reads heritage once per arm per edge"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean chain result warms"
+        );
+    });
+
+    // (7) Bounded work, the WARM half, measured over a FRESH dispatch so
+    // the memo's warm path is the one under test. The `chain` demand is
+    // the discriminating one: its cold evaluation pays both heritage
+    // walks AND the `string` arm's relation reads, so a warm replay that
+    // adds ZERO of either is a real measurement, not a shape that could
+    // not have moved the counters anyway.
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "chain");
+        INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
+        let warm_start = trace_len();
+        let warm = execute_flow(dispatch, key);
+        assert!(
+            matches!(
+                &warm,
+                QueryResult::Value(SemanticQueryOutput {
+                    value: SemanticQueryValue::FlowReturn(_),
+                    ..
+                })
+            ),
+            "the warm re-demand must serve the completed result"
+        );
+        let warm_window = dispatch_classes_since(warm_start);
+        let relation_reads = class_count(&warm_window, "Relate");
+        assert_eq!(
+            (
+                INSTANCEOF_HERITAGE_READS.with(|reads| reads.get()),
+                relation_reads,
+            ),
+            (0, 0),
+            "an identical warm demand re-walks no heritage and adds zero relation \
+             reads, recorded {warm_window:?}"
+        );
+    });
+}
+
+/// D10-AC4's cold bound, as case (6) of
+/// [`instanceof_heritage_decides_both_edges_and_bounds_its_reads`]
+/// measures it: one heritage read per ARM per cold EDGE.
+///
+/// Two edges × (the `Chain3` arm + the tested class `Chain1`) = 4; the
+/// `string` arm carries no declaration and asks nothing. The subject's
+/// three-level hierarchy does NOT appear in this number — that is the
+/// point of the bound, and of putting the recursive ancestry walk behind
+/// one memoized heritage-authority read. A guard that starts charging per
+/// ancestor, per member, per relation or per re-ask fails here rather
+/// than silently paying for it.
+const COLD_CHAIN_HERITAGE_READS: usize = 4;
+
+/// A heritage hop this generation can neither ROOT nor READ — a
+/// cross-file base whose declaration the walk's `ReturnOnly` accessor
+/// does not serve — leaves the walk undecided, so the narrow degrades
+/// and never warms.
+///
+/// This is the shape behind the `N39_instanceof_imported_class` open
+/// debt, pinned here from the heritage walk's side: the imported
+/// intermediate's bases are not readable, so the instance chain
+/// `KSub -> Mid -> Base` cannot be completed. Publishing the downcast
+/// anyway would be a warm entry rooted on nothing that carries an edit
+/// to `mid.ts`, and publishing the NEGATIVE ("the arm is not in that
+/// family") would be a fabricated proof — both excluded, so the typed
+/// `GuardNarrowing` gap is the only honest answer.
+///
+/// The gap here is OVER-DETERMINED and this case is not the
+/// discriminating control for the walk's decidability gate: a class with
+/// heritage unwraps to a composed heritage carrier the relation
+/// authority also answers undecided (see the recorded relation-authority
+/// deferral in the program's decision records), so the structural route degrades
+/// too. The discriminating control for the decidability gate is
+/// [`instanceof_undecidable_heritage_stays_gapped_and_never_warms`],
+/// whose arms ARE structurally decidable: without the gate those publish
+/// the unrelated-arm intersection clean and warm. What this case pins is
+/// that an unreadable cross-file hop reaches neither publication.
+#[test]
+fn instanceof_unreadable_cross_file_heritage_gaps_and_never_warms() {
+    const BASE: &str = "/ws/instanceof-heritage-crossfile/base.ts";
+    const MID: &str = "/ws/instanceof-heritage-crossfile/mid.ts";
+    const MAIN: &str = "/ws/instanceof-heritage-crossfile/main.ts";
+    const BASE_FIXTURE: &str = r#"
+export class Base { b = 1 }
+"#;
+    const MID_FIXTURE: &str = r#"
+import { Base } from "./base";
+export class Mid extends Base { m = 1 }
+"#;
+    const MAIN_FIXTURE: &str = r#"
+import { Mid } from "./mid";
+import { Base } from "./base";
+class KSub extends Mid { s = 1 }
+
+function f(x: Base) { if (x instanceof KSub) return x; return 0; }
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, BASE, BASE_FIXTURE);
+    upsert_ts(&host, MID, MID_FIXTURE);
+    upsert_ts(&host, MAIN, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, MAIN, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let printed = format!("{expr:?}");
+        assert!(
+            printed.contains("Base"),
+            "an unreadable heritage hop leaves the arm exactly as declared, got {expr:?}"
+        );
+        assert!(
+            !printed.contains("KSub") && !printed.contains("Intersection"),
+            "an unreadable heritage hop publishes neither the downcast nor the \
+             unrelated-arm intersection, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
+            "an unreadable heritage hop leaves the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a narrow the heritage walk could not root never warms"
+        );
+    });
+}
+
+/// The lib `Function` global's carrier is TERMINAL for the relation
+/// authority — its `"__builtin__"` base names no declaration the
+/// `Instantiate` dispatch can serve, so the carrier is handed through
+/// unexpanded and would otherwise reach the deferred-shell gate and
+/// answer `Unknown` for the two judgements the checker decides by tag:
+/// `Function` IS an object, and every callable inhabits `Function`.
+/// Deciding them keeps the carrier terminal — no `Instantiate`, no body
+/// it does not have — and the controls prove the decision is not a
+/// blanket accept.
+#[test]
+fn the_global_function_carrier_relates_to_object_and_accepts_callables() {
+    const CANONICAL: &str = "/ws/global-function-relation/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type Callable = (a: number) => string;
+interface CallableSurface { (a: number): string; extra: number }
+interface PlainSurface { extra: number }
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let named = |name: &str| {
+            dispatch
+                .lower_type_expr_in_owner_scope_with_context(
+                    CANONICAL,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    &verter_type_expr::TypeExpr::Ref {
+                        name: Arc::from(name),
+                        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+                .unwrap_or_else(|| panic!("`{name}` must lower in owner scope"))
+        };
+        let graph = host.project_type_store().semantic_graph();
+        let function = named("Function");
+        let callable = named("Callable");
+        let callable_surface = named("CallableSurface");
+        let plain_surface = named("PlainSurface");
+        let object = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Object,
+            ),
+        );
+        let number = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
+        let assignable = |source, target| {
+            matches!(
+                dispatch.execute_relate_pair_as_result_for_tests(source, target),
+                verter_type_engine::semantic_query::RelationResult::Assignable { .. }
+            )
+        };
+
+        assert!(
+            assignable(function, object),
+            "the global `Function` IS an object"
+        );
+        assert!(
+            assignable(callable, function),
+            "a bare call signature inhabits the global `Function` surface"
+        );
+        assert!(
+            assignable(callable_surface, function),
+            "an object surface carrying a call signature inhabits `Function`"
+        );
+
+        // Controls: the terminal arm decides exactly those judgements and
+        // nothing else — a NON-callable surface and a primitive are never
+        // accepted into `Function`, and `Function` is not accepted into an
+        // unrelated primitive.
+        assert!(
+            !assignable(plain_surface, function),
+            "a surface with no call or construct signature is not a `Function`"
+        );
+        assert!(
+            !assignable(number, function),
+            "a primitive is never a `Function`"
+        );
+        assert!(
+            !assignable(function, number),
+            "`Function` is not assignable to an unrelated primitive"
+        );
+    });
+}
+
+/// D10's UNDECIDABLE-heritage control, the other half of D10-AC2. An
+/// `instanceof` arm whose class ancestry the fact producer could not
+/// name (`class X extends mixin(K) {}` — a call-expression base folds no
+/// heritage arm into the body) or whose base declaration this generation
+/// cannot read at all (an unresolved heritage import) proves NOTHING in
+/// either direction.
+///
+/// Both fixtures are the dangerous shape: the arm is structurally
+/// UNRELATED to the tested class, so a walk that read the empty base
+/// list as a proof of no heritage would classify the arm unrelated, mint
+/// the whole-subject intersection, and publish it clean and warm — while
+/// the checker resolves the mixin's base instance type (and the import's
+/// declaration) and keeps the arm. That is the wrong-complete result the
+/// charter's correctness budget excludes, so the arm must stay behind
+/// the typed `GuardNarrowing` gap and never warm.
+#[test]
+fn instanceof_undecidable_heritage_stays_gapped_and_never_warms() {
+    const EXPRESSION_CANONICAL: &str = "/ws/instanceof-undecidable/expression.ts";
+    const EXPRESSION_FIXTURE: &str = r#"
+export {};
+declare function mixin<T>(base: T): T;
+class K { k = 1 }
+class Mixed extends mixin(K) { extra = 1 }
+
+function f(x: Mixed | string) { if (x instanceof K) return x; return 0; }
+"#;
+    const UNRESOLVED_CANONICAL: &str = "/ws/instanceof-undecidable/unresolved.ts";
+    const UNRESOLVED_FIXTURE: &str = r#"
+import { Absent } from "./absent";
+class K { k = 1 }
+class Derived extends Absent { extra = 1 }
+
+function f(x: Derived | string) { if (x instanceof K) return x; return 0; }
+"#;
+    for (canonical, fixture, arm, what) in [
+        (
+            EXPRESSION_CANONICAL,
+            EXPRESSION_FIXTURE,
+            "Mixed",
+            "an expression base the fact producer could not name",
+        ),
+        (
+            UNRESOLVED_CANONICAL,
+            UNRESOLVED_FIXTURE,
+            "Derived",
+            "an unresolved heritage import",
+        ),
+    ] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert_ts(&host, canonical, fixture);
+        with_dispatch(&host, |dispatch| {
+            let key = whole_return_key(dispatch, canonical, "f");
+            let result = flow_result_value(dispatch, key.clone());
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("return node must project to TypeExpr");
+            let printed = format!("{expr:?}");
+            assert!(
+                printed.contains(arm),
+                "{what} must leave the arm possible, got {expr:?}"
+            );
+            assert!(
+                !printed.contains("Intersection"),
+                "{what} must never mint the unrelated-arm intersection, got {expr:?}"
+            );
+            assert_eq!(
+                result.degradation(),
+                Some(
+                    verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                    )
+                ),
+                "{what} leaves the typed guard-narrowing gap"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{what} never warms"
+            );
+        });
+    }
+}
+
+/// Assert that an `instanceof` test over `A | B` establishes no narrowing
+/// and never warms: the join keeps BOTH class arms, the demand carries
+/// the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[track_caller]
+fn assert_instanceof_class_arms_gap_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for class in ["A", "B"] {
+        assert!(
+            arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+            )),
+            "{name}: no narrow is established through the constructor — the `{class}` arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
+        "{name}: the constructor test degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable constructor binding never warms"
+    );
+}
+
+/// A same-file predicate's target is authored in the CALLEE's declaration
+/// scope — `isNum(x): x is T` names the MODULE alias `type T = number` —
+/// but the fact is consumed inside the CALLER's frame, whose binder
+/// environment interns the caller's own `<T extends number>`. Lowering
+/// the target there rebinds it to the caller's `T`: no arm of `string |
+/// number` is assignable to a type parameter, the target itself is
+/// assignable to the subject, so the narrow becomes `T` and `f` publishes
+/// `T | boolean` where the checker says `number | boolean` — complete and
+/// warm. The guard reads the predicate from the callee's own signature,
+/// whose `T` is the module alias: the join is the checker's `number |
+/// false`, complete and warm.
+#[test]
+fn generic_caller_binder_never_captures_a_predicate_target() {
+    const CANONICAL: &str = "/ws/caller-binder-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type T = number;
+
+function isNum(x: unknown): x is T { return true }
+
+function f<T extends number>(x: string | number, _t: T) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_narrows_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            &[verter_type_expr::PrimitiveName::Number],
+            &[verter_type_expr::PrimitiveName::String],
+        );
+    });
+}
+
+/// `x instanceof A` narrows to the PREDICATE target of a static
+/// `[Symbol.hasInstance]` when the constructor's static side carries one
+/// — directly or through its heritage: with `static
+/// [Symbol.hasInstance](x: unknown): x is B` the checker narrows `A | B`
+/// to `B`, and `f` returns `B | boolean`. An owner-scope type reference
+/// for `A` narrows to the class instance type `A` instead — a
+/// wrong-complete `A | boolean` that would warm. Such a constructor is
+/// refused at lowering: both demands keep both class arms, carry the
+/// typed gap, and hold zero candidates.
+#[test]
+fn instanceof_with_symbol_has_instance_never_narrows_to_the_class_instance() {
+    const CANONICAL: &str = "/ws/instanceof-has-instance/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class B { b = 1 }
+class A {
+  a = 1;
+  static [Symbol.hasInstance](x: unknown): x is B { return true }
+}
+class Base {
+  static [Symbol.hasInstance](x: unknown): x is B { return true }
+}
+class C extends Base { c = 1 }
+
+function direct(x: A | B) {
+  if (x instanceof A) return x;
+  return false;
+}
+
+function inherited(x: C | B) {
+  if (x instanceof C) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_instanceof_class_arms_gap_unwarmed(dispatch, &host, CANONICAL, "direct");
+        let key = whole_return_key(dispatch, CANONICAL, "inherited");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("inherited: the join is a union, got {expr:?}");
+        };
+        for class in ["C", "B"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+                )),
+                "inherited: the `{class}` arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
+            "inherited: the constructor test degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "inherited: an inherited `Symbol.hasInstance` never warms"
+        );
+    });
+}
+
+/// A DISCARDED sequence operand's assertion call narrows everything after
+/// it: the checker enters the comma operand into control flow, so
+/// `(assertString(x), x)` is `string`. The assertion applies ahead of the
+/// sequence's value. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `string`.
+#[test]
+fn discarded_sequence_assertion_narrows_the_value() {
+    const CANONICAL: &str = "/ws/discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  return (assertString(x), x);
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", false);
+    });
+}
+
+/// A type carrier folds its operand into ONE shallow-pass answer WITHOUT
+/// visiting it (`((assertString(x), 0) as number)` is `number`), so the
+/// direct-sequence protection never runs for the wrapped sequence and the
+/// discarded assertion's call would be blanket-certified decided-above —
+/// the checker narrows `x` to `string` while the unnarrowed superset
+/// publishes complete and warm. The wrapped discarded assertion takes the
+/// same discarded-operand discipline as the direct sequence: the binding
+/// keeps the carrier's asserted type, the later read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
+/// the family slot holds zero candidates.
+#[test]
+fn type_carrier_wrapped_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/wrapped-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = ((assertString(x), 0) as number);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            object_prop(&expr, "y"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "f: the binding keeps the carrier's asserted type: {expr:?}"
+        );
+        let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+            panic!("f: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+                 survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
+            "f: the wrapped discarded assertion degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable wrapped discarded assertion never warms"
+        );
+    });
+}
+
+/// A class's `super_class` heritage expression evaluates in the ENCLOSING
+/// frame, so a discarded operand of a sequence there still narrows what
+/// follows: after `((class extends (assertString(x), Base) {}) as typeof
+/// Base)` the checker reads `x` as `string`. Treating the whole class as a
+/// nested frame skipped the sequence split, blanket-certified the heritage
+/// assertion decided-above, and — with no call obligation for the class
+/// expression — the unnarrowed superset published complete and warm. The
+/// heritage assertion takes the discarded-operand discipline: the later
+/// read of `x` keeps the unnarrowed `string | number` join, the demand
+/// carries the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[test]
+fn class_heritage_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/heritage-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+class Base {}
+
+function f(x: string | number) {
+  const y = ((class extends (assertString(x), Base) {}) as typeof Base);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+            panic!("f: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+                 survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
+            "f: the heritage discarded assertion degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable heritage discarded assertion never warms"
+        );
+    });
+}
+
+/// A semantically complete `any` leaf answer (`as any`) is warm-admissible,
+/// but the leaf still RUNS: a class static block executes at class
+/// evaluation, so the assertion inside `(class { static { assertString(x);
+/// } } as any)` narrows `x` to `string` for every read that follows in the
+/// checker. Answering `SemanticAny` before the leaf call scanner ran
+/// skipped the same-frame discipline — no gap, no call obligation (the
+/// skeleton mints none for a class body) — and the `{ a: any, x }` return
+/// sealed complete and warm with `x` unnarrowed. The leaf takes the same
+/// per-callee certification: the assertion is unprovable, so the later
+/// read of `x` keeps the unnarrowed `string | number` join, the demand
+/// carries the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[test]
+fn semantic_any_leaf_static_block_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/semantic-any-static-block/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const a = (class { static { assertString(x); } } as any);
+  return { a, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// Assert that a dropped same-frame narrowing never publishes warm for a
+/// `{ y, x }` return: the later read of `x` keeps BOTH arms of the
+/// unnarrowed `string | number` parameter, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[track_caller]
+fn assert_object_read_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+        panic!("{name}: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
+        "{name}: the unprovable call degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable call never warms"
+    );
+}
+
+/// `name`'s read of `x` (the whole return, or its object's `x` member when
+/// `member` is set) is `string` and the answer is complete: an entered
+/// `asserts x is string` call applied before the read.
+fn assert_entered_assertion_narrows_the_read(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    member: bool,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key);
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let read = if member {
+        object_prop(&expr, "x")
+    } else {
+        &expr
+    };
+    assert_eq!(
+        read,
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "{name}: the asserted read is `string`, got {expr:?}"
+    );
+    assert_eq!(
+        result.degradation(),
+        None,
+        "{name}: the applied assertion leaves the read complete"
+    );
+}
+
+/// `name`'s read of `x` (the whole return, or its object's `x` member when
+/// `member` is set) keeps the declared `string | number` exactly, and the
+/// answer is complete: a call the checker never enters into control flow
+/// narrows nothing.
+fn assert_never_entered_call_keeps_the_read(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+    member: bool,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key);
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let read = if member {
+        object_prop(&expr, "x")
+    } else {
+        &expr
+    };
+    let verter_type_expr::TypeExpr::Union(arms) = read else {
+        panic!("{name}: the read of `x` is the declared union, got {expr:?}");
+    };
+    assert_eq!(
+        arms.len(),
+        2,
+        "{name}: exactly the declared arms, got {expr:?}"
+    );
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        None,
+        "{name}: a never-entered call leaves the read complete"
+    );
+}
+
+/// A class DECLARATION statement is not transparent: its static block
+/// runs at class evaluation — in THIS frame, at the statement — so the
+/// assertion in `class C { static { assertString(x); } }` narrows `x` to
+/// `string` for every read that follows in the checker (TypeScript 7.0.2,
+/// `--strict` and without `strictNullChecks`). The static block lowers in
+/// the frame, so its entered assertion narrows the return's read and the
+/// evidenced call publishes complete and warm.
+#[test]
+fn class_declaration_static_block_assertion_narrows_warm() {
+    const CANONICAL: &str = "/ws/class-decl-static-block/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number | boolean) {
+  class C { static { assertString(x); } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_applies_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            verter_type_expr::PrimitiveName::String,
+        );
+    });
+}
+
+/// A COMPUTED member key evaluates at class definition, but the checker
+/// never enters a call there into control flow, so the assertion in
+/// `class C { [assertString(x)]() {} }` narrows nothing. Measured on 7.0.2
+/// (`--strict`, and without `strictNullChecks`): `f` returns `string |
+/// number`, complete.
+#[test]
+fn class_declaration_computed_key_call_narrows_nothing() {
+    const CANONICAL: &str = "/ws/class-decl-computed-key/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { [assertString(x)]() {} }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
+    });
+}
+
+/// A member DECORATOR evaluates at class definition, but the checker
+/// never enters a call there into control flow, so the assertion in
+/// `class C { @assertString(x) m() {} }` narrows nothing. Measured on
+/// 7.0.2 (`--strict`, and without `strictNullChecks`): `f` returns
+/// `string | number`, complete.
+#[test]
+fn class_declaration_member_decorator_call_narrows_nothing() {
+    const CANONICAL: &str = "/ws/class-decl-member-decorator/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { @assertString(x) m() {} }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
+    });
+}
+
+/// A STATIC auto-accessor initializer runs at class evaluation, but the
+/// checker never enters a call there into control flow, so the assertion
+/// in `class C { static accessor p = assertString(x); }` narrows nothing.
+/// Measured on 7.0.2 (`--strict`, and without `strictNullChecks`): `f`
+/// returns `string | number`, complete.
+#[test]
+fn class_declaration_static_accessor_initializer_call_narrows_nothing() {
+    const CANONICAL: &str = "/ws/class-decl-static-accessor/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { static accessor p = assertString(x); }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", false);
+    });
+}
+
+/// A class-evaluation position can WRITE a frame binding, not only call:
+/// the static block of `class C { static { x = "s"; } }` runs at class
+/// evaluation and retypes `x` in the checker for every read that follows
+/// (TypeScript 7.0.2: `f` returns `string`). The static block lowers in
+/// the frame and its write applies there, once: the read is `string`,
+/// complete and warm.
+#[test]
+fn class_declaration_static_block_write_applies_warm() {
+    const CANONICAL: &str = "/ws/class-decl-static-block-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class C { static { x = "s"; } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_applies_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            verter_type_expr::PrimitiveName::String,
+        );
+    });
+}
+
+/// The class's `super_class` heritage expression evaluates in the
+/// ENCLOSING frame at the class declaration, so the sequence write in
+/// `class C extends (x = "s", B) {}` retypes `x` in the checker exactly
+/// as a static block write does (TypeScript 7.0.2: `f` returns `string`).
+/// The heritage's effects apply at the statement: the read is `string`,
+/// complete and warm.
+#[test]
+fn class_declaration_heritage_sequence_write_applies_warm() {
+    const CANONICAL: &str = "/ws/class-decl-heritage-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class B {}
+  class C extends (x = "s", B) {}
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_applies_warm(
+            dispatch,
+            &host,
+            CANONICAL,
+            "f",
+            verter_type_expr::PrimitiveName::String,
+        );
+    });
+}
+
+/// A write through a type assertion assigns nothing: the checker's
+/// assignment-target walk and narrowable reference both stop at an
+/// assertion, so `((x) as any) = "s"` in a static block leaves `x` as
+/// declared. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `string | number`. The read is that
+/// declared type, complete — no unapplied write stands behind it.
+#[test]
+fn class_declaration_asserted_write_keeps_the_declared_type() {
+    const CANONICAL: &str = "/ws/class-decl-wrapped-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class C { static { ((x) as any) = "s"; } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key);
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("f: the read is the declared union, got {expr:?}");
+        };
+        assert_eq!(arms.len(), 2, "f: exactly the declared arms, got {expr:?}");
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the {primitive:?} arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            None,
+            "f: an asserted write retypes nothing, so the read is complete"
+        );
+    });
+}
+/// An UNSELECTED binding's initializer never lowers — but it still runs at
+/// the statement: the discarded assertion of `const unused =
+/// (assertString(x), 0)` is a comma operand the checker enters into
+/// control flow, so it narrows `x` to `string` for every read that
+/// follows. The scan of the elided position collects it and applies it
+/// once the initializer has run. Measured on 7.0.2 (`--strict`, and
+/// without `strictNullChecks`): `f` returns `{ x: string; }`.
+#[test]
+fn unselected_initializer_assertion_narrows_the_read() {
+    const CANONICAL: &str = "/ws/unselected-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const unused = (assertString(x), 0);
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
+    });
+}
+
+/// A DESTRUCTURING declarator never lowers (it is not a simple local
+/// reaching definition) — but its initializer still runs at the statement,
+/// and the assertion in `const { a } = (assertString(x), { a: 0 })` is a
+/// comma operand the checker enters into control flow: it applies once
+/// the initializer has run. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `{ x: string; }`.
+#[test]
+fn destructuring_initializer_assertion_narrows_the_read() {
+    const CANONICAL: &str = "/ws/destructuring-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const { a } = (assertString(x), { a: 0 });
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
+    });
+}
+
+/// An enum declaration is not transparent: every member initializer
+/// evaluates in THIS frame at the statement, and the assertion in `enum E {
+/// A = (assertString(x), 1) }` is a comma operand the checker enters into
+/// control flow, so it narrows `x` for every read that follows; it applies
+/// once the initializer has run. Measured on 7.0.2 (`--strict`, and
+/// without `strictNullChecks`): `f` returns `{ x: string; }`.
+#[test]
+fn enum_member_initializer_assertion_narrows_the_read() {
+    const CANONICAL: &str = "/ws/enum-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  enum E { A = (assertString(x), 1) }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
+    });
+}
+
+/// The discarded-operand scan must see WRITES, not only calls: the write
+/// in `(void (class { static { x = "s"; } }), x)` hides in a discarded
+/// operand's class static block, runs at the enclosing statement, and
+/// retypes `x` in the checker for the read the sequence's value carries.
+/// The skeleton skips the class subtree, so the write reached neither the
+/// effect ledger nor a scanner — the sequence's read of `x` could publish
+/// the unnarrowed superset complete and warm. The write takes the typed
+/// `GuardNarrowing` gap instead, and the family slot holds zero
+/// candidates.
+#[test]
+fn discarded_operand_class_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/discarded-operand-class-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  return { x: (void (class { static { x = "s"; } }), x) };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `for … of` whose left side is an assignment target WRITES the binding
+/// once per iteration — inside a class expression's static block the write
+/// runs at class evaluation and retypes `x` in the checker, while the
+/// default walk visited the target as a plain read and the skeleton never
+/// entered the class subtree. The loop-head target takes the same whole-binding write
+/// discipline: the return's read of `x` keeps the unnarrowed join, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn for_of_left_target_write_in_scanned_position_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/for-of-left-target-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+declare const xs: string[];
+
+function f(x: string | number) {
+  const C = class { static { for (x of xs) {} } };
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `switch` case TEST is a control position: `switch (true) { case
+/// isString(x): … }` narrows `x` inside the clause in the checker exactly
+/// as the `if` twin does. The lowering modeled only literal case tests, so
+/// a predicate call there reached neither a guard, nor an obligation, nor
+/// a scanner — the clause's read of `x` could publish the unnarrowed
+/// superset complete and warm. The case test takes the control-test
+/// discipline: an unprovable control callee keeps every read of `x`
+/// unnarrowed, the demand carries the typed `GuardNarrowing` gap, and the
+/// family slot holds zero candidates.
+#[test]
+fn switch_case_test_predicate_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/switch-case-test-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function isString(x: unknown): x is string { return typeof x === "string" }
+
+function f(x: string | number) {
+  switch (true) {
+    case isString(x):
+      break;
+    default:
+      break;
+  }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `switch` clause whose dispatch relation this half cannot carry must
+/// never be dispatched as the DEFAULT clause.
+///
+/// The default clause's dispatch edge is "the discriminant minus every
+/// carried test". Routing an unrecognized relation onto that edge is not
+/// a superset — it is a WRONG value: the clause is published as if it
+/// were reached only by the discriminant values no other clause claimed,
+/// so an arm the clause genuinely can see (`"b"`, claimed by the
+/// preceding literal clause) disappears from its read. A degraded result
+/// is still USED by tolerant consumers, so a partial must approximate in
+/// the safe direction. The unrecognized clause therefore applies NO
+/// dispatch narrow, and the switch carries the typed gap.
+#[test]
+fn switch_unrecognized_case_relation_never_takes_the_default_edge() {
+    const CANONICAL: &str = "/ws/switch-unrecognized-case-relation/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+const k: "a" = "a";
+
+function f(x: "a" | "b" | "c") {
+  switch (x) {
+    case "b":
+      throw new Error();
+    case k:
+      return { x };
+  }
+  throw new Error();
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let read = object_prop(&expr, "x");
+        let verter_type_expr::TypeExpr::Union(arms) = read else {
+            panic!("the unrecognized clause keeps the whole discriminant union, got {expr:?}");
+        };
+        for literal in ["a", "b", "c"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                        value
+                    )) if value.as_str() == literal
+                )),
+                "the `{literal}` arm survives an uncarried dispatch relation, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
+            "the uncarried dispatch relation degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an uncarried dispatch relation never warms"
+        );
+    });
+}
+
+/// Every operand of a statement-position comma sequence is entered into
+/// control flow: the discarded operand of `(assertString(x), 0);` narrows
+/// `x` to `string` for the read that follows, exactly as the bare call
+/// statement does. Measured on 7.0.2 (`--strict`, and without
+/// `strictNullChecks`): `f` returns `{ x: string; }`.
+#[test]
+fn expression_statement_discarded_assertion_narrows_the_read() {
+    const CANONICAL: &str = "/ws/expression-statement-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  (assertString(x), 0);
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_entered_assertion_narrows_the_read(dispatch, &host, CANONICAL, "f", true);
+    });
+}
+
+/// A call inside a discarded operand's NESTED frame never executes in
+/// this frame: the arrow body of `((() => { assertString(x); }), x)`
+/// runs only if the arrow is called, which nothing here does — so the
+/// checker narrows NOTHING and the read of `x` stays `string | number`.
+/// Walking the discarded operand without nested-frame boundaries
+/// collected the arrow body's call, could not certify the closed
+/// `asserts` callee, and flagged the typed gap for a call that never
+/// runs — a spurious degraded success. The nested-frame discipline
+/// collects nothing there: the demand stays CLEAN, keeps the unnarrowed
+/// join, and admits warm.
+#[test]
+fn discarded_operand_nested_frame_call_never_gaps_this_frame() {
+    const CANONICAL: &str = "/ws/discarded-nested-frame/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  return ((() => { assertString(x); }), x);
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "f: a never-executing call mints no gap — the demand stays clean"
+        );
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("f: the read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the arrow body never runs — the {primitive:?} arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "f: a clean complete result admits warm"
+        );
+    });
+}
+
+/// An array element that is a CONDITIONAL narrows its branches through a
+/// predicate test exactly as a returned conditional does: the array
+/// literal lowers structurally, so the element is the branch join and the
+/// predicate call is the guard's own evidence — `[isString(x) ? x :
+/// false]` is the checker's `(string | boolean)[]` (TypeScript 7.0.2),
+/// clean and warm. (The same conditional folded into a LEAF answer keeps
+/// the per-callee certification and its typed gap:
+/// `flow_slice_content_tests::leaf_nested_control_position_calls_are_never_blanket_certified`.)
+#[test]
+fn array_element_conditional_narrows_through_its_predicate() {
+    const CANONICAL: &str = "/ws/leaf-nested-control/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function isString(x: unknown): x is string {
+  return typeof x === "string";
+}
+
+function f(x: string | number) {
+  return [isString(x) ? x : false];
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
+            panic!("f: the return is an array, got {expr:?}");
+        };
+        let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
+            panic!("f: the element is the branch join, got {expr:?}");
+        };
+        let mut arms: Vec<_> = arms.iter().cloned().collect();
+        arms.sort_by_key(|arm| format!("{arm:?}"));
+        assert_eq!(
+            arms,
+            vec![
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ],
+            "f: the consequent reads the narrowed `string`, got {expr:?}"
+        );
+        assert_eq!(result.degradation(), None, "f: {expr:?}");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "f: a clean complete result admits warm"
+        );
+    });
+}
+
+/// A call a type carrier wraps directly — `(assertString(x) as void)` —
+/// is never entered into control flow, so it narrows nothing. Measured on
+/// 7.0.2 (`--strict`, and without `strictNullChecks`): `f` returns `{ y:
+/// void; x: string | number; }`, and the read of `x` is complete.
+#[test]
+fn leaf_carrier_wrapped_assertion_narrows_nothing() {
+    const CANONICAL: &str = "/ws/carrier-wrapped-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (assertString(x) as void);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_never_entered_call_keeps_the_read(dispatch, &host, CANONICAL, "f", true);
+    });
+}
+
+/// The RIGHTMOST operand of a sequence is the sequence's value, so the
+/// discarded-operand split never touches it — but a carrier folding the
+/// whole sequence discards the VALUE, not the evaluation: `((0,
+/// assertString(x)) as unknown)` still runs the assertion, and the checker
+/// narrows every read that follows. The folded rightmost assertion takes
+/// the same per-callee certification: unprovable, so the later read of `x`
+/// keeps the unnarrowed join, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn rightmost_sequence_assertion_under_carrier_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/rightmost-sequence-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = ((0, assertString(x)) as unknown);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A class STATIC BLOCK runs at class evaluation — enclosing-frame
+/// immediate, unlike the deferred bodies around it. Guarding the whole
+/// class body as a nested frame skipped the sequence split for the block,
+/// blanket-certifying the block's assertion decided-above while the
+/// checker narrows `x` for the read that follows the class. The static
+/// block takes the same-frame discipline: the assertion is unprovable, so
+/// the later read of `x` keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_static_block_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/static-block-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (class { static { (assertString(x), 0); } } as object);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A STATIC property initializer also runs at class evaluation, so an
+/// assertion there narrows what follows exactly as a static block's
+/// would. The initializer takes the same enclosing-frame discipline: the
+/// later read of `x` keeps the unnarrowed `string | number` join, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn class_static_property_initializer_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/static-property-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (class { static p = (assertString(x), 0); } as object);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A FLOW-rooted component's carrier — the self-root union the root and
+/// its batched members publish on — covers every file any drained member
+/// observed, the CALL members included. Here `seed`'s initializer in a
+/// THIRD file calls back into the pending root, so its call drains as a
+/// call member whose self-roots name that file (its program point and
+/// its argument node), while no flow or relation member of the component
+/// does: a carrier composed from the flow and relation members alone
+/// omits it. The component degrades (a program-expression hold has no
+/// value to resurrect the read with) and publishes nothing, so the
+/// composed carrier is read through the observation probe.
+///
+/// The explicit-type-argument spelling of the same omission
+/// (`bb<Arg>(n - 1)` with `Arg` imported from a third file) composes the
+/// same incomplete carrier, but its edit is already caught by the fact
+/// rail — the import's resolution facts — so it warms and invalidates
+/// correctly before and after the union; the third-file program point is
+/// the observation that only the union covers.
+#[test]
+fn flow_root_component_carrier_covers_call_member_roots() {
+    const A: &str = "/ws/scc-call-roots/a.ts";
+    const A_SRC: &str = r#"
+import { seed } from "/ws/scc-call-roots/c";
+
+export function a(n: number) {
+  if (n <= 0) return seed;
+  return 1;
+}
+"#;
+    const C: &str = "/ws/scc-call-roots/c.ts";
+    const C_SRC: &str = r#"
+import { a } from "/ws/scc-call-roots/a";
+
+export const seed = a(0);
+"#;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, A, A_SRC);
+    upsert_ts(&host, C, C_SRC);
+    *host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned") = Some(Vec::new());
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, A, "a");
+        let _ = execute_flow(dispatch, key);
+    });
+    let roots = host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned")
+        .take()
+        .expect("the probe stays armed");
+    assert!(
+        !roots.is_empty(),
+        "the flow-root close composed and recorded a carrier"
+    );
+    for file in [A, C] {
+        assert!(
+            roots.iter().any(|root| root.as_ref() == file),
+            "the component carrier covers {file}: {roots:?}"
+        );
+    }
+}
+
+/// A mixed component's UNPROVEN deferred flow members poison the
+/// MACHINERY ROOT that consumed their values. The joint fixed point
+/// feeds the evaluated flow-member overrides into the call/relation
+/// equations before the members finalize, so a close that refuses the
+/// member batch (the torn-component rule) but hands the root back as
+/// admissible would warm a verdict around an unproven flow-derived
+/// value. The discharge coordinator must mark the whole outcome
+/// non-admissible: the root's payload still flows (ReturnOnly), and the
+/// relation memo admits nothing. The proven control keeps the root
+/// admissible.
+#[test]
+fn unproven_flow_member_poisons_mixed_machinery_root() {
+    use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
+    use super::dispatch_txn::{FlowReturnPendingOutcome, InferenceOccurrence, PendingVerdict};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let member_key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        // A REAL prepared member demand: the carrier below is the one the
+        // finalizer triangulates against.
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(member_key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&member_key, idx);
+        let carrier = dispatch
+            .flow_demand_carrier_of(&member_key)
+            .expect("the member demand installs");
+        let provenance = carrier.provenance;
+        // The drained member: an EVALUATED value whose discharge report is
+        // MISSING — its planned obligations stay pending, so finalization
+        // refuses (unproven), exactly the torn-component shape.
+        let member = super::relation::DrainedFlowReturnMember {
+            key: member_key,
+            outcome: FlowReturnPendingOutcome::EvaluatedValue(
+                verter_type_engine::semantic_query::FlowReturnResult::new(
+                    graph,
+                    number,
+                    verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
+                        false,
+                    ),
+                    None,
+                ),
+            ),
+            // This member PLANNED cleanly and failed at the proof gate,
+            // so it contributes no refusal cause of its own.
+            plan_refusal: None,
+            inline_flight: None,
+            holds: Vec::new(),
+            self_roots: Vec::new(),
+            materialized: verter_type_engine::semantic_query::demand::MaterializedSet::empty(),
+            fresh_seed: false,
+            flow_demand: Some(carrier),
+            discharge: None,
+            provenance,
+        };
+        let relate_key = dispatch.relate_key_for(number, number);
+        let outcome = dispatch
+            .relation_discharge_and_route(
+                true,
+                Some((
+                    relate_key,
+                    InferenceOccurrence::ARGUMENT_COVARIANT,
+                    PendingVerdict::Assignable {
+                        bindings: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    false,
+                    false,
+                    None,
+                    None,
+                    Default::default(),
+                )),
+                Vec::new(),
+                vec![member],
+                None,
+                Vec::new(),
+                false,
+                &ObservedFlowConvergence {
+                    iterations: 1,
+                    stable: true,
+                },
+            )
+            .expect("the mixed close routes");
+        assert!(
+            outcome.self_publish.is_some(),
+            "the machinery root's payload still flows to its ReturnOnly build"
+        );
+        assert!(
+            outcome.flow_batch_unproven,
+            "a refused flow-member batch must mark the machinery root's \
+             outcome non-admissible — the mixed equation consumed the \
+             members' evaluated values"
+        );
+        assert!(
+            outcome.flow_batch_partial_reasons.is_empty(),
+            "a member that planned cleanly contributes no cause of its own — \
+             the root keeps the contained class, got {:?}",
+            outcome.flow_batch_partial_reasons
+        );
+    });
+
+    // Control: a PROVEN member batch keeps the root admissible.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let relate_key = dispatch.relate_key_for(number, number);
+        let outcome = dispatch
+            .relation_discharge_and_route(
+                true,
+                Some((
+                    relate_key,
+                    InferenceOccurrence::ARGUMENT_COVARIANT,
+                    PendingVerdict::Assignable {
+                        bindings: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    false,
+                    false,
+                    None,
+                    None,
+                    Default::default(),
+                )),
+                Vec::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                false,
+                &ObservedFlowConvergence {
+                    iterations: 1,
+                    stable: true,
+                },
+            )
+            .expect("the member-free close routes");
+        assert!(
+            outcome.self_publish.is_some() && !outcome.flow_batch_unproven,
+            "a component without a refused member batch keeps the root admissible"
+        );
+    });
+}
+
+/// A REFUSED member's own cause reaches the root that consumed its
+/// value — at EVERY root domain that drains a flow member (relation,
+/// call, and flow). The root's preparation can be spotless while a
+/// member was refused for a budget edge or a torn view, and those two
+/// causes fault consumers the contained `FLOW_RETURN_UNVERIFIED` class
+/// does not reach: every Vue macro projection lane contains the
+/// unverified class by definition, so a member's budget refusal
+/// classified as contained let a value-deriving lane publish and warm
+/// around work that never ran. The cause therefore rides the deferral to
+/// the close instead of being dropped at the pop.
+///
+/// The refusal is scoped to the INJECTED MEMBER's own preparation, so
+/// the class under test can only have come from the member — a globally
+/// armed slot would also refuse a flow root's own preparation and prove
+/// nothing. The control leaves that slot disarmed: the same member is
+/// still refused (its discharge report is missing), records no cause,
+/// and the root keeps the contained class alone.
+///
+/// Mutation: dropping the member's cause at any of the three drain
+/// sites, or classifying the batch by the root's own refusal, fails the
+/// armed leg's faulting-class assertion for that domain while every
+/// other assertion still passes.
+#[test]
+fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
+    use verter_type_engine::semantic_query::{
+        CallKind, FunctionParam, PartialReasonSet, SignatureKind,
+    };
+
+    #[derive(Clone, Copy)]
+    enum RootDomain {
+        Relation,
+        Call,
+        Flow,
+    }
+
+    for domain in [RootDomain::Relation, RootDomain::Call, RootDomain::Flow] {
+        for armed in [true, false] {
+            let host = make_host();
+            with_dispatch(&host, |dispatch| {
+                let graph = dispatch.graph();
+                let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                let member = flow_key(
+                    dispatch,
+                    "subLiteral",
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                );
+                let (label, query_key) = match domain {
+                    RootDomain::Relation => (
+                        "relation root",
+                        dispatch.relate_key_for(number, number).to_query_key(),
+                    ),
+                    RootDomain::Call => {
+                        let declared = super::call_resolve_tests::signature(
+                            dispatch,
+                            "refusedMemberCallRoot",
+                            0,
+                            SignatureKind::Call,
+                            vec![FunctionParam::synthetic(None, number, false, false)],
+                            Vec::new(),
+                            number,
+                        );
+                        let callee = super::call_resolve_tests::callable(
+                            dispatch,
+                            vec![declared],
+                            Vec::new(),
+                        );
+                        (
+                            "call root",
+                            SemanticQueryKey::ResolveCall(Box::new(
+                                super::call_resolve_tests::call_key_at(
+                                    dispatch,
+                                    CANONICAL,
+                                    callee,
+                                    CallKind::Call,
+                                    None,
+                                    vec![super::call_resolve_tests::eager(number)],
+                                ),
+                            )),
+                        )
+                    }
+                    RootDomain::Flow => (
+                        "flow root",
+                        SemanticQueryKey::FlowReturn(Box::new(flow_key(
+                            dispatch,
+                            "subLiteral",
+                            FunctionPartIdentity::DeclarationBody,
+                            0,
+                        ))),
+                    ),
+                };
+                if armed {
+                    host.flow_fault_injection
+                        .refuse_injected_member_demand
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                arm_unproven_member(&host, &member);
+                let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+                assert!(
+                    unproven_member_slot_consumed(&host),
+                    "{label} armed={armed}: the root build ran and drained the injected member"
+                );
+                assert!(
+                    read.result_is_partial && read.cache_suppress,
+                    "{label} armed={armed}: the refused batch keeps the root non-admissible"
+                );
+                assert_eq!(
+                    read.partial_reasons
+                        .contains(PartialReasonSet::UNSTABLE_STATE),
+                    armed,
+                    "{label} armed={armed}: the member's refusal must reach the root's rails \
+                     as the faulting class it is — and must not appear when no member \
+                     recorded a cause, got {:?}",
+                    read.partial_reasons
+                );
+                assert!(
+                    read.partial_reasons
+                        .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+                    "{label} armed={armed}: the refused batch always rides the unverified \
+                     class too — the member set is incomplete either way, got {:?}",
+                    read.partial_reasons
+                );
+                assert_eq!(
+                    graph.slot_candidate_count_for_tests(&query_key),
+                    0,
+                    "{label} armed={armed}: nothing composed around an unproven flow value admits"
+                );
+            });
+        }
+    }
+}
+
+/// The demand site classifies its OWN edges: a store read that did not
+/// serve the function's file is a transient statement about the read and
+/// takes the faulting `UNSTABLE_STATE` class, while an unrepresentable
+/// demand point is a deterministic statement about the request and keeps
+/// the contained `FLOW_RETURN_UNVERIFIED` class. Both spell the same
+/// typed no-value failure at the evaluation boundary, so a caller that
+/// classified by the failure alone reported every torn prepare-time read
+/// as contained — under-faulting exactly the consumers a torn view must
+/// reach.
+///
+/// The unserved read is presented through the refuse-only one-shot slot:
+/// the demand PREPARATION sees the file unserved and refuses, the
+/// evaluation's own derivation then serves normally and produces a
+/// value. That pairing — refused preparation, successful evaluation — is
+/// the whole reason the transient class exists, and there is no way to
+/// author it.
+///
+/// Mutation: classifying the unserved edge as `Unplannable` (the blanket
+/// class the site's callers previously applied to every edge) fails the
+/// first leg's class assertions while the value and suppression
+/// assertions still pass.
+#[test]
+fn unserved_demand_site_takes_the_transient_class() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        host.flow_fault_injection
+            .unserved_demand_site
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let read = dispatch
+            .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        assert!(
+            !host
+                .flow_fault_injection
+                .unserved_demand_site
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the one-shot slot is consumed by the preparation's derivation"
+        );
+        assert!(
+            matches!(read.value, QueryResult::Value(_)),
+            "the evaluation's own derivation served, so the usable value still flows, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "the refused preparation keeps the read partial + suppressed"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(PartialReasonSet::UNSTABLE_STATE),
+            "a torn prepare-time read is transient and takes the faulting class, got {:?}",
+            read.partial_reasons
+        );
+        assert!(
+            !read
+                .partial_reasons
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the transient read must not ride the contained class every macro projection \
+             lane publishes through, got {:?}",
+            read.partial_reasons
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "the refused build never admits"
+        );
+    });
+}
+
+/// Set the per-host one-shot slot that leaves `member` as an UNPROVEN
+/// provisional flow member beneath the next machinery root's close.
+fn arm_unproven_member(host: &VerterHost, member: &FlowReturnKey) {
+    *host
+        .flow_fault_injection
+        .unproven_flow_member
+        .lock()
+        .expect("the unproven-member fault slot is never poisoned") = Some(member.clone());
+}
+
+/// Whether the one-shot slot was consumed — i.e. a machinery-root build
+/// actually ran and drained the injected member.
+fn unproven_member_slot_consumed(host: &VerterHost) -> bool {
+    host.flow_fault_injection
+        .unproven_flow_member
+        .lock()
+        .expect("the unproven-member fault slot is never poisoned")
+        .is_none()
+}
+
+/// The ReturnOnly rails a build folds around an unproven flow value:
+/// partial, cache-suppressed, under the flow-unverified reason class.
+#[track_caller]
+fn assert_flow_unverified_rails(
+    result_is_partial: bool,
+    cache_suppress: bool,
+    reasons: verter_type_engine::semantic_query::PartialReasonSet,
+    what: &str,
+) {
+    assert!(
+        result_is_partial && cache_suppress,
+        "{what}: the build folds the ReturnOnly rails (partial: {result_is_partial}, \
+         suppressed: {cache_suppress})"
+    );
+    assert!(
+        reasons
+            .contains(verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+        "{what}: the refusal rides the flow-unverified class, got {reasons:?}"
+    );
+}
+
+/// SEAM — the RELATION machinery root. An unproven flow member drained
+/// at the root's close turns the decided verdict into
+/// `DecidedReturnOnly`: the payload still reaches the caller, the build
+/// folds the flow-unverified ReturnOnly rails, the relation family slot
+/// admits NOTHING, and the next request runs the build again (the slot
+/// is consumed a second time). The unarmed control admits once. The
+/// member enters through the real provisional pop path beneath the open
+/// root frame, so the close drains it exactly as an organic torn
+/// component would.
+#[test]
+fn unproven_flow_member_makes_relation_root_decided_return_only() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let query_key = dispatch.relate_key_for(number, number).to_query_key();
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        for request in 1..=2 {
+            arm_unproven_member(&host, &member);
+            let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+            assert!(
+                unproven_member_slot_consumed(&host),
+                "request {request}: the relation root build ran and drained the injected member"
+            );
+            assert!(
+                matches!(
+                    read.value,
+                    QueryResult::Value(SemanticQueryValue::Relation(_))
+                ),
+                "request {request}: the decided verdict still flows to the caller, got {:?}",
+                read.value
+            );
+            assert_flow_unverified_rails(
+                read.result_is_partial,
+                read.cache_suppress,
+                read.partial_reasons,
+                &format!("request {request}: relation root"),
+            );
+            assert_eq!(
+                graph.slot_candidate_count_for_tests(&query_key),
+                0,
+                "request {request}: the relation memo admits nothing composed around an \
+                 unproven flow value — the second request recomputes"
+            );
+        }
+
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::Relation(_))
+            ),
+            "control: the decided verdict flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            1,
+            "control: an unpoisoned relation root admits once"
+        );
+    });
+}
+
+/// SEAM — the CALL machinery root. An unproven flow member drained at
+/// the root's close turns the complete result into `CompleteReturnOnly`:
+/// the resolved call still reaches the caller, the build is
+/// cache-suppressed under the flow-unverified class, the call family
+/// slot admits nothing, and NOTHING is queued to the completed-member
+/// batches of either domain. The unarmed control admits once.
+#[test]
+fn unproven_flow_member_makes_call_root_complete_return_only() {
+    use verter_type_engine::semantic_query::{CallKind, FunctionParam, SignatureKind};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let declared = super::call_resolve_tests::signature(
+            dispatch,
+            "poisonedCallRoot",
+            0,
+            SignatureKind::Call,
+            vec![FunctionParam::synthetic(None, number, false, false)],
+            Vec::new(),
+            number,
+        );
+        let callee = super::call_resolve_tests::callable(dispatch, vec![declared], Vec::new());
+        let query_key =
+            SemanticQueryKey::ResolveCall(Box::new(super::call_resolve_tests::call_key_at(
+                dispatch,
+                CANONICAL,
+                callee,
+                CallKind::Call,
+                None,
+                vec![super::call_resolve_tests::eager(number)],
+            )));
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            unproven_member_slot_consumed(&host),
+            "the call root build ran and drained the injected member"
+        );
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::ResolveCall(_))
+            ),
+            "the resolved call still flows to the caller, got {:?}",
+            read.value
+        );
+        assert_flow_unverified_rails(
+            read.result_is_partial,
+            read.cache_suppress,
+            read.partial_reasons,
+            "call root",
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            0,
+            "the call memo admits nothing composed around an unproven flow value"
+        );
+        {
+            let txn = dispatch.dispatch_txn.borrow();
+            assert!(
+                txn.call.completed_members.is_empty(),
+                "the poisoned root is never queued as a completed call member"
+            );
+            assert!(
+                txn.flow.completed_members.is_empty(),
+                "the refused member batch queues no completed flow member"
+            );
+        }
+
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::ResolveCall(_))
+            ),
+            "control: the resolved call flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            1,
+            "control: an unpoisoned call root admits once"
+        );
+    });
+}
+
+/// SEAM — the FLOW machinery root. An unproven flow member drained at
+/// the root's close withholds the root's OWN verdict: no proof token
+/// mints, the usable value still flows, the build folds the
+/// flow-unverified ReturnOnly rails, and neither the root's nor the
+/// member's family slot admits a candidate. The unarmed control proves
+/// and admits once.
+#[test]
+fn unproven_flow_member_withholds_flow_root_verdict() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let root = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let member = flow_key(
+            dispatch,
+            "subParam",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let root_query = SemanticQueryKey::FlowReturn(Box::new(root));
+        let member_query = SemanticQueryKey::FlowReturn(Box::new(member.clone()));
+
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(root_query.clone());
+        assert!(
+            unproven_member_slot_consumed(&host),
+            "the flow root build ran and drained the injected member"
+        );
+        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = &read.value else {
+            panic!(
+                "the root's evaluated value still flows, got {:?}",
+                read.value
+            );
+        };
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the root's own value is usable — only its proof is withheld"
+        );
+        assert_flow_unverified_rails(
+            read.result_is_partial,
+            read.cache_suppress,
+            read.partial_reasons,
+            "flow root",
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&root_query),
+            0,
+            "no proof token: the root never warms"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&member_query),
+            0,
+            "the refused member never warms"
+        );
+
+        let read = dispatch.execute_via_cold_build_helper(root_query.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::FlowReturn(_))
+            ),
+            "control: the root's value flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&root_query),
+            1,
+            "control: an unpoisoned flow root proves and admits once"
+        );
+    });
+}
+
+/// Structural discharge claims are WALK-LEDGER-GATED: the execution
+/// witness yields an executed selection only from the evaluator's own
+/// recorded walk ledger (regions entered/completed at the walk sites),
+/// never by copying the plan's selection. An evaluation whose walk
+/// ledger is short/aborted (modelling an early-exit run that did not
+/// complete the structural walk) claims NO structural obligation: the
+/// usable value still flows, zero candidates, and the second demand
+/// recomputes. The unarmed control warms. Mutation: assign the witness's
+/// executed selection from the plan unconditionally; the armed leg
+/// admits and fails.
+#[test]
+fn short_walk_ledger_never_discharges_structural_claims() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _short = inject::Guard::arm(&host.flow_fault_injection.short_execution_ledger);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a short walk ledger claims no structural obligation and never warms"
+        );
+    });
+
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the completed walk's ledger yields the executed selection and warms"
+        );
+    });
+}
+
+/// The evaluation-provenance token is RUNTIME-unique, not merely
+/// (store, generation, ordinal)-unique: every fresh dispatch creates a
+/// fresh obligation runtime with an EMPTY demand ledger, so the first
+/// demand of two genuine runtimes against the same host bears the same
+/// ledger ordinal (zero). A token without the runtime axis aliases
+/// across them, and the finalizer's carrier comparison could not tell
+/// one runtime's first-demand evidence from the other's. Both first
+/// tokens must differ, and finalizing one runtime's demand with the
+/// OTHER runtime's first-demand token must be the typed
+/// `ForeignProvenance` partial — never a proof.
+#[test]
+fn provenance_distinguishes_first_demands_of_two_runtimes() {
+    use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
+    use super::flow_solve::{FlowPartialReason, FlowSolveOutcome};
+
+    let host = make_host();
+    let key_of = |dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>| {
+        flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+    };
+    // Runtime A: its FIRST demand's carrier token.
+    let provenance_a = with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch);
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&key, idx);
+        dispatch
+            .flow_demand_carrier_of(&key)
+            .expect("the first demand installs on runtime A")
+            .provenance
+    });
+    // Runtime B: a genuine fresh dispatch runtime against the SAME host
+    // and unchanged generation — its first demand also bears ordinal 0.
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch);
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&key, idx);
+        let carrier = dispatch
+            .flow_demand_carrier_of(&key)
+            .expect("the first demand installs on runtime B");
+        assert_ne!(
+            carrier.provenance, provenance_a,
+            "two runtimes' first demands must not mint identical provenance"
+        );
+        // The functional leg: runtime A's first-demand token presented as
+        // runtime B's evaluation evidence is foreign, never a proof.
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let result = verter_type_engine::semantic_query::FlowReturnResult::new(
+            graph,
+            number,
+            verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
+            None,
+        );
+        let verdict = dispatch.finalize_flow_demand(
+            Some(&carrier),
+            None,
+            &ObservedFlowConvergence {
+                iterations: 1,
+                stable: true,
+            },
+            provenance_a,
+            &result,
+        );
+        assert!(
+            matches!(
+                verdict,
+                Some(FlowSolveOutcome::Partial(ref partial))
+                    if matches!(partial.reason, FlowPartialReason::ForeignProvenance)
+            ),
+            "the other runtime's first-demand token must finalize as the \
+             typed ForeignProvenance partial, got {verdict:?}"
+        );
+    });
+}
+
+/// Discharge claims are EVALUATOR-ORIGIN: a call obligation is claimed
+/// only from the call-sink evidence the evaluation actually recorded, and
+/// a relation obligation additionally requires every relation outcome the
+/// occurrence's resolution consumed to be decided. An evaluation whose
+/// recorded call evidence is dropped (modelling work it never performed)
+/// finalizes unproven — the usable value still flows, zero candidates —
+/// and so does one whose calls consumed undecided relation outcomes. The
+/// unarmed control warms. Mutation: claim call/relation obligations from
+/// the plan's own specs instead of the recorded evidence; both armed legs
+/// admit and fail.
+#[test]
+fn discharge_claims_require_evaluator_call_evidence() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Armed: the evaluation's recorded call evidence is dropped — the
+    // planned CallSite / SemanticRelation obligations have no evidence to
+    // claim, so the demand never seals.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _suppress = inject::Guard::arm(&host.flow_fault_injection.suppress_call_evidence);
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a call obligation without evaluator-recorded evidence never discharges"
+        );
+    });
+
+    // Armed: every recorded call is marked relation-undecided — the
+    // SemanticRelation obligation has no decided outcome to claim.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _undecided = inject::Guard::arm(&host.flow_fault_injection.undecided_relation_evidence);
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a relation obligation without a decided relation outcome never discharges"
+        );
+    });
+
+    // Control: the unarmed evaluation records its call evidence and warms.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subCallReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "evaluator-recorded call evidence discharges and the demand seals"
+        );
+    });
+}
+
+#[test]
+fn flow_return_declared_authority_lookup_does_not_scan_runtime_aliases() {
+    for count in [32usize, 64] {
+        let declarations = "var x;".repeat(count);
+        let writes = "x=1;".repeat(8);
+        let source = format!("function makeProps(){{{declarations}var x:0|1=0;{writes}return x;}}");
+        let mut counter = None;
+        let (result, _) = flow_source_probe_configured(&source, |host| {
+            counter = Some(Arc::clone(
+                &host.flow_fault_injection.declared_authority_work,
+            ))
+        });
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        assert_eq!(expr, verter_type_expr::TypeExpr::number_literal(1.0));
+        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{count} aliases: {work} authority lookups for eight assignments");
+        assert!(work > 0, "the fixture must consume declaration authority");
+        assert!(
+            work <= 32,
+            "eight assignments across {count} aliases inspected {work} authority candidates"
+        );
+    }
+}
+
+#[test]
+fn flow_return_finally_identity_membership_scales_with_written_subjects() {
+    for count in [32usize, 64] {
+        let declarations = (0..count)
+            .map(|n| format!("let x{n}=0;"))
+            .collect::<String>();
+        let writes = (0..count).map(|n| format!("x{n}=1;")).collect::<String>();
+        let members = (0..count)
+            .map(|n| format!("x{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "function makeProps(){{{declarations}try{{}}finally{{{writes}}}return {{{members}}};}}"
+        );
+        let mut counter = None;
+        let (result, _) = flow_source_probe_configured(&source, |host| {
+            counter = Some(Arc::clone(&host.flow_fault_injection.finally_identity_work))
+        });
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            ..
+        } = result
+        else {
+            panic!("{result:?}");
+        };
+        for n in 0..count {
+            assert_eq!(
+                member_types(&expr, &format!("x{n}")),
+                vec![verter_type_expr::TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Number
+                )]
+            );
+        }
+        let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("{count} finally writes: {work} identity membership operations");
+        assert!(
+            work >= count,
+            "the fixture must execute every selected finally write: {work}"
+        );
+        assert!(
+            work <= count * 4,
+            "{count} finally writes examined {work} identities"
+        );
+    }
+}
+
+#[test]
+fn flow_return_unused_catch_parameter_does_not_poison_selected_writes() {
+    // An unused binder must neither block the catch's write nor replace it
+    // with a product-selection failure. The write of `'s'` to `let x = 0`
+    // holds the declared `number` (the checker's assignment rule; tsc 7.0.2
+    // answers `number`), so the read is clean.
+    for clause in ["catch(e)", "catch"] {
+        let source =
+            format!("function makeProps(){{let x=0;try{{throw 0;}}{clause}{{x='s';}}return x;}}");
+        let result = flow_source_probe(&source);
+        let FlowSourceProbe::Value {
+            expr,
+            degradation: None,
+            candidates: 1,
+        } = result
+        else {
+            panic!("{source}: {result:?}");
+        };
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+    }
+    assert_eq!(
+        expect_clean_flow_value(
+            "function makeProps(){let x=0;try{throw 0;}catch(e){x=1;}return x;}"
+        ),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    );
+    // A read of the catch variable is its declared type: `unknown` under
+    // the default `useUnknownInCatchVariables`.
+    assert_eq!(
+        expect_clean_flow_value("function makeProps(){try{throw 0;}catch(e){return e;}}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
+    );
+}
+
+#[test]
+fn flow_return_indexed_argument_identity_work_is_independent_of_unrelated_bindings() {
+    for argument in ["x", "other as typeof x"] {
+        for count in [64usize, 256] {
+            let declarations = (0..count)
+                .map(|n| format!("const unrelated{n}={n};"))
+                .collect::<String>();
+            let source=format!("const x:string='outer';function id<T>(x:T):T{{return x;}}function makeProps(x:number,other:boolean){{{declarations}return id({argument});}}");
+            let mut counter = None;
+            let (result, _) = flow_source_probe_configured(&source, |host| {
+                counter = Some(Arc::clone(
+                    &host.flow_fault_injection.indexed_argument_identity_work,
+                ))
+            });
+            let FlowSourceProbe::Value {
+                expr,
+                degradation: None,
+                candidates: 1,
+            } = result
+            else {
+                panic!("{result:?}");
+            };
+            assert_eq!(
+                expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            );
+            let work = counter.unwrap().load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("{argument}, {count} unrelated bindings: {work} argument identity probes");
+            assert!(
+                work > 0,
+                "the call must resolve its selected argument identity"
+            );
+            assert!(
+            work <= 8,
+            "fixed selected call inspected {work} identities with {count} unrelated declarations"
+        );
+        }
+    }
+}
+
+#[test]
+fn flow_return_indexed_arguments_keep_exact_parameter_and_capture_roots() {
+    assert_eq!(expect_clean_flow_value(
+        "function id<T>(x:T):T{return x;}const x=true;function makeProps(x:string){return id((x));}"
+    ), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    let closure=expect_clean_flow_value(
+        "function id<T>(x:T):T{return x;}const x=true;function makeProps(){const x='inner';return()=>id((x));}"
+    );
+    let verter_type_expr::TypeExpr::Function(function) = &closure else {
+        panic!("{closure:?}")
+    };
+    assert_eq!(
+        function.return_type.as_deref(),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
+    );
+}
+
+#[test]
+fn flow_return_evolving_local_established_writes_keep_existing_warm_policy() {
+    let overwritten = expect_clean_flow_value(
+        "function makeProps(n:number){let v;if(n>0){v='p' as const;}v=1 as const;return {v};}",
+    );
+    assert_eq!(
+        member_types(&overwritten, "v"),
+        vec![verter_type_expr::TypeExpr::number_literal(1.0)]
+    );
+    let established = expect_clean_flow_value(
+        "function makeProps(n:number){let v;v=1 as const;if(n>0){v='p' as const;}return {v};}",
+    );
+    assert_eq!(
+        member_types(&established, "v"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::string_literal("p"),
+            verter_type_expr::TypeExpr::number_literal(1.0),
+        ])]
+    );
+}
+
+#[test]
+fn flow_return_indexed_wrapped_arguments_preserve_the_lowered_binding_root() {
+    assert_eq!(expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string){return id((x as string) satisfies string);}"), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    // An authoritative assertion supplies the argument's type, even when its
+    // authored type name is also the name of a runtime parameter.
+    assert_eq!(expect_clean_flow_value("type T=string;function id<V>(v:V):V{return v;}function makeProps(T:number,x:boolean){return id(x as T);}"), verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+}
+
+#[test]
+fn flow_return_authoritative_type_query_argument_preserves_lexical_scope() {
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string){return id(x as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(other:boolean){return id(other as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+#[test]
+fn flow_return_type_query_argument_uses_its_own_binding() {
+    assert_eq!(
+        expect_clean_flow_value("const x:number=0;function id<T>(v:T):T{return v;}function makeProps(x:string,other:boolean){return id(other as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+}
+
+#[test]
+fn flow_return_type_query_argument_keeps_current_narrowing() {
+    assert_eq!(
+        expect_clean_flow_value("const x:boolean=false;function id<T>(v:T):T{return v;}function makeProps(x:string|number){if(typeof x!=='string'){throw 0;}return id(0 as typeof x);}"),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+}
+
+/// [`flow_expr_for_script`] with the warm half asserted: a CLEAN result
+/// must serve a fresh request's warm read exactly, so a wrong answer
+/// cannot hide behind a cold build that happens to be right.
+fn flow_expr_cold_warm(
+    script: &str,
+) -> (
+    verter_type_expr::TypeExpr,
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
+) {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
+        FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        }
+    };
+    let cold = with_dispatch(&host, |dispatch| flow_result_value(dispatch, key(dispatch)));
+    if cold.degradation().is_none() {
+        let warm = with_dispatch(&host, |dispatch| {
+            dispatch
+                .graph()
+                .get_flow_return_result(dispatch.ctx, &key(dispatch))
+                .map(|served| served.value)
+        });
+        assert_eq!(
+            warm.as_ref(),
+            Some(&cold),
+            "a clean result serves its warm read"
+        );
+    }
+    let expr = host
+        .project_node_to_type_expr_for_test(cold.return_type())
+        .expect("return node must project to TypeExpr");
+    (expr, cold.degradation())
+}
+
+/// A switch case's dispatch-edge refinement rides the reaching-TYPE
+/// layer, while an enclosing `typeof` guard's facts ride the narrowing
+/// overlay. The case's own refinement is what a read must publish: it is
+/// the newer fact and the narrower one, so an enclosing guard's broader
+/// fact may not outrank it merely for living in the layer a read consults
+/// first — neither at the case itself, nor when a clause boundary later
+/// restores the overlay the guard established, nor through a MEMBER fact
+/// the guard left on the refined root. A member fact still narrower than
+/// the refined root's own member is a different case: it holds, and the
+/// read keeps it. A member fact that OVERLAPS the refined member — each
+/// says something the other does not — narrows it: the read is the
+/// refined member filtered by the fact. Oracle, per row.
+#[test]
+fn flow_return_switch_case_refinement_outranks_enclosing_guard_fact() {
+    const TYPES: &str = "type P = { k: \"a\", v: \"A\" } | { k: \"b\", v: \"B\" } | { k: \"c\", v: number }\ntype Q = { k: \"a\", v: string | number } | { k: \"b\", v: object }\ntype O = { k: \"a\", v?: \"A\" } | { k: \"b\", v?: \"B\" } | { k: \"c\", v: number }\n";
+    let number = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    let broader_member = format!("{TYPES}function makeProps(p: P) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
+    let broader_member_past_try = format!("{TYPES}function makeProps(p: P) {{ if (typeof p.v === \"string\") {{ try {{ switch (p.k) {{ case \"a\": break; default: throw 0 }} }} finally {{}} return {{ v: p.v }} }} throw 0 }}");
+    let narrower_member = format!("{TYPES}function makeProps(p: Q) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
+    let overlapping_member = format!("{TYPES}function makeProps(p: O) {{ if (typeof p.v === \"string\") {{ switch (p.k) {{ case \"a\": return {{ v: p.v }}; default: throw 0 }} }} throw 0 }}");
+    let overlapping_member_past_try = format!("{TYPES}function makeProps(p: O) {{ if (typeof p.v === \"string\") {{ try {{ switch (p.k) {{ case \"a\": break; default: throw 0 }} }} finally {{}} return {{ v: p.v }} }} throw 0 }}");
+    for (case, body, expected) in [
+        // The case arm `{ v: "a" }`, the default arm `{ v: string }`, and
+        // the trailing return `{ v: number }` — the refined `{ v: "a" }`
+        // arm is a strict subtype of the default's `{ v: string }`, so the
+        // return-position reunion absorbs it and two arms survive.
+        (
+            "whole-binding refinement at the case",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { switch (p) { case \"a\": return { v: p }; default: return { v: p } } } return { v: 0 } }",
+            vec![number.clone(), string.clone()],
+        ),
+        // Only the `"a"` case completes the try normally, and nothing is
+        // written: the clause-entry restore must not bring the guard's
+        // `string` back over the surviving `"a"`.
+        (
+            "whole-binding refinement past a try/finally",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { switch (p) { case \"a\": break; default: throw 0 } } finally {} return { v: p } } return { v: 0 } }",
+            vec![string_literal("a"), number.clone()],
+        ),
+        // The guard's member fact `p.v: "A" | "B"` is broader than the
+        // `"a"` arm's own member `"A"`.
+        (
+            "member fact broader than the refined root's member",
+            broader_member.as_str(),
+            vec![string_literal("A")],
+        ),
+        (
+            "member fact broader than the refined root's member, past a try/finally",
+            broader_member_past_try.as_str(),
+            vec![string_literal("A")],
+        ),
+        // The `"a"` arm's member is `string | number`; the guard's
+        // `string` is the narrower, still-valid answer.
+        (
+            "member fact narrower than the refined root's member",
+            narrower_member.as_str(),
+            vec![string.clone()],
+        ),
+        // The guard's member fact `p.v: "A" | "B"` and the `"a"` arm's
+        // optional member `"A" | undefined` overlap: neither subsumes the
+        // other, and the read is the arm's member narrowed by the fact.
+        (
+            "member fact overlapping the refined root's member",
+            overlapping_member.as_str(),
+            vec![string_literal("A")],
+        ),
+        (
+            "member fact overlapping the refined root's member, past a try/finally",
+            overlapping_member_past_try.as_str(),
+            vec![string_literal("A")],
+        ),
+    ] {
+        let (expr, degradation) = flow_expr_cold_warm(body);
+        assert_eq!(degradation, None, "{case}");
+        assert_eq!(member_types(&expr, "v"), expected, "{case}");
+    }
+}
+
+/// The clause-entry overlay restore is keyed on the writes the clause
+/// EXECUTED, so the two halves of clause scoping hold at once: a narrow
+/// established inside the clause does not escape, and an entering fact
+/// about a value the clause REPLACED does not come back.
+///
+/// The rows separate that rule from the cheaper ones it would be easy to
+/// mistake it for. Restoring the entry overlay unconditionally fails the
+/// changing-write row; keying on the type-CHANGE subset fails the
+/// unchanged-write row; diffing the clause's end overlay against its
+/// entry fails the write-then-equal-assertion row, because that clause
+/// ends holding exactly the overlay it started with while having PROVED
+/// the fact from the write rather than inherited it. The
+/// strengthening-without-a-write row holds the rule's other edge: only a
+/// write retires an entering fact.
+#[test]
+fn flow_return_clause_entry_restore_excludes_every_executed_write() {
+    const PRELUDE: &str = "declare function mayThrow(): void\nfunction assertA(v: unknown): asserts v is \"a\" { if (v !== \"a\") throw 0 }\nfunction assertOne(v: unknown): asserts v is 1 { if (v !== 1) throw 0 }\n";
+    let boolean = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean);
+    let number = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+    for (case, body, expected) in [
+        // A CHANGING write: past the statement the binding holds the
+        // written value, never the pre-try `typeof p === "string"` fact
+        // about the value the write replaced.
+        (
+            "changing write",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = 1 } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![boolean.clone(), number.clone()],
+        ),
+        // STRENGTHENING WITHOUT A WRITE: with no catch, reaching past the
+        // statement PROVES the try completed normally, so the clause's
+        // stronger `"a"` holds. Nothing was written, so there is no stale
+        // entering fact to retire and nothing for the write-keyed rule to
+        // do — the strengthening is what survives.
+        (
+            "strengthening without a write",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { assertA(p) } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![string_literal("a"), boolean.clone()],
+        ),
+        // An UNCHANGED write: `p` already reaches `number`, so writing
+        // `q` leaves the reaching type exactly where it was and there is
+        // no type CHANGE to key on. The write still replaced the value
+        // the entering `1` fact described, so that fact is retired and
+        // the binding reads `number`. Keying the restore on the
+        // type-change subset instead would revive the literal.
+        (
+            "unchanged write",
+            "function makeProps(p: string | number, q: number) { p = q; if (p === 1) { try { p = q } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![boolean.clone(), number.clone()],
+        ),
+        // A write followed by an assertion proving EXACTLY the entering
+        // fact. The write retires that fact as stale, and the assertion
+        // then re-proves it on the only path reaching past the statement,
+        // so the literal stands on the assertion's own proof rather than
+        // on the entering guard. The clause therefore ENDS holding the
+        // overlay it entered with: an overlay diff reads that as "nothing
+        // happened", and dropping the proof for coinciding with the
+        // retired fact publishes the written `number` on an edge that
+        // proved `1`.
+        (
+            "write then assertion equal to the entry guard",
+            "function makeProps(p: string | number, q: number) { p = q; if (p === 1) { try { p = q; assertOne(p) } finally { mayThrow() } return { v: p } } return { v: true } }",
+            vec![
+                verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+                boolean.clone(),
+            ],
+        ),
+        // Read INSIDE the finally after a write that keeps the value
+        // within the entering fact. The finally starts from the join of
+        // the pre-try state and the written try end; the entering
+        // `string` still describes both predecessors, so it stands at
+        // the join.
+        (
+            "same-type write read inside the finally",
+            "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = \"x\" } finally { return { v: p } } } return { v: true } }",
+            vec![
+                boolean.clone(),
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ],
+        ),
+    ] {
+        let (expr, degradation) = flow_expr_cold_warm(&format!("{PRELUDE}{body}"));
+        assert_eq!(degradation, None, "{case}");
+        assert_eq!(member_types(&expr, "v"), expected, "{case}");
+    }
+    // The CHANGING write read inside the finally: the entering fact does
+    // not describe the written try end, so it cannot stand at the join;
+    // the finally reads the pre-try `string` and the written `number`
+    // (tsc 7.0.2: `{ v: string | number; } | { v: boolean; }`).
+    let (expr, degradation) = flow_expr_cold_warm(
+        "function makeProps(p: string | number) { if (typeof p === \"string\") { try { p = 1 } finally { return { v: p } } } return { v: true } }",
+    );
+    assert_eq!(degradation, None, "changing write read inside the finally");
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![
+            boolean,
+            verter_type_expr::TypeExpr::union(vec![
+                number,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            ]),
+        ],
+        "changing write read inside the finally"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Flow/query convergence over a selective operand: the flow rail retains
+// a demanded callee's selective return type as a CARRIER and admits the
+// complete result without forcing it; the consumer's demand forces the
+// carrier through the one shared query graph, where the dead branch
+// costs zero semantic work, zero dependency facts, and no candidate.
+// ────────────────────────────────────────────────────────────────────────
+
+/// The file every DEAD branch declaration lives in. A whole-hash fact of
+/// this file inside a measured window is a dead-operand dependency read.
+const CONV_DEAD: &str = "/ws/conv_dead.ts";
+const CONV_OWNER: &str = "/ws/conv_owner.ts";
+
+/// The two revisions of the dead file, and the two dead-branch spellings
+/// of the owner. Every incremental step below names the pair it is at, so
+/// the same pair can be replayed on a FRESH host as the oracle.
+const CONV_DEAD_V0: &str = "export type DeadDeclared = { dropped: \"no\" };\n";
+const CONV_DEAD_V1: &str = "export type DeadDeclared = { dropped: \"changed\" };\n";
+const CONV_FALSE_V0: &str = "DeadShell";
+const CONV_FALSE_V1: &str = "DeadShell | { extra: \"e\" }";
+
+/// The dead branch reaches the dead file only through a LOCAL alias
+/// shell: minting the shell's `DeclRef` records no fact of the dead file
+/// (shallow indexing of an import route is not semantic work), so only
+/// FORCING the dead branch can read it.
+fn conv_owner_source(false_branch: &str) -> String {
+    format!(
+        "import type {{ DeadDeclared }} from \"{CONV_DEAD}\";\n\
+         export type DeadShell = DeadDeclared;\n\
+         export type Cond<T> = T extends string ? {{ picked: \"yes\" }} : {false_branch};\n\
+         export declare function pick(): Cond<string>;\n\
+         export declare function pickDead(): Cond<number>;\n\
+         export function makeProps() {{ return {{ v: pick() }} }}\n\
+         export function makeDead() {{ return {{ v: pickDead() }} }}\n"
+    )
+}
+
+fn conv_upsert(host: &VerterHost, canonical: &str, source: String) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+/// Run `f` under the host's fact tracer and count the finalised facts
+/// naming the dead file. A non-cacheable or overflowed tracer is a fixture
+/// fault, never a zero.
+fn conv_dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R, usize) {
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    let (value, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        f,
+    );
+    let facts = match read_set.finalise() {
+        FactReadSetFinalise::Ok(facts) => facts,
+        other => panic!("convergence tracer must finalise on a tiny fixture: {other:?}"),
+    };
+    let dead = facts
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == CONV_DEAD
+            )
+        })
+        .count();
+    (value, dead)
+}
+
+fn conv_flow_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(CONV_OWNER),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(CONV_OWNER),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// The consumer's demand: walk member `v` of the published flow node in
+/// the published `Expanded` mode — the same shared `ProjectPath` route
+/// every consumer takes to read a member of a resolved return surface.
+fn conv_member_demand(base: SemanticNodeId) -> SemanticQueryKey {
+    use verter_type_engine::semantic_query::{
+        PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey,
+    };
+    SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(
+            vec![PathSegment::Member(PropertyKey::identifier(Arc::from("v")))].into_boxed_slice(),
+        ),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }
+}
+
+fn conv_execute_node(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    key: SemanticQueryKey,
+) -> SemanticNodeId {
+    match dispatch.execute(key) {
+        QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::TypeNode(node),
+            ..
+        }) => node,
+        other => panic!("the member demand must resolve to a type node, got {other:?}"),
+    }
+}
+
+/// The single property of a projected object surface: `(key, value)`.
+fn conv_sole_property(expr: &verter_type_expr::TypeExpr) -> (String, verter_type_expr::TypeExpr) {
+    let verter_type_expr::TypeExpr::Object(object) = expr else {
+        panic!("expected an object surface, got {expr:?}");
+    };
+    let [verter_type_expr::ObjectMember::Property(property)] = object.properties.as_slice() else {
+        panic!("expected exactly one property, got {:?}", object.properties);
+    };
+    (
+        property
+            .key
+            .as_string()
+            .expect("the fixture's keys are string names")
+            .to_owned(),
+        property.ty.clone(),
+    )
+}
+
+fn conv_stats(host: &VerterHost) -> verter_type_engine::semantic_query::SemanticGraphStats {
+    host.project_type_store().semantic_graph().stats_snapshot()
+}
+
+/// One measured pass over the flow result and the consumer's demand.
+struct ConvObservation {
+    flow_projected: verter_type_expr::TypeExpr,
+    flow_candidates: usize,
+    demand_projected: verter_type_expr::TypeExpr,
+    demand_node: SemanticNodeId,
+    demand_dead_fact_reads: usize,
+    demand_conditionals_decided: u64,
+    demand_false_selections: u64,
+}
+
+/// Cold-or-warm pass: the flow result is read under the fact tracer and
+/// pinned to enter no forcing family and read no dead-file fact; the
+/// member demand is then measured for dead-file facts and branch
+/// selections. `expect_flow_cold` pins the flow window's exact family
+/// multiset for a cold evaluation; a warm read must enter neither a
+/// forcing family NOR a cold one, which is what separates a memo hit
+/// from a silent recomputation that lands on the same answer.
+fn conv_observe(host: &Arc<VerterHost>, function: &str, expect_flow_cold: bool) -> ConvObservation {
+    use super::semantic_operand_tests::{dispatch_classes_since, trace_len};
+    with_dispatch(host, |dispatch| {
+        let key = conv_flow_key(dispatch, function);
+        let flow_window = trace_len();
+        let (result, flow_dead_reads) =
+            conv_dead_file_fact_reads(host, || flow_result_value(dispatch, key.clone()));
+        let flow_classes = dispatch_classes_since(flow_window);
+        assert_eq!(
+            result.degradation(),
+            None,
+            "{function}: a retained selective carrier is a COMPLETE flow answer"
+        );
+        assert_eq!(
+            flow_dead_reads, 0,
+            "{function}: the flow rail read {flow_dead_reads} dead-file fact(s) — it forced a \
+             branch the consumer never demanded"
+        );
+        if expect_flow_cold {
+            // The callee's `typeof pick` resolution and the ONE declared-return
+            // lowering: no Instantiate / Conditional family inside the flow
+            // window — the selective operand stays a carrier here.
+            assert_eq!(
+                flow_classes,
+                [("LowerLocator", 1), ("TypeOf", 1)]
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+                "{function}: the cold flow window entered a forcing family"
+            );
+        } else {
+            // A warm read serves the memo: it enters NO family at all. The
+            // COLD families are pinned to zero alongside the forcing ones
+            // because a cache miss that recomputed the whole flow result
+            // re-enters exactly `LowerLocator` + `TypeOf`, and the candidate
+            // COUNT cannot see it — an invalidated candidate is REPLACED, so
+            // the count stays one. Without these two names a silent
+            // recomputation would satisfy every warm assertion below.
+            for family in [
+                "LowerLocator",
+                "TypeOf",
+                "Instantiate",
+                "Conditional",
+                "ProjectPath",
+                "IndexedAccess",
+            ] {
+                assert_eq!(
+                    flow_classes.get(family).copied().unwrap_or(0),
+                    0,
+                    "{function}: a warm flow read entered {family}"
+                );
+            }
+        }
+        let flow_projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the flow node projects");
+        let flow_candidates = dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+
+        let demand = conv_member_demand(result.return_type());
+        let before = conv_stats(host);
+        let (demand_node, demand_dead_fact_reads) =
+            conv_dead_file_fact_reads(host, || conv_execute_node(dispatch, demand));
+        let after = conv_stats(host);
+        let demand_projected = host
+            .project_node_to_type_expr_for_test(demand_node)
+            .expect("the demanded member projects");
+        ConvObservation {
+            flow_projected,
+            flow_candidates,
+            demand_projected,
+            demand_node,
+            demand_dead_fact_reads,
+            demand_conditionals_decided: after.conditional_decided_count
+                - before.conditional_decided_count,
+            demand_false_selections: after.branch_selections_false - before.branch_selections_false,
+        }
+    })
+}
+
+/// The INDEPENDENT oracle: a brand-new host that has only ever seen this
+/// exact source pair, observed cold. An incremental result is equal to
+/// FRESH only when it matches this — comparing it against a pre-edit
+/// observation of DIFFERENT source proves nothing about the edited
+/// inputs, because the pre-edit answer is the one the edit was supposed
+/// to be allowed to change.
+///
+/// Only the projections are comparable across hosts: node identities and
+/// the graph counters belong to the host that produced them.
+fn conv_fresh(dead_source: &str, false_branch: &str) -> ConvObservation {
+    let host = make_host();
+    conv_upsert(&host, CONV_DEAD, dead_source.to_owned());
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(false_branch));
+    conv_observe(&host, "makeProps", true)
+}
+
+/// A function returning `{ v: pick() }` with `pick(): Cond<string>` — a
+/// callee whose declared return is a selective operand whose dead branch
+/// lives in a second file.
+///
+/// * The flow rail lowers the callee's declared return in structural
+///   transit and publishes the member as the `Cond<string>` CARRIER: the
+///   cold flow window enters no forcing family, reads no dead-file fact,
+///   and admits ONE warm candidate. Mutation recipe: lowering the declared
+///   return in a published mode forces `Instantiate` + `Conditional`
+///   inside the flow window and fails the family pin.
+/// * The consumer's `Expanded` demand on `v` forces the carrier through
+///   the shared graph: exactly one conditional decision, the TRUE branch,
+///   zero FALSE selections, zero dead-file facts, and the answer is the
+///   selected branch alone. Mutation recipe: materialising both branches
+///   before selecting (an eager conditional) reads the dead file and
+///   selects the false branch once.
+/// * The warm repeat of the demand returns the same node, interns zero
+///   nodes, and decides nothing again; the warm flow read admits no
+///   second candidate.
+/// * The positive control `makeDead` (`Cond<number>`) selects the FALSE
+///   branch: it reads the dead file and publishes the dead declaration —
+///   the zero assertions above discriminate.
+/// * A same-owner edit that respells only the dead branch recomputes (or
+///   conservatively re-serves) a result EQUAL to fresh with the same zero
+///   dead-branch work; an edit to the dead FILE alone invalidates nothing:
+///   the flow read is a warm hit and the demanded operand decides nothing
+///   again. Mutation recipe: rooting the operand result on the dead
+///   branch's file makes the dead-file edit re-decide the conditional.
+/// * "Equal to fresh" is decided against `conv_fresh`: an independent host
+///   that has only ever seen the edited sources, observed cold. Both edited
+///   states are checked against their own oracle, so a stale re-serve
+///   cannot certify convergence merely by agreeing with the answer it held
+///   BEFORE the edit. Mutation recipe: serving the pre-edit result for an
+///   edit that does change the demanded member fails the oracle while the
+///   node-identity and re-decision counters still pass.
+#[test]
+fn flow_return_retains_a_selective_operand_as_a_carrier_and_forces_it_only_on_consumer_demand() {
+    use super::semantic_operand_tests::interned_nodes;
+    use verter_type_engine::project_semantic_dispatch::raise::enable_dispatch_trace_for_test;
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+
+    let host = make_host();
+    conv_upsert(&host, CONV_DEAD, CONV_DEAD_V0.to_owned());
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(CONV_FALSE_V0));
+    let _trace = enable_dispatch_trace_for_test();
+
+    let carrier = TypeExpr::Ref {
+        name: Arc::from("Cond"),
+        type_arguments: Arc::from(
+            vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+        ),
+    };
+    let picked = (
+        "picked".to_owned(),
+        TypeExpr::Literal(LiteralValue::String("yes".to_owned())),
+    );
+
+    // ── COLD: flow result, then the consumer's demand ──────────────────
+    let cold = conv_observe(&host, "makeProps", true);
+    assert_eq!(
+        conv_sole_property(&cold.flow_projected),
+        ("v".to_owned(), carrier.clone()),
+        "the flow result publishes the selective operand as its carrier"
+    );
+    assert_eq!(
+        cold.flow_candidates, 1,
+        "the complete flow result admits one warm candidate"
+    );
+    assert_eq!(
+        conv_sole_property(&cold.demand_projected),
+        picked,
+        "the demand publishes exactly the selected branch"
+    );
+    assert_eq!(
+        cold.demand_dead_fact_reads, 0,
+        "the cold demand read a dead-file fact"
+    );
+    assert_eq!(
+        cold.demand_conditionals_decided, 1,
+        "the cold demand decides the conditional once"
+    );
+    assert_eq!(
+        cold.demand_false_selections, 0,
+        "the cold demand selected the dead branch"
+    );
+
+    // ── WARM repeat: same node, zero growth, nothing re-decided ────────
+    let nodes_before = interned_nodes(&host);
+    let warm = conv_observe(&host, "makeProps", false);
+    assert_eq!(
+        warm.demand_node, cold.demand_node,
+        "the warm demand serves the same node"
+    );
+    assert_eq!(
+        interned_nodes(&host) - nodes_before,
+        0,
+        "a warm pass interned semantic nodes"
+    );
+    assert_eq!(
+        warm.demand_conditionals_decided, 0,
+        "a warm demand re-decided the conditional"
+    );
+    assert_eq!(
+        warm.demand_dead_fact_reads, 0,
+        "a warm demand read a dead-file fact"
+    );
+    assert_eq!(
+        warm.flow_candidates, 1,
+        "a warm flow read appended a candidate"
+    );
+
+    // ── POSITIVE CONTROL: the false branch DOES read the dead file ─────
+    let control = conv_observe(&host, "makeDead", true);
+    assert_eq!(
+        conv_sole_property(&control.demand_projected).0,
+        "dropped",
+        "selecting the false branch publishes the dead declaration"
+    );
+    assert_eq!(
+        control.demand_false_selections, 1,
+        "the control selects the false branch once"
+    );
+    assert!(
+        control.demand_dead_fact_reads >= 1,
+        "forcing the dead branch must read the dead file — the zero assertions discriminate"
+    );
+
+    // ── SAME-OWNER DEAD EDIT: equal to FRESH, zero dead-branch work ────
+    conv_upsert(&host, CONV_OWNER, conv_owner_source(CONV_FALSE_V1));
+    let edited = conv_observe(&host, "makeProps", true);
+    // The oracle: an independent host that has only ever seen the EDITED
+    // owner. This is what "equals fresh" has to mean — `cold` observed a
+    // different owner source, so agreeing with it is a separate (and
+    // weaker) claim about the respell being invisible.
+    let fresh_after_owner_edit = conv_fresh(CONV_DEAD_V0, CONV_FALSE_V1);
+    assert_eq!(
+        conv_sole_property(&edited.flow_projected),
+        conv_sole_property(&fresh_after_owner_edit.flow_projected),
+        "the incrementally recomputed flow result differs from a fresh computation over the \
+         edited source"
+    );
+    assert_eq!(
+        conv_sole_property(&edited.demand_projected),
+        conv_sole_property(&fresh_after_owner_edit.demand_projected),
+        "the incrementally recomputed demand differs from a fresh computation over the edited \
+         source"
+    );
+    assert_eq!(
+        conv_sole_property(&edited.flow_projected),
+        conv_sole_property(&cold.flow_projected),
+        "respelling only the dead branch changed the published flow result"
+    );
+    assert_eq!(
+        conv_sole_property(&edited.demand_projected),
+        conv_sole_property(&cold.demand_projected),
+        "respelling only the dead branch changed the demanded member"
+    );
+    assert_eq!(
+        edited.demand_dead_fact_reads, 0,
+        "recomputation read a dead-file fact"
+    );
+    assert_eq!(
+        edited.demand_false_selections, 0,
+        "recomputation selected the dead branch"
+    );
+    let candidates_after_owner_edit = edited.flow_candidates;
+
+    // ── DEAD-FILE EDIT: invalidates nothing the consumer demanded ──────
+    conv_upsert(&host, CONV_DEAD, CONV_DEAD_V1.to_owned());
+    let nodes_before = interned_nodes(&host);
+    let dead_edit = conv_observe(&host, "makeProps", false);
+    // Serving the SAME node is only correct if that node is still the
+    // answer a fresh computation over BOTH edited files produces. The
+    // oracle rules out a stale re-serve that happens to keep its identity.
+    let fresh_after_dead_edit = conv_fresh(CONV_DEAD_V1, CONV_FALSE_V1);
+    assert_eq!(
+        conv_sole_property(&dead_edit.flow_projected),
+        conv_sole_property(&fresh_after_dead_edit.flow_projected),
+        "the re-served flow result differs from a fresh computation over the edited dead file"
+    );
+    assert_eq!(
+        conv_sole_property(&dead_edit.demand_projected),
+        conv_sole_property(&fresh_after_dead_edit.demand_projected),
+        "the re-served demand differs from a fresh computation over the edited dead file"
+    );
+    assert_eq!(
+        dead_edit.demand_node, edited.demand_node,
+        "the dead-file edit re-served the demand"
+    );
+    assert_eq!(
+        dead_edit.demand_conditionals_decided, 0,
+        "the dead-file edit re-decided the conditional"
+    );
+    assert_eq!(
+        interned_nodes(&host) - nodes_before,
+        0,
+        "the dead-file edit interned semantic nodes"
+    );
+    assert_eq!(
+        dead_edit.flow_candidates, candidates_after_owner_edit,
+        "the dead-file edit invalidated the flow result"
+    );
+}
+
+// ── Return-position subtype reunion ───────────────────────────────────
+
+/// A return join absorbs a strict-subtype arm into its supertype peer —
+/// TypeScript's own return-position subtype reduction — while the
+/// CANONICAL union over the identical constituents keeps both.
+///
+/// The two halves discriminate WHERE the reduction lives: a reduction
+/// added to the canonical algebra would collapse the second half too, and
+/// a reduction missing from the inference layer would leave the first half
+/// a two-arm union. The pair is `{ c: string }` / `{ c: string | number }`
+/// — object arms with the SAME key set, where the canonical layer's rule
+/// that a supertype arm never swallows a subtype arm is what keeps both.
+#[test]
+fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both() {
+    let (expr, degradation) = flow_expr_cold_warm(
+        "function assertString(v: unknown): asserts v is string { if (typeof v !== \"string\") throw 0 }\nfunction makeProps(v: number, p: string | number) { switch (v) { case 0: assertString(p); return { c: p }; case 1: return { c: p }; default: return { c: p } } }",
+    );
+    assert_eq!(degradation, None);
+    assert!(
+        matches!(expr, verter_type_expr::TypeExpr::Object(_)),
+        "the asserted `{{ c: string }}` arm is absorbed into `{{ c: string | number }}`, leaving \
+         ONE object: {expr:?}"
+    );
+    assert_eq!(
+        member_types(&expr, "c"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let string = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
+            ),
+        );
+        let number = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
+        let string_or_number =
+            dispatch.intern_normalized_union_or_intersection(&[string, number], true);
+        let member = |value: SemanticNodeId| verter_type_engine::semantic_query::SurfaceMember {
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("c"),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            spans: Default::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        };
+        let object = |value: SemanticNodeId| {
+            graph.intern_node(verter_type_engine::semantic_query::SemanticNodeData::Object(
+                verter_type_engine::surface_view! {
+                    members: Arc::from(vec![member(value)].into_boxed_slice()),
+                    call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    index_signatures: Arc::from(Vec::<verter_type_engine::semantic_query::IndexSignature>::new().into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature: false,
+                },
+            ))
+        };
+        let narrow = object(string);
+        let wide = object(string_or_number);
+        let union = dispatch.intern_normalized_union_or_intersection(&[narrow, wide], true);
+        let Some(verter_type_engine::semantic_query::SemanticNodeData::Union(members)) =
+            graph.node_data(union).as_deref().cloned()
+        else {
+            panic!("the canonical union of the two object arms must stay a union");
+        };
+        // The canonical union renders its members in `VerterStableV1` order, so
+        // compare the constituent SET: both arms must survive, whichever sorts first.
+        let mut kept = members.to_vec();
+        kept.sort();
+        let mut expected = vec![narrow, wide];
+        expected.sort();
+        assert_eq!(
+            kept, expected,
+            "the canonical layer keeps every constituent: a supertype arm never swallows a \
+             subtype arm there"
+        );
+    });
+}
+
+/// The arms that SURVIVE reduction keep their source order: the absorbed
+/// arm is removed in place, never re-sorted around.
+#[test]
+fn flow_return_reunion_keeps_the_surviving_arms_in_source_order() {
+    let (expr, degradation) = flow_expr_cold_warm(
+        "function makeProps(flag: boolean, c: boolean, b: { b: true }) { let x: string | { b: true } = \"a\"; try { if (flag) { x = b; return { out: 0 } } } finally { if (c) return { out: x } } return { out: x } }",
+    );
+    assert_eq!(degradation, None);
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("the two surviving object arms stay a union, got {expr:?}");
+    };
+    assert_eq!(
+        arms.len(),
+        2,
+        "the third `{{ out: string }}` arm is a strict subtype of `{{ out: string | {{ b: true }} }}`"
+    );
+    let out = member_types(&expr, "out");
+    assert_eq!(out.len(), 2, "one `out` member per surviving arm: {out:?}");
+    assert_eq!(
+        out[0],
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the early `{{ out: 0 }}` return stays FIRST: {out:?}"
+    );
+    let verter_type_expr::TypeExpr::Union(second) = &out[1] else {
+        panic!(
+            "the finally's arm keeps its declared union, got {:?}",
+            out[1]
+        );
+    };
+    // The declared union's members render in `VerterStableV1` order; what matters
+    // is that the object constituent is still THERE.
+    assert!(
+        second
+            .iter()
+            .any(|arm| matches!(arm, verter_type_expr::TypeExpr::Object(_))),
+        "the surviving supertype arm keeps the `{{ b: true }}` object constituent, \
+         so the reduction never collapsed to the bare `string`: {second:?}"
+    );
+    assert_eq!(
+        second.len(),
+        2,
+        "exactly the declared two constituents survive: {second:?}"
+    );
+    assert!(
+        second.iter().any(|arm| matches!(
+            arm,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        )),
+        "…with the `string` constituent alongside it: {second:?}"
+    );
+}
+
+/// `L & K` is assignable to `L` and `L` is not assignable to the
+/// intersection (it lacks `k`), so the reunion absorbs the intersection
+/// arm: `makeProps` returns `L` on 7.0.2, complete.
+#[test]
+fn flow_return_reunion_absorbs_an_intersection_arm_into_its_supertype() {
+    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(script);
+    assert_eq!(degradation, None, "the decided reduction is complete");
+    assert!(
+        matches!(&expr, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"),
+        "the intersection arm is absorbed into `L`: {expr:?}"
+    );
+}
+
+/// An arm pair the relation authority cannot decide leaves the reduction
+/// UNFINISHED: every arm survives, the typed nominal-relation gap rides
+/// the result, and the result is `ReturnOnly` — never a guessed
+/// absorption promoted warm.
+///
+/// `L & Absent` (over an import that does not resolve) is assignable to
+/// `L`, so the pair IS an admitted reduction candidate; the reverse
+/// direction (`L` against the intersection) reaches the unresolved
+/// `Absent` and is the judgement the authority does not give. Over a
+/// resolved `L & K` both directions decide and the checker's reduction
+/// runs: TypeScript 7.0.2 (`tsc --declaration --emitDeclarationOnly
+/// --strict`) returns `L` from `makeProps(x: L | null) { if (x
+/// instanceof K) { return x } return anL }`, and so does the lane.
+#[test]
+fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warms() {
+    let decided = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(decided);
+    assert_eq!(
+        degradation, None,
+        "a decided reduction is complete: {expr:?}"
+    );
+    assert!(
+        matches!(&expr, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"),
+        "the intersection arm is absorbed into its supertype: {expr:?}"
+    );
+
+    let script = "import type { Absent } from \"./absent-reunion-source\"\nclass L { readonly l = \"l\" }\ndeclare const anL: L\ndeclare const both: L & Absent\nfunction makeProps(c: boolean) { if (c) { return both } return anL }";
+    let (expr, degradation) = flow_expr_for_script(script);
+    assert_eq!(
+        degradation,
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::NominalRelation
+            )
+        ),
+        "an undecided arm pair records the typed relation gap"
+    );
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("every arm must survive an undecided reduction, got {expr:?}");
+    };
+    assert_eq!(arms.len(), 2, "both arms survive: {expr:?}");
+    assert_eq!(
+        flow_return_slot_candidates(script, "makeProps"),
+        0,
+        "a degraded reduction is ReturnOnly — nothing warms"
+    );
+}
+
+/// An intersection arm is absorbed into its own member class: `L & K`
+/// (the `instanceof K` narrowing of an `L`) is below `L` in the strict
+/// subtype relation, and `L` is not below the intersection, so the join
+/// is `L` (TypeScript 7.0.2: `L`), clean and warm.
+#[test]
+fn flow_return_reunion_absorbs_an_intersection_into_its_member_class() {
+    let script = "class K { readonly k = \"k\" }\nclass L { readonly l = \"l\" }\ndeclare const anL: L\nfunction makeProps(x: L | null) { if (x instanceof K) { return x } return anL }";
+    let (expr, degradation) = flow_expr_for_script(script);
+    assert_eq!(degradation, None, "the reduction is decided");
+    assert!(
+        matches!(
+            &expr,
+            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "L"
+        ),
+        "the intersection is absorbed into `L`: {expr:?}"
+    );
+    assert_eq!(
+        flow_return_slot_candidates(script, "makeProps"),
+        1,
+        "the decided reduction warms"
+    );
+}
+
+/// A cold join asks the relation authority at most once per ORDERED arm
+/// pair — the reduction visits each arm once and stops at the first peer
+/// it is below — and a warm replay of the same demand asks NOTHING.
+#[test]
+fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() {
+    // Three arms: `{ v: "a" }`, `{ v: string }`, `{ v: number }`.
+    let script = "function makeProps(p: string | number) { if (typeof p === \"string\") { switch (p) { case \"a\": return { v: p }; default: return { v: p } } } return { v: 0 } }";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
+        FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        }
+    };
+    let (cold_reads, cold) = with_dispatch(&host, |dispatch| {
+        let before = dispatch.graph().stats_snapshot().relation_check_count;
+        let value = flow_result_value(dispatch, key(dispatch));
+        (
+            dispatch.graph().stats_snapshot().relation_check_count - before,
+            value,
+        )
+    });
+    assert_eq!(cold.degradation(), None, "the join is clean");
+    // The whole request's relation budget, PINNED. Most of it belongs to
+    // the `typeof` guard's own narrowing; the reunion's share is bounded
+    // by "once per ordered arm pair", and a reduction that re-asks a pair
+    // (or asks past the first peer an arm is below) raises this number. A
+    // pin rather than an inequality: an inequality with slack cannot see
+    // the extra asks.
+    assert_eq!(
+        cold_reads, 15,
+        "the cold relation budget of this three-arm join moved; a reunion that re-asks a \
+         decided arm pair spends more"
+    );
+    let warm_reads = with_dispatch(&host, |dispatch| {
+        let before = dispatch.graph().stats_snapshot().relation_check_count;
+        let warm = dispatch
+            .graph()
+            .get_flow_return_result(dispatch.ctx, &key(dispatch))
+            .map(|served| served.value);
+        assert_eq!(
+            warm.as_ref(),
+            Some(&cold),
+            "the reduced result replays warm, equal to the fresh one"
+        );
+        dispatch.graph().stats_snapshot().relation_check_count - before
+    });
+    assert_eq!(
+        warm_reads, 0,
+        "an identical warm demand re-decides no arm pair"
+    );
+}
+
+/// The `slot_candidate_count` of `function`'s whole-return demand — zero
+/// for a `ReturnOnly` result, non-zero once a clean result is admitted.
+fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(function),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let _ = flow_result_value(dispatch, key.clone());
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
+    })
+}
+
+/// The call value of a generic callee whose declared return intersects
+/// the empty object type reduces to the bare constituent, at the whole
+/// return AND at a member position — the checker's own
+/// `getIntersectionType` reduction, which the canonical intersection
+/// applies too (TypeScript 7.0.2: `{} & 'x'` is `"x"`). A constructed
+/// `string & {}` is `string` (`type NN<T> = T & {}` makes `NN<string>`
+/// `string`), while a written `string & {}` keeps both arms (`string &
+/// {}`).
+#[test]
+fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() {
+    let (whole, whole_degradation) = flow_expr_cold_warm(
+        "function andD<T>(x: T): T & {} { return x as T & {} }\nfunction makeProps() { return andD(\"x\") }",
+    );
+    assert_eq!(whole_degradation, None);
+    assert_eq!(
+        whole,
+        verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String("x".to_owned())),
+        "`\"x\" & {{}}` reduces to `\"x\"`"
+    );
+
+    let (member, member_degradation) = flow_expr_cold_warm(
+        "function andD<T>(x: T): T & {} { return x as T & {} }\nfunction makeProps() { return { a: andD(\"x\") } }",
+    );
+    assert_eq!(member_degradation, None);
+    assert_eq!(
+        member_types(&member, "a"),
+        vec![verter_type_expr::TypeExpr::Literal(
+            verter_type_expr::LiteralValue::String("x".to_owned())
+        )],
+        "the same reduction applies at a member position"
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let literal = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Literal(
+                verter_type_expr::LiteralValue::String("x".to_owned()),
+            ),
+        );
+        let empty = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Object(
+                verter_type_engine::semantic_query::SurfaceView::new(
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    None,
+                    false,
+                ),
+            ),
+        );
+        let intersection =
+            dispatch.intern_normalized_union_or_intersection(&[empty, literal], false);
+        assert_eq!(
+            intersection, literal,
+            "`{{}} & \"x\"` is `\"x\"` in the canonical layer"
+        );
+        let string = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
+            ),
+        );
+        let derived = dispatch.intern_normalized_union_or_intersection(&[string, empty], false);
+        assert_eq!(
+            derived, string,
+            "a constructed `string & {{}}` (an instantiated `T & {{}}`) is `string`"
+        );
+        let written = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Intersection(
+                verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
+                    Arc::from(vec![string, empty].into_boxed_slice()),
+                ),
+            ),
+        );
+        assert_eq!(
+            super::canonical_algebra::reduced_authored_intersection(
+                graph,
+                written,
+                verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            ),
+            None,
+            "a written `string & {{}}` keeps both constituents"
+        );
+    });
+}
+
+/// A warm flow-return query takes the semantic memo's host-wide `entries`
+/// lock once, and the count does not change when other callers query
+/// unrelated functions of the same host at the same time. A warm read
+/// snapshots its slot under the lock and validates outside it; when the
+/// candidate it validated is already the slot's freshest, there is no
+/// LRU move to make, so it does not take the lock again. Taking it a
+/// second time on every hit made each warm query two turns on one lock
+/// that every concurrent read of every family shares.
+#[test]
+fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
+    use verter_type_engine::capture_token::ENTRIES_MUTEX_ACQUISITIONS;
+
+    const FUNCTIONS: [&str; 4] = [
+        "subCallReturn",
+        "subCallAfterLoop",
+        "subLoopReturn",
+        "subSwitchReturn",
+    ];
+    let host = make_host();
+    let identity = |name: &str| verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(name),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let query = |name: &str| {
+        host.get_flow_return_type_with_audit(
+            &identity(name),
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        )
+    };
+    for name in FUNCTIONS {
+        assert!(query(name).as_result().is_ok(), "{name} answers cold");
+    }
+    // Per caller: the memo-lock acquisitions of one warm query of its own
+    // function, measured by a capture token on the caller's thread.
+    let acquisitions = |callers: usize| -> Vec<u64> {
+        let start = std::sync::Barrier::new(callers);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..callers)
+                .map(|caller| {
+                    let (start, query) = (&start, &query);
+                    scope.spawn(move || {
+                        start.wait();
+                        let name = FUNCTIONS[caller % FUNCTIONS.len()];
+                        let guard =
+                            verter_type_engine::capture_token::CaptureToken::start_for_query(
+                                "warm",
+                            );
+                        let answered = query(name).as_result().is_ok();
+                        let snapshot = guard.end();
+                        assert!(answered, "{name} answers warm");
+                        snapshot.counter(ENTRIES_MUTEX_ACQUISITIONS)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("caller"))
+                .collect()
+        })
+    };
+    assert_eq!(acquisitions(1), vec![1], "one caller");
+    assert_eq!(acquisitions(4), vec![1; 4], "four callers");
+}
+
+/// The functions of `source` whose `FlowReturn` read closes WITHOUT its
+/// proof — the finalizer's verdict partial, so the read is `ReturnOnly`
+/// with [`verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`]
+/// — each with its partial reasons. A correct flow answer closes with its
+/// proof: the completeness design keeps every correct answer clean and
+/// admits no unproven one as exact, so a publication boundary that
+/// honours the verdict can only keep a correct answer clean when its
+/// proof closes.
+pub(super) fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<String> {
+    const FILE: &str = "/ws/proof.ts";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(FILE.to_string()),
+        input_id: FILE.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(FILE)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let mut unproven = Vec::new();
+    for name in names {
+        with_dispatch(&host, |dispatch| {
+            let key = FlowReturnKey {
+                function: dispatch.flow_function_slot_for(
+                    Arc::from(FILE),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from(*name),
+                    FunctionPartIdentity::DeclarationBody,
+                    0,
+                ),
+                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: dispatch.flow_return_context_for(FILE),
+                demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+                result_contract: super::flow_solve::flow_return_result_contract_id(),
+            };
+            let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
+            if read.result_is_partial {
+                unproven.push(format!("{name}: {:?}", read.partial_reasons));
+            }
+        });
+    }
+    unproven
+}
+
+/// An annotated declaration's initializer RUNS: the checker checks it and
+/// its flow sees every write and call inside it, whatever the declared
+/// type makes of its value. Its writes reach later reads, each call in it
+/// is evaluated and so evidenced, and the proof closes. TypeScript 7.0.2,
+/// all four settings: `wContextual` is `1`, `initWrite` `number`,
+/// `initWriteLet` `readonly [number, number]`.
+const ANNOTATED_INITIALIZERS: &str = r#"
+declare function f<T>(x: T): T;
+export function wContextual() { const x: 1 = f(f(1)); return x; }
+export function initWrite() { let y: string | number = "s"; const x: 1 = (y = 2, 1); return y; }
+export function initWriteLet() { let y: string | number = "s"; let x: number = (y = 2, 3); return [x, y] as const; }
+"#;
+
+#[test]
+fn an_annotated_declarations_initializer_runs_and_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(
+        ANNOTATED_INITIALIZERS,
+        &["wContextual", "initWrite", "initWriteLet"],
+    );
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(ANNOTATED_INITIALIZERS).returns(&[
+            ("wContextual", "1"),
+            ("initWrite", "number"),
+            ("initWriteLet", "readonly [number, number]"),
+        ]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An `asserts` call applied as a sequence operand, a sequence arm or an
+/// initializer operand is evaluated where it narrows: the narrow records
+/// the call's evidence, decided exactly as a predicate call's narrow is,
+/// and the proof closes. TypeScript 7.0.2, all four settings: `p12` is
+/// `string`, `inSequence` `string | number`, `guardedInSequence` `never`,
+/// `initAssert` `string`, `stmtTruthy` and `seqTruthy` `string`.
+const ASSERTION_CALLS: &str = r#"
+declare function assertString(x: unknown): asserts x is string;
+declare function ok(v: unknown): asserts v;
+function isStr(x: unknown): asserts x is string { if (typeof x !== "string") throw 0; }
+function isNum(x: unknown): asserts x is number { if (typeof x !== "number") throw 0; }
+export function p12(x: string | number) { return ((0, assertString(x)), x); }
+export function inSequence(x: string | number | boolean, c: boolean) { const y = (c ? (0, isStr(x)) : (0, isNum(x)), x); return y; }
+export function guardedInSequence(x: string | number | boolean) { const y = (typeof x === "string" ? (0, isNum(x)) : (0, isStr(x)), x); return y; }
+export function initAssert(v: string | number) { const x: 1 = ((0, assertString(v)), 1); return v; }
+export function stmtTruthy(v: string | undefined) { ok(v); return v; }
+export function seqTruthy(v: string | undefined) { return ((0, ok(v)), v); }
+"#;
+
+#[test]
+fn an_assertion_call_evidences_its_own_narrow() {
+    let mut failures = flow_reads_without_proof(
+        ASSERTION_CALLS,
+        &[
+            "p12",
+            "inSequence",
+            "guardedInSequence",
+            "initAssert",
+            "stmtTruthy",
+            "seqTruthy",
+        ],
+    );
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(ASSERTION_CALLS).returns(&[
+            ("p12", "string"),
+            ("inSequence", "string | number"),
+            ("guardedInSequence", "never"),
+            ("initAssert", "string"),
+            ("stmtTruthy", "string"),
+            ("seqTruthy", "string"),
+        ]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A construction passed as a call argument is a call of its constructor:
+/// the frame evaluates it as it does any call argument, so the
+/// construction's own call is evidenced and the proof closes. TypeScript
+/// 7.0.2, all four settings: `cArg` is `Error0`.
+const CONSTRUCTED_ARGUMENTS: &str = r#"
+class Error0 {}
+declare function id<T>(x: T): T;
+export function cArg() { return id(new Error0()); }
+"#;
+
+#[test]
+fn a_constructed_call_argument_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(CONSTRUCTED_ARGUMENTS, &["cArg"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(CONSTRUCTED_ARGUMENTS)
+            .returns(&[("cArg", "Error0")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A callable in a parameter list is served by no index entry, but the
+/// frame resolves every name it reaches, so its capture set is exact and
+/// no closure-capture gap stands. TypeScript 7.0.2, all four settings:
+/// `dpArrow` is `() => number`.
+const PARAMETER_CALLABLES: &str = r#"
+export function dpArrow(cb = () => 7) { return cb; }
+"#;
+
+#[test]
+fn a_parameter_default_callable_closes_its_proof() {
+    let mut failures = flow_reads_without_proof(PARAMETER_CALLABLES, &["dpArrow"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(PARAMETER_CALLABLES)
+            .returns(&[("dpArrow", "() => number")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class static block runs at the class's evaluation, and the checker
+/// flows through it inline: `x = 1` in `class C { static { x = 1; } }`
+/// reaches every later read of `x` in the frame. TypeScript 7.0.2, all four
+/// settings: `classStaticBlockAssigns` is `(x: string | number) =>
+/// boolean` (the assignment declines the predicate). The static block's
+/// statements lower in the frame, so the proof closes.
+const STATIC_BLOCK_WRITES: &str = r#"
+export function classStaticBlockAssigns(x: string | number) { class C { static { x = 1; } } return typeof x === "string"; }
+"#;
+
+#[test]
+fn a_class_static_block_write_is_flowed_in_its_frame() {
+    let mut failures = flow_reads_without_proof(STATIC_BLOCK_WRITES, &["classStaticBlockAssigns"]);
+    failures.extend(
+        super::differential_harness_tests::Matrix::new(STATIC_BLOCK_WRITES)
+            .returns(&[("classStaticBlockAssigns", "boolean")]),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

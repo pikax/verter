@@ -5,8 +5,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::Severity;
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 /// Disallow registering components that are not used in the template.
 pub struct NoUnusedComponents;

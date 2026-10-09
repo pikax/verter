@@ -1110,9 +1110,10 @@ fn element_with_interpolation() {
         offset: 0,
         expression: None,
         multi_statement: false,
+        statements: None,
         errors: None,
         bindings: None,
-        ide_recovery_scope: Vec::new(),
+        ide_recovery_scope: None,
         dynamism: Dynamism::Static,
     };
 

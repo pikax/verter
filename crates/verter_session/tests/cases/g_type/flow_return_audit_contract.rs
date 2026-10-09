@@ -32,10 +32,10 @@ use std::sync::Arc;
 use verter_audit::payloads::flow_return::{FlowDegradationTag, FlowFailureTag, FlowPartialityTag};
 use verter_audit::{AuditCaptureState, RequestKind, StructuredAuditEvent};
 use verter_session::host_flow_return_audit::FlowReturnError;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     demand, FlowReturnFailure, FlowReturnResult, ReturnProjectionDemand,
 };
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
@@ -146,7 +146,9 @@ fn cold_inference_emits_started_event_and_counts_one_cold_compute() {
 
     // The active registration published the record into the host store.
     assert!(
-        host.take_audit_record(record.request_id).is_some(),
+        host.host_audit_runtime()
+            .take_record(record.request_id)
+            .is_some(),
         "active flow-return registration must publish into the records store"
     );
 }
@@ -299,7 +301,9 @@ fn filtered_kind_returns_cheap_noop_record_and_publishes_nothing() {
     assert_eq!(payload.cold_computes, 0, "noop record is default-filled");
     // Nothing was published into the records store.
     assert!(
-        host.take_audit_record(record.request_id).is_none(),
+        host.host_audit_runtime()
+            .take_record(record.request_id)
+            .is_none(),
         "a filtered registration must not publish"
     );
 }
@@ -576,7 +580,7 @@ fn partiality_projection_does_not_change_admission_or_warmth() {
 /// it causes, both legs fail the typed-`Cancelled` assertion.
 #[test]
 fn caller_cancellation_answers_cancelled_on_both_registration_arms() {
-    use verter_scheduler::cancellation::CancellationToken;
+    use verter_execution::cancellation::CancellationToken;
     for (filter, capture) in [
         (
             verter_audit::AuditConsumerFilter::allow_all(),
@@ -653,7 +657,7 @@ fn caller_cancellation_answers_cancelled_on_both_registration_arms() {
 /// value.
 #[test]
 fn a_pre_cancelled_request_answers_cancelled_over_a_warm_answer() {
-    use verter_scheduler::cancellation::CancellationToken;
+    use verter_execution::cancellation::CancellationToken;
     let host = build_host(false);
     let ident = identity(CANONICAL, "makeThing");
     let cold = host.get_flow_return_type_with_audit(&ident, whole());

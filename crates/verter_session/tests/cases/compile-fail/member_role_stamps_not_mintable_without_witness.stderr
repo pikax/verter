@@ -5,7 +5,7 @@ error[E0423]: cannot initialize a tuple struct which contains private fields
    |             ^^^^^^^^^^^^^^^^^
    |
 note: constructor is not visible here due to private fields
-  --> src/semantic_query.rs
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
    | pub struct MacroOwnBodyStamp(bool);
    |                              ^^^^ private field
@@ -21,7 +21,7 @@ error[E0423]: cannot initialize a tuple struct which contains private fields
    |             ^^^^^^^^^^^^^^
    |
 note: constructor is not visible here due to private fields
-  --> src/semantic_query.rs
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
    | pub struct MergeRoleStamp(MemberMergeRole);
    |                           ^^^^^^^^^^^^^^^ private field

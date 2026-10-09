@@ -670,7 +670,7 @@ fn the_recorded_runes_axis_matches_what_the_shipped_route_infers() {
     // under.
     for cell in read_svelte_conformance_matrix() {
         let language = verter_language::FileLanguage::svelte();
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let (_snapshot, artifact) = crate::parse::carrier_parse_snapshot(
             &cell.fixture_path,
             &cell.source,

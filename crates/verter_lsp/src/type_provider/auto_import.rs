@@ -24,7 +24,7 @@ use oxc_ast::ast::Statement;
 use oxc_span::SourceType;
 use tower_lsp_server::ls_types::{Position, Range, TextEdit};
 use verter_parser::oxc_parse::Parser;
-use verter_semantic::analysis::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImport;
 use verter_span::TsPosition;
 
 use crate::documents::carrier_structure::project_carrier_blocks;
@@ -152,7 +152,7 @@ impl ScriptImportInsertionAnchor {
 /// `user_import_spans` are the **SFC-absolute** `(start, end)` byte spans of the SFC's top-level
 /// imports, exactly as `AnalyzedImport.span` produces them: `verter_session` parses a
 /// position-preserving SFC-offset script source, so every analysis span is SFC-absolute by
-/// construction (see `verter_semantic::analysis::types::AnalyzedImport`). They are consumed in
+/// construction (see `verter_session_query::analysis::types::AnalyzedImport`). They are consumed in
 /// that coordinate space DIRECTLY — the selected `<script setup>` content start is NEVER re-added.
 ///
 /// * existing `<script setup>` + imports inside it → end of the last in-block import;
@@ -243,6 +243,7 @@ pub fn resolve_script_import_anchor_from_structure(
 /// a real Vue carrier that is not a self-file projection; the code-action merge has weaker context
 /// here, so it restricts to the provable-correct anchor.
 pub(crate) fn resolve_carrier_preamble_import_anchor_from_structure(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     current_tsx_path: &str,
     carrier_source: &str,
     user_import_spans: &[(u32, u32)],
@@ -260,8 +261,8 @@ pub(crate) fn resolve_carrier_preamble_import_anchor_from_structure(
     // import-reanchor is Vue-SFC-specific, so ONLY a `Some(CarrierKind::Vue)` continues; a Svelte /
     // non-carrier stem — and any future markup carrier without its own arm — maps to `Svelte` / `None`
     // and fails closed here, never falling through into the Vue branch.
-    let carrier_continues =
-        crate::server::carrier_language_for(carrier_stem).is_some_and(|language| {
+    let carrier_continues = crate::server::carrier_language_for(classifier, carrier_stem)
+        .is_some_and(|language| {
             matches!(
                 crate::features::auto_close_tag::carrier_kind_for_language(&language),
                 Some(crate::features::auto_close_tag::CarrierKind::Vue)
@@ -320,6 +321,7 @@ pub(crate) fn resolve_carrier_preamble_import_anchor(
         current_tsx_path.contains(".svelte."),
     );
     resolve_carrier_preamble_import_anchor_from_structure(
+        &verter_session::framework::HostLanguageClassifier::default(),
         current_tsx_path,
         carrier_source,
         user_import_spans,

@@ -94,7 +94,7 @@ impl UpsertBatchTxn {
         // ONE input-order wait. `wait_batch` returns `state[i]` for the
         // i-th submitted request regardless of completion order.
         let states = {
-            verter_workspace::probe_scope!(UPSERT_WAIT);
+            verter_session_query::probe_scope!(UPSERT_WAIT);
             host.scheduler.wait_batch(&batch)
         };
         verter_debug_assert_eq!(
@@ -377,7 +377,7 @@ impl VerterHost {
         // so no owner revision can land between an override's current-stamp
         // validation and its atomic admission.
         let _block_content_fence = self.block_content.admission_fence.lock();
-        verter_workspace::probe_scope!(UPSERT_MANY);
+        verter_session_query::probe_scope!(UPSERT_MANY);
         // 2–5: build the transaction (resolve + uniqueness-check canonicals
         //      first, capture context once, prepare each request, ONE
         //      `submit_batch_atomic`).
@@ -427,7 +427,7 @@ impl VerterHost {
         // submission, and clone it into every batch Request. The
         // scheduler installs it into the source / analysis worker TLS, so
         // fan-out events stay attributable to the outer audited request.
-        let request_context = verter_scheduler::request_context::current_context();
+        let request_context = verter_execution::request_context::current_context();
 
         if self.config.metrics_enabled {
             self.metrics
@@ -492,7 +492,7 @@ impl VerterHost {
         // top of it. The returned `BatchHandle`'s handles are in input
         // order, index-aligned with `prepared`.
         let batch = {
-            verter_workspace::probe_scope!(UPSERT_SUBMIT);
+            verter_session_query::probe_scope!(UPSERT_SUBMIT);
             self.scheduler.submit_batch_atomic(scheduler_requests)
         };
         UpsertBatchTxn { prepared, batch }
@@ -606,7 +606,7 @@ impl VerterHost {
     ) -> Result<(Option<HostUpdateResult>, Option<WorkspaceParsedCommit>), HostError> {
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::RequestResult;
-        verter_workspace::probe_scope!(UPSERT_POST_COMMIT);
+        verter_session_query::probe_scope!(UPSERT_POST_COMMIT);
 
         let PreparedUpsertCommit {
             canonical_id,
@@ -617,9 +617,9 @@ impl VerterHost {
         // The committed stage's generation is the fence. Empty-analysis
         // hosts stop at Source; analysis-bearing hosts retain the Analysis
         // fence. Artifact is never an upsert target.
-        let committed_generation = match ready {
-            RequestResult::Source(source_snap) => source_snap.generation,
-            RequestResult::Analysis(analysis_snap) => analysis_snap.generation,
+        let committed_version = match ready {
+            RequestResult::Source(source_snap) => source_snap.version(),
+            RequestResult::Analysis(analysis_snap) => analysis_snap.version(),
             RequestResult::Artifact(_) => {
                 return Err(HostError::MissingSource {
                     canonical_id: canonical_id.clone(),
@@ -639,12 +639,13 @@ impl VerterHost {
                 canonical_id: canonical_id.clone(),
             })?;
 
-        // Commit fence: the source snapshot must match the generation the
-        // Analysis stage committed against. A higher source generation
-        // means a newer upsert raced in after our batch admitted; the
+        // Commit fence: the source snapshot must match the version (node
+        // object + generation) the stage committed against. A newer version
+        // means a newer upsert, removal or reset raced in after our batch
+        // admitted; the
         // read-back parse would be torn relative to the analysis we waited
         // on — reject as superseded rather than publishing a stale result.
-        if new_source_snap.generation != committed_generation {
+        if new_source_snap.version() != committed_version {
             return Err(HostError::Superseded);
         }
 
@@ -839,18 +840,21 @@ impl VerterHost {
                 .or_default();
             let profile = profile_ref.value_mut();
             if whole_hash_changed {
-                crate::host_manage::push_cache_drained_at_upsert(
+                verter_type_engine::request_observers::push_cache_drained_at_upsert(
                     "compile_cache_overrides",
                     &canonical_id,
                 );
             }
             if changes.changed && changes.semantic_changed {
                 let session_node =
-                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                    crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                 session_node.clear_compile_outputs_for_file(profile);
                 profile.latest_diagnostics.clear();
                 profile.diagnostics_generation += 1;
-                crate::host_manage::push_cache_drained_at_upsert("compile_slots", &canonical_id);
+                verter_type_engine::request_observers::push_cache_drained_at_upsert(
+                    "compile_slots",
+                    &canonical_id,
+                );
             }
         }
 
@@ -873,7 +877,7 @@ impl VerterHost {
         if whole_hash_changed {
             self.compile_output_pure_content()
                 .remove_canonical(&canonical_id);
-            crate::host_manage::push_cache_drained_at_upsert(
+            verter_type_engine::request_observers::push_cache_drained_at_upsert(
                 "compile_output_pure_content",
                 &canonical_id,
             );
@@ -931,7 +935,7 @@ impl VerterHost {
             derived.import_routes.clear();
             derived.evicted = false;
             if drained_derived {
-                crate::host_manage::push_cache_drained_at_upsert(
+                verter_type_engine::request_observers::push_cache_drained_at_upsert(
                     "derived_raw_cache",
                     &canonical_id,
                 );
@@ -953,7 +957,10 @@ impl VerterHost {
             dep.aliases = alias_set.clone();
             dep.generation = dep.generation.saturating_add(1);
         }
-        crate::host_manage::push_cache_drained_at_upsert("dependency_cache", &canonical_id);
+        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+            "dependency_cache",
+            &canonical_id,
+        );
 
         write_lock(&self.block_content.state).supersede_owner(&canonical_id);
 
@@ -969,7 +976,10 @@ impl VerterHost {
         // read path; a cross-file consumer's warm entry is revalidated
         // lazily on read through its own `fact_dep_signature` check (R3).
         self.register_facts_for_new_content(&canonical_id);
-        crate::host_manage::push_cache_drained_at_upsert("semantic_invalidate", &canonical_id);
+        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+            "semantic_invalidate",
+            &canonical_id,
+        );
         // A content change is the signature kernel's reclamation point: past
         // its record cap the kernel retires its epoch, and a warm read of a
         // retired-epoch value misses and recomputes.
@@ -994,7 +1004,10 @@ impl VerterHost {
         if !defer_workspace_commit {
             self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
         }
-        crate::host_manage::push_cache_drained_at_upsert("workspace_parsed_edges", &canonical_id);
+        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+            "workspace_parsed_edges",
+            &canonical_id,
+        );
 
         // Scheduler-tracked canonicals are not artifact-only, but keep the
         // single-file and batch overlay mutations behind host-owned wrappers
@@ -1045,7 +1058,7 @@ impl VerterHost {
                 &canonical_id,
                 old_source_snap,
                 Arc::clone(&new_source_snap),
-                committed_generation,
+                committed_version,
             );
         }
         self.ingest_ambient_contributor(canonical_id.as_ref(), req.source.as_ref());
@@ -1070,7 +1083,10 @@ impl VerterHost {
         }
         self.ingest_injected_ambient_roots(Some(canonical_id.as_ref()));
         self.bump_store_view_epoch();
-        crate::host_manage::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
+        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+            "store_view_epoch",
+            &canonical_id,
+        );
         Ok((result, workspace_commit))
     }
 
@@ -1117,8 +1133,8 @@ impl VerterHost {
     pub(crate) fn build_parsed_edges_from_analysis(
         _canonical_id: &str,
         external_requests: &[crate::ExternalSourceRequest],
-        imports: &[verter_semantic::analysis::AnalyzedImport],
-        module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
+        imports: &[verter_session_query::analysis::types::AnalyzedImport],
+        module_references: &[verter_session_query::analysis::types::AnalyzedModuleReference],
     ) -> Vec<verter_workspace::ParsedEdge> {
         let mut parsed_edges = Vec::new();
 
@@ -1132,14 +1148,14 @@ impl VerterHost {
         // R5 dedupe by (specifier, kind) — NOT by specifier alone.
         let mut seen: rustc_hash::FxHashSet<(
             String,
-            verter_semantic::resolver_core::ResolveRequestKind,
+            verter_session_query::resolution::ResolveRequestKind,
         )> = rustc_hash::FxHashSet::default();
 
         for imp in imports {
             let kind = if imp.is_type_only {
-                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                verter_session_query::resolution::ResolveRequestKind::TypeImport
             } else {
-                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                verter_session_query::resolution::ResolveRequestKind::EsmImport
             };
             if !seen.insert((imp.source.clone(), kind)) {
                 continue;
@@ -1159,9 +1175,9 @@ impl VerterHost {
 
         for modref in module_references {
             let kind = if modref.is_type_only {
-                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                verter_session_query::resolution::ResolveRequestKind::TypeImport
             } else {
-                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                verter_session_query::resolution::ResolveRequestKind::EsmImport
             };
 
             if let Some(specifier) = modref.literal_specifier.as_ref() {

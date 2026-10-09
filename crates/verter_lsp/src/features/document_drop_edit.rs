@@ -14,7 +14,9 @@ use crate::documents::line_index::LineIndex;
 ///
 /// This is exposed as a custom LSP request (`$/verter/documentDropEdit`),
 /// since `textDocument/documentDropEdit` is still experimental in LSP 3.18+.
+#[allow(clippy::too_many_arguments)]
 pub fn document_drop_edit(
+    classifier: &verter_session::framework::HostLanguageClassifier,
     dropped_uri: &str,
     position: &Position,
     source: &str,
@@ -24,7 +26,7 @@ pub fn document_drop_edit(
     preferred_import_path: Option<&str>,
 ) -> Option<WorkspaceEdit> {
     // Only handle framework CARRIER file drops (`.vue`, `.svelte`, …).
-    crate::server::carrier_language_for(dropped_uri)?;
+    crate::server::carrier_language_for(classifier, dropped_uri)?;
 
     // Check the drop position is inside a template block
     let offset = line_index.position_to_offset(position)? as usize;
@@ -100,7 +102,7 @@ fn extract_component_name(path: &str) -> Option<String> {
         .or_else(|| path.rsplit('\\').next())?;
     // Registry-backed carrier strip: `Foo.vue` / `Foo.svelte` → `Foo`. A
     // non-carrier filename yields itself unchanged, so reject it.
-    let name = verter_semantic::resolver_core::strip_carrier_extension(filename);
+    let name = verter_session_query::resolution::strip_carrier_extension(filename);
     if name.is_empty() || name == filename {
         return None;
     }
@@ -160,6 +162,7 @@ mod tests {
     #[test]
     fn test_drop_edit_non_carrier_file() {
         let result = document_drop_edit(
+            &verter_session::framework::HostLanguageClassifier::default(),
             "file:///project/utils.ts",
             &Position {
                 line: 1,

@@ -10,6 +10,7 @@ const OWNERS = Object.freeze([
   "language",
   "semantic",
   "session",
+  "session-query",
   "type-runtime",
   "workspace",
 ]);

@@ -15,6 +15,7 @@
 //! the struct definition in `lib.rs`; the construction-time substrate
 //! types ([`HostResolverState`], [`WorkspaceSourceLoader`],
 //! [`next_host_instance_id`]) live here.
+use verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs;
 
 use std::sync::Arc;
 
@@ -37,28 +38,6 @@ pub(crate) fn is_ordinary_typescript_canonical(canonical: &str) -> bool {
         return false;
     }
     canonical.ends_with(".ts") || canonical.ends_with(".tsx")
-}
-
-/// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
-///
-/// - `force_overflow_observations`: test-injection for the cold relation
-///   judgement path — when `N > 0`, the cold compute observes `N` synthetic
-///   `FileWholeHash` facts onto the active tracer, forcing the relation
-///   memo's `FactReadSetFinalise::Overflow` non-admission (the judgement is
-///   returned to the caller but refused memo admission).
-/// - `force_budget_exhaustion`: trips the relation reducer's work budget on
-///   its first driver pass — the deterministic trigger for the typed
-///   `BudgetExceeded` public outcome and its three-layer non-admission (no
-///   warm memo entry, no fact signature, no reverse-index registration).
-///
-/// The strict-family configuration is NOT a knob: the relation reducer reads
-/// it from the effective tsconfig options of the project owning the
-/// request's canonical ([`VerterHost::semantic_compiler_options_for`]), the
-/// same option set that project's `type_env_hash` folds.
-#[derive(Debug, Default)]
-pub(crate) struct RelationHostKnobs {
-    pub(crate) force_overflow_observations: std::sync::atomic::AtomicUsize,
-    pub(crate) force_budget_exhaustion: std::sync::atomic::AtomicBool,
 }
 
 /// Construction-time source for the host's execution-only worker pools.
@@ -99,15 +78,15 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
             } else {
                 format!("{}**/*", root)
             };
-            membership.spec.include = vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::new(&include),
+            membership.spec.include = vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::new(&include),
             )];
             membership.spec.exclude =
                 ["node_modules/**", "bower_components/**", "jspm_packages/**"]
                     .into_iter()
                     .map(|pattern| {
-                        verter_semantic::resolver_core::CompiledGlob::new(
-                            verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                        verter_session_query::resolution::CompiledGlob::new(
+                            verter_session_query::resolution::NormalizedGlob::new(&format!(
                                 "{root}{pattern}"
                             )),
                         )
@@ -161,6 +140,46 @@ impl HostResolverState {
     pub(crate) fn reset_all(&self) {
         self.runtime.clear_caches();
     }
+}
+
+/// The workspace-scoped services every workspace attached to a host
+/// receives: the host's resolve-extension policy.
+///
+/// Built once by the composition root. [`Self::attach`] is the single
+/// route through which a workspace receives them — at construction and on
+/// every [`VerterHost::set_workspace`] swap — so a swapped-in workspace
+/// can never miss a service the original received. Resident resolution
+/// state needs no service: every workspace charges the process-local
+/// retention account from its own construction.
+pub(crate) struct WorkspaceServices {
+    resolve_extensions: Vec<String>,
+}
+
+impl WorkspaceServices {
+    fn new(config: &HostConfig) -> Self {
+        Self {
+            resolve_extensions: config.resolve_extensions.clone(),
+        }
+    }
+
+    /// Hand `workspace` this host's workspace-scoped services.
+    pub(crate) fn attach(&self, workspace: &dyn verter_workspace::WorkspaceAccess) {
+        // Reverse-dep stem stripping honours the host policy from the start.
+        workspace.set_default_resolve_extensions(self.resolve_extensions.clone());
+    }
+}
+
+/// Translate the host's configuration into the engine's immutable execution
+/// policy, once, at construction. The engine takes the selected values; it
+/// never reads the host configuration itself.
+fn engine_policy_for(
+    config: &HostConfig,
+) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
+    verter_type_engine::project_semantic_dispatch::EnginePolicy::new(
+        config.depth_budget,
+        config.recursion_budget_overrides.synthesis_steps,
+        config.recursion_budget_overrides.walker_pathological_cap,
+    )
 }
 
 /// SourceLoader that delegates to the host's current workspace.
@@ -237,6 +256,42 @@ impl VerterHost {
     #[must_use]
     pub fn language_classifier(&self) -> &crate::framework::HostLanguageClassifier {
         &self.language_classifier
+    }
+
+    /// The extension probe order for resolving module references against a
+    /// caller-provided known-file set: the bare specifier, the script
+    /// extensions, then the framework carriers this host composed, in the
+    /// adapters' DECLARED probe-rank order. Carrier MEMBERSHIP comes from
+    /// the composed admission (an unadmitted vertical's extension is never
+    /// probed), while carrier ORDER is each descriptor's explicit
+    /// `carrier_probe_rank` — deliberately NOT the classifier's
+    /// `carrier_extensions()` order, which is the longest-suffix-first
+    /// MATCHING order (a classification concern): extension probing is
+    /// first-match-wins resolution, so a same-stem `.vue`/`.svelte`
+    /// collision resolves by declared rank, not by suffix length. The
+    /// native and browser bindings default to this list instead of spelling
+    /// their own.
+    #[must_use]
+    pub fn known_dependency_extensions(&self) -> Vec<String> {
+        const SCRIPT_EXTENSIONS: [&str; 9] = [
+            "", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs",
+        ];
+        SCRIPT_EXTENSIONS
+            .iter()
+            .map(|extension| (*extension).to_string())
+            .chain(self.framework_services.carrier_probe_extensions())
+            .collect()
+    }
+
+    /// The typed framework options this host was constructed with — the
+    /// admission set the composed framework services, the classifier,
+    /// and the grammar authority all derive from. Read-only for the
+    /// host's lifetime: request-specific options cannot mutate this
+    /// host-scoped configuration; a different admission is a different
+    /// host.
+    #[must_use]
+    pub fn framework_options(&self) -> &crate::framework::FrameworkOptions {
+        self.framework_services.options()
     }
 
     /// The platform-services profile bound at construction: which
@@ -339,19 +394,20 @@ impl VerterHost {
         // across hosts; the scheduler crate uses a `OnceLock` and
         // silently observes that the hook is already registered on
         // subsequent host constructions.
-        crate::request_context::install_clear_tls_hook();
+        verter_type_engine::request_context::install_clear_tls_hook();
 
-        // Thread the host's configured `resolve_extensions` into the
-        // workspace at construction so reverse-dep stem stripping
-        // honours the host policy from the start.
-        workspace.set_default_resolve_extensions(config.resolve_extensions.clone());
+        // The workspace-scoped services, attached to the initial workspace
+        // through the same route every later swap uses.
+        let workspace_services = WorkspaceServices::new(&config);
+        workspace_services.attach(workspace.as_ref());
+        let engine_policy = engine_policy_for(&config);
 
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
         // Constructed before the scheduler so the stage executor can share
         // the host's provenance counters (`carrier_parses` / `sfc_parses`
         // are bumped on rayon workers where no capture-token TLS exists).
-        let provenance = Arc::new(crate::types::MetaProvenance::default());
+        let provenance = Arc::new(crate::meta_provenance::MetaProvenance::default());
         let instance_id = next_host_instance_id();
         let registered_source_authority = Arc::new(
             verter_language::registered_source_authority::RegisteredSourceAuthority::new()
@@ -361,49 +417,24 @@ impl VerterHost {
             verter_language::carrier_grammar::CarrierGrammarAuthority::new()
                 .expect("carrier grammar authority"),
         );
-        use verter_language::carrier_grammar::{
-            CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
-        };
-        // Seed the live grammar registry from the compiler's frontend
-        // catalog rows: the catalog `CarrierFrontend` registration is the
-        // SOLE grammar authority, so the host registers the catalog fact
-        // itself rather than an independently spelled copy. The version
-        // pairs below are host registration metadata (adapter semantic
-        // version × parser grammar version), not grammar content. A
-        // catalog row without a registered grammar fact fails host
-        // construction loudly — never a silently skipped registration.
-        for (language, adapter_version, grammar_version) in [
-            (verter_language::FileLanguage::vue(), 1, 1),
-            (verter_language::FileLanguage::svelte(), 1, 1),
-        ] {
-            let adapter_id = language
-                .adapter_id()
-                .expect("built-in carrier language carries a framework adapter id");
-            let carrier_language_id = language
-                .carrier_language_id()
-                .expect("built-in carrier language carries a carrier language id");
-            let grammar = verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
-                adapter_id,
-                carrier_language_id,
-            )
-            .unwrap_or_else(|| {
-                panic!(
-                    "frontend catalog row for adapter '{adapter_id}' × language \
-                     '{carrier_language_id}' carries no registered grammar fact"
-                )
-            })
-            .clone();
-            carrier_grammar_authority
-                .register_carrier_grammar(
-                    language.clone(),
-                    FrameworkAdapterSemanticVersion::new(adapter_version).expect("adapter version"),
-                    CarrierParserGrammarVersion::new(grammar_version).expect("grammar version"),
-                    grammar,
-                )
-                .unwrap_or_else(|error| {
-                    panic!("register catalog grammar for adapter '{adapter_id}': {error:?}")
-                });
-        }
+        // Seed the live grammar registry from the composed framework
+        // capability catalog. The catalog projects the compiler's frontend
+        // `CarrierFrontend` registrations — the SOLE grammar authority — so
+        // the host enumerates no frameworks of its own: a framework added to
+        // that catalog registers itself here, and one removed upstream stops
+        // being claimed here. A catalog row without a registered grammar
+        // fact fails construction loudly, never a silently skipped row.
+        // The composition runs under the typed framework options, so an
+        // unadmitted vertical registers no grammar here either — its
+        // sources fail closed at this authority instead of half-existing.
+        let framework_services =
+            std::sync::Arc::new(crate::framework::HostServices::composed(&config.framework));
+        framework_services
+            .capabilities()
+            .register_all(&carrier_grammar_authority)
+            .unwrap_or_else(|error| {
+                panic!("register composed capability-catalog carrier grammars: {error:?}")
+            });
         let carrier_publication_store = Arc::new(
             crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
                 Arc::clone(&registered_source_authority),
@@ -414,12 +445,24 @@ impl VerterHost {
         let registered_envelope_ingest = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
 
         // The host's language classification authority. The capability
-        // snapshot is empty: no capability producer exists in the
-        // session yet, so host-gated classification equals the static
-        // registry resolution until one lands.
-        let language_classifier = crate::framework::HostLanguageClassifier::with_built_in_registry(
-            crate::framework::ProjectCapabilitySnapshot::empty(),
-        );
+        // snapshot is empty: no capability producer exists in the session
+        // yet, so host-gated classification equals the static registry
+        // resolution until one lands. The framework admission is the SAME
+        // typed options the framework services composed under, so the two
+        // authorities cannot disagree about which verticals exist.
+        let language_classifier =
+            crate::framework::HostLanguageClassifier::with_built_in_registry_and_options(
+                crate::framework::ProjectCapabilitySnapshot::empty(),
+                &config.framework,
+            );
+        // The classifier is the host's watch surface and the language
+        // server's advertised framework surface, so it must classify exactly
+        // the carriers the composed services registered. Without this the two
+        // could drift: an extension classified as a carrier the catalog never
+        // registered would be watched but unservable, and a registered carrier
+        // the classifier never resolves would be served but unwatched. Both
+        // fail construction instead.
+        framework_services.assert_classifier_agrees(&language_classifier);
 
         // The platform-services profile this target requires. Bound
         // before the scheduler seam so the seam's compiled transport
@@ -433,9 +476,7 @@ impl VerterHost {
                 .expect("wasm32 host must bind a browser-admissible route set");
         }
 
-        // The framework adapter registry, built ONCE here.
-        let framework_registry =
-            std::sync::Arc::new(crate::framework::FrameworkAdapterRegistry::built_in());
+        // Host-owned framework script-fact caches, built ONCE here.
         let framework_script_caches =
             std::sync::Arc::new(crate::framework::script_facts::FrameworkScriptCaches::new());
 
@@ -524,16 +565,23 @@ impl VerterHost {
             }
         };
 
-        let project_type_store = Arc::new(
-            crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
-        );
-        // The workspace's resident request-overlay resolution state charges
-        // the same aggregate account every host store charges.
-        workspace_lock.read().install_resolution_retention(Arc::new(
-            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
-                project_type_store.retention_account(),
-            )),
-        ));
+        // The composition root mints the one execution-task registry — the
+        // cycle authority every layer whose producers may wait on one
+        // another shares — and composes the project store over it. The
+        // engine grants stay here: the root lends them to the request
+        // attachment alone.
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
+        let (project_type_store, engine_grants) =
+            crate::project_type_store::ProjectTypeStore::compose(
+                Arc::clone(&provenance),
+                task_registry,
+            );
+        let project_type_store = Arc::new(project_type_store);
+        // Retained artifacts own their canonical's freshness evidence in the
+        // workspace they are built from.
+        project_type_store
+            .indexed()
+            .install_freshness_readers(workspace_lock.read().freshness_readers());
         // Pull RouteDb / ImportedRootDb handles from the project-type-store
         // BEFORE constructing the resolver runtime so the runtime borrows
         // the project-shared `Arc`s. This keeps
@@ -547,20 +595,12 @@ impl VerterHost {
         // fresh `insert`s bump `total_shallow_processes` + `loaded_files`
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.
-        #[cfg(test)]
-        let test_force = crate::host_test_force::TestForceKnobs::default();
+        #[cfg(any(test, feature = "test-support"))]
+        let test_force = Arc::new(crate::host_test_force::TestForceKnobs::default());
         #[cfg(test)]
         project_type_store
             .indexed()
             .install_test_audit_hook(Arc::clone(&test_force.audit));
-        // Build the audit records store ONCE and share its `Arc` between
-        // the legacy `audit_records` field and the new `host_audit_runtime`
-        // so writes through either surface land in the same map. The
-        // legacy field becomes a thin `Arc::clone` of the runtime's
-        // store accessor; this avoids a dual-store regression where
-        // each surface accumulated its own records.
-        let audit_records_init: Arc<crate::component_meta_audit::AuditRecordsStore> =
-            Arc::new(crate::component_meta_audit::AuditRecordsStore::default());
         // Mirror the relevant `HostConfig` flags into the substrate's
         // `AuditConfig` snapshot. The substrate-side flag is what
         // `AuditRequestRegistration::new` and the sampler thread read,
@@ -607,7 +647,20 @@ impl VerterHost {
             .clone()
             .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
             .unwrap_or_default();
+        // The request attachment shares the registry-owned surface stores and
+        // receives the root's engine grants — the output lease and the
+        // surface-claim authority; it constructs none of them.
+        let session_attachment = crate::session_attachment::SessionAttachment::new(
+            framework_services.framework_registry(),
+            engine_grants.output_lease,
+            engine_grants.surface_claims,
+        );
         let host = Self {
+            #[cfg(any(test, feature = "test-support"))]
+            source_input_leases: crate::resolver_core::request_inputs::InputArtifactLeases::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            direct_request_snapshot: std::sync::OnceLock::new(),
+
             instance_id,
             config,
             carrier_publication: crate::carrier_publication_store::CarrierPublicationHostHandles {
@@ -619,6 +672,8 @@ impl VerterHost {
             block_content: crate::block_content::BlockContentHostLane::default(),
             language_classifier,
             workspace: workspace_lock,
+            workspace_services,
+            engine_policy,
             alias_to_canonical: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
             store_view_epoch: std::sync::atomic::AtomicU64::new(1),
@@ -634,10 +689,8 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
-            audit_records: Arc::clone(&audit_records_init),
             host_audit_runtime: Arc::new(crate::host_audit_runtime::HostAuditRuntime::new(
                 audit_config,
-                Arc::clone(&audit_records_init),
             )),
             // `usize::MAX` is the "unobserved" sentinel. A real worker
             // overwrites this with either its host-pool id or `usize::MAX`
@@ -667,11 +720,12 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
-            framework_registry,
+            session_attachment,
+            framework_services,
             framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
-            decl_lowering: Arc::new(crate::decl_lowering::DeclLoweringService::new_with(
+            decl_lowering: Arc::new(verter_semantic_source::decl_lowering::DeclLoweringService::new_with(
                 matches!(
                     decl_lowering_policy.spawn,
                     crate::types::PoolSpawn::LazyOnFirstUse
@@ -679,19 +733,17 @@ impl VerterHost {
                 decl_lowering_policy.size.resolve(),
             )),
             compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
-            relation_knobs: RelationHostKnobs::default(),
+            relation_knobs: Arc::new(RelationHostKnobs::default()),
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             flow_fault_injection:
-                crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default(),
-            #[cfg(test)]
+                Arc::new(verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default()),
+            #[cfg(any(test, feature = "test-support"))]
             test_force,
-            #[cfg(test)]
-            macro_hot_lowering_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
-            signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
+            signature_overflow_at_install: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
             _test_worker_pool_lease: test_worker_pool_lease,
         };
@@ -731,7 +783,7 @@ impl VerterHost {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
-        let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+        let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
             .iter()
             .map(|(root, tsconfig_json)| {
                 let root = root.trim_end_matches('/').to_string();
@@ -847,7 +899,7 @@ impl VerterHost {
     #[must_use]
     pub fn dispatch_trace_for(
         &self,
-        key: &crate::semantic_query::SemanticQueryKey,
+        key: &verter_type_engine::semantic_query::SemanticQueryKey,
     ) -> crate::host_test_audit::DispatchTrace {
         crate::host_test_audit::DispatchTrace::from_key(
             self.project_type_store.semantic_graph(),
@@ -875,14 +927,21 @@ impl VerterHost {
     #[must_use]
     pub fn semantic_dispatch(
         &self,
-    ) -> crate::project_semantic_dispatch::ProjectSemanticDispatch<'_> {
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
+    ) -> verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    > {
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
     }
 
     /// Run one base-lane operation through a sealed request-bound context.
     pub(crate) fn with_base_resolver_context<R>(
         &self,
-        operation: impl FnOnce(&dyn crate::resolver_core::ResolverContext) -> R,
+        operation: impl FnOnce(
+            &dyn verter_type_engine::resolver_core::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            >,
+        ) -> R,
     ) -> R {
         let base = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -1059,7 +1118,7 @@ impl VerterHost {
     pub fn semantic_compiler_options_for(
         &self,
         canonical: &str,
-    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+    ) -> verter_session_query::resolution::SemanticCompilerOptions {
         let workspace = self.workspace();
         self.resolve_project_for_canonical(canonical)
             .and_then(|p| workspace.semantic_compiler_options_for_project(p))
@@ -1067,7 +1126,7 @@ impl VerterHost {
     }
 
     /// TEST-ONLY: the live `parse_env_hash` dimension for `canonical`, as
-    /// the sealed [`ParseEnvHash`](crate::semantic_query::ParseEnvHash)
+    /// the sealed [`ParseEnvHash`](verter_session_query::facts::fact_cache::ParseEnvHash)
     /// newtype. Lets external test fixtures mirror the
     /// `instantiate_context_for` choke point's `file_backed(P)` keying
     /// WITHOUT opening the newtype's byte constructor — the wrapped value
@@ -1083,8 +1142,8 @@ impl VerterHost {
     pub fn live_parse_env_dim_for_tests(
         &self,
         canonical: &str,
-    ) -> crate::semantic_query::ParseEnvHash {
-        crate::semantic_query::ParseEnvHash::from_env_hash(
+    ) -> verter_session_query::facts::fact_cache::ParseEnvHash {
+        verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
             self.host_view_env_hashes_for(canonical).parse_env_hash,
         )
     }
@@ -1123,7 +1182,7 @@ impl VerterHost {
     pub fn resolve_project_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+    ) -> Option<verter_session_query::resolution::ProjectId> {
         let root = self.workspace().published_root()?;
         root.snapshot.owners_for_file(canonical).first().copied()
     }
@@ -1252,22 +1311,14 @@ impl VerterHost {
         &self.typeinfo_scratch_cache
     }
 
-    /// The Vue adapter's typed framework-surface DTO store — the host-owned
-    /// cache of `.vue` macro-surface normalized DTOs.
-    ///
-    /// The store lives erased on the Vue registration row
-    /// ([`crate::framework::registry::FrameworkRegistration::surface_store`]);
-    /// this accessor performs the ONE downcast at store acquisition to the typed
-    /// [`FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
-    /// exactly the public-hidden downcast doctrine the carriers use. Used by the
-    /// [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]
-    /// to materialize each `.vue` macro surface once per `(canonical, content,
-    /// macro, level)`.
-    ///
-    /// Panics only on a build defect (the Vue registration absent, or its
-    /// surface store erased to the wrong concrete type) — neither is reachable
-    /// on a correctly-constructed host (`framework_registry_complete` +
-    /// `vue_registration_carries_every_leg` pin the registration).
+    /// The host-owned state a request reaches beside the engine (the typed
+    /// framework-surface DTO stores, selected once from the registry rows that
+    /// own them). Request contexts hand it out through the host-attachment
+    /// port.
+    pub(crate) fn session_attachment(&self) -> &crate::session_attachment::SessionAttachment {
+        &self.session_attachment
+    }
+    #[cfg(test)]
     pub(crate) fn vue_surface_store(
         &self,
     ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
@@ -1285,37 +1336,11 @@ impl VerterHost {
             )
     }
 
-    /// The Svelte adapter's typed framework-surface DTO store — the host-owned
-    /// cache of `.svelte` per-source-family normalized DTOs.
-    ///
-    /// The ONE downcast at store acquisition to the typed
-    /// [`FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
-    /// keyed by the Svelte adapter remainder (one source family per row).
-    /// Used by [`crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface`]
-    /// to materialize each Svelte source surface once per `(canonical, content,
-    /// source, level)`.
-    pub(crate) fn svelte_surface_store(
-        &self,
-    ) -> &crate::framework::surface_store::FrameworkSurfaceStore<
-        crate::typeinfo::framework_surface::SvelteSurfaceKey,
-        crate::typeinfo::framework_surface::MacroSurfaceDtos,
-    > {
-        self.framework_registry()
-            .get(&verter_language::FrameworkAdapterId::svelte())
-            .expect("the Svelte adapter is registered")
-            .surface_store
-            .as_any()
-            .downcast_ref()
-            .expect(
-                "the Svelte surface store is FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>",
-            )
-    }
-
     /// The framework adapter registry — the executor / synth-injection /
     /// public-API-projection dispatch authority. Built once at host
     /// construction and immutable thereafter.
     pub(crate) fn framework_registry(&self) -> &crate::framework::FrameworkAdapterRegistry {
-        &self.framework_registry
+        self.framework_services.framework_registry()
     }
 
     /// The framework script-fact caches — the resolved-validation half's
@@ -1342,7 +1367,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         state: &mut crate::resolver_core::ShallowFileState,
-        macros: &[verter_semantic::analysis::types::AnalyzedMacro],
+        macros: &[verter_session_query::analysis::types::AnalyzedMacro],
         eval_source: Option<&str>,
         framework_parse: Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     ) {
@@ -1409,7 +1434,7 @@ impl VerterHost {
             module_region,
             framework_mode_hint,
             source_type,
-            state.decl_bodies().owner_table(),
+            &state.owners,
         );
         let cx = crate::framework::synth::ComponentDefaultSynthCtx {
             canonical_id,
@@ -1598,9 +1623,9 @@ mod resource_policy_lazy_tests {
     use std::sync::Arc;
 
     use crate::host_compile::{CompileBatchInput, CompileBatchOptions};
-    use crate::semantic_query::ProjectionMode;
     use crate::types::{HostConfig, UpsertRequest};
     use crate::{FileLanguage, VerterHost};
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     /// `batch_typecheck()` must NOT spawn the host CPU pool's worker
     /// threads at construction; the first `compile_many` batch (which fans
@@ -1748,5 +1773,375 @@ mod resource_policy_lazy_tests {
                  catalog fact"
             );
         }
+    }
+}
+
+impl verter_type_engine::fact_signature_helpers::UnboundBasisOwner for crate::VerterHost {
+    fn signature_overflow_at_install(&self) -> &std::sync::atomic::AtomicU64 {
+        &self.signature_overflow_at_install
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    fn engine_test_knobs(&self) -> &verter_type_engine::engine_test_knobs::TestKnobs {
+        &self.test_force.engine
+    }
+}
+
+impl crate::VerterHost {
+    pub(crate) fn engine_observers(
+        &self,
+    ) -> verter_type_engine::project_semantic_dispatch::EngineObservers {
+        verter_type_engine::project_semantic_dispatch::EngineObservers::new(
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.signature_overflow_at_install),
+            Arc::clone(&self.provenance.engine),
+            Arc::clone(&self.relation_knobs),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.flow_fault_injection),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.test_force.engine),
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod fact_validation_authority {
+    use std::collections::BTreeSet;
+    use verter_session_query::facts::fact_cache::{
+        DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
+        ResolveImportsFactRef, RouteSurfaceFactRef,
+    };
+    use verter_session_query::facts::store_view::{
+        ResolverHash16, StoreView, StoreViewCompatToken,
+    };
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+    impl verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation
+        for crate::VerterHost
+    {
+        type Clocks = crate::resolver_store::WorkspaceSlotClocks;
+        fn request_snapshot(
+            &self,
+        ) -> &verter_type_engine::resolver_core::RequestSnapshot<Self::Clocks> {
+            self.direct_request_snapshot
+                .get_or_init(|| self.capture_request_snapshot())
+        }
+    }
+    impl FactValidation for crate::VerterHost {
+        fn current_external_supersession_fingerprint(&self) -> u64 {
+            crate::VerterHost::current_external_supersession_fingerprint(self)
+        }
+        fn source_environment(
+            &self,
+            key: &verter_session_query::source::artifact_key::FileArtifactKey,
+        ) -> verter_session_query::source::env_identity::SourceEnvIdentity {
+            crate::resolver_store::live_source_env_identity(self, key)
+        }
+        fn request_flags(&self) -> &verter_type_engine::resolver_core::RequestFlags {
+            verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(self)
+                .flags()
+        }
+        fn complete_graph_signature(
+            &self,
+            roots: &[(
+                std::sync::Arc<str>,
+                verter_session_query::analysis::types::Hash16,
+            )],
+            facts: &[FactVersionRef],
+        ) -> Result<
+            verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
+            verter_audit::NonAdmissionReason,
+        > {
+            let view = match self.resolver_store_view_read() {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+            verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
+                &view, roots, facts,
+            )
+        }
+        fn record_signature_overflow(&self) {
+            self.signature_overflow_at_install
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn tracer_forcing(&self) -> (bool, usize) {
+            (
+                self.test_force
+                    .engine
+                    .force_fact_tracer_non_cacheable_read
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                self.test_force
+                    .engine
+                    .force_fact_tracer_overflow_observations
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        // Component-meta-tier bridges ------------------------------------
+
+        #[inline]
+        fn current_dependency_fact_versions(
+            &self,
+            canonical: &str,
+            tracked_deps: &BTreeSet<String>,
+        ) -> Vec<FactVersionRef> {
+            crate::VerterHost::current_dependency_fact_versions(self, canonical, tracked_deps)
+        }
+        fn compat_token(&self) -> StoreViewCompatToken {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.compat_token()
+        }
+        fn validates(&self, fact: &FactVersionRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates(fact)
+        }
+        fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_parse_domain(fact)
+        }
+        fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_resolve_imports_domain(fact)
+        }
+        fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_route_surface_domain(fact)
+        }
+        fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_program_analysis_domain(fact)
+        }
+        fn validates_file_source_env(
+            &self,
+            canonical_id: &str,
+            parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
+            parse_key: &verter_language::ParseKey,
+            file_language_id: &verter_language::FileLanguage,
+        ) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_file_source_env(
+                canonical_id,
+                parse_env_hash,
+                parse_key,
+                file_language_id,
+            )
+        }
+        fn validates_self_root_whole_hash(
+            &self,
+            canonical_id: &str,
+            hash: &ResolverHash16,
+        ) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_self_root_whole_hash(canonical_id, hash)
+        }
+        fn strict_self_root_world_identity(
+            &self,
+        ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.strict_self_root_world_identity()
+        }
+        fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.strict_self_root_is_witnessable(canonical_id)
+        }
+        fn mint_strict_self_root_world(
+            &self,
+            roots: &[(&str, ResolverHash16)],
+        ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.mint_strict_self_root_world(roots)
+        }
+        fn tracks_file(&self, canonical_id: &str) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.tracks_file(canonical_id)
+        }
+        fn derived_hash_for(
+            &self,
+            canonical_id: &str,
+            kind: DerivedFactKind,
+        ) -> Option<ResolverHash16> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.derived_hash_for(canonical_id, kind)
+        }
+        fn aggregate_basis_seed(
+            &self,
+        ) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched
+        }
+        fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_fact_signature(sig)
+        }
+        fn validate_fact_signature(
+            &self,
+            sig: &[FactVersionRef],
+            self_root_canonicals: &[&str],
+        ) -> Result<(), usize> {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validate_fact_signature(sig, self_root_canonicals)
+        }
+        fn validates_fact_signature_with_self_roots(
+            &self,
+            sig: &[FactVersionRef],
+            self_root_canonicals: &[&str],
+        ) -> bool {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+        }
+        fn promote_route_completion(
+            &self,
+            canonical: &str,
+            whole_hash: verter_session_query::analysis::types::Hash16,
+            route_hash: Option<verter_session_query::analysis::types::Hash16>,
+        ) {
+            let view = match crate::VerterHost::resolver_store_view_read(self) {
+                crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
+                crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
+            };
+
+            view.promote_route_completion(canonical, whole_hash, route_hash)
+        }
+    }
+}
+
+/// K2 typed framework options: a narrowed admission reaches every
+/// framework authority of the CONSTRUCTED host — the retained options,
+/// the classifier's watch surface, and the live grammar authority —
+/// coherently, and an unadmitted vertical's sources fail closed there.
+#[cfg(test)]
+mod framework_options_construction_tests {
+    use std::sync::Arc;
+
+    use verter_language::registered_source_authority::{
+        CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+    };
+    use verter_language::LanguageId;
+
+    use crate::framework::FrameworkOptions;
+    use crate::types::HostConfig;
+    use crate::{FileLanguage, VerterHost};
+
+    fn vue_only_options() -> FrameworkOptions {
+        FrameworkOptions::admitting_names(["vue"]).expect("the Vue vertical is composed")
+    }
+
+    #[test]
+    fn a_narrowed_admission_reaches_every_host_authority() {
+        let host = VerterHost::new_standalone(HostConfig {
+            framework: vue_only_options(),
+            ..HostConfig::default()
+        });
+        let vue_only = vue_only_options();
+        assert_eq!(host.framework_options(), &vue_only);
+        assert_eq!(
+            host.language_classifier().carrier_extensions(),
+            vec!["vue"],
+            "the watch surface narrows with the admission"
+        );
+        assert!(
+            !host
+                .framework_registry()
+                .contains(&verter_language::FrameworkAdapterId::svelte()),
+            "the dispatch authority registers no unadmitted vertical"
+        );
+        let probes = host.known_dependency_extensions();
+        assert!(
+            probes.iter().any(|extension| extension == ".vue")
+                && !probes.iter().any(|extension| extension == ".svelte"),
+            "known-file dependency resolution probes only admitted carriers: {probes:?}"
+        );
+    }
+
+    #[test]
+    fn an_unadmitted_verticals_sources_fail_closed_on_the_real_host() {
+        let host = VerterHost::new_standalone(HostConfig {
+            framework: vue_only_options(),
+            ..HostConfig::default()
+        });
+        let source_authority = RegisteredSourceAuthority::new().expect("source authority");
+        let svelte_source = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///workspace/Box.svelte"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                FileLanguage::svelte(),
+                Arc::from("<script>let x = 1;</script>"),
+            )
+            .expect("registered source");
+        let svelte_grammar =
+            verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                &verter_language::FrameworkAdapterId::svelte(),
+                &LanguageId::new("svelte"),
+            )
+            .expect("the frontend catalog publishes the Svelte carrier grammar");
+        assert!(
+            host.carrier_publication
+                .grammar_authority
+                .accept_registered_source(&source_authority, &svelte_source, svelte_grammar)
+                .is_err(),
+            "an unadmitted vertical's source must fail closed on the live host authority"
+        );
     }
 }

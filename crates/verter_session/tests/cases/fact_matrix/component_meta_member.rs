@@ -10,11 +10,13 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_semantic::facts::registry::{InternedName, SymbolSpace};
-use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
-use verter_session::for_tests::ReadSetSignature;
-use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
+use verter_session::resolver_core::PermissiveStoreView;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+use verter_session_query::facts::registry::{InternedName, SymbolSpace};
+use verter_session_query::facts::store_view::StoreView;
+use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -35,8 +37,9 @@ fn component_meta_signature_carries_member() {
         .expect("ComponentMetaResultEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
-            || window.contains("read_set_signature: ReadSetSignature"),
+        window.contains(
+            "read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature"
+        ) || window.contains("read_set_signature: ReadSetSignature"),
         "component_meta matrix slice: \
          `ComponentMetaResultEntry` MUST carry \
          `read_set_signature: ReadSetSignature`. Window:\n{window}"

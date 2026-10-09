@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use verter_semantic::facts::version::FactVersionRef;
-use verter_semantic::resolver_core::{
-    AttemptFailure, AttemptOutcome, AttemptOutput, CompletedAttempt,
-    ConsumedResolutionObservationKey, InputKey, InputLoadIntegrityReason,
-    InputResolutionBudgetMeter, InputResolutionBudgets, KernelAttempt, LoadSet, PathProbe,
-    ResolutionContext, ResolvePhase, ResolveRequestKind, ResolverObservation,
+use verter_resolution::{AttemptOutput, CompletedAttempt, KernelAttempt, ResolverObservation};
+use verter_session_query::facts::version::FactVersionRef;
+use verter_session_query::resolution::{
+    AttemptFailure, AttemptOutcome, ConsumedResolutionObservationKey, InputKey,
+    InputLoadIntegrityReason, InputResolutionBudgetMeter, InputResolutionBudgets, LoadSet,
+    PathProbe, ResolutionContext, ResolvePhase, ResolveRequestKind,
 };
 
 use super::resolution_conversion_tests::{
@@ -347,7 +347,7 @@ fn fact_matches_selector(
             ResolutionFactKey::Manifest { .. },
             ConsumedResolutionObservationKey::PackageManifest { directory },
         ) => fact.canonical_id().is_some_and(|canonical| {
-            canonical == verter_semantic::resolver_core::join_paths(directory, "package.json")
+            canonical == verter_session_query::resolution::join_paths(directory, "package.json")
         }),
         (
             ResolutionFactKey::RecoveryScope { .. },
@@ -736,7 +736,7 @@ fn attempt_budget_is_inclusive_and_rejects_before_the_next_kernel_invocation() {
     assert_eq!(
         take_input_resolution_budget_events_for_test(),
         vec![
-            verter_semantic::resolver_core::InputResolutionBudgetExhaustion {
+            verter_session_query::resolution::InputResolutionBudgetExhaustion {
                 meter: InputResolutionBudgetMeter::Attempts,
                 consumed: 1,
                 prospective: 2,
@@ -784,7 +784,7 @@ fn kernel_retention_terminal_emits_exact_audit_once_and_publishes_nothing() {
     assert_eq!(
         take_input_resolution_budget_events_for_test(),
         vec![
-            verter_semantic::resolver_core::InputResolutionBudgetExhaustion {
+            verter_session_query::resolution::InputResolutionBudgetExhaustion {
                 meter: InputResolutionBudgetMeter::CompletedWitnessRetention,
                 consumed: 1,
                 prospective: 2,
@@ -823,7 +823,7 @@ fn kernel_retention_terminal_emits_exact_audit_once_and_publishes_nothing() {
     assert_eq!(
         take_input_resolution_budget_events_for_test(),
         vec![
-            verter_semantic::resolver_core::InputResolutionBudgetExhaustion {
+            verter_session_query::resolution::InputResolutionBudgetExhaustion {
                 meter: InputResolutionBudgetMeter::AliasGeometryRetention,
                 consumed: 1,
                 prospective: 2,
@@ -873,7 +873,7 @@ fn real_resolution_facade_maps_completed_witness_breach_to_budget_exceeded_witho
             "/proj/src/main.ts",
             "./target",
             CONTEXT,
-            verter_semantic::resolver_core::ResolutionPopulation::Base,
+            verter_session_query::resolution::ResolutionPopulation::Base,
         ),
         0,
         "the breached attempt cannot publish a positive or negative candidate"
@@ -881,7 +881,7 @@ fn real_resolution_facade_maps_completed_witness_breach_to_budget_exceeded_witho
     assert_eq!(
         take_input_resolution_budget_events_for_test(),
         vec![
-            verter_semantic::resolver_core::InputResolutionBudgetExhaustion {
+            verter_session_query::resolution::InputResolutionBudgetExhaustion {
                 meter: InputResolutionBudgetMeter::CompletedWitnessRetention,
                 consumed: 1,
                 prospective: 2,
@@ -1263,9 +1263,9 @@ fn churn_budget_is_inclusive_and_rejects_before_loader_work() {
         .expect("memory workspace publishes a basis");
     assert_ne!(
         actual_basis,
-        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder()
+        verter_session_query::resolution::ResolutionBasis::unbound_placeholder()
     );
-    let mismatched = verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder();
+    let mismatched = verter_session_query::resolution::ResolutionBasis::unbound_placeholder();
     let mut wave = 0;
     let mut ledger = InputResolutionLedger::new(tightened_budgets(4, 4, 128, 2, 1));
     let result = drive_attempt::<()>(
@@ -1335,7 +1335,7 @@ fn bounded_loader_rejects_reservation_and_capture_integrity_failures() {
                     .expect("reservation"),
                     1 => ResolutionInputReservationBatch::new(
                         keys.to_vec(),
-                        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder(),
+                        verter_session_query::resolution::ResolutionBasis::unbound_placeholder(),
                         reservation.entries().to_vec(),
                     )
                     .expect("reservation"),
@@ -1429,7 +1429,7 @@ fn reservation_identity_is_rejected_before_the_load_seam() {
                         vec![path_key("/wrong-reservation")]
                     },
                     if corrupt_basis {
-                        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder()
+                        verter_session_query::resolution::ResolutionBasis::unbound_placeholder()
                     } else {
                         basis
                     },
@@ -1505,7 +1505,7 @@ fn unsupported_input_is_terminal_before_mixed_delta_preflight_or_charging() {
     assert_eq!(
         *failure,
         AttemptFailure::ObservationUnavailable {
-            observation: verter_semantic::resolver_core::ResolverObservationKind::WholeHash,
+            observation: verter_session_query::resolution::ResolverObservationKind::WholeHash,
         }
     );
     assert_eq!(preflight_calls, 0);
@@ -1514,9 +1514,9 @@ fn unsupported_input_is_terminal_before_mixed_delta_preflight_or_charging() {
 
 #[test]
 fn all_unsupported_input_families_map_to_their_exact_observation_kind() {
-    use verter_semantic::analysis::function_program::{FunctionDeclarationRef, FunctionProgramKey};
-    use verter_semantic::facts::SymbolSpace;
-    use verter_semantic::resolver_core::{
+    use verter_session_query::facts::SymbolSpace;
+    use verter_session_query::function_program::{FunctionDeclarationRef, FunctionProgramKey};
+    use verter_session_query::resolution::{
         AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, DeclarationSpace,
         FlowFunctionObservationKey, ProjectIdentity, ResolverObservationKind,
     };
@@ -1845,9 +1845,9 @@ fn native_payload_and_package_index_stay_cold_after_late_batch_integrity_failure
     let manifest = package_dir.join("package.json");
     std::fs::write(&manifest, r#"{"types":"./index.d.ts"}"#).expect("manifest write");
     let package_dir =
-        verter_semantic::resolver_core::normalize_canonical_id(&package_dir.to_string_lossy());
+        verter_session_query::resolution::normalize_canonical_id(&package_dir.to_string_lossy());
     let manifest =
-        verter_semantic::resolver_core::normalize_canonical_id(&manifest.to_string_lossy());
+        verter_session_query::resolution::normalize_canonical_id(&manifest.to_string_lossy());
     let workspace = crate::filesystem::FilesystemWorkspace::new(Default::default());
     let key = InputKey::PackageManifest {
         directory: Arc::from(package_dir),

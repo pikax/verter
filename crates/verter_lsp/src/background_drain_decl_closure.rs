@@ -771,7 +771,7 @@ impl DeclOverlayOwner {
                 let Some(canonical_id) = documents.get_canonical_id(&uri) else {
                     continue;
                 };
-                if carrier_language_for(&canonical_id).is_some() {
+                if carrier_language_for(documents.language_classifier(), &canonical_id).is_some() {
                     roots.insert(canonical_id);
                 }
             }
@@ -1326,7 +1326,7 @@ pub(crate) fn carrier_dependency_ids(
         let Some(resolved) = resolved else {
             continue;
         };
-        if verter_semantic::resolver_core::path_is_carrier(&resolved)
+        if verter_session_query::resolution::path_is_carrier(&resolved)
             && seen.insert(resolved.clone())
         {
             deps.push(resolved);

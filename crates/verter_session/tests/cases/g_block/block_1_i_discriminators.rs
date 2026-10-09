@@ -14,7 +14,7 @@
 #![cfg(test)]
 
 use serial_test::serial;
-use verter_session::for_tests::ReadSetSignature;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Discriminator — `execute_read_cold_build_persists_traced_facts`.
 ///
@@ -44,12 +44,12 @@ fn execute_read_cold_build_persists_traced_facts() {
     // `RouteSurface(...)` observation.
     let mod_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/project_semantic_dispatch/mod.rs"),
+            .join("../verter_type_engine/src/project_semantic_dispatch/mod.rs"),
     )
     .expect("read mod.rs");
     let raise_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/project_semantic_dispatch/raise.rs"),
+            .join("../verter_type_engine/src/project_semantic_dispatch/raise.rs"),
     )
     .expect("read raise.rs");
 
@@ -65,7 +65,7 @@ fn execute_read_cold_build_persists_traced_facts() {
     );
     let frames_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/project_semantic_dispatch/query_frames.rs"),
+            .join("../verter_type_engine/src/project_semantic_dispatch/query_frames.rs"),
     )
     .expect("read query_frames.rs");
     assert!(
@@ -116,11 +116,12 @@ fn execute_read_cold_build_persists_traced_facts() {
 #[serial(fact_counter_provenance)]
 fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     use std::sync::Arc;
-    use verter_session::for_tests::{ReadSetSignature, SemanticGraphStore};
-    use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
-    use verter_session::semantic_query::{
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+    use verter_type_engine::semantic_query::{
         PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
     };
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let store = SemanticGraphStore::new();
 
@@ -132,7 +133,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
             canonical_id: Arc::from("/test/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -146,8 +147,8 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     // `/test/fact-dep.ts`.
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
         canonical_id: "/test/fact-dep.ts".to_string(),
-        key: verter_semantic::facts::FactKey::SyntacticExportSet,
-        lane: verter_semantic::facts::FactLane::Semantic,
+        key: verter_session_query::facts::FactKey::SyntacticExportSet,
+        lane: verter_session_query::facts::FactLane::Semantic,
         expected_hash: [0x22u8; 16],
     })]);
     let carrier = ReadSetSignature::new(facts);
@@ -225,7 +226,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
 fn cooperative_return_only_not_shared_to_joiners() {
     let ca_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/cache_runtime/singleflight.rs"),
+            .join("../verter_type_engine/src/cache_runtime/singleflight.rs"),
     )
     .expect("read cache_runtime/singleflight.rs");
     assert!(
@@ -310,7 +311,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
 #[serial(fact_counter_provenance)]
 fn read_set_signature_carrier_canonical_ids_covers_fact_rail() {
     use std::sync::Arc;
-    use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![
         FactVersionRef::FileWholeHash {
@@ -319,8 +320,8 @@ fn read_set_signature_carrier_canonical_ids_covers_fact_rail() {
         },
         FactVersionRef::Parse(ParseFactRef {
             canonical_id: "/parse.ts".to_string(),
-            key: verter_semantic::facts::FactKey::SyntacticExportSet,
-            lane: verter_semantic::facts::FactLane::Semantic,
+            key: verter_session_query::facts::FactKey::SyntacticExportSet,
+            lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: [2u8; 16],
         }),
     ]);

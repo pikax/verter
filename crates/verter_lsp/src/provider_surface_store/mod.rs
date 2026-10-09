@@ -54,10 +54,10 @@
 //! reachable reader.
 //!
 //! Every retained snapshot is CHARGED, for as long as it lives, to the one
-//! process-local [`SemanticRetentionAccount`] — the same aggregate byte ceiling
+//! process-local [`SemanticRetentionAccount`](verter_session_query::retention::SemanticRetentionAccount) — the same aggregate byte ceiling
 //! the semantic caches admit against, so provider-surface bytes and semantic-cache
 //! bytes cannot each claim the ceiling independently. The charge is
-//! [`ChargeClass::Pinned`](verter_session::semantic_retention_account::ChargeClass::Pinned):
+//! [`ChargeClass::Pinned`](verter_session_query::retention::ChargeClass::Pinned):
 //! a synced surface is an obligation, not a policy choice — refusing to retain one
 //! would leave the provider holding content this store could no longer map back,
 //! which is the silent-corruption outcome the whole module exists to prevent. The
@@ -72,10 +72,9 @@ use verter_span::path::InjectedPathKey;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
-use verter_semantic::analysis::types::Hash16;
-use verter_session::semantic_retention_account::{
-    RetainedFootprint, RetentionCharge, SemanticRetentionAccount, StoreAccount,
-    ENTRY_OVERHEAD_BYTES,
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::retention::{
+    RetainedFootprint, RetentionCharge, StoreAccount, ENTRY_OVERHEAD_BYTES,
 };
 
 use crate::carrier_cache::{EngineRecheckState, RegenKey};
@@ -176,6 +175,22 @@ pub struct ProviderSurfaceStamp {
     /// identity: a `map_hash` change invalidates every cached MAPPED result keyed
     /// by the old map. `[0; 16]` when the surface carries no source map.
     pub map_hash: Hash16,
+    /// The path's content epoch: equal across records of one path exactly while
+    /// the provider bytes, the carrier source and the map identity all stay the
+    /// same. An identical re-record keeps it; any change mints a fresh one from
+    /// the session-monotonic sequence, so a surface that changes and changes
+    /// back (A→B→A) never returns to the epoch it started from.
+    pub content_epoch: u64,
+    /// The path's surface incarnation: kept by every record of a live path and
+    /// minted fresh by the first record after the path was absent or closing,
+    /// so a close and identical reopen is a distinct incarnation.
+    pub incarnation: u64,
+    /// The path's project-owner epoch: kept while successive records name the
+    /// same owning project and minted fresh whenever the owner changes, so an
+    /// owner that changes and changes back (A→B→A) never returns to the epoch
+    /// it started from. Independent of [`Self::content_epoch`]: an owner move
+    /// with identical bytes keeps the content epoch.
+    pub owner_epoch: u64,
 }
 
 /// An immutable, fully self-contained capture of one synced provider surface.
@@ -238,6 +253,122 @@ pub struct ProviderSurfacePayload {
     /// release call for an early-return path to skip, no way to release twice,
     /// and a shared payload is charged ONCE rather than once per generation.
     _retention: RetentionCharge,
+    /// Whether the serving provider has ever acknowledged THESE bytes — the
+    /// recorded-and-delivered half of the surface. See [`DeliveryCell`].
+    delivery: DeliveryCell,
+}
+
+/// The delivery acknowledgement a payload carries: whether the serving
+/// provider's own evidence has ever shown it holding exactly these bytes, and
+/// through which delivery model.
+///
+/// Set only from serving-side evidence observed by
+/// [`ProviderSurfaceStore::delivery_of`] — the engine's per-incarnation
+/// application receipt, or the gateway's committed membership publication —
+/// never from the record itself. It is monotonic (unset → acknowledged) and
+/// lives on the payload, so an identical re-record, which shares the payload,
+/// keeps it, while a reopen or a content change, which builds a new payload,
+/// starts unacknowledged. The acknowledgement alone never makes a surface
+/// servable: currency against the serving incarnation is re-read on every
+/// verdict. It only tells a surface that was never delivered (a record that ran
+/// ahead of its delivery) from one whose delivery was lost or overtaken.
+/// It stores neither an engine incarnation nor a delivery sequence: equal
+/// bytes after replay or an unrecorded A→B→A delivery reuse this acknowledgement.
+///
+/// One byte inline in the payload: an acknowledgement adds no allocation to a
+/// record.
+#[derive(Default)]
+struct DeliveryCell(std::sync::atomic::AtomicU8);
+
+impl DeliveryCell {
+    const UNACKNOWLEDGED: u8 = 0;
+    const APPLIED: u8 = 1;
+    const PUBLISHED: u8 = 2;
+
+    fn acknowledged(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) != Self::UNACKNOWLEDGED
+    }
+
+    fn acknowledge(&self, model: u8) {
+        let _ = self.0.compare_exchange(
+            Self::UNACKNOWLEDGED,
+            model,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+}
+
+/// What the serving provider can prove it holds for one recorded surface —
+/// the answer a [`ProviderDeliveryWitness`] reads from the provider's own
+/// ledger, locally and without a provider round trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServingDelivery {
+    /// The serving engine incarnation accepted exactly these bytes for the
+    /// surface's path (its application receipt).
+    Applied(Arc<str>),
+    /// The serving engine incarnation holds no bytes for the path: never
+    /// delivered, or lost to an engine restart, an ownership exclusion or a
+    /// failed delivery.
+    NotApplied,
+    /// The engine reads the surface through the carrier membership
+    /// publication, and the committed publication attests exactly this
+    /// surface.
+    Published,
+    /// The engine reads the surface through the carrier membership
+    /// publication, and no committed publication attests this surface.
+    Unpublished,
+    /// The engine keeps no application ledger the store could consult: it
+    /// cannot say which bytes it holds, so nothing it answers is attributable
+    /// to a recorded surface.
+    Uncertified,
+}
+
+/// The serving provider's delivery ledger, as the store consults it. Bound
+/// once per server by [`ProviderSurfaceStore::bind_delivery_witness`]; every
+/// call is a local ledger read — it never issues a provider request.
+pub trait ProviderDeliveryWitness: Send + Sync {
+    /// What the serving provider holds for `surface`'s provider path.
+    fn serving_delivery(&self, surface: &ProviderSurfaceSnapshot) -> ServingDelivery;
+}
+
+/// The typed delivery state of one recorded surface at the ledger observation:
+/// whether the provider's evidence attests the recorded bytes at that moment.
+/// This is not an identity of the delivery a particular query evaluated.
+///
+/// Only [`Self::Delivered`] may serve a provider answer: a record is never
+/// evidence of its own delivery. Every other state is a signal of its own —
+/// never a diagnostics outcome — and a foreground request meets it by
+/// repairing the requested file's surface before dispatch, or by answering
+/// without the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceDelivery {
+    /// Recorded and delivered: the serving provider holds exactly these bytes.
+    Delivered,
+    /// Recorded, but the serving provider has never acknowledged these bytes:
+    /// the record ran ahead of its delivery, or the delivery never happened.
+    AwaitingDelivery,
+    /// The bytes were acknowledged once, but the serving engine now holds
+    /// different bytes at the path: a newer delivery ran ahead of its record,
+    /// or the engine fell behind.
+    EngineDiverged,
+    /// The bytes were acknowledged once, but the serving provider no longer
+    /// holds them: an engine restart, an ownership exclusion or a failed
+    /// delivery.
+    DeliveryLost,
+    /// No serving-side ledger exists to consult (no provider is bound, or it
+    /// cannot certify application): nothing proves the engine holds these
+    /// bytes, so the record alone never serves a provider answer.
+    Unwitnessed,
+}
+
+impl SurfaceDelivery {
+    /// Whether this state satisfies the delivery prerequisite for decoding.
+    /// The verdict alone does not bind a query to a particular delivery.
+    #[must_use]
+    pub const fn is_servable(self) -> bool {
+        matches!(self, Self::Delivered)
+    }
 }
 
 impl ProviderSurfacePayload {
@@ -479,6 +610,42 @@ struct Lifecycle {
     /// Per-path lifecycle state. Present ⇒ known virtual surface (either state);
     /// absent ⇒ fully unknown.
     paths: HashMap<Arc<str>, ProviderPathState>,
+    /// The immutable root every foreground capture shares: the same per-path
+    /// states as `paths`, resolved to their snapshots and keyed by filesystem
+    /// identity. Rewritten under the lifecycle WRITE lock in the same critical
+    /// section as each `paths` mutation, so a capture never observes the two
+    /// apart.
+    root: ProviderLifecycleRoot,
+}
+
+impl Lifecycle {
+    /// Publish `path`'s new state into the shared root (`None` ⇒ fully
+    /// unknown). Called under the lifecycle write lock by every `paths`
+    /// mutation. A capture already holding the previous root keeps it unchanged:
+    /// the persistent map copies only the nodes on this one path's route.
+    fn publish(&mut self, path: &Arc<str>, state: Option<CapturedPathState>) {
+        let identity = InjectedPathKey::new(path);
+        let mut spellings: Vec<(Arc<str>, CapturedPathState)> = self
+            .root
+            .by_identity
+            .get(&identity)
+            .map(|spellings| {
+                spellings
+                    .iter()
+                    .filter(|(spelling, _)| **spelling != **path)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(state) = state {
+            spellings.push((Arc::clone(path), state));
+        }
+        if spellings.is_empty() {
+            self.root.by_identity.remove(&identity);
+        } else {
+            self.root.by_identity.insert(identity, spellings.into());
+        }
+    }
 }
 
 /// Returned by [`ProviderSurfaceStore::forget`]; the ONLY key that can finalize
@@ -525,6 +692,9 @@ struct StoreInner {
     /// no aggregate headroom" is unrepresentable; its `Default` is the ONE
     /// process-local account, never a private per-store quota.
     account: StoreAccount,
+    /// The serving provider's delivery ledger, bound once the server has a
+    /// provider. Read outside every store lock.
+    witness: RwLock<Option<Arc<dyn ProviderDeliveryWitness>>>,
 }
 
 impl ProviderSurfaceStore {
@@ -537,9 +707,13 @@ impl ProviderSurfaceStore {
     ///
     /// Production always uses [`Self::new`]; this exists so a test can drive and
     /// observe retention deterministically, without the rest of the process's
-    /// occupancy moving underneath its assertions.
+    /// occupancy moving underneath its assertions. Test-only: an isolated
+    /// account can be minted only under test support.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_account(account: Arc<SemanticRetentionAccount>) -> Self {
+    pub fn with_account(
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
         Self {
             inner: Arc::new(StoreInner {
                 account: StoreAccount::new(account),
@@ -631,8 +805,10 @@ impl ProviderSurfaceStore {
         // payload — a second reservation for bytes the account is already
         // charging. The generation is still FRESH: basis identity is the
         // snapshot's, and only the content underneath is shared.
+        // An absent or `Closing` path simply means "nothing to reuse" — never a
+        // fallback that could vouch content.
         let reusable = self
-            .current_snapshot_for(&provider_path)
+            .current_snapshot(&provider_path)
             .filter(|current| {
                 current.kind == surface.kind
                     && *current.source_canonical == *surface.source_canonical
@@ -658,6 +834,41 @@ impl ProviderSurfaceStore {
         // mutation (see LINEARIZATION above).
         let generation = lifecycle.next_epoch;
         lifecycle.next_epoch += 1;
+        // The content epoch and incarnation continue from the snapshot this
+        // record displaces, read under the same write lock, so two racing
+        // records cannot both inherit from one predecessor.
+        let displaced_snapshot = match lifecycle.paths.get(&provider_path) {
+            Some(ProviderPathState::Current {
+                generation: current,
+            }) => self
+                .inner
+                .snapshots
+                .get(&(Arc::clone(&provider_path), *current))
+                .map(|entry| Arc::clone(entry.value())),
+            Some(ProviderPathState::Closing { .. }) | None => None,
+        };
+        let (content_epoch, incarnation, owner_epoch) = match displaced_snapshot {
+            Some(displaced) => {
+                let same_content = displaced.kind == surface.kind
+                    && *displaced.source_canonical == *surface.source_canonical
+                    && displaced.stamp.content_hash == payload.content_hash
+                    && displaced.stamp.source_hash == payload.source_hash
+                    && displaced.stamp.map_hash == surface.map_hash
+                    && displaced.source_map.is_some() == payload.source_map.is_some();
+                let content_epoch = if same_content {
+                    displaced.stamp.content_epoch
+                } else {
+                    generation
+                };
+                let owner_epoch = if displaced.project_owner == surface.project_owner {
+                    displaced.stamp.owner_epoch
+                } else {
+                    generation
+                };
+                (content_epoch, displaced.stamp.incarnation, owner_epoch)
+            }
+            None => (generation, generation, generation),
+        };
 
         let snapshot = Arc::new(ProviderSurfaceSnapshot {
             stamp: ProviderSurfaceStamp {
@@ -666,6 +877,9 @@ impl ProviderSurfaceStore {
                 content_hash: payload.content_hash,
                 source_hash: payload.source_hash,
                 map_hash: surface.map_hash,
+                content_epoch,
+                incarnation,
+                owner_epoch,
             },
             kind: surface.kind,
             source_canonical,
@@ -688,6 +902,10 @@ impl ProviderSurfaceStore {
             Arc::clone(&provider_path),
             ProviderPathState::Current { generation },
         );
+        lifecycle.publish(
+            &provider_path,
+            Some(CapturedPathState::Current(Arc::clone(&snapshot))),
+        );
         // Release the store's hold on the generation this record displaced, AFTER
         // the lifecycle already points at the new one (so no reader can observe
         // `Current { displaced }` and then miss its snapshot) and still under the
@@ -703,24 +921,6 @@ impl ProviderSurfaceStore {
         }
         drop(lifecycle);
         snapshot
-    }
-
-    /// The snapshot a `Current` path resolves to right now, by interned key.
-    ///
-    /// Only used to decide payload reuse, so an absent or `Closing` path simply
-    /// means "nothing to reuse" — never a fallback that could vouch content.
-    fn current_snapshot_for(
-        &self,
-        provider_path: &Arc<str>,
-    ) -> Option<Arc<ProviderSurfaceSnapshot>> {
-        let generation = match self.inner.lifecycle.read().paths.get(provider_path) {
-            Some(ProviderPathState::Current { generation }) => *generation,
-            _ => return None,
-        };
-        self.inner
-            .snapshots
-            .get(&(Arc::clone(provider_path), generation))
-            .map(|entry| Arc::clone(entry.value()))
     }
 
     /// Build the immutable payload for a surface whose content the store does not
@@ -778,6 +978,7 @@ impl ProviderSurfaceStore {
             source_hash,
             map_hash,
             _retention: retention,
+            delivery: DeliveryCell::default(),
         }
     }
 
@@ -852,6 +1053,7 @@ impl ProviderSurfaceStore {
         lifecycle
             .paths
             .insert(Arc::clone(&path), ProviderPathState::Closing { epoch });
+        lifecycle.publish(&path, Some(CapturedPathState::KnownNonMappable));
         // Release the store's hold on the generation this close retired, AFTER the
         // lifecycle already reads `Closing` and still under the write lock. This is
         // the other half of the retention bound: without it, every closed document's
@@ -902,6 +1104,7 @@ impl ProviderSurfaceStore {
                 // `close_after_capture_preserves_captured_snapshot`, which reads
                 // `retained_surface_count()` across exactly this sequence.
                 lifecycle.paths.remove(&token.provider_path);
+                lifecycle.publish(&token.provider_path, None);
                 true
             }
             // Reopened (now `Current`), retired again by a newer close (`Closing`
@@ -944,16 +1147,25 @@ impl ProviderSurfaceStore {
     /// The CURRENT active snapshot for a provider path, if one is synced (its
     /// lifecycle state is `Current`). A `Closing` or absent path resolves to
     /// `None`. Used to CAPTURE the in-flight pinned set.
+    ///
+    /// The generation is read and resolved to its snapshot under ONE lifecycle
+    /// read guard. [`Self::record`] drops the generation it displaces under the
+    /// lifecycle WRITE lock, so a reader that released the guard between the two
+    /// could find that generation already gone and answer "no current surface"
+    /// for a path that was `Current` at every instant — which every
+    /// byte-identical background re-sync of an open carrier would expose.
     #[must_use]
     pub fn current_snapshot(&self, provider_path: &str) -> Option<Arc<ProviderSurfaceSnapshot>> {
-        let generation = match self.inner.lifecycle.read().paths.get(provider_path) {
-            Some(ProviderPathState::Current { generation }) => *generation,
-            _ => return None,
+        let lifecycle = self.inner.lifecycle.read();
+        let (path, ProviderPathState::Current { generation }) =
+            lifecycle.paths.get_key_value(provider_path)?
+        else {
+            return None;
         };
         self.inner
             .snapshots
-            .get(&(Arc::from(provider_path), generation))
-            .map(|e| Arc::clone(e.value()))
+            .get(&(Arc::clone(path), *generation))
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     /// Whether a previously-captured snapshot still agrees with the path's CURRENT
@@ -998,6 +1210,60 @@ impl ProviderSurfaceStore {
             || (current.stamp.content_hash == captured.stamp.content_hash
                 && current.stamp.source_hash == captured.stamp.source_hash
                 && current.stamp.map_hash == captured.stamp.map_hash)
+    }
+
+    /// Whether the path's CURRENT surface is still `captured`'s content epoch,
+    /// incarnation and project owner — the bracket a foreground request closes
+    /// around every surface whose provider answer it decodes, at that decode
+    /// and again at settlement.
+    ///
+    /// Stricter than [`Self::captured_snapshot_still_honored`]: the content and
+    /// owner epochs move on every change and never return, so a surface whose
+    /// content or owner changed and changed back during the request fails the
+    /// bracket even though it ends where it began. An identical re-record keeps
+    /// both epochs and passes.
+    ///
+    /// The bracket also requires the surface to be DELIVERED
+    /// ([`Self::delivery_of`]): the serving provider must still hold exactly
+    /// the captured bytes. Equal epochs alone cannot say so — a record can run
+    /// ahead of its delivery, a delivery can run ahead of its record, and an
+    /// engine can restart — and an answer decoded through bytes the engine did
+    /// not evaluate maps newer host offsets into older provider text.
+    /// These observations do not detect an unrecorded A→B→A delivery between
+    /// them or identify a same-byte replay after an engine restart. The path's
+    /// incarnation above is distinct from the serving engine's incarnation.
+    #[must_use]
+    pub fn captured_surface_is_current(&self, captured: &ProviderSurfaceSnapshot) -> bool {
+        self.current_snapshot(&captured.stamp.provider_path)
+            .is_some_and(|current| {
+                current.stamp.content_epoch == captured.stamp.content_epoch
+                    && current.stamp.incarnation == captured.stamp.incarnation
+                    && current.stamp.owner_epoch == captured.stamp.owner_epoch
+                    && current.project_owner == captured.project_owner
+            })
+            && self.delivery_of(captured).is_servable()
+    }
+
+    /// Bind the serving provider's delivery ledger. Called once, by the server
+    /// that owns the provider; a store with no bound witness answers
+    /// [`SurfaceDelivery::Unwitnessed`].
+    pub fn bind_delivery_witness(&self, witness: Arc<dyn ProviderDeliveryWitness>) {
+        *self.inner.witness.write() = Some(witness);
+    }
+
+    /// The typed delivery state of `surface`: whether the serving provider
+    /// holds exactly the bytes it records.
+    ///
+    /// Reads the bound witness — a local ledger read, never a provider round
+    /// trip — outside every store lock. Serving-side proof of these exact bytes
+    /// acknowledges the payload ([`DeliveryCell`]); the acknowledgement then
+    /// tells a surface whose delivery was lost or overtaken from one that was
+    /// never delivered, but it never vouches for currency on its own: every
+    /// verdict re-reads what the serving incarnation holds now.
+    #[must_use]
+    pub fn delivery_of(&self, surface: &ProviderSurfaceSnapshot) -> SurfaceDelivery {
+        let witness = self.inner.witness.read().clone();
+        delivery_verdict(witness.as_deref(), surface)
     }
 
     /// The owning configured project (tsconfig URI) of `provider_path`'s CURRENT
@@ -1118,91 +1384,54 @@ impl ProviderSurfaceStore {
         }
     }
 
-    /// Capture EVERY tracked path's lifecycle state — the immutable in-flight
-    /// pinned set a cross-file rename holds across its provider query, and the SOLE
-    /// authority [`classify_captured_api_surface`] routes on (it never reads the
-    /// live store afterward).
+    /// Capture the store's immutable lifecycle root — the shared handle a
+    /// foreground request takes ONCE and derives every captured view from
+    /// ([`ProviderLifecycleRoot::carrier_api_set`],
+    /// [`ProviderLifecycleRoot::carrier_ide_set`]).
     ///
-    /// COMPLETENESS (condition b): the returned set distinguishes the three states
-    /// classify needs, so it can classify + map WITHOUT any later live read:
-    /// - a `Current` `CarrierApi` path → [`CapturedPathState::Current`] with its
-    ///   full immutable snapshot (maps onto the `.vue` or, if it has no source map,
-    ///   drops);
-    /// - a `Closing` path, OR a `Current` path that is not `CarrierApi`, OR a
-    ///   `Current` path whose snapshot Arc is somehow absent → captured as
-    ///   [`CapturedPathState::KnownNonMappable`] (known-virtual-but-not-mappable →
-    ///   `VirtualDrop`, never `NotVirtual`). A `Closing` path is INCLUDED here (the
-    ///   prior capture SKIPPED it, forcing a live re-consult — the third TOCTOU);
-    /// - a path ABSENT from the map → absent from the capture too (a genuinely real
-    ///   file → `NotVirtual`).
+    /// CONSTANT COST: the capture clones one persistent-map handle under the
+    /// lifecycle read guard. It visits no path, copies no entry and takes no
+    /// reference on any snapshot, so warm capture work, request-owned entries and
+    /// lock hold time are independent of how many unrelated paths the workspace
+    /// tracks. The snapshots the root reaches stay alive only while a request
+    /// holds it; dropping the request (completion or cancellation) releases them.
     ///
-    /// ATOMICITY (condition a): the whole capture runs under ONE `lifecycle.read()`
-    /// guard held for the entire loop — no drop-and-re-acquire, no second lock. The
-    /// `snapshots` DashMap lookup for a `Current` path's generation is performed
-    /// WHILE STILL HOLDING that guard, so the captured `(state, snapshot)` pair
-    /// cannot be torn by a concurrent `record`/`forget`/`finalize_close`. This is
-    /// sound because [`Self::record`] PUBLISHES the snapshot into `snapshots` BEFORE
-    /// pointing the lifecycle state at its generation: holding the lifecycle read
-    /// guard and then reading `snapshots` for the generation the guard observed
-    /// always yields a consistent pair (the snapshot for the observed generation is
-    /// already present). A concurrent writer is blocked on the lifecycle write lock
-    /// for the whole loop.
-    ///
-    /// Because every captured value is immutable (an `Arc` snapshot, or a state tag),
-    /// a concurrent background sync that advances a path's generation, or a close
-    /// that retires/finalizes it, AFTER this capture can never change what a captured
-    /// entry resolves to — the no-race property the third-TOCTOU fix completes.
+    /// ATOMICITY: every lifecycle mutation rewrites the root under the lifecycle
+    /// WRITE lock in the same critical section as the per-path state it mirrors,
+    /// so the captured root is one consistent point-in-time view of every path's
+    /// state and snapshot — no `(state, snapshot)` pair can tear, and a later
+    /// `record`/`forget`/`finalize_close` never changes what it resolves to.
+    #[must_use]
+    pub fn capture_lifecycle_root(&self) -> ProviderLifecycleRoot {
+        let mut root = self.inner.lifecycle.read().root.clone();
+        root.witness = self.inner.witness.read().clone();
+        root
+    }
+
+    /// The captured carrier-API view of every tracked path — the immutable
+    /// in-flight set a cross-file rename holds across its provider query, and the
+    /// SOLE authority [`classify_captured_api_surface`] routes on (it never reads
+    /// the live store afterward). A request that also needs the IDE view captures
+    /// [`Self::capture_lifecycle_root`] once and derives both from it.
     #[must_use]
     pub fn capture_current_carrier_api_set(&self) -> ProviderQuerySnapshot {
-        self.capture_current_set_of_kind(ProviderSurfaceKind::CarrierApi)
+        self.capture_lifecycle_root().carrier_api_set()
     }
 
-    /// Capture EVERY tracked path's lifecycle state with `CarrierIde` snapshots
-    /// as the mappable role — the immutable in-flight pinned set a navigation
-    /// handler holds across its provider query so a returned FOREIGN carrier
-    /// IDE location maps through the surface captured when the request began,
-    /// never whatever surface is current at merge time. Same atomicity and
-    /// completeness contract as [`Self::capture_current_carrier_api_set`].
+    /// The captured carrier-IDE view of every tracked path — the immutable
+    /// in-flight set a navigation handler holds across its provider query so a
+    /// returned FOREIGN carrier IDE location maps through the surface captured
+    /// when the request began, never whatever surface is current at merge time.
     #[must_use]
     pub fn capture_current_carrier_ide_set(&self) -> ProviderQuerySnapshot {
-        self.capture_current_set_of_kind(ProviderSurfaceKind::CarrierIde)
-    }
-
-    fn capture_current_set_of_kind(&self, kind: ProviderSurfaceKind) -> ProviderQuerySnapshot {
-        // ONE read guard for the ENTIRE capture (atomicity, condition a).
-        let lifecycle = self.inner.lifecycle.read();
-        let mut by_path: HashMap<InjectedPathKey, CapturedPathState> =
-            HashMap::with_capacity(lifecycle.paths.len());
-        for (path, state) in lifecycle.paths.iter() {
-            let captured = match state {
-                // `Closing` (retired-but-known): no mappable snapshot, but the store
-                // knew it as virtual → KnownNonMappable so it drops, never falls
-                // through to NotVirtual. (This is the path the OLD capture skipped.)
-                ProviderPathState::Closing { .. } => CapturedPathState::KnownNonMappable,
-                // `Current`: resolve its snapshot Arc UNDER THIS SAME READ GUARD so
-                // the (state, snapshot) pair is consistent and cannot tear (see
-                // ATOMICITY above). A snapshot of the requested role is mappable;
-                // anything else (a different role, or a missing snapshot) is
-                // known-virtual but not mappable → drop.
-                ProviderPathState::Current { generation } => {
-                    match self.inner.snapshots.get(&(Arc::clone(path), *generation)) {
-                        Some(entry) if entry.value().kind == kind => {
-                            CapturedPathState::Current(Arc::clone(entry.value()))
-                        }
-                        _ => CapturedPathState::KnownNonMappable,
-                    }
-                }
-            };
-            by_path.insert(InjectedPathKey::new(path), captured);
-        }
-        ProviderQuerySnapshot { by_path }
+        self.capture_lifecycle_root().carrier_ide_set()
     }
 
     /// The account this store charges. Tests only — production never needs to
     /// reach past the store to the account.
     #[cfg(test)]
     #[must_use]
-    pub fn account(&self) -> &Arc<SemanticRetentionAccount> {
+    pub fn account(&self) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
         self.inner.account.get()
     }
 
@@ -1231,32 +1460,99 @@ impl ProviderSurfaceStore {
     }
 }
 
-/// The per-path lifecycle state CAPTURED at the rename fence — the SOLE input to
-/// [`classify_captured_api_surface`]. Captured atomically under one `lifecycle`
-/// read guard so it is a consistent point-in-time snapshot of the store's view of
-/// every path, immune to any live mutation after capture.
+/// The per-path lifecycle state CAPTURED at the request fence — the SOLE input to
+/// [`classify_captured_api_surface`]. Read from one captured
+/// [`ProviderLifecycleRoot`], so it is a consistent point-in-time view of the
+/// store, immune to any live mutation after capture.
 ///
-/// Three cases are explicit; a path ABSENT from [`ProviderQuerySnapshot::by_path`]
-/// is the fourth (a genuinely real on-disk file the store did not know as virtual
-/// at capture → `NotVirtual`, edit in place).
+/// Three cases are explicit; a path ABSENT from the captured root is the fourth (a
+/// genuinely real on-disk file the store did not know as virtual at capture →
+/// `NotVirtual`, edit in place).
+#[derive(Clone)]
 pub enum CapturedPathState {
-    /// A `Current` `CarrierApi` path with its full immutable snapshot — the only
-    /// case that can map a returned `{carrier}.ts` offset onto the `.vue`. The
-    /// merge maps ONLY through this captured generation's own source map.
+    /// A `Current` path of the view's role with its full immutable snapshot —
+    /// the only case that can map a returned `{carrier}.ts` offset onto the
+    /// `.vue`. The merge maps ONLY through this captured generation's own source
+    /// map.
     Current(Arc<ProviderSurfaceSnapshot>),
     /// A path the store KNEW as virtual at capture but for which there is NO
     /// mappable snapshot: it was `Closing` (a close in flight), or `Current` but
-    /// not a `CarrierApi` surface, or its snapshot Arc was somehow absent. Its
-    /// offsets index VIRTUAL content, so it MUST classify `VirtualDrop` (fail
-    /// closed) — never fall through to the real-file branch and edit a same-named
-    /// real file with virtual offsets.
+    /// of another role than the view's. Its offsets index VIRTUAL content, so it
+    /// MUST classify `VirtualDrop` (fail closed) — never fall through to the
+    /// real-file branch and edit a same-named real file with virtual offsets.
     KnownNonMappable,
 }
 
-/// An immutable, point-in-time capture of EVERY tracked path's lifecycle state,
-/// pinned by a cross-file rename across its provider query.
+/// The answer for a known path that has no mappable snapshot in a view.
+static KNOWN_NON_MAPPABLE: CapturedPathState = CapturedPathState::KnownNonMappable;
+
+/// The immutable provider lifecycle root: every tracked path's lifecycle state,
+/// resolved to its snapshot, keyed by filesystem identity
+/// ([`InjectedPathKey`], so a provider-returned slash, drive-letter or — on a
+/// case-folding host — case spelling resolves the surface it names).
 ///
-/// This captured set is the SOLE merge authority: [`classify_captured_api_surface`]
+/// The store publishes a new root on every lifecycle mutation; a foreground
+/// request captures the current one with
+/// [`ProviderSurfaceStore::capture_lifecycle_root`]. Cloning a root is
+/// constant-cost and shares every node, so a captured root costs the request
+/// nothing per tracked path, and pins old snapshots only for as long as the
+/// request lives.
+///
+/// Each identity carries every raw spelling the store tracks under it. Two
+/// tracked spellings of one file are never mappable through a third spelling:
+/// a lookup that does not match one of them exactly classifies
+/// [`CapturedPathState::KnownNonMappable`] (fail closed), never an arbitrary
+/// pick.
+#[derive(Clone, Default)]
+pub struct ProviderLifecycleRoot {
+    by_identity: imbl::HashMap<InjectedPathKey, IdentitySpellings>,
+    /// The serving provider's delivery ledger, bound to a CAPTURED root so a
+    /// decode through it observes delivery like every other capture does.
+    /// Never set on the store's own published root.
+    witness: Option<Arc<dyn ProviderDeliveryWitness>>,
+}
+
+/// Every raw spelling tracked under one filesystem identity, with its state.
+type IdentitySpellings = Arc<[(Arc<str>, CapturedPathState)]>;
+
+impl ProviderLifecycleRoot {
+    /// This root viewed with `CarrierApi` snapshots as the mappable role.
+    #[must_use]
+    pub fn carrier_api_set(&self) -> ProviderQuerySnapshot {
+        self.view(ProviderSurfaceKind::CarrierApi)
+    }
+
+    /// This root viewed with `CarrierIde` snapshots as the mappable role.
+    #[must_use]
+    pub fn carrier_ide_set(&self) -> ProviderQuerySnapshot {
+        self.view(ProviderSurfaceKind::CarrierIde)
+    }
+
+    fn view(&self, kind: ProviderSurfaceKind) -> ProviderQuerySnapshot {
+        ProviderQuerySnapshot {
+            root: self.clone(),
+            kind,
+        }
+    }
+
+    /// The state captured for `provider_path`'s filesystem identity, or `None`
+    /// when the store did not know it as virtual.
+    fn state_for(&self, provider_path: &str) -> Option<&CapturedPathState> {
+        let spellings = self.by_identity.get(&InjectedPathKey::new(provider_path))?;
+        Some(match &**spellings {
+            [(_, state)] => state,
+            spellings => spellings
+                .iter()
+                .find(|(spelling, _)| **spelling == *provider_path)
+                .map_or(&KNOWN_NON_MAPPABLE, |(_, state)| state),
+        })
+    }
+}
+
+/// One role's view of a captured [`ProviderLifecycleRoot`], pinned by a
+/// provider-backed request across its provider query.
+///
+/// This captured view is the SOLE merge authority: [`classify_captured_api_surface`]
 /// resolves every returned provider location by looking its path up HERE, never the
 /// live store. A path captured [`CapturedPathState::Current`] maps through that
 /// captured generation's own snapshot; a path captured
@@ -1264,38 +1560,92 @@ pub enum CapturedPathState {
 /// a genuinely real on-disk file (edited in place). A path whose live generation or
 /// lifecycle later changes is irrelevant: this capture is the state the provider's
 /// offsets were produced against.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct ProviderQuerySnapshot {
-    by_path: HashMap<InjectedPathKey, CapturedPathState>,
+    root: ProviderLifecycleRoot,
+    kind: ProviderSurfaceKind,
 }
 
 impl ProviderQuerySnapshot {
     /// The captured per-path lifecycle state for `provider_path`, or `None` if the
     /// path was ABSENT from the capture (the store did not know it as virtual at
-    /// capture → a genuinely real file). This is the lookup classify routes on.
+    /// capture → a genuinely real file). This is the lookup classify routes on. A
+    /// `Current` surface of another role than this view's is known but not
+    /// mappable.
     #[must_use]
     pub fn captured_state_for(&self, provider_path: &str) -> Option<&CapturedPathState> {
-        self.by_path.get(&InjectedPathKey::new(provider_path))
+        Some(match self.root.state_for(provider_path)? {
+            CapturedPathState::Current(snapshot) if snapshot.kind != self.kind => {
+                &KNOWN_NON_MAPPABLE
+            }
+            state => state,
+        })
     }
 
     /// The captured MAPPABLE snapshot for `provider_path`, if it was a `Current`
-    /// `CarrierApi` surface at capture time. Returns `None` for a
+    /// surface of this view's role at capture time. Returns `None` for a
     /// [`CapturedPathState::KnownNonMappable`] path (e.g. `Closing` at capture) and
     /// for an absent path alike — only a path with a mappable snapshot can vouch a
     /// `.vue` edit.
     #[must_use]
     pub fn snapshot_for(&self, provider_path: &str) -> Option<&Arc<ProviderSurfaceSnapshot>> {
-        match self.by_path.get(&InjectedPathKey::new(provider_path)) {
+        match self.captured_state_for(provider_path) {
             Some(CapturedPathState::Current(snapshot)) => Some(snapshot),
             _ => None,
         }
+    }
+
+    /// The typed delivery state of a surface this view captured, read fresh
+    /// from the serving provider's ledger bound at capture — a local read,
+    /// never a provider round trip. Only [`SurfaceDelivery::Delivered`] may
+    /// decode a provider answer through the surface.
+    #[must_use]
+    pub fn delivery_of(&self, surface: &ProviderSurfaceSnapshot) -> SurfaceDelivery {
+        delivery_verdict(self.root.witness.as_deref(), surface)
     }
 
     /// Whether the captured set is empty (no tracked path at all — neither a
     /// mappable `Current` surface nor a known-non-mappable one).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_path.is_empty()
+        self.root.by_identity.is_empty()
+    }
+}
+
+/// The typed delivery state of `surface` under `witness` — the one verdict
+/// [`ProviderSurfaceStore::delivery_of`] and a captured
+/// [`ProviderQuerySnapshot::delivery_of`] both answer with.
+fn delivery_verdict(
+    witness: Option<&dyn ProviderDeliveryWitness>,
+    surface: &ProviderSurfaceSnapshot,
+) -> SurfaceDelivery {
+    let Some(witness) = witness else {
+        return SurfaceDelivery::Unwitnessed;
+    };
+    let cell = &surface.payload.delivery;
+    let unproven = |acknowledged: bool, lost: SurfaceDelivery| {
+        if acknowledged {
+            lost
+        } else {
+            SurfaceDelivery::AwaitingDelivery
+        }
+    };
+    match witness.serving_delivery(surface) {
+        ServingDelivery::Applied(bytes) if str_eq(&bytes, &surface.provider_content) => {
+            cell.acknowledge(DeliveryCell::APPLIED);
+            SurfaceDelivery::Delivered
+        }
+        ServingDelivery::Published => {
+            cell.acknowledge(DeliveryCell::PUBLISHED);
+            SurfaceDelivery::Delivered
+        }
+        ServingDelivery::Applied(_) => {
+            unproven(cell.acknowledged(), SurfaceDelivery::EngineDiverged)
+        }
+        ServingDelivery::NotApplied | ServingDelivery::Unpublished => {
+            unproven(cell.acknowledged(), SurfaceDelivery::DeliveryLost)
+        }
+        ServingDelivery::Uncertified => SurfaceDelivery::Unwitnessed,
     }
 }
 

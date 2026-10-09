@@ -5,8 +5,8 @@ use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{ExactResolution, ParsedEdge};
 use crate::ProjectMembership;
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::IdeProjectCompilerOptions;
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 fn set_fallback_projects(ws: &MemoryWorkspace, roots: &[&str]) {
     ws.set_project_graph(ProjectGraph::from_configs(
@@ -1595,7 +1595,7 @@ fn trait_configure_resolver_empty_clears_resolver() {
 /// did not move. PASSES post-fix: the setter republishes and bumps once.
 #[test]
 fn changing_default_resolve_extensions_republishes_resolve_env_hash() {
-    use crate::workspace_snapshot::ProjectId;
+    use verter_session_query::resolution::ProjectId;
 
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     let project = crate::resolver::ide_project_config(
@@ -1778,7 +1778,7 @@ fn memory_unresolved_relative_records_stem_without_published_root() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     // /src/types.ts strips `.ts` → /src/types — finds the stem bucket.
@@ -1804,7 +1804,8 @@ fn memory_resolved_relative_does_not_leak_stem() {
             extensions: vec![".ts".into()],
             workspace_root: "/src".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: crate::membership::configured_membership_match_all_under_root(
                 &CanonicalPath::new("/src"),
@@ -1815,7 +1816,7 @@ fn memory_resolved_relative_does_not_leak_stem() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     // Canonical hit — direct query.
@@ -1866,7 +1867,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/A.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Child".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1880,7 +1881,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/B.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Helper".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1894,7 +1895,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/C.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./util".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1914,7 +1915,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/D.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Mystery".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     let carriers = verter_language::LanguageRegistry::global().carrier_extensions();
@@ -1960,7 +1961,7 @@ fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1972,8 +1973,8 @@ fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
         "/src/Comp.vue",
         vec![crate::types::ExactResolution {
             specifier: "./types".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/lib/types.ts".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -2134,6 +2135,70 @@ fn a_repeated_byteless_content_transition_is_strictly_newer_each_time() {
     assert_eq!(
         WorkspaceRead::last_content_transition_generation(&ws, "/src/Other.vue"),
         WorkspaceRead::last_content_transition_generation(&ws, "/src/Unrelated.vue"),
+    );
+}
+
+/// Byte-less transitions on many distinct canonicals are history like any
+/// other: once the view that capped retirement leaves, they drain. A marker
+/// recorded ahead of the live content generation could never retire, because
+/// the floor never passes the live generation.
+#[test]
+fn byteless_transition_churn_drains_once_readers_leave() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let readers = WorkspaceRead::freshness_readers(&ws).expect("the engine keeps a history");
+    let view = readers.lease_view(ws.content_generation());
+    let total = crate::freshness::DEFAULT_RETIRE_TRIGGER + 64;
+    for index in 0..total {
+        WorkspaceRead::record_content_transition(&ws, &format!("/marker/{index}.vue"));
+    }
+    let pinned = ws.resource_snapshot().freshness_history;
+    assert_eq!(
+        pinned.exact_entries, total,
+        "a live view keeps every marker above its captured generation"
+    );
+
+    drop(view);
+    let drained = ws.resource_snapshot().freshness_history;
+    assert_eq!(drained.exact_entries, 0, "{drained:?}");
+    assert_eq!(drained.queued_entries, 0, "{drained:?}");
+    let current = ws.content_generation();
+    for index in [0, total - 1] {
+        let answer =
+            WorkspaceRead::last_content_transition_generation(&ws, &format!("/marker/{index}.vue"));
+        assert!(
+            answer > 0 && answer <= current,
+            "a retired marker still answers past its transition and never past \
+             the live generation ({answer} vs {current})"
+        );
+    }
+}
+
+/// One bulk upsert larger than the retirement trigger records every path at
+/// the batch's single generation. A retirement pass that raises the floor to
+/// that generation mid-batch must not push the batch's later records past it:
+/// an artifact built at the completed batch's generation is fresh for every
+/// path, and the batch's records retire without another mutation.
+#[test]
+fn a_bulk_upsert_past_the_retirement_trigger_records_no_future_revision() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let trigger = crate::freshness::DEFAULT_RETIRE_TRIGGER;
+    let records: Vec<(String, Arc<str>)> = (0..2 * trigger + 64)
+        .map(|index| (format!("/bulk/{index}.ts"), Arc::from("export {};")))
+        .collect();
+    ws.notify_upsert_many(&records);
+
+    let completed = ws.content_generation();
+    for (path, _) in &records {
+        assert_eq!(
+            WorkspaceRead::last_content_transition_generation(&ws, path),
+            completed,
+            "{path} must answer the batch's own generation"
+        );
+    }
+    let residency = ws.resource_snapshot().freshness_history;
+    assert!(
+        residency.exact_entries <= 64 && residency.queued_entries <= 64,
+        "the batch's records must retire as the queue reaches the trigger: {residency:?}"
     );
 }
 
@@ -2585,5 +2650,84 @@ fn a_package_checkout_between_input_rounds_never_admits_a_torn_answer() {
         CHECKOUT_ESM_IMPORT,
         checkout,
         CheckoutPoint::BetweenInputRounds,
+    );
+}
+
+// ── Published authority identity ──
+
+/// A root republished over the live snapshot with the same readiness and
+/// env-hash tables answers under the live authority; a readiness change, a
+/// membership change, a rebuild of the same project graph and another
+/// workspace at the same scalar generation each answer under a new one.
+#[test]
+fn published_authority_survives_only_an_equivalent_republication() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["/a"]);
+    let live = ws.load_published().expect("published");
+
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_env_hash_tables(
+            Arc::clone(&live.snapshot),
+            live.env_hashes_by_project.clone(),
+            live.project_identity_hashes.clone(),
+        ));
+    let republished = ws.load_published().expect("republished");
+    assert!(!Arc::ptr_eq(&live, &republished));
+    assert_eq!(republished.authority(), live.authority());
+
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_ext(
+            Arc::clone(&live.snapshot),
+            Box::new(()),
+        ));
+    let ready = ws.load_published().expect("ready");
+    assert_ne!(ready.authority(), live.authority(), "readiness changed");
+
+    // The env-hash tables the publication recomposes for the extension-only
+    // root equal the live ones, so this is the equivalent republication a
+    // consumer-view rebuild performs.
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_ext(
+            Arc::clone(&live.snapshot),
+            Box::new(()),
+        ));
+    let views_rebuilt = ws.load_published().expect("views rebuilt");
+    assert_eq!(views_rebuilt.authority(), ready.authority());
+
+    set_fallback_projects(&ws, &["/a", "/b"]);
+    let membership = ws.load_published().expect("membership");
+    assert_ne!(
+        membership.authority(),
+        ready.authority(),
+        "membership changed"
+    );
+
+    set_fallback_projects(&ws, &["/a", "/b"]);
+    let rebuilt = ws.load_published().expect("rebuilt");
+    assert_ne!(
+        rebuilt.authority(),
+        membership.authority(),
+        "a rebuilt snapshot is a new authority even with identical content"
+    );
+
+    // Republishing an older snapshot over a newer root never resurrects the
+    // older root's authority.
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_ext(
+            Arc::clone(&live.snapshot),
+            Box::new(()),
+        ));
+    let older = ws.load_published().expect("older snapshot");
+    assert_ne!(older.authority(), ready.authority());
+    assert_ne!(older.authority(), rebuilt.authority());
+
+    let replacement = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&replacement, &["/a"]);
+    let replaced = replacement.load_published().expect("replacement");
+    assert_eq!(replaced.snapshot.generation, live.snapshot.generation);
+    assert_ne!(
+        replaced.authority(),
+        live.authority(),
+        "a replacement workspace repeating the scalar generation"
     );
 }

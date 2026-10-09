@@ -8,7 +8,8 @@
 //!   a variant named `Compat`. If the enum collapsed to a single variant,
 //!   it must have been deleted entirely.
 //! - No `match` arm in any production source file under
-//!   `crates/verter_session/src` reads a `Compat` variant of the query
+//!   `crates/verter_session/src` or `crates/verter_type_engine/src` reads a
+//!   `Compat` variant of the query
 //!   kind.
 //! - The legacy `get_declared_component_meta` family (`get_declared_component_meta`,
 //!   `get_declared_component_meta_with_resolution`, `get_declared_component_meta_payload`)
@@ -130,9 +131,13 @@ impl<'ast> Visit<'ast> for CompatArmVisitor {
 #[test]
 fn no_match_arm_reads_compat_variant() {
     let root = workspace_root();
-    let src = root.join("crates").join("verter_session").join("src");
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_rs_files(&src, &mut files);
+    // The session crate and the type engine it builds on.
+    for krate in ["verter_session", "verter_type_engine"] {
+        let src = root.join("crates").join(krate).join("src");
+        assert!(src.is_dir(), "source root {} is missing", src.display());
+        collect_rs_files(&src, &mut files);
+    }
 
     let mut offenders: Vec<(PathBuf, String)> = Vec::new();
     for path in &files {
@@ -177,6 +182,10 @@ fn no_get_declared_component_meta_function_remains() {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_rs_files(
         &root.join("crates").join("verter_session").join("src"),
+        &mut files,
+    );
+    collect_rs_files(
+        &root.join("crates").join("verter_type_engine").join("src"),
         &mut files,
     );
     collect_rs_files(

@@ -1117,7 +1117,7 @@ fn ordered_structure_to_proto(value: &FfiOrderedSfcStructure) -> proto::OrderedS
 
 /// Project the registered semantic arena directly to the content-free wire schema.
 pub fn semantic_ordered_structure_to_proto(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
 ) -> proto::OrderedSfcStructure {
     use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, MarkupNodeKind};
 
@@ -1315,7 +1315,7 @@ pub fn semantic_ordered_structure_to_proto(
 }
 
 fn semantic_structure_range(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
 ) -> FfiStructureRange {
     FfiStructureRange {
@@ -1326,7 +1326,7 @@ fn semantic_structure_range(
 }
 
 fn semantic_authored_name(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     authored: verter_language::parse_artifact::carrier_inventory::SourceSlice,
     normalized: verter_language::parse_artifact::carrier_inventory::InternedNameId,
 ) -> FfiAuthoredName {
@@ -1371,7 +1371,7 @@ fn semantic_block_role(
 }
 
 fn semantic_termination(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     value: &verter_language::parse_artifact::carrier_inventory::SyntaxTermination,
 ) -> FfiSyntaxTermination {
     use verter_language::parse_artifact::carrier_inventory::SyntaxTermination;
@@ -1391,7 +1391,7 @@ fn semantic_termination(
 }
 
 fn semantic_attribute(
-    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
     attribute: &verter_language::parse_artifact::carrier_inventory::CarrierAttribute,
 ) -> FfiCarrierAttribute {
     use verter_language::parse_artifact::carrier_inventory::{AttributeValue, CarrierAttribute};

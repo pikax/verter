@@ -29,7 +29,7 @@ use std::sync::Arc;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 const FIXTURE_HELPER: &str = "export interface HelperProps {\n\

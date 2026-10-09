@@ -8,7 +8,7 @@
 //! a const value AND no parent uses `v-bind` spread on the component.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::template::PropValueConstness;
+use verter_session_query::analysis::template::PropValueConstness;
 
 use crate::shared::read_lock;
 use crate::VerterHost;
@@ -80,7 +80,7 @@ impl VerterHost {
         // Collect (parent_id, template_analysis) pairs from the appropriate source.
         let parent_templates: Vec<(
             String,
-            std::sync::Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+            std::sync::Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         )> = {
             self.scheduler
                 .node_ids()
@@ -105,9 +105,9 @@ impl VerterHost {
                     Some(source) => match self.resolve_via_vfs(
                         parent_id,
                         source,
-                        verter_semantic::resolver_core::ResolutionContext {
-                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                        verter_session_query::resolution::ResolutionContext {
+                            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                         },
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -631,7 +631,7 @@ import Child from '@/components/Child.vue'
         // bumps `project_generation` (evicting the project-shape
         // cluster), and advances the store-view epoch.
         {
-            use verter_semantic::resolver_core::*;
+            use verter_session_query::resolution::*;
             host.configure_projects(vec![IdeProjectConfig {
                 root: "/project".to_string(),
                 workspace_root: "/project".to_string(),

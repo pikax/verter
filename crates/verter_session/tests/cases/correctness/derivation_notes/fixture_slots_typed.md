@@ -69,7 +69,7 @@ Phase linkage:
   rule-correct expected (slots = `[default: { item: string }, named:
   { row: number }]`).
 - Phase 5j §5.12 closes the gap via
-  `crates/verter_session/src/project_semantic_dispatch/mod.rs`
+  `crates/verter_type_engine/src/project_semantic_dispatch/mod.rs`
   (adds `project_slot_binding_member` non-variant dispatch helper)
   and the `expand_field_expr` closure in
   `crates/verter_session/src/host_manage.rs::compute_evaluated_types*`

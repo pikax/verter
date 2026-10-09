@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn execution_policy_generic_over_cancellation_representation() {
         // Any type may fill the cancellation slot — this crate does not
-        // require it to be `verter_scheduler::cancellation::CancellationToken`
+        // require it to be `verter_execution::cancellation::CancellationToken`
         // (which it must not depend on; see the module doc).
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         struct FakeToken(u8);

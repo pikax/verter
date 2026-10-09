@@ -21,10 +21,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use verter_diagnostics::{LintConfig, Linter};
-use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
-use verter_session::{
-    CompileProfile, CompileTarget, FileAnalysisSnapshot, HostConfig, UpsertRequest, VerterHost,
-};
+use verter_session::{CompileProfile, CompileTarget, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalysisFlags;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 struct VueFile {
@@ -318,9 +318,10 @@ fn main() {
 mod tests {
     use super::*;
 
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
+    use verter_session_query::analysis::types::{
         AnalyzedModuleReference, AnalyzedOptionsApi, CssVarManipulation, CssVarManipulationKind,
-        DomQueryCallSite, DomQueryKind, ModuleReferenceAnalyzability, ModuleReferenceSemantics,
+        DomQueryKind, ModuleReferenceAnalyzability, ModuleReferenceSemantics,
         ModuleReferenceSyntax, ScriptBindingOccurrence, ScriptUsageKind, StoreApiClassification,
         StoreDefinition, StoreUsage,
     };

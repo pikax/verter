@@ -10,24 +10,50 @@
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { classifyVerterAnswer, compactProbeRecord, verdict } from "./analyze.mjs";
+import { classifyVerterAnswer, compactProbeRecord, parseCli, verdict } from "./analyze.mjs";
 import { canonicalDigest, canonicalType } from "./canonical.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "./measure-expected.mjs";
-import { sha256Text, toolchainPin } from "./provenance.mjs";
+import { buildProblems, sha256Text, toolchainPin } from "./provenance.mjs";
 import { interpretMeasurement } from "./reference.mjs";
+import { renderMarkdown } from "./report.mjs";
 import {
+  LIB_FILE,
   sameArchitecture,
   schedule,
   scheduleBalanceProblems,
   tuningEnvironment,
   ROOT,
+  TIER_DEFAULTS,
 } from "./run.mjs";
-import { allScenarios, cliSource, moduleText, SETTINGS, tsconfigText } from "./scenarios.mjs";
+import {
+  allScenarios,
+  cliSource,
+  moduleText,
+  scenariosForTier,
+  SETTINGS,
+  TIERS,
+  tsconfigText,
+} from "./scenarios.mjs";
+import {
+  classifyMeta,
+  requiredStateComparison,
+  sessionArmsOf,
+  sessionInputs,
+} from "./session-analyze.mjs";
+import {
+  allSessions,
+  INCREMENTAL_FACILITY,
+  SESSION_TIERS,
+  sessionProblems,
+  sessionsFor,
+  tscFiles,
+} from "./sessions.mjs";
 import { summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
@@ -530,6 +556,10 @@ const PACKAGES = [
 const MEM_MB = 64;
 const PIN = toolchainPin(ROOT);
 const INFRA_MB = 1024;
+const HERE = dirname(fileURLToPath(import.meta.url));
+const LIB_TEXT = readFileSync(LIB_FILE, "utf8");
+const NODE = "node";
+const TSC_SESSION_DRIVER = join(HERE, "tsc-session-probe.mjs");
 
 function supervisorRecord(overrides = {}) {
   return {
@@ -686,7 +716,9 @@ function syntheticRun({
     arm: p.arm,
     rep: p.rep,
     warmup: p.warmup,
-    command: [p.arm === "verter" ? "/bin/probe" : "node"],
+    command: [
+      p.arm === "verter" ? "/bin/probe" : p.arm === "verter-observe" ? "/bin/observe" : "node",
+    ],
     supervisorOut: `/nonexistent/${index}.sup.json`,
     supervisorExit: 0,
     supervisor: supervisorRecord(),
@@ -698,7 +730,7 @@ function syntheticRun({
       { phase: "done", atMs: 1020 },
     ],
     probe: withWarm(
-      p.arm === "verter" ? verterProbe(verterText, p.arm) : tscProbe(tscText),
+      p.arm === "tsc-api" ? tscProbe(tscText) : verterProbe(verterText, p.arm),
       !p.warmup && p.rep === 0,
     ),
   }));
@@ -708,7 +740,10 @@ function syntheticRun({
     env: { CARGO_INCREMENTAL: "0", RUSTC: "/rust/rustc", RUSTUP_TOOLCHAIN: PIN },
     toolchainPin: PIN,
     rustc: `rustc ${PIN}\nrelease: ${PIN}\nhost: x86_64-pc-windows-msvc`,
-    environment: { names: ["CARGO_INCREMENTAL", "PATH", "RUSTC"], valuesSha256: "b" },
+    environment: {
+      names: ["CARGO_INCREMENTAL", "PATH", "RUSTC"],
+      valuesSha256: sha256Text("build environment"),
+    },
     packages: Object.fromEntries(
       PACKAGES.map((p) => [
         p,
@@ -721,10 +756,10 @@ function syntheticRun({
     meta: {
       options,
       plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
-      host: { arch: "x64" },
+      host: { arch: "x64", nodeExe: NODE },
       tuning: {},
       environment: {
-        runtime: { names: ["PATH", "SystemRoot"], valuesSha256: "e" },
+        runtime: { names: ["PATH", "SystemRoot"], valuesSha256: sha256Text("runtime environment") },
         inherited: false,
       },
       tree: { head: "h", diffSha256: "d", untrackedSha256: "u" },
@@ -749,6 +784,7 @@ function syntheticRun({
           identity: {
             debugAssertions: false,
             instrumented: false,
+            captureAvailable: false,
             targetArch: "x86_64",
             nativeArch: "x86_64",
           },
@@ -844,6 +880,16 @@ test("--no-demand records an empty demand section, and only then may it be empty
   const none = syntheticRun({ arms: [] });
   Object.assign(none.meta.options, { noDemand: true });
   failsWith(resummarize(none), /no other section/);
+  // The selected sessions schedule no invocation either; that is not a missing record.
+  const sessions = syntheticRun({ arms: [] });
+  Object.assign(sessions.meta.options, {
+    noDemand: true,
+    oss: [],
+    only: ["synthetic", "incremental-edits"],
+  });
+  addSessions(sessions, sessionsFor("quick", TIERS, sessions.meta.options.only));
+  assert.equal(sessions.sessionInvocations.length, 0);
+  assert.deepEqual(validate(resummarize(sessions)).failures, []);
 });
 
 test("a wrong tsc answer against the measured reference fails validation", () => {
@@ -1411,4 +1457,823 @@ test("the timer resolution is calibrated: a coarse clock by its quantum, a fine 
   for (const inv of none.invocations.filter((i) => i.arm === "tsc-api"))
     delete inv.probe.calibration;
   assert.equal(timerResolution(none).clock, "uncalibrated");
+});
+
+test("finalized infer declarations credit equivalent conditional union answers", () => {
+  const single = "T extends [infer X] ? X : never";
+  const union = `(${single}) | (T extends [infer Y] ? Y : never)`;
+  assert.equal(canonicalType(union), canonicalType(single));
+  const measured = interpretMeasurement({ printed: `[(${union})]`, codes: [] });
+  assert.equal(classifyVerterAnswer(ANSWER(single), { reference: measured }).class, "matched");
+  assert.equal(classifyVerterAnswer(ANSWER(union), { reference: REF(single) }).class, "matched");
+  assert.notEqual(canonicalType(union), canonicalType("T extends [infer X] ? [X] : never"));
+  assert.throws(
+    () => canonicalType("T extends [infer X] | [infer Y] ? [X, Y] : never"),
+    /ambiguous/,
+  );
+});
+
+function cliFixture(arm = "tsc-cli") {
+  const run = syntheticRun();
+  run.meta.options.arms = [arm];
+  const plan = schedule(["synthetic/strict"], [arm], 2, 1);
+  run.meta.plan = plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`);
+  run.invocations = plan.map((p, index) => ({
+    index,
+    scenario: "synthetic",
+    setting: "strict",
+    arm,
+    rep: p.rep,
+    warmup: p.warmup,
+    command: [
+      run.meta.typescript.exe,
+      "-p",
+      "/x/synthetic/strict/cli/tsconfig.json",
+      "--extendedDiagnostics",
+      ...(arm === "tsc-cli-1" ? ["--singleThreaded"] : []),
+    ],
+    supervisor: supervisorRecord({
+      backend: "windows-job-object",
+      peakMetric: "job-peak-commit-charge",
+    }),
+    supervisorExit: 0,
+    cliStdout: "Check time: 1.00s\nTotal time: 1.00s\n",
+  }));
+  return resummarize(run);
+}
+
+test("CLI provenance binds the executable, project and thread mode even for killed children", () => {
+  for (const arm of ["tsc-cli", "tsc-cli-1"]) {
+    assert.deepEqual(validate(cliFixture(arm)).failures, []);
+    // The project path spelled with either separator is the same project:
+    // records reach validation from workers of either platform.
+    const backslashed = cliFixture(arm);
+    for (const inv of backslashed.invocations)
+      inv.command = inv.command.map((a) => a.replace(/\//g, "\\"));
+    assert.deepEqual(validate(backslashed).failures, []);
+    for (const command of [
+      ["/other/tsc", "-p", "/x/synthetic/strict/cli/tsconfig.json", "--extendedDiagnostics"],
+      ["/tsc/tsc", "-p", "/other/tsconfig.json", "--extendedDiagnostics"],
+      [
+        "/tsc/tsc",
+        "-p",
+        "/x/synthetic/strict/cli/tsconfig.json",
+        "--extendedDiagnostics",
+        ...(arm === "tsc-cli" ? ["--singleThreaded"] : []),
+      ],
+    ]) {
+      const run = cliFixture(arm);
+      run.invocations[0].command = command;
+      failsWith(run, /CLI command/);
+      run.invocations[0].supervisor = supervisorRecord({
+        killedBy: "memory",
+        exitCode: null,
+        backend: "linux-cgroup-v2",
+      });
+      run.invocations[0].supervisorExit = 137;
+      failsWith(resummarize(run), /CLI command/);
+    }
+  }
+});
+
+test("CLI engine memory refuses cgroup and unknown accounting without losing answers", () => {
+  const own = cliFixture();
+  assert.equal(own.summary.cells[0].arms["tsc-cli"].peakBytes.n, 2);
+  for (const overrides of [
+    { backend: "linux-cgroup-v2", peakMetric: "cgroup-memory.peak" },
+    { backend: "windows-job-object", peakMetric: "cgroup-memory.peak" },
+    { backend: "unknown" },
+  ]) {
+    const run = cliFixture();
+    for (const inv of run.invocations)
+      Object.assign(inv.supervisor, overrides, { peakBytes: 1e12 });
+    resummarize(run);
+    assert.deepEqual(validate(run).failures, []);
+    const cell = run.summary.cells[0].arms["tsc-cli"];
+    assert.equal(cell.peakBytes, null);
+    assert.equal(cell.peakMetric, null);
+    assert.equal(cell.status, "completed");
+    assert.equal(cell.memoryUnavailable, "supervisor accounting is not attributable to the engine");
+  }
+  // A partially attributable cell is refused as a whole: the statistic would
+  // span an unknown subset of the cell's completed invocations, and a budget
+  // verdict over that subset is not the cell's either.
+  for (const last of [true, false]) {
+    const run = cliFixture();
+    const measured = run.invocations.filter((i) => !i.warmup);
+    const attributable = measured[last ? 0 : 1];
+    attributable.supervisor.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+    Object.assign(measured[last ? 1 : 0].supervisor, {
+      backend: "linux-cgroup-v2",
+      peakMetric: "cgroup-memory.peak",
+      peakBytes: 1e12,
+    });
+    resummarize(run);
+    assert.deepEqual(validate(run).failures, []);
+    const cell = run.summary.cells[0].arms["tsc-cli"];
+    assert.equal(cell.peakBytes, null);
+    assert.equal(cell.peakMetric, null);
+    assert.equal(cell.status, "completed");
+    assert.equal(cell.memoryUnavailable, "supervisor accounting is not attributable to the engine");
+  }
+  // The published side of the same gate: a fully attributable cell whose
+  // engine passed its memory budget carries the verdict, not a refusal.
+  const over = cliFixture();
+  for (const inv of over.invocations) inv.supervisor.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+  resummarize(over);
+  assert.deepEqual(validate(over).failures, []);
+  const verdict = over.summary.cells[0].arms["tsc-cli"];
+  assert.equal(verdict.status, "over the engine budget");
+  assert.equal(verdict.memoryUnavailable, null);
+  assert.equal(verdict.peakBytes.n, 2);
+  assert.equal(verdict.peakMetric, "job-peak-commit-charge");
+});
+
+test("CLI diagnostics beyond one MiB survive storage and raw verification", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-cli-full-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const text =
+    "padding\n".repeat(80000) +
+    "scenario.ts(1,1): error TS2589: deep\n" +
+    "padding\n".repeat(80000) +
+    "Check time: 1.00s\nTotal time: 1.00s\n";
+  const run = cliFixture();
+  const inv = run.invocations[0];
+  inv.supervisorOut = join(dir, "cli.sup.json");
+  inv.supervisor.stdoutPath = join(dir, "stdout.log");
+  inv.cliStdout = text;
+  writeFileSync(inv.supervisorOut, JSON.stringify(inv.supervisor));
+  writeFileSync(inv.supervisor.stdoutPath, text);
+  run.invocations = [inv];
+  assert.deepEqual(rawFileProblems(run), []);
+  assert.deepEqual(parseCli(inv.cliStdout).codes, [2589]);
+  writeFileSync(inv.supervisor.stdoutPath, text.replace("TS2589", "TS2590"));
+  assert.ok(rawFileProblems(run).some((p) => /whole-program stdout/.test(p)));
+});
+
+test("environment receipts require SHA-256 digests in tuned and constructed runs", () => {
+  for (const allowTuning of [false, true]) {
+    for (const path of ["runtime", "build"]) {
+      for (const bad of [
+        "",
+        "x".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        ["a".repeat(64)],
+        null,
+      ]) {
+        const run = syntheticRun();
+        run.meta.options.allowTuning = allowTuning;
+        run.meta.environment.inherited = allowTuning;
+        const receipt =
+          path === "runtime" ? run.meta.environment.runtime : run.meta.build.environment;
+        receipt.valuesSha256 = bad;
+        failsWith(run, /environment receipts/);
+      }
+    }
+  }
+});
+
+test("the real quick catalog and invocation manifest validate and reject a missing cell", () => {
+  const scenarios = scenariosForTier("quick");
+  assert.ok(scenarios.length > 0);
+  const run = withObserveBuild(syntheticRun());
+  Object.assign(run.meta.options, TIER_DEFAULTS.quick);
+  run.meta.options.only = [];
+  const keys = scenarios.map((s) => `${s.id}/strict`);
+  const plan = schedule(
+    keys,
+    run.meta.options.arms,
+    run.meta.options.repeat,
+    run.meta.options.warmup,
+  );
+  run.meta.plan = plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`);
+  const expected = structuredClone(EXPECTED);
+  expected.scenarios = {};
+  run.meta.scenarios = {};
+  for (const s of scenarios) {
+    const dir = `/quick/${s.id}/strict`;
+    run.meta.scenarios[`${s.id}/strict`] = {
+      id: s.id,
+      setting: "strict",
+      dir,
+      inputs: {
+        ...INPUTS,
+        "scenario.ts": sha256Text(s.source),
+        "cli/scenario.ts": sha256Text(cliSource(s)),
+      },
+    };
+    expected.scenarios[s.id] = {
+      sourceSha256: sha256Text(s.source),
+      settings: {
+        strict: {
+          ...RAW_ONE,
+          receipt: { ...RAW_ONE.receipt, sourceSha256: sha256Text(s.source + MEASURING_SUFFIX) },
+        },
+      },
+    };
+  }
+  run.invocations = plan.map((p, index) => {
+    const [scenario, setting] = p.key.split("/");
+    const warm = !p.warmup && p.rep === 0;
+    const probe = p.arm === "tsc-api" ? tscProbe("1") : verterProbe("1", p.arm);
+    probe.probes[0].warm = warm
+      ? Array.from({ length: run.meta.options.warmRepeats }, () =>
+          structuredClone(probe.probes[0].warm[0]),
+        )
+      : [];
+    if (p.arm === "tsc-api")
+      probe.rootFiles = [
+        join(run.meta.scenarios[p.key].dir, "lib.bench.d.ts"),
+        join(run.meta.scenarios[p.key].dir, "scenario.ts"),
+      ];
+    const fixture = syntheticRun().invocations.find(
+      (i) => i.arm === (p.arm === "tsc-api" ? "tsc-api" : "verter"),
+    );
+    return {
+      ...fixture,
+      supervisor: supervisorRecord({
+        timeoutMs: run.meta.options.timeoutMs + run.meta.options.startupAllowanceMs,
+      }),
+      index,
+      scenario,
+      setting,
+      arm: p.arm,
+      rep: p.rep,
+      warmup: p.warmup,
+      probe,
+      command: [
+        {
+          "verter-counted": "/bin/counted",
+          "verter-observe": "/bin/observe",
+          "tsc-api": "node",
+        }[p.arm] ?? "/bin/probe",
+      ],
+    };
+  });
+  addSessions(run, sessionsFor("quick", TIERS, []));
+  run.summary = summarize(run, expected, scenarios);
+  assert.deepEqual(validateRun(run, expected, scenarios).failures, []);
+  // AC: the quick tier holds the INCREMENTAL, EDITOR SESSION and CONCURRENT
+  // workloads with answers validated, a Capacity row per cell, and the
+  // observe build's comparison.
+  assert.deepEqual(run.summary.sessions.cells.map((c) => c.family).sort(), [
+    "concurrent",
+    "editor",
+    "incremental",
+  ]);
+  for (const cell of run.summary.sessions.cells) {
+    assert.equal(cell.arms.verter.class, "matched", cell.key);
+    assert.equal(cell.arms["verter-observe"].class, "matched", cell.key);
+    assert.equal(cell.arms["tsc-api"].class, "reference", cell.key);
+    assert.equal(cell.requiredState.state, "identical", cell.key);
+  }
+  assert.equal(run.summary.cells.length, scenarios.length);
+  for (const cell of run.summary.cells) {
+    assert.ok(cell.capacity?.verter && cell.capacity?.tscApi, `${cell.key} has a capacity row`);
+    assert.equal(cell.observeBuild?.requiredState?.state, "identical", cell.key);
+  }
+  const report = renderMarkdown({ ...run, validation: { ok: true, failures: [], warnings: [] } });
+  for (const section of ["## Session workloads", "## Capacity", "## Observe build"])
+    assert.ok(report.includes(section), `the report has ${section}`);
+  // Program roots spelled with the platform's separators are the same
+  // program: the probe normalises to forward slashes, and validation must
+  // not depend on which spelling a record carries.
+  for (const inv of run.invocations)
+    if (Array.isArray(inv.probe?.rootFiles))
+      inv.probe.rootFiles = inv.probe.rootFiles.map((f) => f.replace(/\//g, "\\"));
+  assert.deepEqual(validateRun(run, expected, scenarios).failures, []);
+  delete run.meta.scenarios[keys[0]];
+  assert.ok(
+    validateRun(run, expected, scenarios).failures.some((f) => /recorded scenarios/.test(f)),
+  );
+});
+
+// ---------------------------------------------------------------- session workloads
+
+const verterObservation = (text) => ({
+  text,
+  error: null,
+  shape: "union",
+  unionMembers: null,
+  unknownLeaves: 0,
+  unknownSamples: [],
+  conditionalNodes: 0,
+});
+const RETENTION = {
+  semanticNodes: 5,
+  semanticMemoEntries: 4,
+  unionViews: 1,
+  shapeCacheEntries: 0,
+  activeBytes: 0,
+  retainedBytes: 100,
+  pinnedBytes: 0,
+  peakTotalBytes: 120,
+};
+const isConcurrent = (step) => Boolean(step.concurrent && step.requests.length > 1);
+
+/** A Verter session record answering `session`'s script with its constructed answers (or `answers[step/request]`). */
+function verterSessionRecord(session, { arm = "verter", answers = {} } = {}) {
+  return {
+    schema: 1,
+    tool: "verter",
+    kind: "session",
+    observability: false,
+    captureAvailable: arm === "verter-observe",
+    stage: "complete",
+    pid: 1,
+    phases: { engineStart: 10, setup: 100, init: 50 },
+    initOutcome: { kind: "value" },
+    steps: session.steps.map((step, s) => {
+      if (step.kind === "edit")
+        return {
+          kind: "edit",
+          file: step.file,
+          textSha256: sha256Text(step.text),
+          micros: 20,
+        };
+      if (step.kind === "meta")
+        return {
+          kind: "meta",
+          file: step.file,
+          micros: 30,
+          outcome: { kind: "value" },
+          surface: structuredClone(step.expect),
+        };
+      return {
+        kind: "demand",
+        concurrent: isConcurrent(step),
+        threads: isConcurrent(step) ? step.requests.length : 1,
+        wallMicros: 100,
+        requests: step.requests.map((r, k) => ({
+          file: r.file,
+          alias: r.alias,
+          micros: 50,
+          outcome: { kind: "value" },
+          observation: verterObservation(answers[`${s}/${k}`] ?? r.expect),
+        })),
+      };
+    }),
+    afterSteps: {
+      pid: 1,
+      metric: "private-commit",
+      peakBytes: 2000,
+      currentBytes: 1500,
+      cpuMicros: 1,
+    },
+    statsErrors: [],
+    retention: { ...RETENTION },
+  };
+}
+
+/** A tsc session record: answers, and the API snapshot evidence of program reuse. */
+function tscSessionRecord(session, projectDir, { answers = {} } = {}) {
+  let snapshot = 1;
+  return {
+    schema: 1,
+    tool: "tsc",
+    kind: "session",
+    stage: "complete",
+    incremental: INCREMENTAL_FACILITY,
+    tscExe: "/tsc/tsc",
+    statsExe: "/bin/probe",
+    serverPid: 2,
+    rootFiles: ["lib.bench.d.ts", ...tscFiles(session)].map((f) => `${projectDir}/${f}`),
+    phases: { spawnMs: 1, setupMs: 2, setupRoundTripMs: 3, initMs: 1, initRoundTripMs: 2 },
+    initOutcome: { kind: "value" },
+    steps: session.steps.map((step, s) => {
+      if (step.kind === "meta") return { kind: "meta", file: step.file, applicable: false };
+      if (step.kind === "edit")
+        return {
+          kind: "edit",
+          file: step.file,
+          textSha256: sha256Text(step.text),
+          serverMs: 0.3,
+          roundTripMs: 1,
+          snapshot: ++snapshot,
+          fileChanges: { changed: [`${projectDir}/${step.file}`] },
+        };
+      return {
+        kind: "demand",
+        concurrent: isConcurrent(step),
+        threads: isConcurrent(step) ? step.requests.length : 1,
+        basis: isConcurrent(step) ? "round-trip" : "server",
+        wallMs: 2,
+        requests: step.requests.map((r, k) => ({
+          file: r.file,
+          alias: r.alias,
+          serverMs: isConcurrent(step) ? null : 1,
+          outcome: { kind: "value" },
+          observation: {
+            text: answers[`${s}/${k}`] ?? r.expect,
+            error: null,
+            errorType: false,
+            unionMembers: null,
+          },
+        })),
+      };
+    }),
+    serverAfterSteps: {
+      pid: 2,
+      metric: "private-commit",
+      peakBytes: 3000,
+      currentBytes: 2500,
+      cpuMicros: 1,
+    },
+    statsErrors: [],
+  };
+}
+
+/** Add `sessions`' records to `run` in its counterbalanced session plan. */
+function addSessions(run, sessions) {
+  const o = run.meta.options;
+  run.meta.sessions = Object.fromEntries(
+    sessions.map((session) => [
+      session.id,
+      {
+        id: session.id,
+        family: session.family,
+        note: session.note,
+        dir: `/s/${session.id}`,
+        inputs: sessionInputs(session, LIB_TEXT),
+      },
+    ]),
+  );
+  const plan = schedule(
+    sessions.map((x) => x.id),
+    sessionArmsOf(o.arms),
+    o.repeat,
+    o.warmup,
+  );
+  run.meta.sessionPlan = plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`);
+  const byId = new Map(sessions.map((x) => [x.id, x]));
+  run.sessionInvocations = plan.map((p, index) => {
+    const session = byId.get(p.key);
+    const projectDir = `/s/${p.key}/${p.arm}/${p.warmup ? "w" : "r"}${p.rep}/project`;
+    const sessionOut = `/nonexistent/s${index}.session.json`;
+    return {
+      index,
+      sessionId: p.key,
+      arm: p.arm,
+      rep: p.rep,
+      warmup: p.warmup,
+      command:
+        p.arm === "tsc-api"
+          ? [
+              NODE,
+              TSC_SESSION_DRIVER,
+              "--job",
+              `/nonexistent/s${index}.job.json`,
+              "--out",
+              sessionOut,
+            ]
+          : [p.arm === "verter-observe" ? "/bin/observe" : "/bin/probe", "session"],
+      projectDir,
+      supervisorOut: `/nonexistent/s${index}.sup.json`,
+      supervisorExit: 0,
+      supervisor: supervisorRecord({ timeoutMs: o.timeoutMs + o.startupAllowanceMs }),
+      sessionOut,
+      spawnedAtMs: 1000,
+      phase: "done",
+      phaseHistory: [{ phase: "done", atMs: 1010 }],
+      session:
+        p.arm === "tsc-api"
+          ? tscSessionRecord(session, projectDir)
+          : verterSessionRecord(session, { arm: p.arm }),
+    };
+  });
+  return run;
+}
+
+/** The run's observe build: the probe with semantic-observe compiled in. */
+function withObserveBuild(run) {
+  run.meta.binaries.observe = {
+    sha256: "o",
+    pinned: "/bin/observe",
+    identity: {
+      debugAssertions: false,
+      instrumented: false,
+      captureAvailable: true,
+      targetArch: "x86_64",
+      nativeArch: "x86_64",
+    },
+  };
+  run.meta.binariesAfter.observe = "o";
+  const packages = structuredClone(run.meta.build.packages);
+  packages.verter_bench.features = ["attribution", "currency_probe", "hotpath", "semantic-observe"];
+  packages.verter_audit.features = ["attribution", "semantic-observe"];
+  run.meta.observeBuild = { ...run.meta.build, observe: true, packages };
+  return run;
+}
+
+/** A synthetic run with the incremental session (verter and tsc-api arms). */
+function sessionRun() {
+  const run = syntheticRun();
+  run.meta.options.only = ["synthetic", "incremental-edits"];
+  addSessions(run, sessionsFor("quick", TIERS, run.meta.options.only));
+  return resummarize(run);
+}
+
+/** A synthetic run whose session runs the production and the observe build. */
+function observeSessionRun() {
+  const run = withObserveBuild(syntheticRun({ arms: ["verter", "verter-observe"] }));
+  run.meta.options.only = ["synthetic", "incremental-edits"];
+  addSessions(run, sessionsFor("quick", TIERS, run.meta.options.only));
+  return resummarize(run);
+}
+const INCREMENTAL = allSessions().find((x) => x.id === "incremental-edits");
+
+test("the session catalog is well-formed and its workloads sit in the quick tier", () => {
+  const sessions = allSessions();
+  assert.deepEqual(sessions.map((x) => x.family).sort(), ["concurrent", "editor", "incremental"]);
+  for (const session of sessions) {
+    assert.deepEqual(sessionProblems(session), [], session.id);
+    assert.equal(SESSION_TIERS[session.id], "quick");
+  }
+  // The incremental script edits a leaf, an intermediate type and an
+  // unrelated file, re-requesting after each; the editor session demands
+  // component metadata; the concurrent one issues its demands at once.
+  assert.deepEqual(
+    INCREMENTAL.steps.filter((x) => x.kind === "edit").map((x) => x.file),
+    ["leaf.ts", "mid.ts", "unrelated.ts"],
+  );
+  assert.ok(sessions.find((x) => x.family === "editor").steps.some((x) => x.kind === "meta"));
+  assert.ok(sessions.find((x) => x.family === "concurrent").steps.every((x) => isConcurrent(x)));
+  // A malformed construction is refused.
+  const broken = structuredClone(INCREMENTAL);
+  broken.steps[1].text = broken.files["leaf.ts"];
+  broken.steps[0].requests[0].alias = "__Missing";
+  const problems = sessionProblems(broken);
+  assert.ok(problems.some((p) => /changes nothing/.test(p)));
+  assert.ok(problems.some((p) => /declares __Missing 0 times/.test(p)));
+});
+
+test("a session run validates; tsc contradicting a constructed answer fails it, a wrong Verter answer is a finding", () => {
+  const run = sessionRun();
+  assert.deepEqual(validate(run).failures, []);
+  const cell = run.summary.sessions.cells[0];
+  assert.equal(cell.arms.verter.class, "matched");
+  // Every edit and every re-request after it is compared.
+  assert.deepEqual(
+    cell.comparison.map((c) => `${c.step}:${c.kind}`),
+    ["0:demand", "1:edit", "2:demand", "3:edit", "4:demand", "5:edit", "6:demand"],
+  );
+
+  const noopEdit = sessionRun();
+  const verterInv = noopEdit.sessionInvocations.find((i) => i.arm === "verter");
+  verterInv.session.steps.find((x) => x.file === "unrelated.ts").textSha256 = sha256Text("");
+  assert.ok(validate(noopEdit).failures.some((x) => /installed text other than/.test(x)));
+
+  const wrongTsc = sessionRun();
+  wrongTsc.sessionInvocations.find((i) => i.arm === "tsc-api").session = tscSessionRecord(
+    INCREMENTAL,
+    wrongTsc.sessionInvocations.find((i) => i.arm === "tsc-api").projectDir,
+    { answers: { "2/0": '1 | "m" | "mid0"' } },
+  );
+  failsWith(resummarize(wrongTsc), /wrong answer against the constructed answer/);
+
+  const wrongVerter = sessionRun();
+  for (const inv of wrongVerter.sessionInvocations.filter((i) => i.arm === "verter"))
+    inv.session = verterSessionRecord(INCREMENTAL, { answers: { "2/0": '1 | "m" | "mid0"' } });
+  resummarize(wrongVerter);
+  assert.deepEqual(validate(wrongVerter).failures, []);
+  const verter = wrongVerter.summary.sessions.cells[0].arms.verter;
+  assert.equal(verter.class, "mismatch");
+  assert.equal(verter.demands.find((d) => d.step === 2).class, "mismatch");
+  // The stale answer after the leaf edit is never compared.
+  assert.ok(!wrongVerter.summary.sessions.cells[0].comparison.some((c) => c.step === 2));
+});
+
+test("tsc's incremental arm must reuse the API program: each edit names its file and advances the snapshot", () => {
+  const noReuse = sessionRun();
+  const inv = noReuse.sessionInvocations.find((i) => i.arm === "tsc-api");
+  inv.session.steps[1].fileChanges = { invalidateAll: true };
+  failsWith(noReuse, /did not name the edited file/);
+
+  const stale = sessionRun();
+  const staleInv = stale.sessionInvocations.find((i) => i.arm === "tsc-api");
+  staleInv.session.steps[3].snapshot = staleInv.session.steps[1].snapshot;
+  failsWith(stale, /did not advance the API snapshot/);
+
+  const other = sessionRun();
+  other.sessionInvocations.find((i) => i.arm === "tsc-api").session.incremental = "fresh-program";
+  failsWith(other, /incremental facility/);
+});
+
+test("session records must follow the script, and the stored session summary must match them", () => {
+  const skipped = sessionRun();
+  skipped.sessionInvocations.find((i) => i.arm === "verter").session.steps.pop();
+  failsWith(resummarize(skipped), /steps recorded, the script has/);
+
+  const missing = sessionRun();
+  missing.sessionInvocations.pop();
+  failsWith(missing, /missing session record/);
+
+  const claimed = sessionRun();
+  for (const inv of claimed.sessionInvocations.filter((i) => i.arm === "verter"))
+    inv.session = verterSessionRecord(INCREMENTAL, { answers: { "0/0": "never" } });
+  // The stored summary still claims the match.
+  failsWith(claimed, /stored session summary disagrees/);
+
+  const observe = sessionRun();
+  observe.sessionInvocations.find((i) => i.arm === "verter").session.captureAvailable = true;
+  failsWith(observe, /capture availability/);
+});
+
+test("a session's engine statistics must be of the process the run measured", () => {
+  const verter = sessionRun();
+  verter.sessionInvocations.find((i) => i.arm === "verter").session.afterSteps.pid = 777;
+  failsWith(verter, /statistics are not of the session's own process/);
+
+  const tsc = sessionRun();
+  tsc.sessionInvocations.find((i) => i.arm === "tsc-api").session.serverAfterSteps.pid = 777;
+  failsWith(tsc, /statistics are not of the session's own process/);
+
+  const noPid = sessionRun();
+  noPid.sessionInvocations.find((i) => i.arm === "verter").session.pid = 12.5;
+  failsWith(noPid, /statistics are not of the session's own process/);
+});
+
+test("the tsc session arm's provenance is bound to the command that ran it", () => {
+  const otherNode = sessionRun();
+  otherNode.sessionInvocations.find((i) => i.arm === "tsc-api").command[0] = "/other/node";
+  failsWith(otherNode, /not the harness's node on its own tsc session driver/);
+
+  const otherDriver = sessionRun();
+  otherDriver.sessionInvocations.find((i) => i.arm === "tsc-api").command[1] =
+    "/elsewhere/driver.mjs";
+  failsWith(otherDriver, /not the harness's node on its own tsc session driver/);
+
+  const otherJob = sessionRun();
+  otherJob.sessionInvocations.find((i) => i.arm === "tsc-api").command[3] = "/other/job.json";
+  failsWith(otherJob, /not the harness's node on its own tsc session driver/);
+
+  const otherTsc = sessionRun();
+  otherTsc.sessionInvocations.find((i) => i.arm === "tsc-api").session.tscExe = "/WHATEVER/tsc";
+  failsWith(otherTsc, /not the verified tsc/);
+
+  const otherStats = sessionRun();
+  otherStats.sessionInvocations.find((i) => i.arm === "tsc-api").session.statsExe =
+    "/bin/other-stats";
+  failsWith(otherStats, /not the pinned probe/);
+});
+
+test("a session's recorded inputs must be the catalog's, the benchmark library's included", () => {
+  const run = sessionRun();
+  const id = Object.keys(run.meta.sessions)[0];
+  run.meta.sessions[id].inputs["lib.bench.d.ts"] = sha256Text("TOTALLY-DIFFERENT-LIB");
+  failsWith(run, /the library is not the benchmark's/);
+});
+
+test("the observe arm must retain the production build's REQUIRED state", () => {
+  const run = observeSessionRun();
+  assert.deepEqual(validate(run).failures, []);
+  assert.equal(run.summary.sessions.cells[0].requiredState.state, "identical");
+
+  const differs = observeSessionRun();
+  for (const inv of differs.sessionInvocations.filter(
+    (i) => i.arm === "verter-observe" && !i.warmup,
+  ))
+    inv.session.retention.retainedBytes = 999999;
+  failsWith(resummarize(differs), /REQUIRED state differs/);
+
+  // An arm with no completed measured invocation leaves nothing to compare:
+  // reported n/a and warned, never a silent pass.
+  const none = observeSessionRun();
+  for (const inv of none.sessionInvocations.filter(
+    (i) => i.arm === "verter-observe" && !i.warmup,
+  )) {
+    inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+    inv.session = null;
+    inv.phase = "step-1";
+  }
+  resummarize(none);
+  const checked = validate(none);
+  assert.deepEqual(checked.failures, []);
+  assert.equal(none.summary.sessions.cells[0].requiredState.state, "n/a");
+  assert.ok(checked.warnings.some((w) => /REQUIRED-state comparison is n\/a/.test(w)));
+});
+
+test("a session killed after writing its complete record keeps its measurement; a kill inside a step is the engine's", () => {
+  const killed = sessionRun();
+  const inv = killed.sessionInvocations.find((i) => i.arm === "verter" && !i.warmup);
+  inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+  inv.supervisorExit = 137;
+  inv.phase = "stats";
+  resummarize(killed);
+  assert.deepEqual(validate(killed).failures, []);
+  const arm = killed.summary.sessions.cells[0].arms.verter;
+  assert.equal(arm.class, "matched");
+  assert.equal(arm.completedMeasured, 2);
+  assert.equal(arm.metrics.peakBytes.median, 2000);
+  assert.ok(arm.ends.includes("observe-killed"));
+
+  const mid = sessionRun();
+  const midInv = mid.sessionInvocations.find((i) => i.arm === "verter" && !i.warmup);
+  midInv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    backend: "windows-job-object",
+    killTriggerBytes: MEM_MB * 1024 * 1024,
+  });
+  midInv.supervisorExit = 137;
+  midInv.phase = "step-1";
+  midInv.session = null;
+  resummarize(mid);
+  assert.deepEqual(validate(mid).failures, []);
+  assert.equal(mid.summary.sessions.cells[0].arms.verter.class, "killed");
+});
+
+test("a component's metadata is matched only on equal prop names, required flags and events", () => {
+  const expect = {
+    props: [
+      { name: "items", required: true },
+      { name: "size", required: false },
+    ],
+    events: ["focus"],
+  };
+  const step = (surface) => ({ kind: "meta", outcome: { kind: "value" }, surface });
+  assert.equal(classifyMeta(step(structuredClone(expect)), expect).class, "matched");
+  const reordered = { props: [...expect.props].reverse(), events: ["focus"] };
+  assert.equal(classifyMeta(step(reordered), expect).class, "matched");
+  const required = structuredClone(expect);
+  required.props[1].required = true;
+  assert.equal(classifyMeta(step(required), expect).class, "mismatch");
+  assert.equal(classifyMeta(step({ ...expect, events: [] }), expect).class, "mismatch");
+  assert.equal(
+    classifyMeta({ kind: "meta", outcome: { kind: "fault", detail: "x" } }, expect).class,
+    "error",
+  );
+});
+
+test("the observe arm's build carries semantic-observe, the production probe never does, and both retain one REQUIRED state", () => {
+  const run = withObserveBuild(syntheticRun());
+  assert.deepEqual(buildProblems(run.meta.observeBuild), []);
+  // The gate itself is required of the observe build ...
+  const gateless = structuredClone(run.meta.observeBuild);
+  gateless.packages.verter_bench.features = ["attribution"];
+  assert.ok(buildProblems(gateless).some((p) => /lacks semantic-observe/.test(p)));
+  // ... and refused in the production build.
+  const production = structuredClone(run.meta.build);
+  production.packages.verter_audit.features = ["semantic-observe"];
+  assert.ok(buildProblems(production).some((p) => /semantic-observe/.test(p)));
+  const captured = syntheticRun();
+  captured.meta.binaries.probe.identity.captureAvailable = true;
+  failsWith(captured, /capture compiled in/);
+
+  const a = { ...RETENTION };
+  assert.equal(requiredStateComparison([a, a], [{ ...a }]).state, "identical");
+  // Histories and peaks are optional state: they may differ.
+  assert.equal(requiredStateComparison([a], [{ ...a, peakTotalBytes: 999 }]).state, "identical");
+  const differs = requiredStateComparison([a], [{ ...a, semanticNodes: 6 }]);
+  assert.equal(differs.state, "differs");
+  assert.deepEqual(differs.fields, ["semanticNodes"]);
+  assert.equal(
+    requiredStateComparison([a, { ...a, unionViews: 2 }], [a]).state,
+    "nondeterministic",
+  );
+});
+
+test("the Capacity row reports each arm's outcome, and a kill's tree peak and time to it", () => {
+  const run = syntheticRun();
+  const inv = firstOf(run, "tsc-api");
+  inv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    peakBytes: 9e9,
+    wallMs: 4321,
+    timeoutMs: 1500,
+  });
+  inv.supervisorExit = 137;
+  inv.phase = "cold";
+  inv.probe = null;
+  resummarize(run);
+  const row = run.summary.cells[0].capacity;
+  assert.equal(row.budgetBytes, MEM_MB * 1024 * 1024);
+  assert.equal(row.verter.outcome, "matched");
+  assert.equal(row.tscApi.kills, 1);
+  // A tsc API tree's memory kill is never attributed to the engine.
+  assert.equal(row.tscApi.attributedKills, 0);
+  assert.equal(row.tscApi.peakAtKillBytes.median, 9e9);
+  assert.equal(row.tscApi.timeToKillMs.median, 4321);
+  assert.deepEqual(row.tscApi.killedBy, ["memory"]);
+});
+
+test("a session invocation whose supervisor file is unreadable is reported", () => {
+  const run = {
+    sessionInvocations: [
+      {
+        sessionId: "s",
+        arm: "verter",
+        warmup: false,
+        rep: 0,
+        supervisorOut: join(tmpdir(), "semantic-perf-absent-supervisor.json"),
+        sessionOut: join(tmpdir(), "semantic-perf-absent-session.json"),
+        supervisor: null,
+        session: null,
+      },
+    ],
+    invocations: [],
+  };
+  assert.ok(rawFileProblems(run).some((p) => /cannot read .*absent-supervisor/.test(p)));
 });

@@ -3,6 +3,32 @@
 //! The [`Scheduler`] is the central coordination point. Callers submit
 //! requests via [`submit_request`](Scheduler::submit_request), which returns
 //! a [`CompletionHandle`] that resolves when the target stage is reached.
+//!
+//! # Module layout
+//!
+//! This file is the module root. It owns the public [`Scheduler`] surface,
+//! the state that surface reads, and the module's tests. The implementation
+//! behind that surface is split by responsibility, one submodule each:
+//!
+//! - [`admission`](self::admission) — turning a queued submission into one
+//!   admitted DAG node (single requests and atomic batches).
+//! - [`cancellation`](self::cancellation) — cancellation-token and teardown
+//!   bookkeeping for in-flight work.
+//! - [`completion`](self::completion) — terminal states: completion
+//!   integration, failure fan-out and same-path self-await refusal.
+//! - [`dependencies`](self::dependencies) — dependency gating: blocker
+//!   classification, auto-ingest and macro-cycle filtering.
+//! - [`driver`](self::driver) — the driver thread: dispatch, pool submission
+//!   and stage execution.
+//! - [`identity`](self::identity) — work identity: how a request, task or
+//!   scoped flight becomes a DAG identity.
+//! - [`lifecycle`](self::lifecycle) — construction, invalidation, removal and
+//!   node-incarnation bookkeeping.
+//!
+//! Each submodule re-exports its items through this root, so a module reaches
+//! a sibling's items only through this surface and never through a sibling
+//! path. The submodules are private: the public surface of the crate is the
+//! one this file declares.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -18,24 +44,58 @@ use web_time::Instant;
 use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 
-use crate::cancellation::{CancellationOwner, CancellationToken};
 use crate::dag::{
     profile_hash_from_bytes, profile_hash_to_bytes, DagCapacityBudget, DedupJoinerEvent, DepKey,
     FileStageKey, Hash16, PinId, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
 };
 use crate::driver::{QueuedRequest, Submission, SubmissionInbox};
 use crate::edges::EdgeManager;
-use crate::executor::{DefaultExecutor, StageExecutor};
+use crate::execution::executor::{DefaultExecutor, StageExecutor};
 use crate::job::{
     completion_pair, CompletionHandle, CompletionSender, CompletionState, RequestResult,
 };
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, FileNode, SourceSnapshot};
 use crate::overlay::OverlayMap;
+use verter_execution::cancellation::{CancellationOwner, CancellationToken};
 use verter_language::FileLanguage;
 
 use crate::source_loader::SourceLoader;
 use crate::stage::{Priority, TargetStage, TaskKind};
 
+// The scheduler is split by responsibility: this module root owns the public
+// `Scheduler` surface, the state that surface reads, and the tests; each
+// submodule below owns one responsibility and is re-exported here, so no
+// module reaches into a sibling's items directly.
+mod admission;
+mod cancellation;
+mod completion;
+mod dependencies;
+mod driver;
+mod identity;
+mod lifecycle;
+
+use admission::*;
+use cancellation::*;
+use completion::*;
+use dependencies::*;
+use driver::*;
+use identity::*;
+// `lifecycle`'s only free export is `num_cpus`, which is native-only; gating
+// the glob with it keeps the wasm32 build free of an unused-import warning.
+#[cfg(not(target_arch = "wasm32"))]
+use lifecycle::*;
+
+// Roots only the responsibility modules below name. They are imported here
+// so this module stays the single import surface every submodule resolves
+// its crate-internal and external roots through.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use crate::audit_publish;
+pub(crate) use crate::caller_kind;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use crate::execution::owner_command;
+#[cfg(feature = "hotpath")]
+pub(crate) use hotpath;
+pub(crate) use verter_audit;
 /// Contention instrumentation counters for the scheduler. Owned by
 /// [`Scheduler`]; surfaced via
 /// [`Scheduler::counters`](Scheduler::counters) so host-level provenance
@@ -94,501 +154,6 @@ impl SchedulerConfig {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn num_cpus() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-}
-
-/// Admit a unit of work into the DAG for `(canonical, generation, task)`.
-/// Returns the submission token. Used by every admission site
-/// (`handle_new_request`, stage-completion driven transitions, etc.).
-fn admit_work(
-    dag: &mut SchedulerDag,
-    canonical: &Arc<str>,
-    generation: u64,
-    task: TaskKind,
-    priority: Priority,
-    request_context: Option<crate::request_context::OpaqueRequestContext>,
-) -> Option<crate::dag::SubmissionToken> {
-    let (identity, kind) = match task {
-        // The live `FileStage{Source}` DAG node maps to `Load`; the
-        // load+parse work runs in one source-stage execution path, so
-        // there is no separate `Parse` DAG node admitted here.
-        TaskKind::Load => (
-            WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(canonical),
-                generation,
-                stage: FileStageKey::Source,
-            },
-            WorkKind::Load,
-        ),
-        TaskKind::Analysis => (
-            WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(canonical),
-                generation,
-                stage: FileStageKey::Analysis,
-            },
-            WorkKind::Analysis,
-        ),
-        TaskKind::Artifact { profile_hash } => (
-            WorkNodeIdentity::Artifact {
-                canonical: Arc::clone(canonical),
-                generation,
-                profile_hash: profile_hash_to_bytes(profile_hash),
-                content_hash: [0u8; 16],
-            },
-            WorkKind::Artifact,
-        ),
-        // `Parse` and `CacheNode` have no `TaskKind`-driven file-stage
-        // admission path in the single-`FileStage{Source}`-node model:
-        // `Parse` is intrinsic to the source stage, and cache nodes are
-        // submitted into the DAG directly by the cache layer, never through
-        // `admit_work`.
-        TaskKind::Parse | TaskKind::CacheNode { .. } => {
-            unreachable!(
-                "admit_work is the file-stage admission path (Load/Analysis/Artifact); \
-                 Parse is intrinsic to the source stage and CacheNode is admitted \
-                 directly into the DAG by the cache layer"
-            )
-        }
-    };
-    dag.submit(identity, kind, priority, Vec::new(), request_context)
-}
-
-/// THE single routing point from a dequeued [`ReadyJob`] to the
-/// [`StageExecutor`]. Both the native pump path
-/// ([`Scheduler::dispatch_ready_job`]) and the inline path
-/// ([`Scheduler::execute_stage_inline`]) call this — there is no second
-/// adapter, and the `ReadyJob`'s own `(kind, identity)` is matched ONCE here.
-///
-/// Routing:
-///
-/// - [`WorkNodeIdentity::CacheNode`] → the cache-materialisation hook
-///   [`StageExecutor::execute_cache_node`], handed the full cache identity
-///   (`cache_id` + `key_hash` + `view_epoch` + `snapshot_pin_id`) directly from
-///   the identity plus a cancellation token. The dispatched node's parked
-///   capacity reservation is then released by marking the identity complete —
-///   cache-node identities are never observed as [`DepKey`] prerequisites by
-///   file-stage or artifact nodes, so completing here cannot strand a waiter.
-/// - file-stage / artifact work → the owned [`TaskKind`] execution descriptor
-///   is constructed inline from the same match and the work runs through the
-///   file-stage executor chokepoint [`Scheduler::execute_stage_on_worker`].
-///
-/// File-stage work returns its terminal `StageComplete` (cache-node work
-/// returns `None`); the caller owns delivery so a sole inbox consumer can
-/// drain rather than park on its own full inbox.
-///
-/// `file_node` is the resolved [`FileNode`] for file-stage work (the caller
-/// looks it up and applies the removed-node / generation-mismatch guards
-/// first); it is `None` for cache-node work, which has no file node.
-#[allow(clippy::too_many_arguments)]
-#[must_use = "the terminal StageComplete must be delivered to the inbox"]
-fn dispatch_ready_job_to_executor(
-    job: &ReadyJob,
-    file_node: Option<&FileNode>,
-    generation: u64,
-    failed_blocker_deps: std::collections::BTreeMap<DepKey, crate::dag::FailedDepRecord>,
-    executor: &dyn StageExecutor,
-    source_loader: &dyn SourceLoader,
-    inbox_sender: &crossbeam_channel::Sender<Submission>,
-    dag: Arc<DagMutex>,
-    source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
-    cancellation: &CancellationToken,
-) -> Option<Submission> {
-    let _cancellation_guard =
-        crate::cancellation::JobCancellationGuard::install(cancellation.clone());
-    match (&job.kind, &job.identity) {
-        // Cache-node work routes straight to the cache-materialisation hook,
-        // taking the full identity directly: `cache_id` + `key_hash` ride the
-        // owned `TaskKind::CacheNode` descriptor, while `view_epoch` /
-        // `snapshot_pin_id` ride the identity and are handed to the executor
-        // separately (mirroring how `profile_hash` is passed alongside an
-        // `Artifact` task).
-        (
-            WorkKind::CacheNode,
-            WorkNodeIdentity::CacheNode {
-                cache_id,
-                key_hash,
-                view_epoch,
-                snapshot_pin_id,
-            },
-        ) => {
-            // Run the cache node. The executor's default returns a typed
-            // "unsupported" error (a host that has not opted in fails loudly);
-            // the host override performs the real materialisation. The call is
-            // panic-guarded so the reservation release below always runs — the
-            // capacity class never leaks the permit parked at dispatch, even if
-            // a host override panics.
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                executor.execute_cache_node(
-                    *cache_id,
-                    *key_hash,
-                    *view_epoch,
-                    *snapshot_pin_id,
-                    cancellation,
-                )
-            }));
-            // The outcome decides the terminal. ONLY a clean `Ok(Ok(()))`
-            // completes the node as SUCCESS; a typed `Ok(Err(..))` (the
-            // not-overridden default and any real materialisation failure) and
-            // a panic (`Err(..)`) route through the failure path so the work is
-            // never recorded as if it succeeded. Both terminals release the
-            // parked capacity reservation exactly once (the by-value
-            // `release(self)` consume in `complete`/`cancel`), so the capacity
-            // class never leaks the permit on any arm. Cache-node identities
-            // are never observed as `DepKey` prerequisites, so neither terminal
-            // can strand a file-stage/artifact waiter — `complete` returns no
-            // newly-ready tokens and `cancel` returns no stranded tokens.
-            match outcome {
-                Ok(Ok(())) => {
-                    let newly_ready = dag.lock().complete(&job.identity);
-                    verter_debug_assert!(
-                        newly_ready.is_empty(),
-                        "CacheNode completion must not strand DAG waiters: \
-                         CacheNode identities are not used as DepKey prerequisites",
-                    );
-                }
-                Ok(Err(_stage_error)) => {
-                    // Typed cache-node failure. Cancel the identity to release
-                    // the parked reservation and terminalize the node as
-                    // FAILED — never complete-as-success. This is the same
-                    // mechanism the cache-node submit-failure path uses.
-                    let stranded = dag.lock().cancel(&job.identity);
-                    verter_debug_assert!(
-                        stranded.is_empty(),
-                        "CacheNode failure-cancel must not strand DAG waiters: \
-                         CacheNode identities are not used as DepKey prerequisites",
-                    );
-                }
-                Err(_panic) => {
-                    // The host override panicked. Cancel the identity to
-                    // release the parked reservation and terminalize the node
-                    // as FAILED — the panic must not be silently completed as
-                    // success. The unwind payload is dropped (the panic was
-                    // already reported by the default hook); the scheduler does
-                    // not re-raise on its worker thread.
-                    let stranded = dag.lock().cancel(&job.identity);
-                    verter_debug_assert!(
-                        stranded.is_empty(),
-                        "CacheNode panic-cancel must not strand DAG waiters: \
-                         CacheNode identities are not used as DepKey prerequisites",
-                    );
-                }
-            }
-            None
-        }
-        // File-stage / artifact work. The owned execution descriptor is built
-        // from the same `(kind, identity)` match and handed to the file-stage
-        // executor chokepoint.
-        (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => run_file_stage(
-            TaskKind::Load,
-            job,
-            file_node,
-            generation,
-            failed_blocker_deps,
-            executor,
-            source_loader,
-            inbox_sender,
-            dag,
-            source_root,
-        ),
-        // `Parse` is NEVER admitted as a runnable DAG node: it is a label for
-        // the future CPU split, not a request-target file stage, so `admit_work`
-        // (the file-stage admission path) `unreachable!()`s on `TaskKind::Parse`
-        // and there is no other site that produces a `(WorkKind::Parse,
-        // FileStage)` ready job. Routing it into `run_file_stage` would only
-        // hand it to `execute_stage_on_worker`, whose `TaskKind::Parse` arm
-        // panics anyway — so the invariant is single-sourced here at the router
-        // (no live Parse pipeline exists), and the executor's own
-        // `TaskKind::Parse => unreachable!()` stays as defense-in-depth.
-        (WorkKind::Parse, WorkNodeIdentity::FileStage { .. }) => {
-            unreachable!(
-                "Parse is never admitted as a runnable DAG node — it is a label \
-                 for the future CPU split, not a request-target file stage. \
-                 `admit_work` rejects `TaskKind::Parse` (unreachable!) and no site \
-                 produces a `(WorkKind::Parse, FileStage)` ready job, so the router \
-                 can never observe one.",
-            )
-        }
-        (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => run_file_stage(
-            TaskKind::Analysis,
-            job,
-            file_node,
-            generation,
-            failed_blocker_deps,
-            executor,
-            source_loader,
-            inbox_sender,
-            dag,
-            source_root,
-        ),
-        (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => run_file_stage(
-            TaskKind::Artifact {
-                profile_hash: profile_hash_from_bytes(*profile_hash),
-            },
-            job,
-            file_node,
-            generation,
-            failed_blocker_deps,
-            executor,
-            source_loader,
-            inbox_sender,
-            dag,
-            source_root,
-        ),
-        // The DAG's admission paths only produce the `(kind, identity)`
-        // pairings handled above; any other combination is a corrupt ready
-        // job (e.g. a `Load` kind on an `Artifact` identity), which the
-        // admission layer makes unrepresentable.
-        (kind, identity) => unreachable!(
-            "ready job carries an inconsistent (kind, identity) pairing: \
-             {kind:?} / {identity:?}",
-        ),
-    }
-}
-
-/// Run a file-stage [`ReadyJob`] through the file-stage executor chokepoint.
-///
-/// Factored out of [`dispatch_ready_job_to_executor`] so each file-stage arm
-/// shares the node-presence assertion and the single call into
-/// [`Scheduler::execute_stage_on_worker`]. Cache-node work never reaches here.
-#[allow(clippy::too_many_arguments)]
-#[must_use = "the terminal StageComplete must be delivered to the inbox"]
-fn run_file_stage(
-    task_kind: TaskKind,
-    job: &ReadyJob,
-    file_node: Option<&FileNode>,
-    generation: u64,
-    failed_blocker_deps: std::collections::BTreeMap<DepKey, crate::dag::FailedDepRecord>,
-    executor: &dyn StageExecutor,
-    source_loader: &dyn SourceLoader,
-    inbox_sender: &crossbeam_channel::Sender<Submission>,
-    dag: Arc<DagMutex>,
-    source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
-) -> Option<Submission> {
-    let node = file_node.unwrap_or_else(|| {
-        unreachable!(
-            "file-stage dispatch ({:?}) requires a resolved FileNode; the caller \
-             looks the node up and applies the removed-node / generation guards \
-             before routing",
-            job.kind,
-        )
-    });
-    Scheduler::execute_stage_on_worker(
-        node,
-        generation,
-        &task_kind,
-        failed_blocker_deps,
-        executor,
-        source_loader,
-        inbox_sender,
-        dag,
-        source_root,
-    )
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn should_join_driver_thread(
-    handle_thread_id: std::thread::ThreadId,
-    current_thread_id: std::thread::ThreadId,
-) -> bool {
-    handle_thread_id != current_thread_id
-}
-
-/// What ended the native driver's park.
-///
-/// The park watches three things at once, so the outcome is named rather
-/// than inferred from a channel error: a teardown signal delivered on the
-/// driver's own private channel, a submission from the shared inbox, a
-/// closed inbox, or the idle re-pump deadline.
-#[cfg(not(target_arch = "wasm32"))]
-enum DriverPark {
-    /// A teardown was requested. Re-enters the outer loop, which observes
-    /// the shutdown flag and exits.
-    Teardown,
-    /// A submission arrived and must be processed into the DAG.
-    Submission(Submission),
-    /// The inbox is closed: no further submission can arrive.
-    Disconnected,
-    /// The idle re-pump deadline expired. Backstops a dropped wake for
-    /// stranded ready work; not priority aging.
-    IdleTick,
-}
-
-/// Test-only dispatch instrumentation that lets a test deterministically
-/// observe SCHEDULER-PRIORITY-QUEUE dwell.
-///
-/// The dispatch loop ([`Scheduler::dispatch_ready_work`]) drains the
-/// scheduler DAG's ready nodes and hands each entry to a bounded pool, so
-/// by the time a stage executor runs, the entry has already left the
-/// queue — a stage-side gate therefore cannot prove that surplus work
-/// accrued `queue_dwell_ms` *in the scheduler queue* (it may have been
-/// sitting in a pool channel instead). This hook moves the rendezvous to
-/// the dispatch site itself:
-///
-/// 1. The test arms the hook with a `pause_after` dispatch count.
-/// 2. After the driver has dispatched exactly `pause_after` jobs and
-///    BEFORE the next dequeue, it parks here. While parked it keeps
-///    re-draining the inbox (via the supplied closure) so every
-///    still-in-flight submission lands in the scheduler DAG regardless of
-///    submission timing — the surplus then provably SITS in the queue.
-/// 3. The test waits until the driver reports `paused`, observes that
-///    the DAG actually contains the surplus (via
-///    [`Scheduler::test_job_queue_depth`]), and only then releases.
-///
-/// Every wait is bounded and panics on a real stall so a logic error
-/// fails loudly instead of hanging the suite. The hook is
-/// `cfg`-gated to `test` / the opt-in `test-support` feature; it and
-/// its single call site are absent from every build that does not
-/// enable it, so production dispatch is unchanged.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Default)]
-pub(crate) struct DispatchPauseHook {
-    state: Mutex<DispatchPauseState>,
-    cv: parking_lot::Condvar,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Default)]
-struct DispatchPauseState {
-    /// `true` once a test has armed the hook.
-    armed: bool,
-    /// Number of dispatches after which the driver parks (cumulative
-    /// across `dispatch_ready_work` invocations).
-    pause_after: usize,
-    /// Cumulative count of jobs dispatched since the hook was armed.
-    dispatched: usize,
-    /// `true` once the driver has reached the pause point and is parked.
-    paused: bool,
-    /// `true` once the pause has fired; prevents re-pausing on later
-    /// dispatch-loop iterations.
-    consumed: bool,
-    /// `true` once the test has released the parked driver.
-    released: bool,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl DispatchPauseHook {
-    /// Driver side: record one dispatch and, if the cumulative count has
-    /// reached the armed `pause_after`, park before the next dequeue.
-    ///
-    /// While parked, `redrain` is invoked repeatedly so every
-    /// still-in-flight submission is pulled into the scheduler DAG; the
-    /// test observes the resulting queue depth before releasing. Bounded
-    /// at ~10 s — a release that never arrives PANICS rather than hanging
-    /// the driver forever.
-    ///
-    /// The single call site is in the native dispatch loop.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn on_dispatch_and_maybe_pause(&self, redrain: &dyn Fn()) {
-        use std::time::{Duration, Instant};
-        let mut state = self.state.lock();
-        if !state.armed || state.consumed {
-            return;
-        }
-        state.dispatched += 1;
-        if state.dispatched < state.pause_after {
-            return;
-        }
-        // Reached the pause threshold. Park here (before the next
-        // dequeue) until the test releases, re-draining the inbox so the
-        // surplus provably accrues scheduler-queue dwell.
-        state.consumed = true;
-        state.paused = true;
-        self.cv.notify_all();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !state.released {
-            // Drop the lock around the re-drain so the test can observe
-            // `paused`/`released` and so `redrain` (which locks the
-            // scheduler DAG, not this state) cannot deadlock against it.
-            drop(state);
-            redrain();
-            state = self.state.lock();
-            if state.released {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "dispatch pause was never released within 10s — the test \
-                 driver did not call test_release_dispatch_pause (deadlock)"
-            );
-            // Park briefly on the condvar; a release wakes us promptly,
-            // otherwise we loop to re-drain and re-check the deadline.
-            let _ = self.cv.wait_for(&mut state, Duration::from_millis(2));
-        }
-    }
-}
-
-/// Test-only rendezvous fired by [`Scheduler::handle_new_request_batch`]
-/// AFTER the FIRST request in a batch has been admitted but BEFORE the
-/// remaining requests are admitted — strictly WHILE the single
-/// `dag.lock()` is still held.
-///
-/// This is the seam a §6b LOCK-CONTINUITY test uses to release a
-/// concurrent observer that blocking-acquires `dag.lock()`. Because the
-/// batch holds ONE continuously-held lock across all N admits, that
-/// observer cannot acquire until the loop's `}` drops the lock — at
-/// which point the DAG already shows ALL N admitted. It therefore
-/// proves "no concurrent thread can ever first-observe the batch
-/// half-admitted", the observable consequence of the continuity
-/// invariant.
-///
-/// CONTINUITY proper — "all N admits ran under ONE lock acquisition" —
-/// is proven deterministically and independently of any contention race
-/// by the [`Scheduler::dag_admit_epoch`] rail: the admission-lock
-/// acquisition bumps a monotonic epoch, every admit records the epoch it
-/// ran under, and the test asserts all N records share one epoch. A
-/// per-item lock/unlock regression acquires the lock (and bumps the
-/// epoch) once per item, so the recorded epochs DIFFER and the test
-/// FAILS regardless of how the lock-handoff race happens to resolve.
-/// (A non-blocking `try_lock` at a single seam — the prior shape — only
-/// proved the lock was held AT THE SEAM, not continuously across items
-/// 2..N; and a blocking-acquire race alone is not a both-directions
-/// discriminator because `parking_lot`'s barging unlock can let a
-/// per-item re-lock win over a parked waiter. The epoch rail closes
-/// both gaps.)
-///
-/// Carries zero footprint outside test builds — the field, the firing
-/// site, the installer, and the epoch/trace instrumentation are all
-/// `cfg`-gated to `test` / the opt-in `test-support` feature, so
-/// production batch admission is unchanged.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Default)]
-pub(crate) struct BatchAdmitSeamHook {
-    /// Installed by a test; fired once per batch, on the admitting
-    /// thread, between the first and second admit while the DAG lock is
-    /// held. `Box<dyn Fn>` is not `Debug`, hence the manual `Debug`.
-    hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl std::fmt::Debug for BatchAdmitSeamHook {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BatchAdmitSeamHook")
-            .field("installed", &self.hook.lock().is_some())
-            .finish()
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl BatchAdmitSeamHook {
-    /// Install the seam hook. Fired once per subsequent batch, after the
-    /// first admit and before the rest, while `dag.lock()` is held.
-    fn install(&self, hook: Box<dyn Fn() + Send + Sync>) {
-        *self.hook.lock() = Some(hook);
-    }
-
-    /// Fire the installed hook (no-op when none is installed). Called by
-    /// [`Scheduler::handle_new_request_batch`] at the mid-batch seam.
-    fn fire(&self) {
-        if let Some(hook) = self.hook.lock().as_ref() {
-            hook();
-        }
-    }
-}
-
 /// A request to the scheduler.
 pub struct Request {
     pub file_id: String,
@@ -602,7 +167,7 @@ pub struct Request {
     /// existing group, and installs the context into worker TLS
     /// around each stage closure so `current_request_id()` returns a
     /// meaningful value while the job runs.
-    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
+    pub request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
 }
 
 /// Typed admission parameters for one synchronous borrowed cache-node
@@ -621,7 +186,7 @@ pub struct ScopedCacheNodeRequest {
     /// Scheduling priority used by normal DAG lane admission.
     pub priority: Priority,
     /// Optional per-request context used for cancellation and TLS attribution.
-    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
+    pub request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
 }
 
 impl ScopedCacheNodeRequest {
@@ -650,28 +215,6 @@ pub enum ScopedCacheNodeError {
     Reentrant,
 }
 
-#[derive(Clone)]
-enum ScopedCacheTerminal {
-    Value(Arc<dyn Any + Send + Sync>),
-    Cancelled,
-    Shutdown,
-    Panicked,
-}
-
-struct ScopedFlightOwner {
-    request: Option<CancellationToken>,
-    aggregate_registration: Option<CancellationOwner>,
-}
-
-#[derive(Default)]
-struct ScopedCacheFlightState {
-    owners: HashMap<u64, ScopedFlightOwner>,
-    aggregate: Option<CancellationToken>,
-    dispatched: bool,
-    builder_claimed: bool,
-    terminal: Option<ScopedCacheTerminal>,
-}
-
 /// Shared scheduler-side rendezvous for one overlapping scoped cache-node
 /// flight. The borrowed producer closure never lives here; exactly one waiting
 /// caller claims execution after the DAG dispatches this flight.
@@ -679,146 +222,6 @@ struct ScopedCacheFlightState {
 pub struct ScopedCacheFlight {
     state: Mutex<ScopedCacheFlightState>,
     changed: Condvar,
-}
-
-impl ScopedCacheFlight {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(ScopedCacheFlightState::default()),
-            changed: Condvar::new(),
-        }
-    }
-
-    /// Attach an owner before its inbox submission. Returns `false` only when
-    /// this flight is already terminal (including an aggregate token that has
-    /// latched cancellation); the caller must retry against a fresh flight.
-    fn try_add_owner(&self, owner_id: u64, request: Option<CancellationToken>) -> bool {
-        let mut state = self.state.lock();
-        if state.terminal.is_some() {
-            return false;
-        }
-        let aggregate_registration = match state.aggregate.as_ref() {
-            Some(aggregate) => match aggregate.register_owner(request.clone()) {
-                Some(registration) => Some(registration),
-                None => {
-                    state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                    state.owners.clear();
-                    self.changed.notify_all();
-                    return false;
-                }
-            },
-            None => None,
-        };
-        let prior = state.owners.insert(
-            owner_id,
-            ScopedFlightOwner {
-                request,
-                aggregate_registration,
-            },
-        );
-        verter_debug_assert!(prior.is_none(), "scoped owner ids are process-unique");
-        true
-    }
-
-    /// Bind the DAG node's aggregate token to every owner that arrived before
-    /// admission. Later owners register directly in [`Self::try_add_owner`].
-    fn attach_aggregate(&self, aggregate: CancellationToken) -> bool {
-        let mut state = self.state.lock();
-        if state.terminal.is_some() {
-            return false;
-        }
-        if state.aggregate.is_some() {
-            return true;
-        }
-        for owner in state.owners.values_mut() {
-            let Some(registration) = aggregate.register_owner(owner.request.clone()) else {
-                state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                state.owners.clear();
-                self.changed.notify_all();
-                return false;
-            };
-            owner.aggregate_registration = Some(registration);
-        }
-        state.aggregate = Some(aggregate);
-        true
-    }
-
-    /// Remove one request owner. Returns `true` when this transition made the
-    /// flight terminal-cancelled and its DAG node must be cancelled.
-    fn detach_owner(&self, owner_id: u64) -> bool {
-        let mut state = self.state.lock();
-        state.owners.remove(&owner_id);
-        if state.terminal.is_some() {
-            return false;
-        }
-        let no_live_owner = state.owners.is_empty()
-            || state
-                .aggregate
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled);
-        if !no_live_owner {
-            return false;
-        }
-        state.terminal = Some(ScopedCacheTerminal::Cancelled);
-        state.owners.clear();
-        self.changed.notify_all();
-        true
-    }
-
-    /// Signal that normal DAG dispatch selected this flight. No closure runs on
-    /// the driver; one waiting caller claims it and executes on the CPU pool.
-    fn mark_dispatched(&self, aggregate: CancellationToken) -> bool {
-        let mut state = self.state.lock();
-        if state.terminal.is_some() || aggregate.is_cancelled() {
-            if state.terminal.is_none() {
-                state.terminal = Some(ScopedCacheTerminal::Cancelled);
-                state.owners.clear();
-                self.changed.notify_all();
-            }
-            return false;
-        }
-        state.aggregate.get_or_insert(aggregate);
-        state.dispatched = true;
-        self.changed.notify_all();
-        true
-    }
-
-    fn try_claim_builder(&self) -> Option<CancellationToken> {
-        let mut state = self.state.lock();
-        if state.terminal.is_some() || !state.dispatched || state.builder_claimed {
-            return None;
-        }
-        let aggregate = state.aggregate.clone()?;
-        state.builder_claimed = true;
-        Some(aggregate)
-    }
-
-    fn terminal(&self) -> Option<ScopedCacheTerminal> {
-        self.state.lock().terminal.clone()
-    }
-
-    fn set_terminal(&self, terminal: ScopedCacheTerminal) -> bool {
-        let mut state = self.state.lock();
-        if state.terminal.is_some() {
-            return false;
-        }
-        state.terminal = Some(terminal);
-        state.owners.clear();
-        self.changed.notify_all();
-        true
-    }
-
-    fn wait_for_change(&self, timeout: std::time::Duration) {
-        let mut state = self.state.lock();
-        if state.terminal.is_none() && (!state.dispatched || state.builder_claimed) {
-            self.changed.wait_for(&mut state, timeout);
-        }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    fn owner_count(&self) -> usize {
-        self.state.lock().owners.len()
-    }
 }
 
 /// Typed result of a submission attempt.
@@ -886,173 +289,6 @@ impl BatchHandle {
     }
 }
 
-/// A request after pre-lock preparation (tombstone gate + node ensure),
-/// carrying everything the shared admission core needs to admit it
-/// under the DAG lock. The `node` `Arc` was cloned out of the `nodes`
-/// DashMap so no shard `Ref` is held across `dag.lock()`.
-struct PreparedRequest {
-    file_id: String,
-    canonical: Arc<str>,
-    node: Arc<FileNode>,
-    target: TargetStage,
-    priority: Priority,
-    source: Option<Arc<str>>,
-    sender: CompletionSender<RequestResult>,
-    request_context: Option<crate::request_context::OpaqueRequestContext>,
-    /// Resolved language carried from preparation so the admission core
-    /// can perform any language re-home under the DAG lock. Preparation
-    /// deliberately does NOT re-home: that advances a published file's
-    /// generation and must be atomic with the supersede sweep.
-    requested_language: Option<FileLanguage>,
-    /// Incarnation of the `FileNode` this request was PREPARED against.
-    ///
-    /// Preparation runs outside `dag.lock()`, so a prepared request can
-    /// cross a retirement boundary before it is admitted: a concurrent
-    /// `remove()` can install the floor, cancel the DAG and delete the
-    /// `FileNode` in the gap. Carrying the incarnation lets the
-    /// admission core prove the captured node is still the published one
-    /// BEFORE it registers a waiter or admits anything.
-    prepared_incarnation: u64,
-}
-
-/// Work accumulated by the shared admission core that MUST run AFTER
-/// the DAG lock releases: deferred dedup callbacks (which may re-enter
-/// the scheduler) and auto-ingest-tracking clears (which touch a
-/// DashMap that would deadlock against a held DAG lock).
-#[derive(Default)]
-struct AdmissionPostWork {
-    /// Deferred dedup-join callbacks collected from
-    /// [`SchedulerDag::register_request`].
-    dedup_events: Vec<DedupJoinerEvent>,
-    /// `(canonical, generation)` pairs whose auto-ingest tracking entry
-    /// should be cleared once a Source identity has been admitted.
-    auto_ingest_clears: Vec<(Arc<str>, u64)>,
-}
-
-impl AdmissionPostWork {
-    /// Fire every deferred dedup callback and clear every recorded
-    /// auto-ingest entry. MUST be invoked only after the DAG lock has
-    /// been released.
-    fn run(self, scheduler: &Scheduler) {
-        for event in self.dedup_events {
-            event.fire();
-        }
-        for (canonical, generation) in self.auto_ingest_clears {
-            scheduler.clear_auto_ingest_tracking(&canonical, generation);
-        }
-    }
-}
-
-/// Reason a pump iteration ran. Carried by audit/diagnostic prose;
-/// behaviour is identical across variants, the discriminant lets
-/// tests assert which entry point made progress.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PumpReason {
-    /// Driver thread's idle loop.
-    DriverLoop,
-    /// Driver thread woke from `recv_timeout` on a fresh submission.
-    DriverWake,
-    /// A cooperative waiter inside `wait_or_drive`.
-    WaitOrDrive,
-    /// External `drive_one` (sync/test).
-    DriveOne,
-    /// External `drive_all` (sync/test).
-    DriveAll,
-    /// Final drain on shutdown.
-    ShutdownDrain,
-}
-
-/// Counters returned by a single [`Scheduler::pump_ready`] call.
-/// Used by tests and the cooperative pump to decide whether
-/// progress was made before parking on the condvar.
-///
-/// `pump_ready` and every producer of these counters are native-only.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PumpStats {
-    /// Submissions drained from the inbox into the DAG.
-    pub drained: usize,
-    /// Ready jobs handed off to a pool (native dispatch).
-    pub dispatched: usize,
-    /// Ready jobs executed inline on the caller's thread.
-    pub executed_inline: usize,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl PumpStats {
-    /// `true` when any counter is non-zero. A pump that drained
-    /// nothing, dispatched nothing, and ran nothing inline made no
-    /// progress; the caller must park rather than spin.
-    pub(crate) fn made_progress(self) -> bool {
-        self.drained > 0 || self.dispatched > 0 || self.executed_inline > 0
-    }
-}
-
-/// Outcome of routing a [`crate::dag::ReadyJob`] through
-/// `dispatch_ready_job`. The cooperative pump uses the variant
-/// to track whether work ran on this thread or was handed off.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DispatchOutcome {
-    /// The job was queued onto the CPU or I/O pool.
-    SubmittedToPool,
-    /// The job ran inline on the calling thread.
-    ExecutedInline,
-    /// A scoped borrowed cache-node flight was selected by the DAG. The
-    /// driver signalled its waiting callers; one of them executes the closure.
-    DeferredScoped,
-    /// The job was skipped (defensive cases: CacheNode, removed
-    /// node, generation mismatch).
-    Skipped,
-}
-
-/// The mutex type guarding the scheduler's central [`SchedulerDag`] — the
-/// single most contended lock in the scheduler (every admission, dispatch,
-/// and completion acquires it).
-///
-/// A dedicated alias rather than reusing the crate-wide `Mutex` import: under
-/// the `hotpath` feature this becomes `hotpath::wrap::parking_lot::Mutex`,
-/// hotpath 0.23's drop-in instrumented wrapper, so the DAG lock's wait/hold
-/// duration is exactly the kind of bottleneck that instrumentation exists to
-/// surface — but the wrapper doesn't implement `Debug`/`Default`, and
-/// `scheduler.rs` has several OTHER, unrelated `Mutex<T>` fields on
-/// `#[derive(Debug, Default)]` structs (dispatch-pause state, cache-call
-/// recording) that would break if the crate-wide import were swapped
-/// instead. Scoping the wrap to this one alias keeps every other lock in the
-/// file byte-identical to the pre-instrumentation code regardless of the
-/// feature.
-#[cfg(feature = "hotpath")]
-type DagMutex = hotpath::wrap::parking_lot::Mutex<SchedulerDag>;
-#[cfg(not(feature = "hotpath"))]
-type DagMutex = Mutex<SchedulerDag>;
-
-/// Guard type returned by locking a [`DagMutex`]. See [`DagMutex`] for why
-/// this is a dedicated alias rather than a bare `parking_lot::MutexGuard`.
-// `#[allow(dead_code)]` on both branches: rustc's type-alias dead-code check
-// does not credit `acquire_dag_for_admission`'s return-position reference to
-// this alias — reproduces on EITHER branch (whichever is the active cfg), so
-// it is a rustc false positive for a private lifetime-generic alias used
-// only in return position, not an actually-unused alias.
-#[cfg(feature = "hotpath")]
-#[allow(dead_code)]
-type DagMutexGuard<'a> = hotpath::wrap::parking_lot::MutexGuard<'a, SchedulerDag>;
-#[cfg(not(feature = "hotpath"))]
-#[allow(dead_code)]
-type DagMutexGuard<'a> = parking_lot::MutexGuard<'a, SchedulerDag>;
-
-/// Construct a [`DagMutex`]. Under `hotpath` this routes through
-/// `hotpath::mutex!`; without it, this is a plain `parking_lot::Mutex::new`,
-/// identical to the pre-instrumentation code.
-#[cfg(feature = "hotpath")]
-fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
-    hotpath::mutex!(parking_lot::Mutex::new(dag), label = "scheduler_dag")
-}
-#[cfg(not(feature = "hotpath"))]
-fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
-    Mutex::new(dag)
-}
-
 /// The main scheduler.
 ///
 /// Manages per-file nodes, a priority queue, and a driver thread that
@@ -1112,21 +348,12 @@ pub struct Scheduler {
     /// Distinct from the host coordinator pool (`HostCpuPool`, tagged
     /// `External`) — host fan-out work never runs here.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
+    pub(crate) cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
     /// Host-constructed, injected scheduler I/O pool for file reads.
     /// Separate from the CPU pool so blocking disk reads don't starve
     /// parse/analyze work. Workers tag `CallerKind::IoWorker`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) io_pool: Arc<crate::pool::SchedulerIoPool>,
-    /// Tombstones for removed files. Value is a monotonic removal counter.
-    /// A `source: Some(...)` submission only clears the tombstone if it was
-    /// submitted AFTER the removal (checked via an atomic counter on the
-    /// scheduler that is bumped on each removal and stamped on each submission).
-    pub tombstones: DashMap<String, u64>,
-    /// Per-file generation floor. After remove, the floor is set to the
-    /// removed node's generation. A re-added node starts at floor+1, so
-    /// stale completions from the old incarnation never match.
-    pub generation_floors: DashMap<String, u64>,
+    pub(crate) io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     /// Deferred blocker IDs for files whose node was at generation 0 when
     /// `register_resolved_deps` was called. Replayed when the node advances
     /// past generation 0 during Source stage completion.
@@ -1140,7 +367,7 @@ pub struct Scheduler {
     /// READ time instead would leave a peek-before-lock race: an id inserted
     /// between the peek and the lock would have no language, which is exactly
     /// the silent-skip this field's shape now prevents.
-    pub deferred_blocker_ids: DashMap<String, Vec<(String, FileLanguage)>>,
+    pub(crate) deferred_blocker_ids: DashMap<String, Vec<(String, FileLanguage)>>,
     /// Tracking set for deps whose Source `NewRequest` is queued in the
     /// inbox but has not yet been drained by the driver. Source-of-truth
     /// for "auto-ingest fired, FileNode is present, but no DAG identity
@@ -1160,10 +387,6 @@ pub struct Scheduler {
     /// landed (driver crash between insert and dequeue) without
     /// inserting an extra sweep loop.
     pub(crate) auto_ingested_recent: DashMap<Arc<str>, AutoIngestedRecord>,
-    /// Monotonic counter bumped on every `remove()`. Submissions carry the
-    /// counter value at submission time so the driver can reject pre-remove
-    /// submissions even if they carry a source buffer.
-    pub(crate) removal_epoch: AtomicU64,
     /// Count of stage completions refused at their publish point
     /// because the owning `FileNode` moved between dispatch and
     /// publish — a superseded generation or a re-homed incarnation.
@@ -1173,6 +396,7 @@ pub struct Scheduler {
     /// caller error), so without a counter a test cannot distinguish
     /// "the gate fired" from "the race never happened". Expected to
     /// stay ZERO absent concurrent invalidation.
+    #[cfg(any(test, feature = "semantic-observe"))]
     pub(crate) stale_completion_refusals: AtomicU64,
     /// Shutdown flag.
     pub(crate) shutdown: AtomicBool,
@@ -1280,95 +504,6 @@ pub struct Scheduler {
     pub(crate) io_submit_attempts: std::sync::atomic::AtomicUsize,
 }
 
-/// Classification of a recorded `FileStage::Analysis` blocker dep
-/// against the live FileNode + DAG state. Produced by
-/// [`Scheduler::file_stage_analysis_blocker_status`] and consumed by
-/// both the pre-admission filter ([`Scheduler::register_resolved_deps`])
-/// and the recorded-blocker filter
-/// ([`Scheduler::admit_artifact_with_blockers`]). Centralising the
-/// classifier prevents the two predicates from drifting — the
-/// dead-producer matrix has several distinct rows that an
-/// independent re-implementation tends to collapse.
-///
-/// Three-state split. The earlier two-state encoding (`Resolved`)
-/// collapsed two semantically distinct outcomes:
-///
-/// - `Satisfied` — the prerequisite reached committed Analysis OR
-///   is genuinely moot (FileNode missing, stale generation, gen 0,
-///   no persistent failure record). The blocker is dropped silently
-///   and the downstream admission proceeds as usual.
-/// - `Failed(record)` — the prerequisite terminalized (Source /
-///   Analysis failure). The persistent
-///   [`crate::dag::SchedulerDag::terminal_dep_failures`] store
-///   carries a [`crate::dag::FailedDepRecord`] for this DepKey;
-///   the caller MUST attach the record to the freshly-submitted
-///   waiter so the pre-dispatch short-circuit in
-///   [`Scheduler::execute_stage_on_worker`] surfaces a typed
-///   `DependencyFailed`. Without this discrimination the matrix
-///   would collapse `Failed` onto `Resolved` and the admission
-///   would silently drop the blocker, resolving the waiter `Ready`
-///   on a snapshot built from a dead prerequisite — the
-///   pre-admission failure race.
-#[derive(Clone, Debug)]
-enum BlockerStatus {
-    /// The dep is still gating: an Analysis is committed (and the
-    /// owner waits for completion fan-out) OR an Analysis identity is
-    /// live in the DAG (queued or dispatched).
-    Gating,
-    /// The dep is no longer gating without a terminal-failure
-    /// record: Analysis is committed, the FileNode is missing, the
-    /// recorded generation is stale, or the gen is 0. The blocker is
-    /// dropped silently.
-    Satisfied,
-    /// The dep is no longer gating because the producer terminally
-    /// failed and the persistent store carries the recorded cause.
-    /// The caller MUST attach this [`crate::dag::FailedDepRecord`]
-    /// to its admitted node so the pre-dispatch short-circuit fires.
-    Failed(crate::dag::FailedDepRecord),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AnalysisDemandKind {
-    DirectRequest,
-    ArtifactBlocker,
-}
-
-/// Record planted in [`Scheduler::auto_ingested_recent`] when
-/// [`Scheduler::register_resolved_deps`] auto-ingests a dep blocker by
-/// enqueueing a `Submission::NewRequest` to the inbox. The record makes
-/// the "queued in inbox, not yet drained" state explicit so the
-/// dead-producer matrix can distinguish it from "Source failed and
-/// cancelled" — both leave the FileNode with `current_source().is_none()`
-/// and no live Source/Analysis DAG identity.
-///
-/// The record is removed when the driver finally drains the queued
-/// `NewRequest` and admits a Source DAG identity (see the cleanup arm
-/// in [`Scheduler::handle_new_request`]). A stale entry left behind by
-/// a driver-thread crash is trimmed by the [`STALE_THRESHOLD`]-based
-/// sweep in the matrix consumer.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AutoIngestedRecord {
-    /// Generation the dep FileNode was at when the auto-ingest fired.
-    /// Matched against the dep's current generation in the matrix; a
-    /// mismatch means the entry is stale (the dep has advanced beyond
-    /// the auto-ingest, so the gate it set up no longer applies).
-    pub(crate) generation: u64,
-    /// Monotonic instant the record was planted. Used by the cleanup
-    /// sweep to trim entries whose admission never landed (e.g. driver
-    /// crash between insert and dequeue).
-    pub(crate) since: Instant,
-}
-
-/// Trim threshold for [`Scheduler::auto_ingested_recent`] entries. An
-/// entry older than this is dropped on consumption — belt-and-suspenders
-/// against a driver-thread crash between
-/// [`Scheduler::register_resolved_deps`]'s insert and
-/// [`Scheduler::handle_new_request`]'s removal arm. Under normal
-/// operation the removal arm fires on the next driver tick, so the
-/// threshold is generous.
-const AUTO_INGESTED_RECENT_STALE_THRESHOLD: std::time::Duration =
-    std::time::Duration::from_secs(60);
-
 impl Scheduler {
     /// Identities of the injected CPU and I/O worker pools.
     ///
@@ -1390,8 +525,8 @@ impl Scheduler {
     pub fn new(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
-        cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        io_pool: Arc<crate::pool::SchedulerIoPool>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         Self::with_executor(
             config,
@@ -1408,14 +543,14 @@ impl Scheduler {
     /// `Arc` allows `Drop` to run (sets shutdown, joins driver, drains pending).
     ///
     /// `cpu_pool` / `io_pool` are host-constructed and injected — see
-    /// [`crate::pool`]. The scheduler owns no pool construction.
+    /// [`crate::execution::pool`]. The scheduler owns no pool construction.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
-        cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        io_pool: Arc<crate::pool::SchedulerIoPool>,
+        cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         let scheduler = Arc::new(Self {
             nodes: DashMap::new(),
@@ -1434,11 +569,9 @@ impl Scheduler {
             config,
             cpu_pool,
             io_pool,
-            tombstones: DashMap::new(),
-            generation_floors: DashMap::new(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
-            removal_epoch: AtomicU64::new(0),
+            #[cfg(any(test, feature = "semantic-observe"))]
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
@@ -1484,13 +617,13 @@ impl Scheduler {
     /// Use `drive_one()` / `drive_all()` to process manually.
     ///
     /// On native, the host injects the scheduler's CPU and I/O pools
-    /// (see [`crate::pool`]); on WASM there are no pools (stages run
+    /// (see [`crate::execution::pool`]); on WASM there are no pools (stages run
     /// inline on the calling thread).
     pub fn new_sync(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
-        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::pool::SchedulerIoPool>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         Self::new_sync_with_executor(
             config,
@@ -1506,13 +639,13 @@ impl Scheduler {
     /// Create a sync scheduler with a custom stage executor.
     ///
     /// On native, the host injects the scheduler's CPU and I/O pools
-    /// (see [`crate::pool`]); on WASM there are no pools.
+    /// (see [`crate::execution::pool`]); on WASM there are no pools.
     pub fn new_sync_with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
-        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::pool::SchedulerCpuPool>,
-        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::pool::SchedulerIoPool>,
+        #[cfg(not(target_arch = "wasm32"))] cpu_pool: Arc<crate::execution::pool::SchedulerCpuPool>,
+        #[cfg(not(target_arch = "wasm32"))] io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
     ) -> Arc<Self> {
         Arc::new(Self {
             nodes: DashMap::new(),
@@ -1533,11 +666,9 @@ impl Scheduler {
             cpu_pool,
             #[cfg(not(target_arch = "wasm32"))]
             io_pool,
-            tombstones: DashMap::new(),
-            generation_floors: DashMap::new(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
-            removal_epoch: AtomicU64::new(0),
+            #[cfg(any(test, feature = "semantic-observe"))]
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1576,24 +707,6 @@ impl Scheduler {
     // `cfg(any(test, feature = "test-support"))` so production binaries
     // never link them; cross-crate tests opt in via the `test-support`
     // feature in `[dev-dependencies]`.
-
-    /// Build default scheduler pools sized from `config`, matching the
-    /// host's construction (CPU/IO worker counts from `cpu_threads` /
-    /// `io_threads`; each transport capacity dominates the matching
-    /// `resolved_dag_budget()` class).
-    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
-    fn default_test_pools(
-        config: &SchedulerConfig,
-    ) -> (
-        Arc<crate::pool::SchedulerCpuPool>,
-        Arc<crate::pool::SchedulerIoPool>,
-    ) {
-        let budget = config.resolved_dag_budget();
-        (
-            crate::pool::SchedulerCpuPool::new(config.cpu_threads, budget.cpu as usize),
-            crate::pool::SchedulerIoPool::new(config.io_threads, budget.io as usize),
-        )
-    }
 
     /// Test analogue of [`Scheduler::new`] that builds default pools.
     #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
@@ -1747,293 +860,12 @@ impl Scheduler {
         }
     }
 
-    fn wait_for_scoped_cache_node<T, F>(
-        self: &Arc<Self>,
-        identity: &WorkNodeIdentity,
-        flight: &Arc<ScopedCacheFlight>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
-        request_token: Option<CancellationToken>,
-        build: F,
-    ) -> Result<Arc<T>, ScopedCacheNodeError>
-    where
-        T: Send + Sync + 'static,
-        F: FnOnce(&CancellationToken) -> T + Send,
-    {
-        let mut build = Some(build);
-        loop {
-            if request_token
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-            {
-                return Err(ScopedCacheNodeError::Cancelled);
-            }
-            if self.shutdown.load(Ordering::Acquire) {
-                self.terminalize_scoped_cache_flight(
-                    identity,
-                    flight,
-                    ScopedCacheTerminal::Shutdown,
-                    false,
-                );
-            }
-
-            if let Some(terminal) = flight.terminal() {
-                return match terminal {
-                    ScopedCacheTerminal::Value(value) => {
-                        Arc::downcast::<T>(value).map_err(|_| ScopedCacheNodeError::TypeMismatch)
-                    }
-                    ScopedCacheTerminal::Cancelled => Err(ScopedCacheNodeError::Cancelled),
-                    ScopedCacheTerminal::Shutdown => Err(ScopedCacheNodeError::Shutdown),
-                    ScopedCacheTerminal::Panicked => Err(ScopedCacheNodeError::Panicked),
-                };
-            }
-
-            if let Some(aggregate) = flight.try_claim_builder() {
-                let operation = build
-                    .take()
-                    .expect("only the caller that supplied this closure can claim it once");
-                let identity_for_path = identity.clone();
-                let identity_for_publication = identity.clone();
-                let context_for_worker = request_context.clone();
-                let aggregate_for_worker = aggregate.clone();
-                let flight_for_worker = Arc::clone(flight);
-                let scheduler_for_worker = Arc::clone(self);
-                let run = move || {
-                    let _request_guard =
-                        context_for_worker.map(|context| Arc::clone(&context.0).install_tls());
-                    let _job_guard = crate::cancellation::JobCancellationGuard::install(
-                        aggregate_for_worker.clone(),
-                    );
-                    let outcome = crate::caller_kind::with_active_path(identity_for_path, || {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            operation(&aggregate_for_worker)
-                        }))
-                    });
-                    match outcome {
-                        Ok(value) => {
-                            let value: Arc<dyn Any + Send + Sync> = Arc::new(value);
-                            let terminal = if aggregate_for_worker.is_cancelled() {
-                                ScopedCacheTerminal::Cancelled
-                            } else {
-                                ScopedCacheTerminal::Value(value)
-                            };
-                            let success = matches!(terminal, ScopedCacheTerminal::Value(_));
-                            scheduler_for_worker.terminalize_scoped_cache_flight(
-                                &identity_for_publication,
-                                &flight_for_worker,
-                                terminal,
-                                success,
-                            );
-                        }
-                        Err(_) => scheduler_for_worker.terminalize_scoped_cache_flight(
-                            &identity_for_publication,
-                            &flight_for_worker,
-                            ScopedCacheTerminal::Panicked,
-                            false,
-                        ),
-                    }
-                };
-                #[cfg(not(target_arch = "wasm32"))]
-                self.cpu_pool.install(run);
-                #[cfg(target_arch = "wasm32")]
-                run();
-                continue;
-            }
-
-            // Cooperatively admit/dispatch for sync schedulers while remaining
-            // safe with the native driver: the DAG lock is the sole dequeue
-            // authority, so concurrent pumps cannot dispatch the same node.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let _ = self.pump_ready(
-                    PumpReason::WaitOrDrive,
-                    crate::caller_kind::CallerKind::current(),
-                );
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let _ = self.drive_one();
-            }
-            flight.wait_for_change(std::time::Duration::from_millis(2));
-        }
-    }
-
-    fn detach_scoped_cache_owner(
-        &self,
-        identity: &WorkNodeIdentity,
-        flight: &Arc<ScopedCacheFlight>,
-        owner_id: u64,
-    ) {
-        let _gate = self.scoped_cache_gate.lock();
-        let lost_all_owners = flight.detach_owner(owner_id);
-        if lost_all_owners || flight.terminal().is_some() {
-            // Incarnation-scoped teardown: the DAG node is keyed by identity
-            // alone, so cancelling it from a SUPERSEDED flight would tear down
-            // the node a later incarnation already owns. See
-            // `scoped_flight_is_current`.
-            if self.scoped_flight_is_current(identity, flight) {
-                let _ = self.dag.lock().cancel(identity);
-            }
-            self.remove_scoped_flight_locked(identity, flight);
-        }
-    }
-
-    /// Terminalize a flight and its DAG node under one incarnation gate.
-    /// `success` is permitted only for a live aggregate job; cancellation
-    /// discovered at this final publication rail always wins.
-    fn terminalize_scoped_cache_flight(
-        &self,
-        identity: &WorkNodeIdentity,
-        flight: &Arc<ScopedCacheFlight>,
-        terminal: ScopedCacheTerminal,
-        success: bool,
-    ) {
-        let _gate = self.scoped_cache_gate.lock();
-        if flight.terminal().is_some() {
-            // Already terminal: this flight owns no live DAG node of its own.
-            // It may also already have been SUPERSEDED, in which case the
-            // identity's node belongs to a newer incarnation and must survive.
-            if self.scoped_flight_is_current(identity, flight) {
-                let _ = self.dag.lock().cancel(identity);
-            }
-            self.remove_scoped_flight_locked(identity, flight);
-            return;
-        }
-        let aggregate_cancelled = self
-            .dag
-            .lock()
-            .cancellation_for(identity)
-            .is_some_and(|token| token.is_cancelled());
-        if success && !aggregate_cancelled {
-            let _ = self.dag.lock().complete(identity);
-            let _ = flight.set_terminal(terminal);
-        } else {
-            let _ = self.dag.lock().cancel(identity);
-            let effective = if aggregate_cancelled {
-                ScopedCacheTerminal::Cancelled
-            } else {
-                terminal
-            };
-            let _ = flight.set_terminal(effective);
-        }
-        self.remove_scoped_flight_locked(identity, flight);
-    }
-
-    /// Is `flight` still the registry's CURRENT incarnation for `identity`?
-    ///
-    /// The scoped-cache rendezvous is per-incarnation but the DAG node it
-    /// drives is keyed by [`WorkNodeIdentity`] alone. A retired incarnation
-    /// that tore the node down by identity would therefore cancel the node a
-    /// LATER incarnation had already been admitted onto: the successor's
-    /// aggregate token latches cancelled, its `by_identity` entry disappears,
-    /// and — when the cancel lands before the successor's dispatch — no
-    /// `mark_dispatched` ever arrives, so every caller parked in
-    /// [`Self::wait_for_scoped_cache_node`] waits forever. Every teardown that
-    /// can run on a superseded flight gates its DAG cancel on this predicate.
-    ///
-    /// The caller holds `scoped_cache_gate`, which serializes incarnation
-    /// replacement against teardown. The registry `Ref` is dropped before
-    /// return so no shard guard is held across the subsequent `dag.lock()`.
-    fn scoped_flight_is_current(
-        &self,
-        identity: &WorkNodeIdentity,
-        flight: &Arc<ScopedCacheFlight>,
-    ) -> bool {
-        self.scoped_cache_flights
-            .get(identity)
-            .is_some_and(|current| Arc::ptr_eq(current.value(), flight))
-    }
-
-    /// Remove only `flight`'s registry incarnation. Caller holds
-    /// `scoped_cache_gate`, which serializes replacement with stale inbox work.
-    fn remove_scoped_flight_locked(
-        &self,
-        identity: &WorkNodeIdentity,
-        flight: &Arc<ScopedCacheFlight>,
-    ) {
-        if let dashmap::mapref::entry::Entry::Occupied(entry) =
-            self.scoped_cache_flights.entry(identity.clone())
-        {
-            if Arc::ptr_eq(entry.get(), flight) {
-                entry.remove();
-            }
-        }
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_scoped_cache_owner_count(&self, identity: &WorkNodeIdentity) -> usize {
         self.scoped_cache_flights
             .get(identity)
             .map_or(0, |flight| flight.owner_count())
-    }
-
-    /// Enqueue without parking the sole driver (or a single-threaded inline
-    /// pump) behind its own full inbox. Other callers wait for bounded
-    /// capacity; the driver can consume one older submission to free a slot.
-    fn send_submission(&self, submission: Submission) -> Result<(), Box<Submission>> {
-        #[cfg(not(target_arch = "wasm32"))]
-        use crate::caller_kind::CallerKind;
-        let mut submission = submission;
-        loop {
-            submission = match self.inbox.sender.try_send(submission) {
-                Ok(()) => return Ok(()),
-                Err(crossbeam_channel::TrySendError::Full(submission)) => submission,
-                Err(crossbeam_channel::TrySendError::Disconnected(submission)) => {
-                    return Err(Box::new(submission))
-                }
-            };
-            if self.shutdown.load(Ordering::Acquire) {
-                return Err(Box::new(submission));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if !matches!(
-                CallerKind::current(),
-                CallerKind::Driver | CallerKind::Inline
-            ) && self.driver_handle.lock().is_some()
-            {
-                return self
-                    .inbox
-                    .sender
-                    .send(submission)
-                    .map_err(|error| Box::new(error.0));
-            }
-            let mut select = crossbeam_channel::Select::new();
-            let send = select.send(&self.inbox.sender);
-            select.recv(&self.inbox.receiver);
-            let operation = select.select();
-            if operation.index() == send {
-                return operation
-                    .send(&self.inbox.sender, submission)
-                    .map_err(|error| Box::new(error.0));
-            }
-            if let Ok(older) = operation.recv(&self.inbox.receiver) {
-                self.process_submission(older);
-            }
-        }
-    }
-
-    /// Deliver a stage's terminal `StageComplete` from a thread that holds
-    /// the scheduler: the inline pump, or a pool worker that inline-ran a
-    /// dependency. Routing through [`Self::send_submission`] lets a sole
-    /// inbox consumer drain an older submission instead of parking on its
-    /// own full inbox.
-    fn deliver_stage_completion(&self, completion: Option<Submission>) {
-        if let Some(completion) = completion {
-            let _ = self.send_submission(completion);
-        }
-    }
-
-    /// Deliver a stage's terminal `StageComplete` from a pool task. A pool
-    /// worker is never the inbox's consumer, so it waits for capacity while
-    /// the driver drains.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn deliver_stage_completion_from_pool(
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-        completion: Option<Submission>,
-    ) {
-        if let Some(completion) = completion {
-            let _ = inbox_sender.send(completion);
-        }
     }
 
     /// Submit a request. Returns a handle that resolves when the target stage is reached.
@@ -2050,6 +882,8 @@ impl Scheduler {
             canonical: Arc::from(request.file_id.as_str()),
             target: request.target.clone(),
         });
+        let submitted_lifetime =
+            self.stamp_request(&request.file_id, request.file_language.clone());
         let submission = Submission::NewRequest {
             file_id: request.file_id,
             target: request.target,
@@ -2057,7 +891,7 @@ impl Scheduler {
             source: request.source,
             file_language: request.file_language,
             sender: sender.clone(),
-            submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
+            submitted_lifetime,
             request_context: request.request_context,
         };
         match self.send_submission(submission) {
@@ -2109,8 +943,9 @@ impl Scheduler {
         verter_audit::attribute_n!(SchedulerSubmitBatch, requests.len());
         let mut handles = Vec::with_capacity(requests.len());
         let mut queued = Vec::with_capacity(requests.len());
-        let submitted_epoch = self.removal_epoch.load(Ordering::Acquire);
         for request in requests {
+            let submitted_lifetime =
+                self.stamp_request(&request.file_id, request.file_language.clone());
             let (handle, sender) = completion_pair();
             // Mirror `submit_request`'s request-level target stamp so a
             // cooperative waiter on a batch handle gets the same
@@ -2127,7 +962,7 @@ impl Scheduler {
                 source: request.source,
                 file_language: request.file_language,
                 sender,
-                submitted_epoch,
+                submitted_lifetime,
                 request_context: request.request_context,
             });
             handles.push(handle);
@@ -2223,6 +1058,12 @@ impl Scheduler {
         &self.counters
     }
 
+    /// Current occupancy of the DAG's dependency-edge and blocker
+    /// reference tables, read under one DAG lock.
+    pub fn dependency_occupancy(&self) -> crate::dag::DependencyOccupancy {
+        self.dag.lock().dependency_occupancy()
+    }
+
     // ── Sync Fast-Path Reads ──
 
     /// Get current source snapshot if generation-coherent.
@@ -2233,6 +1074,32 @@ impl Scheduler {
     /// and reads it as-of.
     pub fn try_get_source(&self, id: &str) -> Option<Arc<SourceSnapshot>> {
         self.nodes.get(id)?.current_source()
+    }
+
+    /// Get the current source snapshot together with the
+    /// [`SourceWitness`](crate::node::SourceWitness) of the node object it
+    /// was read from. External publishers ([`Self::commit_artifact`],
+    /// [`Self::remove_artifact_not_newer_than`]) are fenced on that witness.
+    pub fn try_get_witnessed_source(&self, id: &str) -> Option<crate::node::WitnessedSource> {
+        let node = self.nodes.get(id)?;
+        let snapshot = node.current_source()?;
+        let witness = crate::node::SourceWitness::capture(&node, &snapshot);
+        Some(crate::node::WitnessedSource { snapshot, witness })
+    }
+
+    /// Get the current source snapshot of the node object `witness` was
+    /// captured from. `None` once that node was retired or replaced (removal,
+    /// reset, language re-home), even when its successor serves the same
+    /// content at the same generation, or when it has no current source.
+    pub fn try_get_source_for_witness(
+        &self,
+        witness: &crate::node::SourceWitness,
+    ) -> Option<Arc<SourceSnapshot>> {
+        let node = self.nodes.get(witness.canonical())?;
+        if !node.carries_witness(witness) {
+            return None;
+        }
+        node.current_source()
     }
 
     /// Capture an immutable, LEASED root of the scheduler's source
@@ -2312,59 +1179,32 @@ impl Scheduler {
             }
         }
 
-        // 2. Drain inbox — driver is stopped, so this is exclusive.
+        // 2. Drain queued requests; cooperative admission validates their stamps.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
             Self::shutdown_drained_submission(submission);
         }
         self.shutdown_all_scoped_cache_flights();
 
-        // 3. Remove all nodes, recording generation floors so re-added
-        //    files start above any prior incarnation's generation.
-        let ids: Vec<String> = self.nodes.iter().map(|e| e.key().clone()).collect();
-        // ONE epoch covers every removed member: a batch transition
-        // publishes a single root advance, not one per file. The DAG
-        // signalling runs after the publication hold is released.
-        let removed: Vec<(String, u64)> = self.source_root.publish_transition(|publication| {
-            let mut removed = Vec::with_capacity(ids.len());
-            for id in &ids {
-                if let Some((_, node)) = self.nodes.remove(id) {
-                    let canonical: Arc<str> = Arc::from(id.as_str());
-                    publication.absent(&canonical, node.incarnation_id(), node.generation());
-                    removed.push((id.clone(), node.generation()));
+        // Cooperative pumps share the same lifecycle hold as admission.
+        // No successor can appear between node unpublication and DAG clear.
+        {
+            let mut dag = self.dag.lock();
+            let ids: Vec<String> = self.nodes.iter().map(|e| e.key().clone()).collect();
+            self.source_root.publish_transition(|publication| {
+                for id in &ids {
+                    if let Some((_, node)) = self.nodes.remove(id) {
+                        node.retire(&mut dag);
+                        let canonical: Arc<str> = Arc::from(id.as_str());
+                        publication.absent(&canonical, node.incarnation_id(), node.generation());
+                    }
                 }
-            }
-            removed
-        });
-        for (id, gen) in removed {
-            self.generation_floors.insert(id.clone(), gen);
-            let canonical: Arc<str> = Arc::from(id.as_str());
-            self.dag.lock().signal_file_shutdown(&canonical);
+            });
+            dag.clear();
+            self.edges.reverse_index.inner.clear();
+            self.edges.forward_deps.clear();
+            self.deferred_blocker_ids.clear();
+            self.auto_ingested_recent.clear();
         }
-
-        // 4. Clear state except generation_floors (preserved across resets
-        //    to prevent cross-incarnation stale completions from matching).
-        self.edges.reverse_index.inner.clear();
-        self.edges.forward_deps.clear();
-        self.dag.lock().clear();
-        self.tombstones.clear();
-        // generation_floors intentionally NOT cleared — stale worker completions
-        // from the old incarnation can still arrive after restart, and floors
-        // ensure re-added files start at a generation above any prior use.
-        self.deferred_blocker_ids.clear();
-        // Artifact blocker registry lives on the DAG and is cleared
-        // alongside the DAG itself in `dag.lock().clear()` above
-        // (see `SchedulerDag::clear` — clears `artifact_blocker_deps`).
-        // Auto-ingest tracking map is owned by the scheduler (not the
-        // DAG). Without an explicit clear here, every register_resolved_deps
-        // call that fired in the prior incarnation leaks an entry
-        // across reset() — accumulating across LSP workspace switches,
-        // MCP session boundaries, and multi-project bench cycles. The
-        // map is bounded by the active dep set so the leak is bounded
-        // per reset, but it is still real (entries persist for the
-        // 60s aging window or until a matrix consult that happens to
-        // observe the matching generation, which will rarely happen
-        // across an incarnation boundary).
-        self.auto_ingested_recent.clear();
 
         // 5. Drain inbox again — catch any completions that workers sent
         //    between step 2 and now. These are harmless (nodes removed in
@@ -2409,37 +1249,6 @@ impl Scheduler {
         }
     }
 
-    /// Signal `Shutdown` to every completion sender carried by a
-    /// drained-but-unprocessed submission so the corresponding handles
-    /// resolve instead of hanging. `Wake` / `StageComplete` carry no
-    /// waiter sender and are dropped silently.
-    fn shutdown_drained_submission(submission: Submission) {
-        match submission {
-            Submission::NewRequest { sender, .. } => {
-                sender.send(CompletionState::Shutdown);
-            }
-            Submission::NewRequestBatch { requests } => {
-                for req in requests {
-                    req.sender.send(CompletionState::Shutdown);
-                }
-            }
-            Submission::ScopedCacheNode { flight, .. } => {
-                let _ = flight.set_terminal(ScopedCacheTerminal::Shutdown);
-            }
-            Submission::Wake | Submission::StageComplete { .. } => {}
-        }
-    }
-
-    fn shutdown_all_scoped_cache_flights(&self) {
-        let _gate = self.scoped_cache_gate.lock();
-        for flight in self.scoped_cache_flights.iter() {
-            let _ = flight.set_terminal(ScopedCacheTerminal::Shutdown);
-        }
-        self.scoped_cache_flights.clear();
-    }
-
-    // ── Edge Management ──
-
     /// Register exact resolutions for a file (from bundler/LSP `set_import_dependencies`).
     ///
     /// Updates the scheduler's forward/reverse edges with the newly
@@ -2469,156 +1278,117 @@ impl Scheduler {
         blocker_dep_ids: Vec<String>,
     ) {
         // Ensure the node exists.
-        self.nodes
-            .entry(file_id.to_string())
-            .or_insert_with(|| self.create_node(file_id, None));
-
-        // Update forward/reverse edges.
-        let new_deps: std::collections::BTreeSet<String> = resolved_dep_ids.into_iter().collect();
-        self.edges.record_forward_deps(file_id, new_deps);
-
-        // Store blocker IDs for replay on the next Source completion.
-        // Also handle the empty-set case as an explicit clear of any
-        // prior pending Artifact blocker registry entry at the
-        // owner's live generation — the caller is now declaring
-        // there are no late blockers, and a stale registry entry
-        // would gate subsequent Artifact admissions on deps that the
-        // caller no longer considers blocking.
-        if !blocker_dep_ids.is_empty() {
-            // Resolve languages HERE. This is the sole content writer of
-            // `deferred_blocker_ids` and it runs with no DAG lock held, so the
-            // host classifier is safe to call. `register_resolved_deps` can
-            // return early below (generation 0 / Source not yet committed)
-            // WITHOUT running its node-ensure pass, so a deferred id may well
-            // reach Source completion with no node — carrying the language is
-            // what lets that path create one without touching the host under
-            // the mutex.
+        // Host callbacks finish before the lifecycle hold.
+        let requested_incarnation = self.stamp_request(file_id, None);
+        let dep_languages: std::collections::HashMap<String, FileLanguage> = blocker_dep_ids
+            .iter()
+            .map(|id| (id.clone(), self.source_loader.classify(id)))
+            .collect();
+        let canonical_arc: Arc<str> = Arc::from(file_id);
+        let (generation, incarnation, inherited_priority) = {
+            let mut dag = self.dag.lock();
+            let Some(node) = self
+                .nodes
+                .get(file_id)
+                .map(|entry| Arc::clone(entry.value()))
+            else {
+                return;
+            };
+            if node.submission_lifetime() != requested_incarnation {
+                return;
+            }
+            self.edges
+                .record_forward_deps(file_id, resolved_dep_ids.into_iter().collect());
+            let generation = node.generation();
+            if blocker_dep_ids.is_empty() {
+                self.deferred_blocker_ids.remove(file_id);
+                dag.clear_artifact_blockers(&canonical_arc, generation);
+                return;
+            }
             self.deferred_blocker_ids.insert(
-                file_id.to_string(),
+                file_id.to_owned(),
                 blocker_dep_ids
                     .iter()
-                    .map(|id| (id.clone(), self.source_loader.classify(id)))
+                    .map(|id| (id.clone(), dep_languages[id].clone()))
                     .collect(),
             );
-        } else {
-            self.deferred_blocker_ids.remove(file_id);
-            // Clear any prior pending registry entry at the live
-            // generation before early-returning. An empty
-            // `blocker_dep_ids` is the caller's authoritative "no
-            // pending blockers" signal — leaving a stale entry in
-            // place would gate future Artifact admissions on deps
-            // the caller no longer considers blocking.
-            // Snapshot the generation and drop the nodes-shard Ref
-            // BEFORE acquiring `dag.lock()`. Holding a DashMap Ref
-            // across a parking_lot Mutex acquisition forms an AB-BA
-            // ordering with any caller that takes `dag.lock` first
-            // and then mutates the same nodes shard. The DAG-first
-            // ordering is the canonical one, so the nodes-shard
-            // reader must release before locking.
-            let gen = self.nodes.get(file_id).map(|n| n.generation());
-            if let Some(gen) = gen {
-                if gen > 0 {
-                    let canonical_arc: Arc<str> = Arc::from(file_id);
-                    self.dag.lock().clear_artifact_blockers(&canonical_arc, gen);
-                }
+            if node.current_integrated_source().is_none() {
+                return;
             }
-            return;
-        }
-
-        // If Source has already completed for the current generation, register
-        // blockers immediately. Otherwise they'll be replayed on the next
-        // Source completion.
-        let node = match self.nodes.get(file_id) {
-            Some(n) => n.clone(),
-            None => return,
+            (
+                generation,
+                node.incarnation_id(),
+                dag.highest_priority_for_file(&canonical_arc, generation)
+                    .unwrap_or(Priority::Background),
+            )
         };
-        let generation = node.generation();
-        if generation == 0 || node.current_integrated_source().is_none() {
-            return; // Source hasn't committed yet — deferred replay will handle it
-        }
 
-        let canonical_arc: Arc<str> = Arc::from(file_id);
-        let inherited_priority = self
-            .dag
-            .lock()
-            .highest_priority_for_file(&canonical_arc, generation)
-            .unwrap_or(Priority::Background);
-
-        // First pass: auto-ingest deps that lack a FileNode so their
-        // Source/Analysis pipeline starts. Auto-ingest is a Scheduler
-        // concern (it owns `nodes` + the inbox), not a DAG concern.
-        // We track which deps were just auto-ingested in this call so
-        // the second-pass dead-producer filter can grace them: a
-        // freshly-ingested node has its Source request queued in the
-        // inbox and is structurally indistinguishable from a
-        // Source-failed corpse without this set (both have
-        // `current_source().is_none()` and no live DAG identity for
-        // Source/Analysis).
-        let mut auto_ingested: std::collections::HashSet<&str> =
-            std::collections::HashSet::with_capacity(blocker_dep_ids.len());
+        // A queued Source or reload already owns a node but may still be in
+        // the inbox. Give it the same producer tracking as an auto-ingested
+        // dependency before recording any blockers for its Analysis.
         for dep_id in &blocker_dep_ids {
-            if self.tombstones.contains_key(dep_id) {
-                continue;
-            }
-            // Atomically ENSURE the dep node exists — never replace one.
-            //
-            // `contains_key` followed by an unconditional `insert` was a
-            // check-then-act: a real request creating the same file
-            // between the two had its FileNode REPLACED by this one, at
-            // the same generation and with no source snapshot. The
-            // replaced node stayed the DISPATCHED incarnation for work
-            // already in flight, so that work's completion was later
-            // validated against a different node object entirely — the
-            // live map entry — and the mismatch could not even be seen
-            // by a generation check, since both nodes sit at the same
-            // generation. The vacant entry holds the shard lock, so a
-            // concurrent creator either wins (we observe it and reuse
-            // it) or waits for us.
-            let mut created_generation: Option<u64> = None;
-            {
+            let submission = {
+                let _dag = self.dag.lock();
+                if !self.nodes.get(file_id).is_some_and(|live| {
+                    live.incarnation_id() == incarnation && live.generation() == generation
+                }) {
+                    return;
+                }
+                let dep_node = Arc::clone(
+                    self.nodes
+                        .entry(dep_id.clone())
+                        .or_insert_with(|| {
+                            self.create_node_at(dep_id, Some(dep_languages[dep_id].clone()), 1)
+                        })
+                        .value(),
+                );
                 let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-                let _ensured = self.nodes.entry(dep_id.clone()).or_insert_with(|| {
-                    let dep_node = self.create_node_at_least(dep_id, None, 1);
-                    let dep_gen = dep_node.generation();
-                    // Plant the auto-ingest tracking entry BEFORE
-                    // publishing the FileNode and BEFORE sending the
-                    // NewRequest. A concurrent matrix consultation that
-                    // observes the FileNode without the tracking entry
-                    // would fall through to the dead-producer arm and
-                    // return `Resolved` for a live dep — the FileNode
-                    // is present, no live Source/Analysis DAG identity
-                    // exists yet (the NewRequest is still about to be
-                    // queued), and the tracking entry would be the
-                    // disambiguator. Planting it inside this closure
-                    // keeps that ordering: the entry lands while the
-                    // shard is still locked and the FileNode is not yet
-                    // visible to any reader.
+                if dep_node.source_admission_pending()
+                    && dep_node.current_source().is_none()
+                    && !self.auto_ingest_tracking_gates(
+                        &dep_canonical,
+                        dep_node.incarnation_id(),
+                        dep_node.generation(),
+                    )
+                {
+                    let dep_gen = if dep_node.generation() == 0 {
+                        self.source_root.publish_transition(|publication| {
+                            let generation = publication.bump_node_generation(&dep_node);
+                            publication.absent(
+                                &dep_canonical,
+                                dep_node.incarnation_id(),
+                                generation,
+                            );
+                            generation
+                        })
+                    } else {
+                        dep_node.generation()
+                    };
                     self.auto_ingested_recent.insert(
                         Arc::clone(&dep_canonical),
                         AutoIngestedRecord {
+                            incarnation: dep_node.incarnation_id(),
                             generation: dep_gen,
                             since: Instant::now(),
                         },
                     );
-                    created_generation = Some(dep_gen);
-                    dep_node
-                });
-            }
-            if created_generation.is_some() {
-                let _ = self.send_submission(Submission::NewRequest {
-                    file_id: dep_id.clone(),
-                    target: TargetStage::Analysis,
-                    priority: std::cmp::min(inherited_priority, Priority::Interactive),
-                    source: None,
-                    file_language: None,
-                    request_context: None,
-                    sender: {
-                        let (_, s) = completion_pair::<RequestResult>();
-                        s
-                    },
-                    submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
-                });
-                auto_ingested.insert(dep_id.as_str());
+                    let (_, sender) = completion_pair::<RequestResult>();
+                    Some(Submission::NewRequest {
+                        file_id: dep_id.clone(),
+                        target: TargetStage::Analysis,
+                        priority: std::cmp::min(inherited_priority, Priority::Interactive),
+                        source: None,
+                        file_language: None,
+                        request_context: None,
+                        sender,
+                        submitted_lifetime: dep_node.submission_lifetime(),
+                    })
+                } else {
+                    None
+                }
+            };
+            if let Some(submission) = submission {
+                let _ = self.send_submission(submission);
             }
         }
 
@@ -2643,6 +1413,11 @@ impl Scheduler {
         // first-time blocker registration would drop the dep
         // immediately and skip the gating it just set up.
         let mut dag = self.dag.lock();
+        if !self.nodes.get(file_id).is_some_and(|live| {
+            live.incarnation_id() == incarnation && live.generation() == generation
+        }) {
+            return;
+        }
         let mut dep_keys: Vec<DepKey> = Vec::new();
         // Failed-dep records collected from the 3-state matrix. These
         // ride together with the live `dep_keys` inside the
@@ -2656,11 +1431,12 @@ impl Scheduler {
         // prerequisite. Owner Analysis itself remains ungated.
         let mut failed_records: Vec<crate::dag::FailedDepRecord> = Vec::new();
         for dep_id in &blocker_dep_ids {
-            if self.tombstones.contains_key(dep_id) {
-                continue;
-            }
             let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-            let dep_gen = self.nodes.get(dep_id).map(|n| n.generation()).unwrap_or(0);
+            let Some(dep_node) = self.nodes.get(dep_id).map(|n| Arc::clone(n.value())) else {
+                continue;
+            };
+            let dep_gen = dep_node.generation();
+            let dep_incarnation = dep_node.incarnation_id();
             // Run the shared 3-state matrix:
             //
             // - `Gating`     → record the DepKey for the Artifact
@@ -2673,26 +1449,14 @@ impl Scheduler {
             //                  drains the registry and surfaces a
             //                  typed `DependencyFailed` before codegen
             //                  runs over a dead prerequisite.
-            let status = if auto_ingested.contains(dep_id.as_str()) {
-                // Just-ingested: grace the dep — its Source request
-                // is in the inbox waiting to be dispatched. The
-                // canonical dead-producer matrix can't distinguish
-                // "pending inbox load" from "Source failed" because
-                // both leave the same FileNode + DAG shape, so we
-                // trust the auto-ingest side-effect. (A genuine
-                // terminal failure is intercepted by the matrix's
-                // `terminal_dep_failures` consult before this branch
-                // is reached.)
-                BlockerStatus::Gating
-            } else {
-                self.ensure_analysis_for_demand(
-                    &mut dag,
-                    &dep_canonical,
-                    dep_gen,
-                    std::cmp::min(inherited_priority, Priority::Interactive),
-                    AnalysisDemandKind::ArtifactBlocker,
-                )
-            };
+            let status = self.ensure_analysis_for_demand(
+                &mut dag,
+                &dep_canonical,
+                dep_incarnation,
+                dep_gen,
+                std::cmp::min(inherited_priority, Priority::Interactive),
+                AnalysisDemandKind::ArtifactBlocker,
+            );
             match status {
                 BlockerStatus::Satisfied => continue,
                 BlockerStatus::Failed(record) => {
@@ -2702,6 +1466,7 @@ impl Scheduler {
                 BlockerStatus::Gating => {
                     let dep_key = DepKey::FileStage {
                         canonical: Arc::clone(&dep_canonical),
+                        incarnation: dep_incarnation,
                         generation: dep_gen,
                         stage: FileStageKey::Analysis,
                     };
@@ -2723,7 +1488,7 @@ impl Scheduler {
         // each see the other as not-yet-gating and both register
         // mutually-blocking blocker entries.
         let (filtered_dep_keys, _dropped_dep_keys) =
-            Self::filter_macro_cycle_deps(&dag, &canonical_arc, generation, dep_keys);
+            Self::filter_macro_cycle_deps(&dag, &canonical_arc, incarnation, generation, dep_keys);
         let dep_keys = filtered_dep_keys;
 
         if dep_keys.is_empty() && failed_records.is_empty() {
@@ -2761,91 +1526,6 @@ impl Scheduler {
         dag.record_artifact_blockers(&canonical_arc, generation, pending_set);
     }
 
-    /// Drop any dep whose Analysis transitively waits on the
-    /// owner's Analysis — the single chokepoint for macro-type-dep
-    /// cycle filtering shared by both blocker-registration paths:
-    ///
-    /// 1. The immediate path at the bottom of
-    ///    [`Self::register_resolved_deps`] (Source already complete
-    ///    when blockers arrive).
-    /// 2. The Source-completion replay path inside
-    ///    [`Self::handle_stage_complete`] (TaskKind::Load arm).
-    ///
-    /// Catches three cycle classes uniformly via the DAG's bounded
-    /// reachability walk ([`SchedulerDag::dep_reaches_owner`]):
-    ///
-    /// - Direct self: `A → A`.
-    /// - Direct mutual: `A ↔ B`.
-    /// - Transitive: `A → B → C → A` (bounded BFS).
-    ///
-    /// The caller MUST hold the DAG lock through this call and the
-    /// subsequent `record_artifact_blockers` so two concurrent
-    /// completions cannot race past the filter into mutually-blocking
-    /// registry entries.
-    ///
-    /// Returns the `(kept, dropped)` split for traceability. The
-    /// `dropped` half is currently unused at the call-site but
-    /// preserves the diagnostic the test suite asserts against.
-    fn filter_macro_cycle_deps(
-        dag: &crate::dag::SchedulerDag,
-        owner_canonical: &Arc<str>,
-        owner_generation: u64,
-        deps: Vec<DepKey>,
-    ) -> (Vec<DepKey>, Vec<DepKey>) {
-        let mut kept = Vec::with_capacity(deps.len());
-        let mut dropped = Vec::new();
-        for dep in deps {
-            let drop_this = if let DepKey::FileStage {
-                canonical: dep_canonical,
-                generation: dep_generation,
-                stage: FileStageKey::Analysis,
-            } = &dep
-            {
-                dag.dep_reaches_owner(
-                    owner_canonical,
-                    owner_generation,
-                    dep_canonical,
-                    *dep_generation,
-                )
-            } else {
-                // Non-Analysis deps are not part of the macro-type
-                // cycle class the filter is responsible for.
-                false
-            };
-            if drop_this {
-                dropped.push(dep);
-            } else {
-                kept.push(dep);
-            }
-        }
-        (kept, dropped)
-    }
-
-    /// Create a FileNode for a file, respecting the generation floor
-    /// from prior incarnations so stale completions never match.
-    fn create_node(&self, file_id: &str, file_language: Option<FileLanguage>) -> Arc<FileNode> {
-        self.create_node_at_least(file_id, file_language, 0)
-    }
-
-    fn create_node_at_least(
-        &self,
-        file_id: &str,
-        file_language: Option<FileLanguage>,
-        min_generation: u64,
-    ) -> Arc<FileNode> {
-        let language = file_language.unwrap_or_else(|| self.source_loader.classify(file_id));
-        let floor_gen = self
-            .generation_floors
-            .get(file_id)
-            .map(|floor| *floor + 1)
-            .unwrap_or(0);
-        Arc::new(FileNode::new_at(
-            file_id.to_string(),
-            language,
-            floor_gen.max(min_generation),
-        ))
-    }
-
     /// Get the scheduler configuration.
     pub fn config(&self) -> &SchedulerConfig {
         &self.config
@@ -2861,7 +1541,19 @@ impl Scheduler {
     /// reservation (if the internal worker had already reserved one)
     /// and removes the identity from `by_identity` / `nodes` so the
     /// dispatch loop's `next_ready` will not re-dispatch it.
-    pub fn commit_artifact(&self, file_id: &str, profile_hash: u64, snapshot: ArtifactSnapshot) {
+    ///
+    /// The artifact is published at `witness`'s generation, and only into
+    /// the node object `witness` was captured from: a witness whose node was
+    /// retired (removal, reset, language re-home) is rejected even when a
+    /// successor serves the same content at the same generation. Returns
+    /// whether the artifact was published.
+    pub fn commit_artifact(
+        &self,
+        witness: &crate::node::SourceWitness,
+        profile_hash: u64,
+        data: Arc<dyn crate::node::SnapshotData>,
+    ) -> bool {
+        let file_id = witness.canonical();
         // Snapshot the FileNode `Arc` and drop the nodes-shard
         // `Ref` BEFORE acquiring `dag.lock()`. Holding a DashMap
         // Ref across `dag.lock` forms a latent AB-BA ordering with
@@ -2874,23 +1566,29 @@ impl Scheduler {
         // the per-profile `artifacts` DashMap insert below).
         let node = match self.nodes.get(file_id) {
             Some(r) => Arc::clone(&r),
-            None => return,
+            None => return false,
         };
-        let generation = snapshot.generation;
-        // Full coherence check: node generation, Source, AND Analysis
-        // must all match. Without this, an external compile can publish
-        // an artifact before the scheduler's own pipeline has committed
-        // the prerequisite stages.
-        if node.generation() != generation {
-            return;
+        let incarnation = witness.incarnation();
+        let generation = witness.generation();
+        // Full coherence check: witnessed node object, node generation,
+        // Source, AND Analysis must all match. Without this, an external
+        // compile can publish an artifact before the scheduler's own
+        // pipeline has committed the prerequisite stages.
+        if !node.admits_work(incarnation, generation) {
+            return false;
         }
         if node.current_source().is_none() || node.current_analysis().is_none() {
-            return;
+            return false;
         }
-        let snap = Arc::new(snapshot);
+        let snap = Arc::new(ArtifactSnapshot {
+            generation,
+            profile_hash,
+            data,
+        });
         let canonical: Arc<str> = Arc::from(file_id);
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(&canonical),
+            incarnation,
             generation,
             profile_hash: profile_hash_to_bytes(profile_hash),
             content_hash: [0u8; 16],
@@ -2903,10 +1601,18 @@ impl Scheduler {
         // so an external commit that lands during a worker's
         // executor run is preserved.
         let mut guard = self.dag.lock();
+        if !self
+            .nodes
+            .get(file_id)
+            .is_some_and(|live| live.admits_work(incarnation, generation))
+        {
+            return false;
+        }
         node.artifacts.insert(profile_hash, Arc::clone(&snap));
         let result = RequestResult::Artifact(snap);
         guard.signal_stage_complete(
             &canonical,
+            incarnation,
             generation,
             &TaskKind::Artifact { profile_hash },
             &result,
@@ -2940,47 +1646,59 @@ impl Scheduler {
         {
             guard.clear_artifact_blockers(&canonical, generation);
         }
+        true
     }
 
-    /// Evict the artifact snapshot for `(file_id, profile_hash)` only
-    /// when the stored snapshot is no newer than `max_generation`.
+    /// Evict the artifact snapshot for `(witness.canonical(), profile_hash)`
+    /// only when it belongs to the witnessed node object and is no newer
+    /// than the witnessed generation.
     ///
     /// Called by the host when a compile path refuses cache admission
     /// (e.g. an overflowed fact signature) and any prior artifact for
     /// the same `(canonical, profile)` produced at or before the
-    /// caller's start-of-compile generation must not remain observable
+    /// caller's start-of-compile source must not remain observable
     /// via `try_get_artifact`. The symmetric counterpart to
     /// [`commit_artifact`](Self::commit_artifact): commit publishes the
-    /// snapshot, this evicts it under the generation gate.
+    /// snapshot, this evicts it under the same witness.
     ///
     /// Generation gate. The slow refused compile that started at
     /// generation `N` may reach this call AFTER a fresh successful
     /// compile at generation `N+k` has landed a newer artifact via
     /// `commit_artifact`. Unconditionally removing would clobber the
-    /// newer artifact (since `commit_artifact` rejects stale publishes
-    /// via the node generation check, the inverse asymmetry would be a
-    /// silent data race). The caller passes its captured compile-start
-    /// generation as `max_generation`; the eviction proceeds only when
-    /// the stored snapshot's `generation <= max_generation`.
+    /// newer artifact, so the eviction proceeds only when the stored
+    /// snapshot's `generation <= witness.generation()`.
     ///
-    /// No-op when the node or the per-profile slot is absent, OR when
-    /// the stored snapshot is newer than `max_generation`. Does NOT
-    /// touch generation, source, or analysis state — only the
-    /// `(profile_hash → snapshot)` entry on the artifact map.
-    pub fn remove_artifact_if_not_newer_than(
+    /// Incarnation gate. A witness whose node object was retired (removal,
+    /// reset, language re-home) evicts nothing, even when a successor holds
+    /// an artifact at the same generation for the same content: that
+    /// artifact was never produced from the witnessed source.
+    ///
+    /// Returns whether an artifact was evicted. Does NOT touch generation,
+    /// source, or analysis state — only the `(profile_hash → snapshot)`
+    /// entry on the artifact map.
+    pub fn remove_artifact_not_newer_than(
         &self,
-        file_id: &str,
+        witness: &crate::node::SourceWitness,
         profile_hash: u64,
-        max_generation: u64,
-    ) {
-        if let Some(node) = self.nodes.get(file_id) {
-            // Race-free remove-if: `DashMap::remove_if` runs the
-            // predicate under the per-shard lock so a concurrent
-            // `commit_artifact` cannot land a newer snapshot between
-            // the read and the remove.
-            node.artifacts
-                .remove_if(&profile_hash, |_, snap| snap.generation <= max_generation);
+    ) -> bool {
+        // Removal and reset retire and unpublish a node under the DAG lock,
+        // so the witness check and the eviction cannot straddle a
+        // retirement. The node `Ref` is taken after the lock (DAG-first).
+        let _lifecycle = self.dag.lock();
+        let Some(node) = self.nodes.get(witness.canonical()) else {
+            return false;
+        };
+        if !node.carries_witness(witness) {
+            return false;
         }
+        let max_generation = witness.generation();
+        // Race-free remove-if: `DashMap::remove_if` runs the predicate
+        // under the per-shard lock so a concurrent internal artifact
+        // publication cannot land a newer snapshot between the read and
+        // the remove.
+        node.artifacts
+            .remove_if(&profile_hash, |_, snap| snap.generation <= max_generation)
+            .is_some()
     }
 
     /// Get the shared overlay map.
@@ -3005,252 +1723,6 @@ impl Scheduler {
         self.invalidate_with_lock_hooks(id, &mut || {}, &mut || {});
     }
 
-    /// TEST-ONLY: fire `attempt` after the node snapshot and BEFORE
-    /// `dag.lock()`, so a test holding the DAG lock can sample
-    /// generation once the invalidator has reached the lock rather
-    /// than spinning on `yield_now`.
-    #[cfg(test)]
-    pub(crate) fn invalidate_signaling_before_dag_lock(
-        &self,
-        id: &str,
-        attempt: std::sync::mpsc::SyncSender<()>,
-    ) {
-        self.invalidate_with_lock_hooks(
-            id,
-            &mut || {
-                let _ = attempt.send(());
-            },
-            &mut || {},
-        );
-    }
-
-    /// TEST-ONLY: fire `attempt` after `dag.lock()` and BEFORE the
-    /// publication hold, so a test holding the publication lock can
-    /// sample generation without a yield loop.
-    #[cfg(test)]
-    pub(crate) fn invalidate_signaling_before_publication(
-        &self,
-        id: &str,
-        attempt: std::sync::mpsc::SyncSender<()>,
-    ) {
-        self.invalidate_with_lock_hooks(id, &mut || {}, &mut || {
-            let _ = attempt.send(());
-        });
-    }
-
-    fn invalidate_with_lock_hooks(
-        &self,
-        id: &str,
-        before_dag_lock: &mut dyn FnMut(),
-        before_publication: &mut dyn FnMut(),
-    ) {
-        // Snapshot the FileNode `Arc` and drop the nodes-shard `Ref`
-        // BEFORE acquiring `dag.lock()`. Holding a DashMap Ref
-        // across a parking_lot Mutex acquisition forms a latent
-        // AB-BA ordering with any caller that takes `dag.lock`
-        // first and then mutates the same nodes shard. The
-        // DAG-first ordering is the canonical one for the lifecycle
-        // sweeps, so the nodes-shard reader must release the Ref
-        // before locking. The cloned `Arc<FileNode>` preserves
-        // every field access the original Ref enabled.
-        let node = match self.nodes.get(id) {
-            Some(r) => Arc::clone(&r),
-            None => return,
-        };
-        let canonical: Arc<str> = Arc::from(id);
-        before_dag_lock();
-        let mut dag = self.dag.lock();
-        before_publication();
-        // The bump and the source-root publication run under ONE
-        // publication hold, so a concurrent `capture_source_root` sees
-        // the pre-bump node with the pre-bump root or the post-bump node
-        // with the post-bump root — never a torn pair. The publication
-        // lock is INNER to the DAG lock already held here.
-        let new_gen = self.source_root.publish_transition(|publication| {
-            let new_gen = publication.bump_node_generation(&node);
-            publication.absent(&canonical, node.incarnation_id(), new_gen);
-            new_gen
-        });
-        // Stale per-(owner, generation) Artifact blocker entries
-        // for superseded generations are dropped inside
-        // `supersede_old_file_generations` (it now also scrubs
-        // the DAG's artifact_blocker_deps registry for stale
-        // owner-canonical entries). The new generation records
-        // its own blockers via `register_resolved_deps`.
-        dag.supersede_old_file_generations(&canonical, new_gen);
-    }
-
-    /// Remove a file from the scheduler.
-    ///
-    /// Signals shutdown to pending request handles, removes the node,
-    /// cleans up forward/reverse edges, and unblocks any dependents that
-    /// were waiting on this file (since the blocker can never resolve).
-    pub fn remove(&self, id: &str) {
-        // Bump epoch and tombstone with the new value. Any submission stamped
-        // with an earlier epoch is rejected as pre-remove.
-        let epoch = self.removal_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-        self.tombstones.insert(id.to_string(), epoch);
-
-        let canonical_arc: Arc<str> = Arc::from(id);
-        // Cancel every DAG node for this canonical (across all
-        // generations) and gather stranded waiters whose only
-        // remaining gating dep was a node for this file. Also scrub
-        // the DAG's Artifact blocker registry so no entry — either
-        // as owner OR as a referenced DepKey — keeps the removed
-        // file's identity alive. Same DAG lock holds both passes so
-        // the registry view is consistent with the cancel sweep.
-        // Generation this incarnation last used, read BEFORE the sweep so
-        // the retirement floor can be installed in the same lock hold.
-        let last_gen = self
-            .nodes
-            .get(id)
-            .map(|n| n.generation())
-            .unwrap_or_default();
-        let stranded: Vec<crate::dag::SubmissionToken> = {
-            let mut dag = self.dag.lock();
-            // Install the retirement floor FIRST, in the same hold as the
-            // cancel sweep. The sweep is backward-looking: it cancels
-            // what exists now, then the lock is released and the
-            // `FileNode` is not removed until later. A queued completion
-            // entering that gap still saw a live node at a live
-            // generation and could admit Artifact-G after the sweep;
-            // once the node was gone that work could never dispatch and
-            // its capacity reservation was never released. With the
-            // floor installed here, `submit` refuses every identity for
-            // this canonical at or below the generation this incarnation
-            // used, for the whole rest of `remove()` and beyond. A
-            // re-added file starts above the same floor `create_node`
-            // records, so it is unaffected.
-            // Drain this file's waiter groups as `Shutdown` BEFORE retiring.
-            // `retire_generations_below` signals `Superseded`, and its floor of
-            // `last_gen + 1` covers the LIVE generation too
-            // (`file_waiter_gens_below` is exclusive), so retiring first would
-            // silently change every removal waiter's terminal from `Shutdown`
-            // to `Superseded`. `Superseded` means "a newer generation
-            // invalidated this" — and after `remove()` there is no newer
-            // generation, so it would misreport the cause. Draining first
-            // leaves the sweep below nothing to re-signal.
-            dag.signal_file_shutdown(&canonical_arc);
-            let mut stranded =
-                dag.retire_generations_below(&canonical_arc, last_gen.saturating_add(1));
-            let canonical_for_match = canonical_arc.as_ref().to_string();
-            let (_, also_stranded) = dag.cancel_matching(|identity| match identity {
-                WorkNodeIdentity::FileStage { canonical: c, .. }
-                | WorkNodeIdentity::Artifact { canonical: c, .. } => {
-                    c.as_ref() == canonical_for_match.as_str()
-                }
-                WorkNodeIdentity::CacheNode { .. } => false,
-            });
-            // Drop any owner entry for the removed file AND scrub
-            // every recorded DepKey that references the removed
-            // file as a dep. The owner-side drop covers the
-            // owner-removed case directly; the cross-owner scrub
-            // closes the lifecycle gap where another file's
-            // recorded blocker `DepKey` pointed at the removed
-            // file's Analysis — without the scrub the stale
-            // DepKey would survive `remove(canonical)` and pin
-            // the other file's Artifact admission forever.
-            dag.artifact_blocker_deps_remove_owner(id);
-            dag.scrub_artifact_blockers_referencing(id);
-            // Drop every persistent terminal-dep-failure record
-            // that references the removed file. A stale record on
-            // a removed canonical would otherwise pin a future
-            // admission as `Failed` even after the file went away.
-            dag.scrub_terminal_dep_failures_referencing(id);
-            stranded.extend(also_stranded);
-            stranded
-        };
-
-        self.deferred_blocker_ids.remove(id);
-        // Drop the auto-ingest tracking entry — the FileNode is about
-        // to disappear, so a future matrix lookup must NOT treat the
-        // tracking entry as evidence of a live producer.
-        //
-        // Safety vs. the other 3 sites that use a value-conditional
-        // `remove_if(canonical, |_, v| v.generation == X)`: those sites
-        // can race with a concurrent newer-gen re-insertion (a fresh
-        // auto-ingest by `register_resolved_deps` while the matrix is
-        // mid-cleanup), so they must scope the remove to the generation
-        // they observed. THIS site is different — it runs under the
-        // tombstone barrier installed at the top of `remove()`:
-        //
-        //   1. `removal_epoch.fetch_add(1, AcqRel)` + `tombstones.insert(id, epoch)`
-        //      at the tombstone barrier at the top of `remove()` happen-before this point.
-        //   2. The auto-ingest path in `register_resolved_deps` checks
-        //      `self.tombstones.contains_key(dep_id)` BEFORE inserting
-        //      a tracking entry (see the `tombstones.contains_key`
-        //      guard at the top of the auto-ingest block) and skips
-        //      the entire ingest when the tombstone is present.
-        //   3. The submit-time validation in `handle_new_request`
-        //      rejects any submission with
-        //      `submitted_epoch < tombstone_epoch` (the pre-remove
-        //      rejection branch), so a stale request observed before
-        //      our `removal_epoch++` cannot re-trigger an ingest by
-        //      proxy either.
-        //
-        // Between (1) and this line, no concurrent writer can insert
-        // a new `auto_ingested_recent` entry for this canonical at any
-        // generation — the auto-ingest gate is closed and a stale
-        // request that already passed through `register_resolved_deps`
-        // before (1) would have completed its insert before our
-        // tombstone barrier became visible (the DashMap insert is the
-        // happens-before edge). The unconditional drop is therefore
-        // safe AND complete: any older-gen tracking entry left over
-        // by a superseded matrix path is also scrubbed in one pass.
-        self.auto_ingested_recent.remove(&canonical_arc);
-
-        // Drop the node and publish the resulting `Absent` source
-        // version under ONE publication hold, so no captured root can
-        // observe the file gone from `nodes` while the root still
-        // answers `Present` (or the reverse). The DAG signalling below
-        // stays OUTSIDE the hold — the publication lock is inner to the
-        // DAG lock and must never be held across it.
-        let removed = self.source_root.publish_transition(|publication| {
-            let removed = self.nodes.remove(id);
-            if let Some((_, node)) = removed.as_ref() {
-                publication.absent(&canonical_arc, node.incarnation_id(), node.generation());
-            }
-            removed
-        });
-        if let Some((_, node)) = removed {
-            let gen = node.generation();
-            // Record floor so a re-added node starts above this generation.
-            self.generation_floors.insert(id.to_string(), gen);
-            self.edges.remove_file(id);
-            // Signal Shutdown to any pending waiters for this file.
-            // The retirement floor was already installed at the top of
-            // `remove()`, in the same hold as the cancel sweep.
-            self.dag.lock().signal_file_shutdown(&canonical_arc);
-        }
-
-        // Stranded waiters — their gating dep can never resolve.
-        // Re-enqueue their Artifact work so it proceeds (with the
-        // dep treated as missing) rather than hangs.
-        for tok in stranded {
-            self.requeue_stranded_waiter(tok);
-        }
-    }
-
-    /// Re-enqueue a waiter token whose gating dep was cancelled.
-    /// Looks up the file/generation/profile and re-submits any pending
-    /// artifact work through the DAG so it dispatches.
-    fn requeue_stranded_waiter(&self, _token: crate::dag::SubmissionToken) {
-        // Stranded waiter handling: in the legacy path the
-        // `remove_file_as_blocker` result was iterated and pending
-        // artifacts were re-enqueued via `enqueue_pending_artifacts`.
-        // With the DAG, the file's pending artifact waiters at this
-        // generation are still in the dag's `file_waiters` map. The
-        // dispatch loop will pick them up on the next pass once the
-        // dependency gate clears — which `cancel_matching` already
-        // did when it dropped the cancelled identity from the
-        // waiters reverse-index.
-        //
-        // We re-trigger the dispatch by sending a Wake into the
-        // inbox; the driver picks it up, re-runs the cooperative
-        // pump, and the now-ungated artifact nodes go out.
-        let _ = self.inbox.sender.try_send(Submission::Wake);
-    }
-
     /// Close a file: clear overlay + pending_source, keep node alive.
     ///
     /// The generation bump and the supersede sweep run under the SAME
@@ -3268,6 +1740,14 @@ impl Scheduler {
         };
         let canonical: Arc<str> = Arc::from(id);
         let mut dag = self.dag.lock();
+        let submitted_lifetime = node.incarnation_id();
+        if !self
+            .nodes
+            .get(id)
+            .is_some_and(|live| live.incarnation_id() == submitted_lifetime)
+        {
+            return;
+        }
         // Bump + publish atomically; see [`Self::invalidate`].
         let new_gen = self.source_root.publish_transition(|publication| {
             let new_gen = publication.bump_node_generation(&node);
@@ -3287,7 +1767,7 @@ impl Scheduler {
             priority: Priority::Background,
             source: None,
             file_language: None,
-            submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
+            submitted_lifetime: node.submission_lifetime(),
             request_context: None,
             sender: {
                 let (_, sender) = completion_pair::<RequestResult>();
@@ -3389,2649 +1869,6 @@ impl Scheduler {
                 DriverPark::Teardown | DriverPark::IdleTick => continue,
                 DriverPark::Disconnected => break,
             }
-        }
-    }
-
-    /// Drain all available submissions from the inbox.
-    ///
-    /// Compatibility wrapper around [`Self::drain_inbox_for_pump`].
-    /// The pump entry returns a count; this entry discards it for
-    /// the existing call sites that don't track progress directly.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn drain_inbox(&self) {
-        let _ = self.drain_inbox_for_pump();
-    }
-
-    /// WASM build's drain_inbox (no cooperative-pump infrastructure
-    /// compiled on `wasm32`).
-    #[cfg(target_arch = "wasm32")]
-    fn drain_inbox(&self) {
-        while let Ok(submission) = self.inbox.receiver.try_recv() {
-            self.process_submission(submission);
-        }
-    }
-
-    /// Process a single submission.
-    fn process_submission(&self, submission: Submission) {
-        match submission {
-            Submission::Wake => {}
-            Submission::NewRequest {
-                file_id,
-                target,
-                priority,
-                source,
-                file_language,
-                sender,
-                submitted_epoch,
-                request_context,
-            } => {
-                self.handle_new_request(
-                    file_id,
-                    target,
-                    priority,
-                    source,
-                    file_language,
-                    sender,
-                    submitted_epoch,
-                    request_context,
-                );
-            }
-            Submission::NewRequestBatch { requests } => {
-                self.handle_new_request_batch(requests);
-            }
-            Submission::ScopedCacheNode {
-                identity,
-                priority,
-                flight,
-                request_context,
-            } => {
-                self.handle_scoped_cache_node_submission(
-                    identity,
-                    priority,
-                    flight,
-                    request_context,
-                );
-            }
-            Submission::StageComplete {
-                file_id,
-                generation,
-                task_kind,
-                incarnation,
-            } => {
-                self.handle_stage_complete(&file_id, generation, task_kind, incarnation);
-            }
-        }
-    }
-
-    fn handle_scoped_cache_node_submission(
-        &self,
-        identity: WorkNodeIdentity,
-        priority: Priority,
-        flight: Arc<ScopedCacheFlight>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
-    ) {
-        let _gate = self.scoped_cache_gate.lock();
-        let is_current = self
-            .scoped_cache_flights
-            .get(&identity)
-            .is_some_and(|current| Arc::ptr_eq(current.value(), &flight));
-        if !is_current || flight.terminal().is_some() {
-            return;
-        }
-        let aggregate = {
-            let mut dag = self.dag.lock();
-            dag.submit(
-                identity.clone(),
-                WorkKind::CacheNode,
-                priority,
-                Vec::new(),
-                request_context,
-            );
-            dag.cancellation_for(&identity)
-                .expect("fresh or deduplicated scoped cache node must own a token")
-        };
-        if !flight.attach_aggregate(aggregate) {
-            let _ = self.dag.lock().cancel(&identity);
-            self.remove_scoped_flight_locked(&identity, &flight);
-        }
-    }
-
-    /// Handle a single new request submission.
-    ///
-    /// Thin wrapper over the shared admission core: prepare the request
-    /// (tombstone gate + node ensure) outside the DAG lock, then admit
-    /// it under ONE `dag.lock()` acquisition, then fire any deferred
-    /// dedup callback + clear auto-ingest tracking after the lock
-    /// releases. The single-request and the atomic-batch paths share
-    /// the SAME core so their admission semantics cannot drift.
-    #[allow(clippy::too_many_arguments)]
-    fn handle_new_request(
-        &self,
-        file_id: String,
-        target: TargetStage,
-        priority: Priority,
-        source: Option<Arc<str>>,
-        file_language: Option<FileLanguage>,
-        sender: CompletionSender<RequestResult>,
-        submitted_epoch: u64,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
-    ) {
-        let request = QueuedRequest {
-            file_id,
-            target,
-            priority,
-            source,
-            file_language,
-            sender,
-            submitted_epoch,
-            request_context,
-        };
-        // Prepare outside the lock (tombstone gate, node ensure — the
-        // node `Arc` is cloned out of the `nodes` DashMap and the shard
-        // `Ref` dropped BEFORE the lock per the AB-BA rule).
-        let Some(prepared) = self.prepare_request(request) else {
-            return; // tombstone-rejected; sender already signalled.
-        };
-
-        // Admit under ONE DAG lock; collect the deferred dedup event +
-        // auto-ingest-clear obligation. Callbacks are NOT fired here.
-        let mut post = AdmissionPostWork::default();
-        {
-            let mut dag = self.dag.lock();
-            self.admit_prepared_under_lock(&mut dag, prepared, &mut post);
-        }
-        post.run(self);
-    }
-
-    /// Handle an atomic batch of new request submissions drained as ONE
-    /// inbox item.
-    ///
-    /// All N requests are prepared outside the DAG lock: the node-ensure
-    /// step clones each `FileNode` `Arc` out of the `nodes` DashMap and
-    /// drops the shard `Ref` BEFORE the lock is taken, so no prepared
-    /// request carries a `nodes` `Ref` INTO the critical section. They
-    /// are then admitted under a SINGLE `dag.lock()` acquisition:
-    /// generation bumps, supersede sweeps, waiter registration, and work
-    /// admission for EVERY request happen inside that one critical
-    /// section. The pump therefore can never observe the batch
-    /// half-admitted.
-    ///
-    /// The admission core itself may still read the `nodes` shard under
-    /// the held DAG lock (the Artifact-gating path in
-    /// [`Self::file_stage_analysis_blocker_status`]); that access obeys
-    /// the canonical DAG-first order (lock held first, transient read
-    /// `Ref` dropped before return, never a `Ref` held across a
-    /// `dag.lock()`) — see [`Self::admit_prepared_under_lock`]. Deferred
-    /// dedup callbacks and auto-ingest-tracking cleanup run AFTER the
-    /// lock releases, keeping the callback-under-lock hazard out of the
-    /// batch path exactly as it is kept out of the single-request path.
-    fn handle_new_request_batch(&self, requests: Vec<QueuedRequest>) {
-        if requests.is_empty() {
-            return;
-        }
-        // Prepare every request OUTSIDE the lock. Tombstone-rejected
-        // requests signal their sender here and are dropped from the
-        // admission set. Node `Arc`s are cloned out of the `nodes`
-        // DashMap so no shard `Ref` is held when the lock is taken.
-        let prepared: Vec<PreparedRequest> = requests
-            .into_iter()
-            .filter_map(|req| self.prepare_request(req))
-            .collect();
-        if prepared.is_empty() {
-            return;
-        }
-        // Admit ALL prepared requests under ONE DAG lock.
-        let mut post = AdmissionPostWork::default();
-        {
-            // Acquire the admission lock through the shared helper so the
-            // lock-acquisition epoch is bumped exactly where the lock is
-            // taken. A per-item lock/unlock regression would move this
-            // acquisition INSIDE the loop and thereby bump the epoch once
-            // per item — the LOCK-CONTINUITY rail detects that as differing
-            // recorded epochs. In release builds the helper is a plain
-            // `self.dag.lock()` with no epoch.
-            #[cfg(any(test, feature = "test-support"))]
-            let (mut dag, admit_epoch) = self.acquire_dag_for_admission();
-            #[cfg(not(any(test, feature = "test-support")))]
-            let mut dag = self.dag.lock();
-            for (admit_index, p) in prepared.into_iter().enumerate() {
-                self.admit_prepared_under_lock(&mut dag, p, &mut post);
-                // LOCK-CONTINUITY recording: every admit records the epoch
-                // of the acquisition it ran under. The helper asserts all N
-                // share ONE epoch (proving one held lock) independently of
-                // any thread-scheduling race. Cheap `Option` check when no
-                // test recorder is installed; zero footprint outside
-                // `cfg(test, feature = "test-support")`.
-                #[cfg(any(test, feature = "test-support"))]
-                self.record_batch_admit_epoch(admit_epoch);
-                // Test-only LOCK-CONTINUITY seam: after the FIRST admit and
-                // BEFORE the rest, fire the rendezvous WHILE `dag` is still
-                // held. It releases a concurrent observer that BLOCKING-
-                // acquires `dag.lock()`; because the loop keeps holding this
-                // one lock through the remaining admits, that observer
-                // cannot acquire until the lock drops below — at which point
-                // the DAG already shows ALL N admitted (the observable
-                // consequence of continuity). The guard `dag` is NOT
-                // released here. Zero footprint outside
-                // `cfg(test, feature = "test-support")`.
-                #[cfg(any(test, feature = "test-support"))]
-                if admit_index == 0 {
-                    self.batch_admit_seam.fire();
-                }
-                #[cfg(not(any(test, feature = "test-support")))]
-                let _ = admit_index;
-            }
-        }
-        // After the lock has dropped: fire deferred dedup callbacks +
-        // clear auto-ingest tracking.
-        post.run(self);
-    }
-
-    /// Acquire the DAG lock for an admission critical section, bumping the
-    /// monotonic [`Self::dag_admit_epoch`] exactly at the acquisition
-    /// point and returning the new epoch alongside the guard.
-    ///
-    /// Co-locating the bump with the `lock()` call is what makes the
-    /// LOCK-CONTINUITY rail discriminating: a single held lock bumps the
-    /// epoch ONCE, so every admit in the batch records the same epoch; a
-    /// per-item lock/unlock regression acquires through this helper once
-    /// per item, bumping a fresh epoch each time, so the recorded epochs
-    /// DIFFER. Test-only; release builds take `self.dag.lock()` directly
-    /// with no epoch.
-    #[cfg(any(test, feature = "test-support"))]
-    fn acquire_dag_for_admission(&self) -> (DagMutexGuard<'_>, u64) {
-        let guard = self.dag.lock();
-        // `+ 1` so the first acquisition observes epoch 1 (epoch 0 is the
-        // "no acquisition yet" sentinel, never a recorded value).
-        let epoch = self.dag_admit_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        (guard, epoch)
-    }
-
-    /// Record the acquisition epoch an admit ran under, when a test has
-    /// installed an epoch recorder via [`Self::test_install_batch_admit_epoch_trace`].
-    /// A no-op (single `Option` check) otherwise. Test-only.
-    #[cfg(any(test, feature = "test-support"))]
-    fn record_batch_admit_epoch(&self, epoch: u64) {
-        if let Some(trace) = self.batch_admit_epoch_trace.lock().as_mut() {
-            trace.push(epoch);
-        }
-    }
-
-    /// Pre-lock preparation shared by the single-request and atomic-
-    /// batch admission paths.
-    ///
-    /// Performs the two steps that must NOT run under `dag.lock()`:
-    ///
-    /// 1. **Tombstone gate.** A submission predating a removal (or a
-    ///    `source: None` reload of a since-deleted file) is rejected
-    ///    here; the sender receives `Failed(FileNotFound)` and `None`
-    ///    is returned. A genuine post-removal re-add clears the
-    ///    tombstone.
-    /// 2. **Node ensure.** The `FileNode` is created if absent and its
-    ///    `Arc` is cloned out of the `nodes` DashMap so the shard `Ref`
-    ///    drops before any caller takes the DAG mutex (the canonical
-    ///    DAG-first lock ordering — holding a `nodes` `Ref` across
-    ///    `dag.lock()` is the AB-BA hazard).
-    ///
-    /// Returns the [`PreparedRequest`] for an admissible request, or
-    /// `None` when the request was tombstone-rejected.
-    fn prepare_request(&self, request: QueuedRequest) -> Option<PreparedRequest> {
-        let QueuedRequest {
-            file_id,
-            target,
-            priority,
-            source,
-            file_language,
-            sender,
-            submitted_epoch,
-            request_context,
-        } = request;
-
-        // Tombstone gate.
-        if let Some(tombstone_ref) = self.tombstones.get(&file_id) {
-            let tombstone_epoch = *tombstone_ref;
-            drop(tombstone_ref);
-            if submitted_epoch < tombstone_epoch {
-                // Submitted before the removal — always stale, even with source.
-                sender.send(CompletionState::Failed(
-                    crate::job::SchedulerError::FileNotFound {
-                        file_id: file_id.clone(),
-                    },
-                ));
-                return None;
-            }
-            // Submitted at or after the removal epoch.
-            if source.is_some() {
-                // Genuine re-add: clear tombstone and proceed.
-                self.tombstones.remove(&file_id);
-            } else {
-                // Source: None after removal — stale (e.g. close_file reload
-                // for a file that was subsequently deleted).
-                sender.send(CompletionState::Failed(
-                    crate::job::SchedulerError::FileNotFound {
-                        file_id: file_id.clone(),
-                    },
-                ));
-                return None;
-            }
-        }
-
-        // Ensure node exists. Clone the `Arc<FileNode>` out and drop the
-        // `nodes` shard `Ref` BEFORE returning so no caller holds it
-        // across `dag.lock()`.
-        //
-        // CREATING a node here is safe outside the DAG lock: a brand-new
-        // node has no admitted identity and no waiter to retire.
-        //
-        // RE-HOMING is not, so it is NOT done here. A request carrying a
-        // different resolved language must move the file onto a fresh
-        // node at a higher generation, and advancing a PUBLISHED file's
-        // generation has to be atomic with the supersede sweep that
-        // retires the old generation's identities and waiters. That is
-        // the admission core's job — it holds `dag.lock()`. The
-        // requested language is carried through instead.
-        let node = self
-            .nodes
-            .entry(file_id.clone())
-            .or_insert_with(|| self.create_node(&file_id, file_language.clone()))
-            .value()
-            .clone();
-        let canonical: Arc<str> = Arc::from(file_id.as_str());
-
-        let prepared_incarnation = node.incarnation_id();
-        Some(PreparedRequest {
-            file_id,
-            canonical,
-            node,
-            target,
-            priority,
-            source,
-            sender,
-            request_context,
-            requested_language: file_language,
-            prepared_incarnation,
-        })
-    }
-
-    /// Shared admission core. Runs entirely under the caller-held
-    /// `dag.lock()` — the SOLE place where a request's generation is
-    /// bumped, the supersede sweep runs, the waiter is registered, and
-    /// the work node is admitted. Both [`Self::handle_new_request`] and
-    /// [`Self::handle_new_request_batch`] funnel through here so single
-    /// and batch admission share identical semantics.
-    ///
-    /// Side effects that are independent of the DAG mutex (the
-    /// `overlay`/`pending_source` writes, the completion-sender signals,
-    /// the `set_target` stamp) run inline; they take their own
-    /// independent locks (the overlay DashMap shard, the handle's inner
-    /// mutex), so they are safe under the DAG lock.
-    ///
-    /// `nodes`-shard lock ordering under the DAG lock. The admission
-    /// core DOES read the `nodes` shard while the caller holds
-    /// `dag.lock()` — the Artifact-gating path reaches
-    /// [`Self::file_stage_analysis_blocker_status`] (via
-    /// [`Self::admit_artifact_with_blockers`] →
-    /// [`Self::classify_recorded_dep`]), which calls `self.nodes.get(..)`
-    /// to read the producer FileNode's generation/commit state. That is
-    /// safe NOT because admission avoids the `nodes` shard, but because
-    /// the access obeys the crate's canonical **DAG-first** lock order:
-    /// the `dag.lock()` is acquired FIRST (by the caller), then a
-    /// TRANSIENT read `Ref` is taken on the `nodes` shard and dropped at
-    /// every return arm. No path here takes a `nodes`/shard `Ref` and
-    /// THEN acquires `dag.lock()` — that inversion (`nodes` then `dag`)
-    /// is the AB-BA hazard, and it is structurally absent because the
-    /// caller already holds the DAG lock. The shard `Ref` is never held
-    /// across a `dag.lock()` acquisition.
-    ///
-    /// Deferred work that MUST happen after the lock releases (firing
-    /// dedup callbacks, clearing auto-ingest tracking on a DashMap) is
-    /// pushed onto `post` rather than executed here.
-    fn admit_prepared_under_lock(
-        &self,
-        dag: &mut SchedulerDag,
-        prepared: PreparedRequest,
-        post: &mut AdmissionPostWork,
-    ) {
-        let PreparedRequest {
-            file_id,
-            canonical,
-            node: _captured_node,
-            target,
-            priority,
-            source,
-            sender,
-            request_context,
-            requested_language,
-            prepared_incarnation,
-        } = prepared;
-
-        // Language re-home, under the caller-held DAG lock.
-        //
-        // The node's language routes the Source stage's parse dispatch,
-        // so a request whose resolved language differs must move the
-        // file onto a fresh node — executing with the stale row would
-        // parse through the wrong implementation (or keep failing a
-        // request whose language changed back to a supported row).
-        //
-        // That move ADVANCES a published file's generation, so it obeys
-        // the same rule as `invalidate()` and `close_file()`: the
-        // advance and the supersede sweep form ONE critical section.
-        // Done during preparation instead — outside this lock, with no
-        // sweep at all — every identity admitted at the old generation
-        // was orphaned (unreachable by any later sweep, skipped at
-        // dispatch on the generation-mismatch arm, its parked capacity
-        // reservation never released) and the old generation's waiters
-        // were left parked.
-        //
-        // Lock order is the canonical DAG-first one: the caller holds
-        // `dag.lock()`, and the `nodes` read/write below is transient.
-        //
-        // CROSSING GATE — runs before ANY publication (no waiter
-        // registration, no admission, no generation bump).
-        //
-        // Preparation runs outside this lock, so a prepared request can
-        // cross a retirement boundary in the gap: a concurrent `remove()`
-        // installs the floor, cancels the DAG, deletes the `FileNode` and
-        // drains the shutdown waiters, all before this request resumes.
-        // The captured `Arc` is then DETACHED — it still exists because
-        // this request holds it, but it is no longer the published node
-        // for the canonical.
-        //
-        // Trusting it is not survivable. Bumping a detached node lands
-        // its generation exactly ON the removal floor, which the `<`
-        // comparison admits — and the floor cannot distinguish that from
-        // a legitimate re-add, because both arrive one above the removed
-        // generation. Liveness, not the floor, is what separates them.
-        // A dispatcher would then reserve capacity, find no `FileNode`,
-        // and skip without cancelling: a parked permit plus a waiter no
-        // producer will ever signal.
-        //
-        // So the prepared request must prove the node it captured is
-        // still the published one. Terminalize the sender here rather
-        // than registering a waiter that nothing can complete.
-        // Declared here and assigned ONLY from the live map. That is a
-        // CONVENTION, not enforcement: `_captured_node` remains an ordinary
-        // readable binding and the leading underscore only suppresses an
-        // unused-variable lint. Deleting the field outright is the structural
-        // fix, and that work is owned by
-        // `.claude/skills/scheduler/SKILL.md`.
-        let mut node: Arc<FileNode>;
-        match self.nodes.get(&file_id) {
-            Some(live) if live.incarnation_id() == prepared_incarnation => {
-                node = Arc::clone(live.value());
-            }
-            Some(live) => {
-                // A different incarnation is published: this request was
-                // prepared against a node that has since been replaced.
-                //
-                // Drop the shard READ guard BEFORE signalling. `let _ = live`
-                // does NOT drop it — a wildcard pattern neither moves nor
-                // drops a place expression — so the guard would be held across
-                // the send.
-                drop(live);
-                sender.send(CompletionState::Superseded);
-                return;
-            }
-            None => {
-                // The file was removed while this request was in flight.
-                // `remove()` signals Shutdown to the waiters it can see;
-                // this one had not registered yet, so it is signalled
-                // here instead of being left parked.
-                sender.send(CompletionState::Shutdown);
-                return;
-            }
-        }
-        if let Some(requested) = requested_language {
-            if node.file_language != requested {
-                let fresh =
-                    self.create_node_at_least(&file_id, Some(requested), node.generation() + 1);
-                let fresh_gen = fresh.generation();
-                // Publishing the replacement node and its `Absent`
-                // source version under ONE publication hold keeps a
-                // captured root from ever seeing the fresh incarnation
-                // published while the root still answers with the old
-                // one's committed source.
-                self.source_root.publish_transition(|publication| {
-                    self.nodes.insert(file_id.clone(), Arc::clone(&fresh));
-                    publication.absent(&canonical, fresh.incarnation_id(), fresh_gen);
-                });
-                // Retire the old generation's DAG identities and signal
-                // its waiters `Superseded`.
-                dag.supersede_old_file_generations(&canonical, fresh_gen);
-                node = fresh;
-            }
-        }
-
-        // Generation: bump under the lock so the bump and the supersede
-        // sweep form one critical section. A bare-atomic bump separated
-        // from the lock would let a dispatcher observe the bumped
-        // generation BEFORE the supersede sweep cancelled the stale
-        // identity — the dispatch-time defensive `debug_assert!` would
-        // then trip on a not-yet-terminalized stale identity.
-        let generation = if source.is_some() {
-            // Bump + publish atomically; see [`Self::invalidate`]. The
-            // new generation has no committed snapshot yet, so the
-            // file's published source state is `Absent` until the Source
-            // stage commits one.
-            let gen = self.source_root.publish_transition(|publication| {
-                let gen = publication.bump_node_generation(&node);
-                publication.absent(&canonical, node.incarnation_id(), gen);
-                gen
-            });
-            // Store source in the overlay for SourceLoader access.
-            if let Some(ref src) = source {
-                self.overlay.set(file_id.clone(), Arc::clone(src));
-            }
-            // Store in pending_source for the Source job.
-            node.pending_source
-                .store(Arc::new(source.map(|s| (gen, s))));
-            dag.supersede_old_file_generations(&canonical, gen);
-            gen
-        } else {
-            let gen = node.generation();
-            if gen == 0 {
-                // Node was just created, needs a Source job. No
-                // supersede sweep is needed at generation 0 — there is
-                // no prior dispatched identity. The bump still takes
-                // the publication capability so a lock-free atomic
-                // cannot race a concurrent publish.
-                self.source_root
-                    .publish_transition(|publication| publication.bump_node_generation(&node))
-            } else {
-                gen
-            }
-        };
-
-        // Already-satisfied short-circuit. Note: `current_*` is
-        // generation-coherent, so after a source-update bump these
-        // return `None` and the request always admits a fresh Source.
-        let already_satisfied = match &target {
-            TargetStage::Source => node.current_integrated_source().is_some(),
-            TargetStage::Analysis => node.current_analysis().is_some(),
-            TargetStage::Artifact { profile_hash } => {
-                node.current_artifact(*profile_hash).is_some()
-            }
-        };
-        if already_satisfied {
-            let result = match &target {
-                TargetStage::Source => {
-                    RequestResult::Source(node.current_integrated_source().unwrap())
-                }
-                TargetStage::Analysis => RequestResult::Analysis(node.current_analysis().unwrap()),
-                TargetStage::Artifact { profile_hash } => {
-                    RequestResult::Artifact(node.current_artifact(*profile_hash).unwrap())
-                }
-            };
-            sender.send(CompletionState::Ready(result));
-            return;
-        }
-
-        // Determine the first-missing work stage BEFORE registering the
-        // sender, then stamp its concrete `Work` identity on the
-        // sender's target so the cooperative pump's same-path
-        // self-await detection matches by the exact `WorkNodeIdentity`
-        // once admission has run. (See `CompletionTarget` docs for the
-        // Request-shape fallback that covers the race window before
-        // this stamp lands.)
-        let first_missing = if node.current_integrated_source().is_none() {
-            TaskKind::Load
-        } else if node.current_analysis().is_none() {
-            TaskKind::Analysis
-        } else {
-            target.required_task_kind()
-        };
-        let first_missing_identity: WorkNodeIdentity = match &first_missing {
-            // The first missing stage is one of the request-target stages
-            // (`Load` for Source, `Analysis`, or `Artifact`); `Parse` and
-            // `CacheNode` are never produced by `required_task_kind`.
-            TaskKind::Load => WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(&canonical),
-                generation,
-                stage: FileStageKey::Source,
-            },
-            TaskKind::Analysis => WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(&canonical),
-                generation,
-                stage: FileStageKey::Analysis,
-            },
-            TaskKind::Artifact { profile_hash } => WorkNodeIdentity::Artifact {
-                canonical: Arc::clone(&canonical),
-                generation,
-                profile_hash: profile_hash_to_bytes(*profile_hash),
-                content_hash: [0u8; 16],
-            },
-            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
-                "first-missing-stage planning only yields Load/Analysis/Artifact; \
-                 Parse and CacheNode are not request-target stages"
-            ),
-        };
-        sender.set_target(crate::job::CompletionTarget::Work(
-            first_missing_identity.clone(),
-        ));
-
-        // Register the waiter group. The dedup callback (if any) is
-        // returned as a deferred event and fired after the lock drops.
-        let dedup_event = dag.register_request(
-            &canonical,
-            generation,
-            target.clone(),
-            sender,
-            request_context,
-        );
-        if let Some(event) = dedup_event {
-            post.dedup_events.push(event);
-        }
-
-        let effective_priority = priority;
-
-        // If the next missing stage is an Artifact gated behind a
-        // still-pending Analysis node at this generation, do NOT admit
-        // the Artifact yet — the DAG's dep edge drives re-dispatch when
-        // the gate clears. Propagate the new request's priority onto the
-        // gate instead.
-        let analysis_gate = WorkNodeIdentity::FileStage {
-            canonical: Arc::clone(&canonical),
-            generation,
-            stage: FileStageKey::Analysis,
-        };
-        if matches!(first_missing, TaskKind::Artifact { .. })
-            && dag.has_pending_deps(&analysis_gate)
-        {
-            dag.upgrade_priority(&analysis_gate, effective_priority);
-            return;
-        }
-
-        // Artifact admissions inherit any blockers persisted to the
-        // per-canonical Artifact blocker registry at this
-        // `(file_id, generation)` (owner Analysis is admitted ungated
-        // for macro_type_deps).
-        if let TaskKind::Artifact { profile_hash } = &first_missing {
-            if self
-                .admit_artifact_with_blockers(
-                    dag,
-                    &canonical,
-                    generation,
-                    *profile_hash,
-                    effective_priority,
-                    None,
-                )
-                .is_none()
-            {
-                // Refused by the retirement floor. The waiter group is
-                // already registered, so an ignored refusal is a hang:
-                // nothing will ever produce this identity. Terminalize
-                // the group instead of leaving it parked.
-                Self::terminalize_refused_admission(dag, &canonical, generation);
-            }
-            return;
-        }
-
-        if matches!(first_missing, TaskKind::Analysis) {
-            match self.ensure_analysis_for_demand(
-                dag,
-                &canonical,
-                generation,
-                effective_priority,
-                AnalysisDemandKind::DirectRequest,
-            ) {
-                BlockerStatus::Gating | BlockerStatus::Satisfied => {}
-                BlockerStatus::Failed(_) => unreachable!(
-                    "direct Analysis demand retries the producer and never consumes blocker failure state"
-                ),
-            }
-            return;
-        }
-
-        // A Source admission (the `Load` first-missing stage) transitions the
-        // dep from "queued in inbox" to "Source DAG identity admitted"; the
-        // matrix must stop treating it as a pending auto-ingest. Capture the
-        // discriminant before `admit_work` consumes `first_missing` by value.
-        let is_source_admission = matches!(first_missing, TaskKind::Load);
-        if admit_work(
-            dag,
-            &canonical,
-            generation,
-            first_missing,
-            effective_priority,
-            None,
-        )
-        .is_none()
-        {
-            // See above: a refused admission with a registered waiter is
-            // a hang unless the group is terminalized here.
-            Self::terminalize_refused_admission(dag, &canonical, generation);
-            return;
-        }
-        // The clear touches a DashMap, so it is deferred until the DAG lock
-        // releases (it would otherwise deadlock against anyone holding the
-        // DAG lock and waiting on that shard).
-        if is_source_admission {
-            post.auto_ingest_clears
-                .push((Arc::clone(&canonical), generation));
-        }
-    }
-
-    /// Signal every waiter group registered at `(canonical, generation)`
-    /// when the admission that was supposed to produce their result was
-    /// refused by the retirement floor.
-    ///
-    /// Registration happens before admission, so a refusal that returns
-    /// `None` and is ignored leaves a group waiting on work no producer
-    /// will ever run. `Shutdown` is the same terminal `remove()` uses for
-    /// waiters it can see; this covers the ones it could not.
-    fn terminalize_refused_admission(
-        dag: &mut SchedulerDag,
-        canonical: &Arc<str>,
-        generation: u64,
-    ) {
-        dag.signal_file_shutdown_at(canonical, generation);
-    }
-
-    /// Remove a [`Self::auto_ingested_recent`] entry for
-    /// `(canonical, generation)` when the matching Source DAG
-    /// identity has been admitted. The matrix consumes this set to
-    /// detect the "auto-ingest queued in inbox, not yet drained"
-    /// state; once the driver dequeues the `NewRequest` and admits
-    /// the Source identity, that state is over — the live Source
-    /// identity in `by_identity` is now the source of truth and the
-    /// tracking entry would only confuse future matrix lookups.
-    fn clear_auto_ingest_tracking(&self, canonical: &Arc<str>, generation: u64) {
-        // Atomic value-conditional removal: only drop the entry when
-        // the live entry's generation still matches the one we are
-        // clearing for. `DashMap::remove_if` evaluates the predicate
-        // under the same shard write lock that performs the remove,
-        // so a concurrent insert of a later generation between a
-        // non-atomic `get` + `remove` (the previous pattern) can no
-        // longer delete the newer entry by accident. An entry for a
-        // later generation stays so the next driver tick's admission
-        // of the newer generation's Source request finds it and
-        // clears it on its own match.
-        self.auto_ingested_recent
-            .remove_if(canonical, |_k, v| v.generation == generation);
-    }
-
-    /// Admit an Artifact work node with any late-discovered blocker
-    /// `DepKey`s attached. Reads the per-(owner, generation) blocker
-    /// set from the DAG's typed registry, filters out blockers whose
-    /// Analysis is already committed (no longer gating), filters out
-    /// dead-producer entries (FileNode gone AND no live Analysis
-    /// identity in the DAG), and submits the Artifact identity with
-    /// the remaining `DepKey`s as deps.
-    ///
-    /// Called from every Artifact admission site so a blocker
-    /// registered via [`Self::register_resolved_deps`] AFTER the
-    /// owner's Analysis has dispatched (or completed) still gates
-    /// the Artifact run on the blocker's Analysis. The in-flight
-    /// Analysis node itself never depends on these late-discovered
-    /// blockers (its incoming edges are immutable once dispatched).
-    ///
-    /// Registry lifecycle:
-    ///
-    /// - When every recorded blocker has already resolved (or every
-    ///   entry was a dead producer) the entry is cleared so future
-    ///   Artifact admissions at this generation do not consult a
-    ///   stale registry view.
-    /// - Otherwise the entry stays in place so a re-admission (e.g.
-    ///   a same-generation re-request for a different profile) still
-    ///   picks up the unresolved blockers.
-    fn admit_artifact_with_blockers(
-        &self,
-        dag: &mut SchedulerDag,
-        canonical: &Arc<str>,
-        generation: u64,
-        profile_hash: u64,
-        priority: Priority,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
-    ) -> Option<crate::dag::SubmissionToken> {
-        let mut blocker_deps: Vec<DepKey> = Vec::new();
-        // Failed-dep records to attach to the just-submitted
-        // Artifact node so the pre-dispatch short-circuit in
-        // `execute_stage_on_worker` surfaces a typed
-        // `DependencyFailed` even when the producer failed BEFORE
-        // this Artifact was admitted (pre-admission failure race —
-        // the matrix consults `terminal_dep_failures` AND the
-        // registry-attached `failed` list both as Failed sources).
-        let mut failed_records: Vec<crate::dag::FailedDepRecord> = Vec::new();
-        // Drain + re-record under the DAG lock: read the recorded
-        // blockers (live deps + persisted failure records), route
-        // EVERY entry — live deps AND previously-failed deps — through
-        // the 3-state matrix against the current DAG state, then write
-        // back the rebuilt set so a subsequent admission for a different
-        // profile at the same generation picks up the correct view. An
-        // empty re-record clears the entry (see
-        // `SchedulerDag::record_artifact_blockers`).
-        //
-        // Rebuilding the persisted `failed` set from classification (not
-        // pass-through) is load-bearing in two directions:
-        //
-        //   1. A live dep that fails between admissions must populate the
-        //      NEXT-admission `failed` set, not just the current Artifact.
-        //      If we keep the prior `stored.failed` set verbatim we strand
-        //      the new failure on the current Artifact alone — a later
-        //      profile admission would drain an empty registry and resolve
-        //      Ready over the dead prerequisite.
-        //   2. A previously-failed dep that recovers at the same gen
-        //      (the same-gen recovery path cleared
-        //      `terminal_dep_failures`) must drop from the next
-        //      `failed` set, not ride through verbatim — otherwise the
-        //      next admission attaches a stale `DependencyFailed` record
-        //      to a now-Satisfied dep.
-        //
-        // Both behaviours fall out of routing every persisted entry
-        // through `classify_recorded_dep` against the live state.
-        let stored = dag.drain_artifact_blockers(canonical, generation);
-        let mut still_pending: std::collections::BTreeSet<DepKey> =
-            std::collections::BTreeSet::new();
-        let mut next_failed: Vec<crate::dag::FailedDepRecord> = Vec::new();
-        // Classify every live dep first.
-        for dep in stored.deps.into_iter() {
-            match self.classify_recorded_dep(dag, &dep) {
-                BlockerStatus::Satisfied => continue,
-                BlockerStatus::Failed(record) => {
-                    // Producer terminally failed between record time
-                    // and this Artifact admission. Drop from
-                    // `blocker_deps` so the Artifact does not gate
-                    // on it, attach to the current Artifact via
-                    // `failed_records`, AND persist the failure into
-                    // `next_failed` so a future profile admission at
-                    // the same gen still surfaces the same
-                    // `DependencyFailed`.
-                    failed_records.push(record.clone());
-                    next_failed.push(record);
-                    continue;
-                }
-                BlockerStatus::Gating => {
-                    blocker_deps.push(dep.clone());
-                    still_pending.insert(dep);
-                }
-            }
-        }
-        // Re-classify each persisted failure record against the live
-        // state. A persisted failure can transition out of `Failed`
-        // when the same-gen recovery path clears
-        // `terminal_dep_failures` on a same-gen Source/Analysis
-        // recovery: the matrix returns `Satisfied`
-        // (and we drop the record) or `Gating` (and the dep is still
-        // a live blocker again). The producer's terminalized DAG
-        // identity cannot re-emerge as a different live identity at
-        // the SAME generation, so a `Gating` verdict on a previously-
-        // failed dep only fires after a successful recovery — in which
-        // case treating it as a live gating dep again is correct.
-        for record in stored.failed.into_iter() {
-            match self.classify_recorded_dep(dag, &record.dep_key) {
-                BlockerStatus::Satisfied => continue,
-                BlockerStatus::Failed(current_record) => {
-                    // Producer still terminally failed at this gen.
-                    // Attach to the current Artifact AND persist
-                    // for future admissions. Reuse the freshly-looked-
-                    // up record (its cause is identical, but using the
-                    // classifier's return keeps a single source of
-                    // truth for the persisted failure record).
-                    failed_records.push(current_record.clone());
-                    next_failed.push(current_record);
-                }
-                BlockerStatus::Gating => {
-                    // Producer recovered at the same generation
-                    // (the same-gen recovery path cleared the
-                    // persistent failure record and the pipeline is
-                    // alive again — Source / Analysis queued or in
-                    // flight, or auto-ingest pending). Promote back
-                    // to a live gating dep so the Artifact gates on
-                    // the resumed Analysis. Persist as a gating dep,
-                    // not a failure.
-                    blocker_deps.push(record.dep_key.clone());
-                    still_pending.insert(record.dep_key);
-                }
-            }
-        }
-        // Re-record both the still-pending live deps AND the
-        // rebuilt failure records under the same key so a future
-        // Artifact admission at this generation (e.g. a different
-        // profile) still picks them up. An empty re-record (no deps
-        // AND no failed) drops the entry (which
-        // `record_artifact_blockers` treats as a remove).
-        let next_pending = crate::dag::PendingBlockerSet {
-            deps: still_pending,
-            failed: next_failed,
-        };
-        dag.record_artifact_blockers(canonical, generation, next_pending);
-
-        let identity = WorkNodeIdentity::Artifact {
-            canonical: Arc::clone(canonical),
-            generation,
-            profile_hash: profile_hash_to_bytes(profile_hash),
-            content_hash: [0u8; 16],
-        };
-        let token = dag.submit(
-            identity.clone(),
-            WorkKind::Artifact,
-            priority,
-            blocker_deps,
-            request_context,
-        );
-        // Attach every failed-dep record to the just-submitted
-        // Artifact node. The dispatched-node dedup branch of
-        // `submit` would not pick these up (incoming edges are
-        // immutable after dispatch), so `attach_failed_dep`'s no-op
-        // return for that case is the correct shape: a dispatched
-        // in-flight Artifact already carries its own marker (or
-        // none — meaning the producer failed AFTER dispatch and
-        // the fan-out path will deliver it via `signal_file_failed`).
-        for record in failed_records {
-            dag.attach_failed_dep(&identity, record);
-        }
-        token
-    }
-
-    /// Classify a recorded blocker dep against the live FileNode +
-    /// DAG state. Wraps [`Self::file_stage_analysis_blocker_status`]
-    /// for the only [`DepKey`] variant cross-file blockers use
-    /// (`FileStage::Analysis`). Other variants (Source-stage and
-    /// Artifact and CacheNode) cannot appear in the recorded
-    /// blocker registry; classify them as `Satisfied` defensively
-    /// so a future producer that mis-records returns to the safe
-    /// "drop the blocker" path rather than pinning the admission.
-    fn classify_recorded_dep(&self, dag: &SchedulerDag, dep: &DepKey) -> BlockerStatus {
-        match dep {
-            DepKey::FileStage {
-                canonical,
-                generation,
-                stage: FileStageKey::Analysis,
-            } => self.file_stage_analysis_blocker_status(dag, canonical, *generation),
-            _ => BlockerStatus::Satisfied,
-        }
-    }
-
-    /// Atomically ensure the producer pipeline needed by one Analysis demand.
-    /// Callers hold the scheduler-state mutex, so observing the integrated Source fence,
-    /// checking existing identities, and admitting Analysis are one state
-    /// transition. Blockers preserve terminal failure; direct requests may
-    /// retry Analysis at the same generation.
-    fn ensure_analysis_for_demand(
-        &self,
-        dag: &mut SchedulerDag,
-        canonical: &Arc<str>,
-        generation: u64,
-        priority: Priority,
-        kind: AnalysisDemandKind,
-    ) -> BlockerStatus {
-        let Some(node) = self
-            .nodes
-            .get(canonical.as_ref())
-            .map(|entry| entry.clone())
-        else {
-            return if self.auto_ingest_tracking_gates(canonical, generation) {
-                BlockerStatus::Gating
-            } else {
-                BlockerStatus::Satisfied
-            };
-        };
-        if generation == 0 || node.generation() != generation {
-            return BlockerStatus::Satisfied;
-        }
-        if node.current_analysis().is_some() {
-            return BlockerStatus::Satisfied;
-        }
-
-        let analysis_dep = DepKey::FileStage {
-            canonical: Arc::clone(canonical),
-            generation,
-            stage: FileStageKey::Analysis,
-        };
-        if kind == AnalysisDemandKind::ArtifactBlocker {
-            if let Some(record) = dag.lookup_terminal_dep_failure(&analysis_dep) {
-                return BlockerStatus::Failed(record);
-            }
-        }
-
-        let analysis_identity = WorkNodeIdentity::FileStage {
-            canonical: Arc::clone(canonical),
-            generation,
-            stage: FileStageKey::Analysis,
-        };
-        if dag.token_for(&analysis_identity).is_some() {
-            return BlockerStatus::Gating;
-        }
-
-        if node.current_integrated_source().is_some() {
-            if kind == AnalysisDemandKind::DirectRequest {
-                dag.clear_terminal_dep_failure_for_gen(canonical, generation);
-            }
-            return if admit_work(
-                dag,
-                canonical,
-                generation,
-                TaskKind::Analysis,
-                priority,
-                None,
-            )
-            .is_some()
-            {
-                BlockerStatus::Gating
-            } else {
-                if kind == AnalysisDemandKind::DirectRequest {
-                    Self::terminalize_refused_admission(dag, canonical, generation);
-                }
-                BlockerStatus::Satisfied
-            };
-        }
-
-        let source_identity = WorkNodeIdentity::FileStage {
-            canonical: Arc::clone(canonical),
-            generation,
-            stage: FileStageKey::Source,
-        };
-        if dag.token_for(&source_identity).is_some()
-            || self.auto_ingest_tracking_gates(canonical, generation)
-        {
-            BlockerStatus::Gating
-        } else {
-            BlockerStatus::Satisfied
-        }
-    }
-
-    /// Shared classifier for a `FileStage::Analysis` blocker dep
-    /// recorded for `(canonical, generation)`. Returns whether the
-    /// dep is still gating an owner's Artifact admission, OR whether
-    /// the blocker can be dropped (either because the dep is already
-    /// satisfied OR because the producer is dead and will never
-    /// satisfy it).
-    ///
-    /// Dead-producer matrix. The previous shape only distinguished
-    /// "FileNode missing" from "FileNode present"; that missed the
-    /// case where Source or Analysis previously FAILED at this same
-    /// generation: the DAG identity was cancelled by
-    /// [`Self::terminalize_failure`], but the FileNode remains with
-    /// `current_*().is_none()`, and the old predicate reported the
-    /// blocker as still gating forever.
-    ///
-    /// | FileNode + DAG state                                                                              | status     |
-    /// |---|---|
-    /// | FileNode missing, `auto_ingested_recent` entry present at matching gen                          | Gating (auto-ingest queued, FileNode lookup raced ahead of insert) |
-    /// | FileNode missing                                                                                  | **Resolved** (producer gone) |
-    /// | FileNode present, generation mismatch (including the `generation == 0` recorded blocker)         | **Resolved** (recorded blocker is stale) |
-    /// | FileNode present, same gen, `current_analysis().is_some()`                                       | **Resolved** (Analysis already committed; DAG identity is gone and no fan-out remains) |
-    /// | FileNode present, same gen, no committed Analysis, but a live Analysis DAG identity exists       | Gating (Analysis in flight or queued; completion/cancel fan-out will fire) |
-    /// | FileNode present, same gen, no committed Analysis, no Analysis DAG identity, but Source DAG identity exists | Gating (Source queued or dispatched; Analysis will be admitted on Source completion) |
-    /// | FileNode present, same gen, no live Source/Analysis DAG identity, `auto_ingested_recent` entry present at matching gen | Gating (auto-ingest queued in inbox, driver has not yet drained the NewRequest) |
-    /// | FileNode present, same gen, no committed Analysis, no Analysis DAG identity, no Source DAG identity, `current_source().is_some()` | **Resolved** (Source committed but Analysis failed/cancelled — dead producer) |
-    /// | FileNode present, same gen, no committed Analysis, no Source DAG identity, `current_source().is_none()` | **Resolved** (Source failed and was cancelled — dead producer) |
-    ///
-    /// The Source-DAG-identity check distinguishes "Source pending /
-    /// in flight" from "Source failed and cancelled." Both leave
-    /// `current_source().is_none()` on the FileNode; only the live
-    /// Source identity in `by_identity` proves the pipeline is
-    /// alive. `terminalize_failure(Source)` removes the identity,
-    /// so the absence is the dead-producer signal.
-    ///
-    /// The `auto_ingested_recent` consultation closes the pre-drain
-    /// window: [`Self::register_resolved_deps`] inserts a tracking
-    /// entry BEFORE enqueueing the auto-ingest `NewRequest`. Until
-    /// the driver drains the inbox and [`Self::handle_new_request`]
-    /// admits a Source DAG identity (which removes the entry), the
-    /// dep is structurally indistinguishable from a Source-failed
-    /// corpse — same FileNode shape, no live DAG identity. Without
-    /// this check the matrix would classify the queued-but-undrained
-    /// state as `Resolved` and the owner's Artifact would be admitted
-    /// prematurely. The lookup is matched against the live FileNode
-    /// generation: a stale tracking entry from a previous incarnation
-    /// (or an entry older than [`AUTO_INGESTED_RECENT_STALE_THRESHOLD`])
-    /// is ignored and dropped so it cannot pin future admissions.
-    fn file_stage_analysis_blocker_status(
-        &self,
-        dag: &SchedulerDag,
-        canonical: &Arc<str>,
-        generation: u64,
-    ) -> BlockerStatus {
-        // First: consult the persistent terminal-dep-failure store.
-        // `terminalize_failure(Source|Analysis)` records an entry
-        // under the Analysis `DepKey` for this `(canonical,
-        // generation)`. A match means the producer terminally
-        // failed — return `Failed(record)` so the caller attaches
-        // the record to its admitted node and the pre-dispatch
-        // short-circuit fires.
-        let analysis_dep_key = DepKey::FileStage {
-            canonical: Arc::clone(canonical),
-            generation,
-            stage: FileStageKey::Analysis,
-        };
-        if let Some(record) = dag.lookup_terminal_dep_failure(&analysis_dep_key) {
-            return BlockerStatus::Failed(record);
-        }
-
-        let canonical_str: &str = canonical.as_ref();
-        let node = match self.nodes.get(canonical_str) {
-            Some(n) => n,
-            None => {
-                // FileNode gone or not yet inserted. The producer
-                // either cannot make progress (Satisfied — moot) OR
-                // is in the pre-drain auto-ingest window — consult
-                // the tracking set before classifying.
-                if self.auto_ingest_tracking_gates(canonical, generation) {
-                    return BlockerStatus::Gating;
-                }
-                return BlockerStatus::Satisfied;
-            }
-        };
-        if generation == 0 {
-            // Generation 0 never carries a live Analysis identity —
-            // the first scheduler admission bumps the node above 0
-            // before submitting any DAG identity. A recorded blocker
-            // at gen 0 is stale.
-            return BlockerStatus::Satisfied;
-        }
-        if node.generation() != generation {
-            // Different generation — the recorded blocker is for
-            // a generation that no longer exists. Stale.
-            //
-            // Opportunistic cleanup: drop any tracking entry that
-            // matches the stale generation under a value-conditional
-            // removal. The matrix would otherwise leave the stale
-            // entry to age out through the
-            // `AUTO_INGESTED_RECENT_STALE_THRESHOLD` (60 s) sweep
-            // in `auto_ingest_tracking_gates`, holding memory for
-            // every invalidated dep across that window. The
-            // remove_if predicate guards against concurrent
-            // re-insertion at a newer generation (the value-
-            // conditional removal pattern).
-            self.auto_ingested_recent
-                .remove_if(canonical, |_k, v| v.generation == generation);
-            return BlockerStatus::Satisfied;
-        }
-        if node.current_analysis().is_some() {
-            // Analysis committed at the recorded generation. The
-            // DAG identity is already gone (`dag.complete(...)` removed
-            // it), so recording this dep on a new Artifact admission
-            // would put a DepKey nobody will fire into the waiter
-            // reverse-index. Drop it — the Analysis output is
-            // already on the node and the owner does not need to
-            // gate on it.
-            return BlockerStatus::Satisfied;
-        }
-        // Analysis not committed. Decide between "in flight",
-        // "pending behind Source", and "moot" by consulting the DAG
-        // for both stage identities.
-        let analysis_id = WorkNodeIdentity::FileStage {
-            canonical: Arc::clone(canonical),
-            generation,
-            stage: FileStageKey::Analysis,
-        };
-        if dag.token_for(&analysis_id).is_some() {
-            // Analysis is queued or dispatched — still gating
-            // (whether or not Source is committed yet).
-            return BlockerStatus::Gating;
-        }
-        let source_id = WorkNodeIdentity::FileStage {
-            canonical: Arc::clone(canonical),
-            generation,
-            stage: FileStageKey::Source,
-        };
-        if dag.token_for(&source_id).is_some() {
-            // Source is queued or in flight. Analysis has not been
-            // admitted yet (Source completion is the trigger). The
-            // pipeline is alive — keep the blocker so the eventual
-            // Analysis completion fans out to the owner's Artifact.
-            return BlockerStatus::Gating;
-        }
-        // No live DAG identity for Source AND no live DAG identity
-        // for Analysis. The FileNode + DAG shape matches both
-        // "auto-ingest queued in inbox, driver not yet drained" AND
-        // "producer terminalized but the persistent terminal-dep-
-        // failure record has been cleaned up (e.g. by supersede)."
-        // Consult the tracking set to disambiguate: a matching
-        // entry proves the auto-ingest pipeline is alive and the
-        // driver will admit it on the next tick. Without an entry
-        // the producer is dead-but-moot (Satisfied), since
-        // `terminal_dep_failures` already returned None at the top
-        // of this matrix — the record (if any) was cleaned up and
-        // the blocker is no longer a discriminator.
-        if self.auto_ingest_tracking_gates(canonical, generation) {
-            return BlockerStatus::Gating;
-        }
-        BlockerStatus::Satisfied
-    }
-
-    /// Consult [`Self::auto_ingested_recent`] for a tracking entry on
-    /// `(canonical, generation)`. Returns `true` when an entry exists
-    /// at the matching generation AND the entry is not older than
-    /// [`AUTO_INGESTED_RECENT_STALE_THRESHOLD`]; in that case the
-    /// matrix MUST gate so the owner's Artifact waits for the
-    /// in-flight auto-ingest. Otherwise (no entry, mismatched gen,
-    /// or stale by age) the entry is dropped if present and the
-    /// matrix continues to its dead-producer arm.
-    ///
-    /// Stale-by-age handling is belt-and-suspenders for the case
-    /// where the driver thread crashes between
-    /// [`Self::register_resolved_deps`]'s insert and
-    /// [`Self::handle_new_request`]'s removal arm. Under normal
-    /// operation the removal arm fires on the next driver tick and
-    /// this branch never sees an aged entry.
-    fn auto_ingest_tracking_gates(&self, canonical: &Arc<str>, generation: u64) -> bool {
-        // DashMap entries are short-lived here — the typical removal
-        // path is `handle_new_request` admitting the Source DAG
-        // identity, which runs synchronously after the matrix
-        // consult. Hold the entry only across the freshness check.
-        let entry = match self.auto_ingested_recent.get(canonical) {
-            Some(e) => e,
-            None => return false,
-        };
-        let entry_gen = entry.generation;
-        let entry_since = entry.since;
-        drop(entry);
-        if entry_gen != generation {
-            // Stale generation — drop the entry under a value-conditional
-            // remove keyed on the generation we observed. `remove_if`
-            // evaluates the predicate under the shard write lock so a
-            // concurrent insert of a later generation between this
-            // observation and the removal does not delete the newer
-            // entry by accident. A live auto-ingest for a different
-            // gen will re-insert with the matching gen on the next
-            // call.
-            self.auto_ingested_recent
-                .remove_if(canonical, |_k, v| v.generation == entry_gen);
-            return false;
-        }
-        if entry_since.elapsed() > AUTO_INGESTED_RECENT_STALE_THRESHOLD {
-            // Aged out — the auto-ingest never landed (driver
-            // crash). Drop the entry so future admissions are not
-            // pinned on a ghost. The value-conditional removal again
-            // protects a concurrent newer-gen re-insertion: only the
-            // aged entry we observed is dropped, never a fresh
-            // re-insert at a later generation that happens to land
-            // between the observation and the removal.
-            self.auto_ingested_recent
-                .remove_if(canonical, |_k, v| v.generation == entry_gen);
-            return false;
-        }
-        true
-    }
-
-    /// Number of stage completions refused because the owning
-    /// `FileNode` moved between dispatch and publish. Expected to stay
-    /// ZERO absent concurrent invalidation; the refusal is otherwise
-    /// silent, so this is how a test observes that the gate fired.
-    ///
-    /// The counter itself is incremented in ALL builds — the refusal
-    /// path is release-active. Only this reader is `cfg`-gated; nothing
-    /// outside the tests consumes it today, so it is `cfg(test)` rather
-    /// than carried as dead weight into shipped builds.
-    #[cfg(test)]
-    pub(crate) fn stale_completion_refusals(&self) -> u64 {
-        self.stale_completion_refusals.load(Ordering::Relaxed)
-    }
-
-    /// `true` when `node` is STILL the authority for `file_id` at
-    /// `generation` — same incarnation, same generation, and a
-    /// generation-coherent committed Source snapshot.
-    ///
-    /// MUST be evaluated under the caller-held `dag.lock()`. It is the
-    /// validation half of the single linearization point for a stage
-    /// completion's publish: the supersede sweep is purely
-    /// backward-looking, so it can never retire an identity admitted
-    /// AFTER it ran. Publishing is therefore only safe while the lock
-    /// that a concurrent `invalidate()` / `close_file()` / language
-    /// re-home must also hold is held here.
-    ///
-    /// The incarnation check is not redundant with the generation
-    /// check: a replacement publishes a FRESH `FileNode` for the same
-    /// canonical, and two node objects can sit at the SAME generation,
-    /// so only the incarnation id separates the node the job actually
-    /// ran against from its replacement.
-    ///
-    /// `dispatched_incarnation` MUST come from the completion message —
-    /// i.e. from the node the work ran against. Re-deriving it here by
-    /// map lookup would compare the live node with itself and pass
-    /// vacuously, which is exactly the hole this parameter closes.
-    ///
-    /// Lock order: the caller already holds `dag.lock()`, so the
-    /// transient `nodes` shard read below is the canonical DAG-first
-    /// order. The `Ref` is dropped before returning — never held across
-    /// a `dag.lock()` acquisition.
-    fn stage_completion_is_current(
-        &self,
-        file_id: &str,
-        dispatched_incarnation: u64,
-        generation: u64,
-    ) -> bool {
-        match self.nodes.get(file_id) {
-            Some(live) => {
-                live.incarnation_id() == dispatched_incarnation
-                    && live.generation() == generation
-                    && live.current_source().is_some()
-            }
-            None => false,
-        }
-    }
-
-    /// Refuse a stage completion whose generation has been retired.
-    ///
-    /// Publishes NOTHING and releases the dequeued identity so its
-    /// parked capacity reservation returns through the DAG's cancel
-    /// path — the very path the dispatch-time defensive skip documents
-    /// as its own safety condition. `cancel` is idempotent: when the
-    /// supersede sweep already retired the identity this is a no-op
-    /// returning no stranded tokens. It cannot touch a LATER
-    /// generation's work because `WorkNodeIdentity::FileStage` carries
-    /// the generation, so `Source-G` and `Source-(G+1)` are distinct
-    /// keys — which is what keeps this from re-creating the
-    /// superseded-teardown hang from the other direction.
-    ///
-    /// Returns the stranded waiter tokens for the caller to requeue
-    /// AFTER the DAG lock drops.
-    ///
-    /// Release stays silent and non-leaking; the `debug_assert!` runs
-    /// strictly AFTER the cleanup so debug builds stay loud without
-    /// ever skipping the release.
-    fn refuse_stale_stage_completion(
-        &self,
-        dag: &mut SchedulerDag,
-        canonical: &Arc<str>,
-        generation: u64,
-        identity: &WorkNodeIdentity,
-    ) -> Vec<crate::dag::SubmissionToken> {
-        let stranded = dag.cancel(identity);
-        // A refusal must never leave a request group parked forever.
-        //
-        // Normally the event that retired this generation — an
-        // `invalidate`, a `close_file`, or a language re-home — ran a
-        // supersede sweep, and that sweep already drained this
-        // generation's waiter groups (signalling them `Superseded`), so
-        // the call below finds nothing and is a no-op. But a refusal
-        // must be safe even when no sweep accompanied the change: the
-        // waiters would otherwise wait on a completion that has just
-        // been refused and will never be republished. Signalling them is
-        // idempotent and strictly bounded to the retired generation, so
-        // it cannot disturb a newer one.
-        dag.signal_file_failed(
-            canonical,
-            generation,
-            crate::job::SchedulerError::StageFailed {
-                file_id: canonical.to_string(),
-                stage: "stage_complete".into(),
-                message: "stage completion refused: the file moved to a different \
-                          incarnation or generation while the stage was in flight"
-                    .into(),
-            },
-        );
-        self.stale_completion_refusals
-            .fetch_add(1, Ordering::Relaxed);
-        verter_debug_assert!(
-            dag.token_for(identity).is_none(),
-            "refused stage completion must leave no live DAG token for the retired \
-             identity: {identity:?}",
-        );
-        stranded
-    }
-
-    /// The DAG identity a completing stage was dispatched under.
-    fn dispatched_identity_for(
-        canonical: &Arc<str>,
-        generation: u64,
-        task_kind: &TaskKind,
-    ) -> Option<WorkNodeIdentity> {
-        match task_kind {
-            TaskKind::Load => Some(WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(canonical),
-                generation,
-                stage: FileStageKey::Source,
-            }),
-            TaskKind::Analysis => Some(WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(canonical),
-                generation,
-                stage: FileStageKey::Analysis,
-            }),
-            // Artifact completions carry a content hash the caller does
-            // not have here, and `Parse` / `CacheNode` never reach a
-            // file-stage completion, so no identity is released for
-            // them on the refusal path.
-            TaskKind::Artifact { .. } | TaskKind::Parse | TaskKind::CacheNode { .. } => None,
-        }
-    }
-
-    /// Handle a stage completion.
-    fn handle_stage_complete(
-        &self,
-        file_id: &str,
-        generation: u64,
-        task_kind: TaskKind,
-        incarnation: u64,
-    ) {
-        let node = match self.nodes.get(file_id) {
-            Some(n) => n.clone(),
-            None => return,
-        };
-
-        if node.incarnation_id() != incarnation || node.generation() != generation {
-            // The file already moved on before this completion even
-            // began — a newer generation, or a different node object
-            // entirely. Release the dequeued identity rather than
-            // returning and leaving its reservation parked.
-            let canonical_arc: Arc<str> = Arc::from(file_id);
-            if let Some(identity) =
-                Self::dispatched_identity_for(&canonical_arc, generation, &task_kind)
-            {
-                let stranded = {
-                    let mut dag = self.dag.lock();
-                    self.refuse_stale_stage_completion(
-                        &mut dag,
-                        &canonical_arc,
-                        generation,
-                        &identity,
-                    )
-                };
-                for tok in stranded {
-                    self.requeue_stranded_waiter(tok);
-                }
-            }
-            return;
-        }
-
-        let canonical_arc: Arc<str> = Arc::from(file_id);
-        let inherited_priority = self
-            .dag
-            .lock()
-            .highest_priority_for_file(&canonical_arc, generation)
-            .unwrap_or(Priority::Background);
-
-        match &task_kind {
-            // The source stage completes under the `Load` label (the live
-            // `FileStage{Source}` node maps to `Load`).
-            TaskKind::Load => {
-                // The executor call is the ONLY part of this completion
-                // that runs unlocked. It is pure computation over the
-                // committed snapshot — it publishes nothing and consumes
-                // nothing — and it must not hold the DAG mutex, since it
-                // reaches into host code of unbounded cost.
-                let extracted = node
-                    .current_source()
-                    .map(|source| self.executor.extract_deps(file_id, &source));
-
-                // Resolve dep languages HERE, outside the hold.
-                // `create_node(_, None)` falls through to
-                // `source_loader.classify(..)`, a `dyn SourceLoader` seam into
-                // host code — the same reason `extract_deps` is hoisted above.
-                // Auto-ingest runs under the DAG lock AND inside a `nodes`
-                // shard-WRITE guard, so calling it there would hold two locks
-                // across a host callback, which the base revision never did.
-                //
-                // Both blocker sources must be covered.
-                //
-                // Extractor-supplied ids are classified here. Deferred ids
-                // carry their language with them, resolved at their write
-                // site: `register_resolved_deps` stores blockers and can then
-                // return EARLY (generation 0, or Source not yet committed)
-                // BEFORE its node-ensure pass runs, so a deferred id can and
-                // does arrive here with no `FileNode`. Assuming otherwise
-                // silently skipped creation for deferred-only blockers — the
-                // absent generation-0 node reads as `Satisfied`, so no Load
-                // was admitted and the owner's Artifact proceeded ungated.
-                // `extract_deps` omits bare/aliased deps by design, so that is
-                // the ordinary externally-resolved case, not a corner.
-                let mut dep_languages: std::collections::HashMap<String, FileLanguage> = extracted
-                    .as_ref()
-                    .map(|deps| {
-                        deps.blocker_ids
-                            .iter()
-                            .filter(|id| !self.tombstones.contains_key(*id))
-                            .map(|id| (id.clone(), self.source_loader.classify(id)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // ── Single linearization point ──
-                //
-                // EVERY publish AND every state consumption this
-                // completion performs — forward edges, the deferred
-                // blocker drain, dependency auto-ingest and admission,
-                // the Artifact blocker registry write, the Analysis
-                // admission, and `complete(Source-G)` — happens under
-                // ONE `dag.lock()` hold, gated on a re-validation of the
-                // incarnation and generation.
-                //
-                // The extraction above takes real time, so an
-                // `invalidate()` / `close_file()` / language re-home can
-                // retire this generation inside that window. Nothing may
-                // be published on the strength of the entry check alone:
-                // the supersede sweep is purely backward-looking and can
-                // never cancel an identity admitted after it ran, so a
-                // stale admission would be unreachable by any sweep —
-                // dispatch would skip it on the generation-mismatch arm
-                // and its parked capacity reservation would never be
-                // released.
-                //
-                // CONSUMING state is just as unsafe as publishing it. A
-                // deferred blocker registered for a LATER generation and
-                // drained here by a stale completion would be discarded,
-                // letting that generation's Artifact work run ungated;
-                // and stale forward edges would persist, because a later
-                // extraction unions with the existing set rather than
-                // replacing it.
-                let source_id = WorkNodeIdentity::FileStage {
-                    canonical: Arc::clone(&canonical_arc),
-                    generation,
-                    stage: FileStageKey::Source,
-                };
-                let stranded = {
-                    let mut dag = self.dag.lock();
-                    if !self.stage_completion_is_current(file_id, incarnation, generation) {
-                        // Retired mid-flight: publish NOTHING and consume
-                        // NOTHING — no forward edges, no deferred-blocker
-                        // drain, no dependency admission, no blocker
-                        // records, no Analysis, no Source completion.
-                        // Release the dequeued identity instead.
-                        self.refuse_stale_stage_completion(
-                            &mut dag,
-                            &canonical_arc,
-                            generation,
-                            &source_id,
-                        )
-                    } else {
-                        if let Some(deps) = extracted {
-                            // Merge extract_deps output with any exact-resolved bare deps
-                            let mut new_deps = self.edges.get_forward_deps(file_id);
-                            new_deps.extend(deps.forward_deps);
-                            self.edges.record_forward_deps(file_id, new_deps);
-
-                            // Merge any deferred bare/aliased blocker IDs.
-                            let mut all_blocker_ids = deps.blocker_ids;
-                            if let Some((_, deferred)) = self.deferred_blocker_ids.remove(file_id) {
-                                for (dep_id, dep_language) in deferred {
-                                    dep_languages.insert(dep_id.clone(), dep_language);
-                                    all_blocker_ids.push(dep_id);
-                                }
-                            }
-
-                            // Register blockers for deps that haven't reached Analysis yet.
-                            if !all_blocker_ids.is_empty() {
-                                let mut dep_keys: Vec<DepKey> = Vec::new();
-                                // Failed-dep records collected from the 3-state
-                                // matrix below. These ride together with
-                                // `dep_keys` inside the per-canonical
-                                // `PendingBlockerSet` recorded for the owner's
-                                // Artifact admission. They surface as a typed
-                                // `DependencyFailed` on the FIRST Artifact
-                                // dispatch (via the drain + `attach_failed_dep`
-                                // sequence in
-                                // [`Self::admit_artifact_with_blockers`]),
-                                // matching the scheduler contract that missing
-                                // macro_type_deps gate the owner's Artifact
-                                // (codegen consumes resolved type shapes) and
-                                // never the owner's Analysis (the template /
-                                // script analysis must publish for diagnostics,
-                                // hover, and `defineSlots` consumers even when
-                                // the type dep is unresolved).
-                                let mut failed_records: Vec<crate::dag::FailedDepRecord> =
-                                    Vec::new();
-                                for dep_id in &all_blocker_ids {
-                                    if self.tombstones.contains_key(dep_id) {
-                                        continue;
-                                    }
-                                    let parent_ctx =
-                                        dag.winner_context_for(&canonical_arc, generation);
-
-                                    // Atomically ENSURE the dep node exists —
-                                    // never replace one. A `contains_key` test
-                                    // followed by an unconditional `insert` is a
-                                    // check-then-act: a concurrent creator of the
-                                    // same file would have its FileNode replaced
-                                    // at the same generation, orphaning the
-                                    // incarnation any already-dispatched work ran
-                                    // against. The vacant entry holds the shard
-                                    // lock, so a concurrent creator either wins
-                                    // (we observe it and reuse it) or waits.
-                                    let mut created_generation: Option<u64> = None;
-                                    if let Some(dep_language) = dep_languages.get(dep_id) {
-                                        let dep_language = dep_language.clone();
-                                        let _ensured =
-                                            self.nodes.entry(dep_id.clone()).or_insert_with(|| {
-                                                // `Some(..)` is load-bearing: it is
-                                                // what keeps the host classifier out
-                                                // of this doubly-locked region.
-                                                let dep_node = self.create_node_at_least(
-                                                    dep_id,
-                                                    Some(dep_language),
-                                                    1,
-                                                );
-                                                created_generation = Some(dep_node.generation());
-                                                dep_node
-                                            });
-                                    }
-                                    if let Some(dep_gen) = created_generation {
-                                        let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-                                        admit_work(
-                                            &mut dag,
-                                            &dep_canonical,
-                                            dep_gen,
-                                            TaskKind::Load,
-                                            std::cmp::min(
-                                                inherited_priority,
-                                                Priority::Interactive,
-                                            ),
-                                            parent_ctx,
-                                        );
-                                    }
-
-                                    // Route the blocker through the shared 3-state
-                                    // classifier:
-                                    //
-                                    // - `Gating`    → record the DepKey for the
-                                    //                 owner's Artifact registry
-                                    //                 (gates Artifact admission
-                                    //                 only, never Analysis).
-                                    // - `Satisfied` → drop silently (producer is
-                                    //                 moot or already committed).
-                                    // - `Failed(r)` → drop from `dep_keys` AND
-                                    //                 collect the record for the
-                                    //                 registry's `failed` list.
-                                    //                 The Artifact admission
-                                    //                 re-classifies every
-                                    //                 persisted failure against
-                                    //                 the live state on each
-                                    //                 drain, so a same-gen
-                                    //                 recovery still re-promotes
-                                    //                 the dep to gating.
-                                    let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-                                    let dep_gen =
-                                        self.nodes.get(dep_id).map(|n| n.generation()).unwrap_or(0);
-                                    let status = self.ensure_analysis_for_demand(
-                                        &mut dag,
-                                        &dep_canonical,
-                                        dep_gen,
-                                        std::cmp::min(inherited_priority, Priority::Interactive),
-                                        AnalysisDemandKind::ArtifactBlocker,
-                                    );
-                                    match status {
-                                        BlockerStatus::Satisfied => continue,
-                                        BlockerStatus::Failed(record) => {
-                                            failed_records.push(record);
-                                            continue;
-                                        }
-                                        BlockerStatus::Gating => {
-                                            dep_keys.push(DepKey::FileStage {
-                                                canonical: dep_canonical,
-                                                generation: dep_gen,
-                                                stage: FileStageKey::Analysis,
-                                            });
-                                        }
-                                    }
-                                }
-
-                                if !dep_keys.is_empty() || !failed_records.is_empty() {
-                                    // Record the macro_type_dep blocker set on the
-                                    // per-canonical Artifact registry. The owner's
-                                    // Analysis stays UNGATED — analysis is
-                                    // recoverable from the source alone (templates,
-                                    // defineSlots, script-level diagnostics all
-                                    // derive from the parsed source independently
-                                    // of resolved type shapes). Codegen, however,
-                                    // needs the resolved type shapes, so the gate
-                                    // fires at Artifact admission via
-                                    // [`Self::admit_artifact_with_blockers`].
-                                    //
-                                    // The macro-type cycle filter and the registry
-                                    // write share this guard, so the filter's
-                                    // bounded reachability check and the write stay
-                                    // atomic — no other thread can observe a state
-                                    // where two mutually cyclic deps both pass the
-                                    // filter. The chokepoint lives in
-                                    // [`Self::filter_macro_cycle_deps`].
-                                    let (filtered_deps, _dropped_deps) =
-                                        Self::filter_macro_cycle_deps(
-                                            &dag,
-                                            &canonical_arc,
-                                            generation,
-                                            dep_keys,
-                                        );
-                                    let pending_set = crate::dag::PendingBlockerSet {
-                                        deps: filtered_deps.into_iter().collect(),
-                                        failed: failed_records,
-                                    };
-                                    dag.record_artifact_blockers(
-                                        &canonical_arc,
-                                        generation,
-                                        pending_set,
-                                    );
-                                }
-                            }
-                        }
-                        // The worker publishes snapshot bytes before this
-                        // completion is drained. Advance the explicit
-                        // integration fence only after every dependency fact
-                        // and blocker registration above is complete under
-                        // this same scheduler-state hold.
-                        verter_debug_assert!(
-                            node.mark_source_integrated(generation),
-                            "current Source completion must publish its integration fence",
-                        );
-
-                        // Resolve Source-targeted waiters only after this
-                        // transition has published and consumed all dependency
-                        // facts. Signalling from the worker immediately after
-                        // storing the Source snapshot let callers observe a
-                        // half-integrated generation.
-                        let source = node.current_integrated_source().expect(
-                            "current Source completion must retain its integrated snapshot",
-                        );
-                        let result = RequestResult::Source(source);
-                        dag.signal_stage_complete(
-                            &canonical_arc,
-                            generation,
-                            &TaskKind::Load,
-                            &result,
-                        );
-
-                        // Source → Analysis is demand-driven. A Source-only
-                        // request has reached its target; a later Analysis or
-                        // Artifact request observes the committed Source and
-                        // admits the missing stage through normal admission.
-                        let requires_analysis = dag.has_analysis_demand(&canonical_arc, generation);
-                        // Re-read the file's urgency under THIS hold. The
-                        // value sampled before extraction can be stale: an
-                        // interactive request joining the same generation
-                        // while extraction ran would otherwise leave the
-                        // newly admitted Analysis at the older, lower
-                        // priority.
-                        let effective_priority = dag
-                            .highest_priority_for_file(&canonical_arc, generation)
-                            .unwrap_or(inherited_priority);
-                        if requires_analysis {
-                            let status = self.ensure_analysis_for_demand(
-                                &mut dag,
-                                &canonical_arc,
-                                generation,
-                                std::cmp::min(effective_priority, inherited_priority),
-                                AnalysisDemandKind::DirectRequest,
-                            );
-                            verter_debug_assert!(
-                                matches!(status, BlockerStatus::Gating | BlockerStatus::Satisfied),
-                                "direct Analysis demand must not consume blocker failure state",
-                            );
-                        }
-                        // When a later stage is required, admit Analysis
-                        // BEFORE completing Source under this one hold: a
-                        // concurrent dead-producer classification must never
-                        // observe an Analysis-bound generation with no live
-                        // stage identity. A Source-only request deliberately
-                        // has no later-stage producer and is complete here.
-                        //
-                        // Marking the Source identity complete drops its
-                        // DAG bookkeeping and releases the capacity permit
-                        // parked at dispatch. Any waiter gating on this
-                        // Source identity (rare today, but supported by
-                        // DepKey::FileStage{stage:Source}) is fanned out.
-                        dag.complete(&source_id);
-                        Vec::new()
-                    }
-                };
-                // Requeue stranded waiters after the lock drops — the
-                // requeue path sends on the inbox and must not run under
-                // the DAG lock.
-                for tok in stranded {
-                    self.requeue_stranded_waiter(tok);
-                }
-            }
-            TaskKind::Analysis => {
-                // Mark the Analysis identity as complete in the DAG.
-                // The DAG's `complete()` clears the dep from every
-                // waiter's `deps_remaining`, so dependent artifacts can
-                // proceed on the next dispatch pass.
-                let analysis_id = WorkNodeIdentity::FileStage {
-                    canonical: Arc::clone(&canonical_arc),
-                    generation,
-                    stage: FileStageKey::Analysis,
-                };
-                let analysis_was_gated = self.dag.lock().has_pending_deps(&analysis_id);
-                if !analysis_was_gated {
-                    // Only complete if the file-level gate was already
-                    // clear; if it's still gated (this analysis was
-                    // for a different reason), we keep it.
-                    self.dag.lock().complete(&analysis_id);
-                }
-
-                // For each dependent file (via reverse-index), if its
-                // file-level Analysis gate is now clear, admit any
-                // pending artifacts. Snapshot the dep's generation
-                // and drop the nodes-shard `Ref` BEFORE acquiring
-                // `dag.lock()` — holding a Ref across the DAG mutex
-                // would form a latent AB-BA ordering with any caller
-                // that takes `dag.lock` first and then mutates the
-                // dep file's nodes-shard entry.
-                let dependents = self.edges.reverse_index.get(file_id);
-                for dep_file in dependents {
-                    let dep_gen = self.nodes.get(&dep_file).map(|n| n.generation());
-                    let Some(dep_gen) = dep_gen else { continue };
-                    let dep_canonical: Arc<str> = Arc::from(dep_file.as_str());
-                    let dep_analysis_id = WorkNodeIdentity::FileStage {
-                        canonical: Arc::clone(&dep_canonical),
-                        generation: dep_gen,
-                        stage: FileStageKey::Analysis,
-                    };
-                    if self.dag.lock().has_pending_deps(&dep_analysis_id) {
-                        continue;
-                    }
-                    let inherited = self
-                        .dag
-                        .lock()
-                        .highest_priority_for_file(&dep_canonical, dep_gen)
-                        .unwrap_or(Priority::Background);
-                    self.admit_pending_artifacts(&dep_canonical, dep_gen, inherited);
-                }
-
-                // Admit this file's pending artifact waiters if its own
-                // gate is clear.
-                if !self.dag.lock().has_pending_deps(&analysis_id) {
-                    self.admit_pending_artifacts(&canonical_arc, generation, inherited_priority);
-                }
-            }
-            TaskKind::Artifact { profile_hash } => {
-                // Mark the artifact identity complete so the DAG
-                // drops its bookkeeping, releases the capacity
-                // permit parked at dispatch, and fans out any
-                // dep-edge resolution (e.g. an artifact-on-artifact
-                // dep edge that another file is waiting on). No
-                // further stage admission is needed — artifacts are
-                // terminal.
-                //
-                // Also clear the Artifact blocker registry entry for
-                // this `(owner, generation)` IF no other profile is
-                // still pending at this generation. Pending entries
-                // ride on every Artifact admission at the
-                // `(owner, generation)`; once every admission has
-                // completed, the entry would otherwise persist and
-                // grow the registry across long-lived sessions.
-                let artifact_id = WorkNodeIdentity::Artifact {
-                    canonical: Arc::clone(&canonical_arc),
-                    generation,
-                    profile_hash: profile_hash_to_bytes(*profile_hash),
-                    content_hash: [0u8; 16],
-                };
-                let mut dag = self.dag.lock();
-                dag.complete(&artifact_id);
-                if dag
-                    .pending_artifact_profiles(&canonical_arc, generation)
-                    .is_empty()
-                {
-                    dag.clear_artifact_blockers(&canonical_arc, generation);
-                }
-            }
-            // The pipeline advances on the request-target stage completions
-            // (`Load` → Analysis, `Analysis` → Artifact, `Artifact` terminal).
-            // `Parse` is intrinsic to the source stage and never completes as a
-            // standalone stage, and `CacheNode` completion is owned by the
-            // cache dispatch path, not the file-stage pipeline.
-            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
-                "handle_stage_complete advances the file-stage pipeline on \
-                 Load/Analysis/Artifact completions; Parse and CacheNode do not \
-                 drive file-stage transitions"
-            ),
-        }
-    }
-
-    /// Admit pending Artifact work nodes for a file that has cleared
-    /// Analysis and dependency gating.
-    ///
-    /// Each Artifact admission inherits any late-discovered blockers
-    /// recorded by [`Self::register_resolved_deps`] via
-    /// [`Self::admit_artifact_with_blockers`] so a blocker that
-    /// arrived AFTER the file's Analysis dispatched still gates the
-    /// Artifact until its target Analysis completes.
-    fn admit_pending_artifacts(
-        &self,
-        canonical: &Arc<str>,
-        generation: u64,
-        inherited_priority: Priority,
-    ) {
-        // ONE uninterrupted hold covering the profile snapshot AND every
-        // admission it drives.
-        //
-        // Snapshotting under one lock, releasing, then re-locking per
-        // profile reopened the same window the Source→Analysis publish
-        // closes: an `invalidate()` landing in the gap bumps to G+1 and
-        // runs its supersede sweep, and the loop then admits Artifact-G
-        // AFTER that backward-looking sweep — an identity no sweep can
-        // ever reach. Dispatch reserves capacity for it, observes the
-        // generation mismatch, and skips; the skip never releases the
-        // reservation, so the DAG ledger leaks. Holding the lock across
-        // both phases makes the bump impossible mid-loop, since
-        // `invalidate()` must take the same lock.
-        let mut dag = self.dag.lock();
-        // The generation must still be live as of THIS acquisition: the
-        // caller computed it before the lock was taken.
-        if self.nodes.get(&**canonical).map(|n| n.generation()) != Some(generation) {
-            return;
-        }
-        let profiles: Vec<(u64, Priority)> = dag.pending_artifact_profiles(canonical, generation);
-        for (profile_hash, priority) in profiles {
-            // Inherited priority is the file-level urgency; the
-            // per-waiter priority is what the dag bookkeeping returned.
-            let effective = std::cmp::min(priority, inherited_priority);
-            self.admit_artifact_with_blockers(
-                &mut dag,
-                canonical,
-                generation,
-                profile_hash,
-                effective,
-                None,
-            );
-        }
-    }
-
-    /// Drain every queued submission into the DAG via
-    /// [`Self::process_submission`]. Used by both the driver's idle
-    /// loop and the cooperative pump entry. Returns the number of
-    /// submissions drained so callers can record progress.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn drain_inbox_for_pump(&self) -> usize {
-        let mut drained = 0;
-        while let Ok(submission) = self.inbox.receiver.try_recv() {
-            self.process_submission(submission);
-            drained += 1;
-        }
-        drained
-    }
-
-    /// Run a single cooperative-pump iteration: drain the inbox into
-    /// the DAG, then dispatch every currently-ready job via
-    /// [`Self::dispatch_ready_job`]. Returns the per-iteration
-    /// progress counters; the caller decides whether to loop, park,
-    /// or fall back to a blocking wait.
-    ///
-    /// `caller_kind` is propagated to [`crate::dag::SchedulerDag::
-    /// next_ready_for_pump`] so the DAG can bias selection toward
-    /// the caller's own resource class (a CPU worker prefers a CPU
-    /// dependency it can run inline).
-    ///
-    /// `active_path` (currently empty — populated by the
-    /// `wait_or_drive` integration in a later commit) names the work
-    /// identities the caller is itself waiting on, so the DAG never
-    /// dispatches an identity back to the thread that is parked on
-    /// it.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn pump_ready(
-        self: &Arc<Self>,
-        reason: PumpReason,
-        caller_kind: crate::caller_kind::CallerKind,
-    ) -> PumpStats {
-        self.pump_ready_with_path(reason, caller_kind, &[])
-    }
-
-    /// Variant of [`Self::pump_ready`] that accepts an explicit
-    /// active-path slice. The slice is used by the cooperative
-    /// pump (`wait_or_drive`) to ensure the DAG never returns a
-    /// ready job that the calling worker is itself parked on.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn pump_ready_with_path(
-        self: &Arc<Self>,
-        reason: PumpReason,
-        caller_kind: crate::caller_kind::CallerKind,
-        active_path: &[WorkNodeIdentity],
-    ) -> PumpStats {
-        let mut stats = PumpStats {
-            drained: self.drain_inbox_for_pump(),
-            ..PumpStats::default()
-        };
-
-        loop {
-            // Sample DAG depth under the lock so the audit figure
-            // matches the depth observed by the entry that is about
-            // to leave.
-            let (job, queue_depth_pre_dequeue) = {
-                let mut dag = self.dag.lock();
-                let depth = dag.pending_len();
-                let dequeued = dag.next_ready_for_pump(caller_kind, active_path);
-                (dequeued, depth as u32)
-            };
-            let job = match job {
-                Some(j) => j,
-                None => break,
-            };
-            match self.dispatch_ready_job(job, reason, caller_kind, queue_depth_pre_dequeue) {
-                DispatchOutcome::SubmittedToPool => stats.dispatched += 1,
-                DispatchOutcome::ExecutedInline => stats.executed_inline += 1,
-                DispatchOutcome::DeferredScoped => stats.dispatched += 1,
-                DispatchOutcome::Skipped => {}
-            }
-
-            // Test-only: after each dispatch, record it and — once the
-            // armed `pause_after` count is reached — park here (before the
-            // next dequeue) until the test releases, re-draining the inbox
-            // so the surplus provably accrues scheduler-queue dwell. No-op
-            // unless a test has armed the hook; absent from release builds.
-            #[cfg(any(test, feature = "test-support"))]
-            self.dispatch_pause
-                .on_dispatch_and_maybe_pause(&|| self.drain_inbox());
-        }
-        stats
-    }
-
-    /// Route a single [`crate::dag::ReadyJob`] to the right runtime.
-    ///
-    /// Defensive skips (CacheNode, removed FileNode, generation
-    /// mismatch) return [`DispatchOutcome::Skipped`] — the parked
-    /// reservation releases through the DAG's cancel path.
-    ///
-    /// CPU-bound work submitted by a non-CPU-worker thread (driver,
-    /// I/O worker, external, inline) goes to the scheduler CPU pool via
-    /// nonblocking `cpu_pool.try_submit`. Source work always goes to the I/O
-    /// pool.
-    /// When the caller is a CPU worker (it called into the pump via
-    /// `wait_or_drive`) and the ready job is CPU-bound, the work
-    /// runs inline on the calling thread so a single-CPU-worker
-    /// pool can still complete a transitive dependency chain
-    /// without parking the only worker behind itself.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn dispatch_ready_job(
-        self: &Arc<Self>,
-        job: ReadyJob,
-        _reason: PumpReason,
-        caller_kind: crate::caller_kind::CallerKind,
-        queue_depth_pre_dequeue: u32,
-    ) -> DispatchOutcome {
-        // Compute queue dwell ms: time the entry spent in the DAG
-        // between enqueue and this dispatch.
-        let dequeue_at = Instant::now();
-        let queue_dwell_ms = dequeue_at
-            .saturating_duration_since(job.enqueue_time)
-            .as_secs_f64()
-            * 1000.0;
-        let inbox_depth = self.inbox.sender.len() as u32;
-        // One dispatch = one executed task; the dwell is the time the entry
-        // sat in the DAG, and the pre-dequeue depth is the queue high-water
-        // mark this dispatch observed.
-        verter_audit::attribute!(TaskExecute);
-        verter_audit::attribute_n!(
-            TaskWait,
-            dequeue_at
-                .saturating_duration_since(job.enqueue_time)
-                .as_nanos()
-                .min(u64::MAX as u128)
-        );
-        verter_audit::attribute_max!(QueueDepth, queue_depth_pre_dequeue);
-
-        let inbox_sender = self.inbox.sender.clone();
-        let executor = Arc::clone(&self.executor);
-        let source_loader = Arc::clone(&self.source_loader);
-
-        // Cache-node work has no file node and routes straight to the
-        // executor's cache-materialisation hook. It is CPU-class work
-        // (`WorkKind::CacheNode`), so it is spawned onto the CPU pool where
-        // the single dispatch entry `dispatch_ready_job_to_executor` runs it
-        // and releases the dispatched node's parked reservation. There is no
-        // file-stage routing for it (no node lookup, no generation guard).
-        if matches!(job.identity, WorkNodeIdentity::CacheNode { .. }) {
-            if let Some(flight) = self
-                .scoped_cache_flights
-                .get(&job.identity)
-                .map(|entry| Arc::clone(entry.value()))
-            {
-                if flight.mark_dispatched(job.cancellation.clone()) {
-                    return DispatchOutcome::DeferredScoped;
-                }
-                self.terminalize_scoped_cache_flight(
-                    &job.identity,
-                    &flight,
-                    ScopedCacheTerminal::Cancelled,
-                    false,
-                );
-                return DispatchOutcome::Skipped;
-            }
-            let executor_for_cache = Arc::clone(&self.executor);
-            let source_loader_for_cache = Arc::clone(&self.source_loader);
-            let inbox_for_cache = inbox_sender.clone();
-            let dag_for_cache = Arc::clone(&self.dag);
-            let source_root_for_cache = Arc::clone(&self.source_root);
-            // Snapshot the identity for the submit-failure release path before
-            // `job` moves into the pool closure below.
-            let cache_identity = job.identity.clone();
-            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_for_cache);
-                let cancellation = job.cancellation.clone();
-                let completion = dispatch_ready_job_to_executor(
-                    &job,
-                    None,
-                    0,
-                    std::collections::BTreeMap::new(),
-                    executor_for_cache.as_ref(),
-                    source_loader_for_cache.as_ref(),
-                    &inbox_for_cache,
-                    dag_for_cache,
-                    source_root_for_cache,
-                    &cancellation,
-                );
-                Self::deliver_stage_completion_from_pool(&inbox_for_cache, completion);
-            });
-            return match self.try_submit_cpu(task) {
-                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
-                    DispatchOutcome::SubmittedToPool
-                }
-                // A failed cache-node submit releases the parked reservation by
-                // cancelling the identity — cache-node identities are never
-                // DepKey prerequisites, so this cannot strand a waiter.
-                Err(_err) => {
-                    let stranded = self.dag.lock().cancel(&cache_identity);
-                    verter_debug_assert!(
-                        stranded.is_empty(),
-                        "CacheNode submit-failure release must not strand DAG waiters: \
-                         CacheNode identities are not used as DepKey prerequisites",
-                    );
-                    DispatchOutcome::Skipped
-                }
-            };
-        }
-
-        // File-stage / artifact work. Build the owned execution descriptor
-        // once for pool routing and the cold panic/submit-violation paths; the
-        // actual execution routes through the single dispatch entry
-        // `dispatch_ready_job_to_executor` below. `CacheNode` was branched away
-        // above, so this match never sees it.
-        let task_kind = match (&job.kind, &job.identity) {
-            (WorkKind::Load, WorkNodeIdentity::FileStage { .. }) => TaskKind::Load,
-            // `Parse` is never admitted as a runnable DAG node (see the router
-            // `dispatch_ready_job_to_executor` and `admit_work`), so this
-            // descriptor builder never observes a `(WorkKind::Parse, FileStage)`
-            // ready job either. Fabricating a live `TaskKind::Parse` here would
-            // contradict the router, which `unreachable!()`s on the same pairing.
-            (WorkKind::Parse, WorkNodeIdentity::FileStage { .. }) => unreachable!(
-                "Parse is never admitted as a runnable DAG node — no site produces \
-                 a `(WorkKind::Parse, FileStage)` ready job (admit_work rejects \
-                 `TaskKind::Parse`), so the pool-routing descriptor builder cannot \
-                 observe one.",
-            ),
-            (WorkKind::Analysis, WorkNodeIdentity::FileStage { .. }) => TaskKind::Analysis,
-            (WorkKind::Artifact, WorkNodeIdentity::Artifact { profile_hash, .. }) => {
-                TaskKind::Artifact {
-                    profile_hash: profile_hash_from_bytes(*profile_hash),
-                }
-            }
-            (kind, identity) => unreachable!(
-                "ready job carries an inconsistent file-stage (kind, identity) pairing: \
-                 {kind:?} / {identity:?}",
-            ),
-        };
-        let (file_id, generation) = match &job.identity {
-            WorkNodeIdentity::FileStage {
-                canonical,
-                generation,
-                ..
-            } => (canonical.to_string(), *generation),
-            WorkNodeIdentity::Artifact {
-                canonical,
-                generation,
-                ..
-            } => (canonical.to_string(), *generation),
-            WorkNodeIdentity::CacheNode { .. } => {
-                unreachable!(
-                    "CacheNode identities are routed above and never reach file-stage \
-                              dispatch"
-                )
-            }
-        };
-
-        let node = match self.nodes.get(&file_id) {
-            Some(n) => n.clone(),
-            None => {
-                verter_debug_assert!(
-                    self.dag.lock().token_for(&job.identity).is_none(),
-                    "defensive dispatch skip: removed-FileNode case implies the prior \
-                     `remove()` cancelled the DAG identity before clearing nodes"
-                );
-                return DispatchOutcome::Skipped;
-            }
-        };
-        if node.generation() != generation {
-            verter_debug_assert!(
-                self.dag.lock().token_for(&job.identity).is_none(),
-                "defensive dispatch skip: generation-mismatch case implies the prior \
-                 `supersede_old_file_generations` cancelled the stale-generation DAG \
-                 identity before this dispatch reached the skip"
-            );
-            return DispatchOutcome::Skipped;
-        }
-
-        let canonical_arc: Arc<str> = Arc::from(file_id.as_str());
-        let winner_ctx = job.request_context.clone().or_else(|| {
-            self.dag
-                .lock()
-                .winner_context_for(&canonical_arc, generation)
-        });
-
-        let dag_handle = Arc::clone(&self.dag);
-        let source_root_handle = Arc::clone(&self.source_root);
-        let failed_blocker_deps = job.failed_blocker_deps.clone();
-        // Capture the identity for the active-path push on the
-        // worker side. A worker that re-enters `wait_or_drive`
-        // from inside the executor must declare the work it is
-        // running so the cooperative pump never returns the same
-        // identity to the calling thread.
-        let identity = job.identity.clone();
-
-        // Inline execution: when a pool worker reached the
-        // cooperative pump via wait_or_drive, run the ready work
-        // on the SAME thread instead of queueing it behind
-        // ourselves on the pool. A single-worker configuration
-        // would otherwise deadlock — the only worker is parked
-        // waiting on a dep it itself must run.
-        //
-        // Routing by caller_kind × task_kind:
-        //
-        // - `CpuWorker` × non-Source: inline-execute on the CPU
-        //   thread. Source stays on the I/O pool because mixing
-        //   disk I/O onto a CPU worker would tie up the
-        //   cooperative-pump thread on a read.
-        // - `IoWorker` × Source: inline-execute on the I/O thread.
-        //   The IoWorker is already an I/O thread, so an inline
-        //   I/O job stays consistent with the pool's role.
-        //   Without this, a single-I/O-worker configuration that
-        //   submits an I/O-bound dep and waits parks the only
-        //   I/O worker behind itself.
-        // - `IoWorker` × non-Source: route through the CPU pool
-        //   (the default else-branch below). The IoWorker has no
-        //   business running CPU-bound work inline.
-        //
-        // `CallerKind::Inline` is NOT considered here because the
-        // sync inline-drive loop (`wait_or_drive_inline`) calls
-        // `execute_stage_inline` directly without ever entering
-        // `dispatch_ready_job` — the Inline caller is unreachable
-        // on this path.
-        // `Load` is the I/O-class source label; every other file-stage label
-        // is CPU-class. A CPU worker inline-runs CPU-class work; an I/O worker
-        // inline-runs the I/O-class `Load` (source) work.
-        let inline_eligible = (matches!(caller_kind, crate::caller_kind::CallerKind::CpuWorker)
-            && !matches!(task_kind, TaskKind::Load))
-            || (matches!(caller_kind, crate::caller_kind::CallerKind::IoWorker)
-                && matches!(task_kind, TaskKind::Load));
-        if inline_eligible {
-            // Install the winner's request-context TLS for the
-            // duration of the inline stage execution. Both
-            // pool-spawn branches below also install TLS so the
-            // inner stage's audit events carry the request-context
-            // tag from `winner_ctx`; the inline branch must mirror
-            // them or an inline-executed dep would run under the
-            // OUTER stage's request context and audit events would
-            // be misattributed to the wrong request.
-            //
-            // The inline path runs on the CALLER's worker thread,
-            // which may already have a request context installed
-            // for the OUTER stage. When `winner_ctx` is None, the
-            // outer's TLS must be CLEARED across every slot
-            // `install_tls` would have planted (scheduler opaque,
-            // session request context, audit observer) for the
-            // inner stage — otherwise the inner stage's audit
-            // events would inherit the outer request id. Pool-
-            // spawn paths run inside an outer `install_tls` guard
-            // whose `Drop` resets the slot, so sequential jobs on
-            // the same persistent pool worker observe `None`
-            // between jobs without an explicit clear.
-            let _ctx_guard: InlineTlsGuard = match winner_ctx.as_ref() {
-                Some(opaque) => InlineTlsGuard::Install(Arc::clone(&opaque.0).install_tls()),
-                None => {
-                    InlineTlsGuard::ClearAll(crate::request_context::AllSlotsClearGuard::clear_all())
-                }
-            };
-            // Audit pool tag mirrors the pool the inline branch is
-            // running on: `IoWorker × Source` runs inline on the
-            // I/O worker, so the dispatch audit must record `Io`;
-            // `CpuWorker × non-Source` runs inline on the CPU
-            // worker → `Cpu`. The inline_eligible gate above
-            // already restricts to these two combinations.
-            let inline_pool_tag = match (caller_kind, &task_kind) {
-                (crate::caller_kind::CallerKind::IoWorker, TaskKind::Load) => {
-                    crate::audit_publish::WorkerPoolTag::Io
-                }
-                _ => crate::audit_publish::WorkerPoolTag::Cpu,
-            };
-            let identity_for_path = identity.clone();
-            crate::caller_kind::with_active_path(identity_for_path, || {
-                Self::publish_scheduler_dispatch(
-                    inline_pool_tag,
-                    crate::audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
-                    queue_dwell_ms,
-                );
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let cancellation = job.cancellation.clone();
-                    dispatch_ready_job_to_executor(
-                        &job,
-                        Some(&node),
-                        generation,
-                        failed_blocker_deps,
-                        executor.as_ref(),
-                        source_loader.as_ref(),
-                        &inbox_sender,
-                        Arc::clone(&dag_handle),
-                        Arc::clone(&source_root_handle),
-                        &cancellation,
-                    )
-                }));
-                match result {
-                    Ok(completion) => self.deliver_stage_completion(completion),
-                    Err(_) => Self::surface_stage_panic_as_failed(
-                        &node,
-                        generation,
-                        &task_kind,
-                        &inbox_sender,
-                        Arc::clone(&dag_handle),
-                    ),
-                }
-            });
-            return DispatchOutcome::ExecutedInline;
-        }
-
-        // Capture the terminalization inputs BEFORE moving the worker
-        // payload into the closure. If `try_submit` reports
-        // `Full`/`Closed` the closure is consumed without running, so
-        // the invariant-violation path needs its own copies of
-        // `(canonical, dag, inbox_sender)` to release the parked
-        // reservation through the normal DAG cancel path.
-        let canonical_for_violation: Arc<str> = Arc::from(node.canonical_id.as_str());
-        let dag_for_violation = Arc::clone(&dag_handle);
-        let inbox_for_violation = inbox_sender.clone();
-
-        if matches!(task_kind, TaskKind::Load) {
-            // Source (`Load`) jobs: I/O pool loads content; the parse step is
-            // intrinsic to the source-stage execution path (no separate node).
-            let node_for_panic = Arc::clone(&node);
-            let dag_for_panic = Arc::clone(&dag_handle);
-            let task_kind_for_panic = task_kind.clone();
-            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_sender);
-                let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
-                    winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
-                Self::publish_scheduler_dispatch(
-                    crate::audit_publish::WorkerPoolTag::Io,
-                    crate::audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
-                    queue_dwell_ms,
-                );
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::caller_kind::with_active_path(identity, || {
-                        let cancellation = job.cancellation.clone();
-                        dispatch_ready_job_to_executor(
-                            &job,
-                            Some(&node),
-                            generation,
-                            failed_blocker_deps,
-                            executor.as_ref(),
-                            source_loader.as_ref(),
-                            &inbox_sender,
-                            Arc::clone(&dag_handle),
-                            Arc::clone(&source_root_handle),
-                            &cancellation,
-                        )
-                    })
-                }));
-                match result {
-                    Ok(completion) => {
-                        Self::deliver_stage_completion_from_pool(&inbox_sender, completion)
-                    }
-                    Err(_) => Self::surface_stage_panic_as_failed(
-                        &node_for_panic,
-                        generation,
-                        &task_kind_for_panic,
-                        &inbox_sender,
-                        dag_for_panic,
-                    ),
-                }
-            });
-            match self.try_submit_io(task) {
-                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
-                    DispatchOutcome::SubmittedToPool
-                }
-                Err(err) => self.terminalize_pool_submit_violation(
-                    err,
-                    &dag_for_violation,
-                    &canonical_for_violation,
-                    generation,
-                    &task_kind,
-                    &inbox_for_violation,
-                ),
-            }
-        } else {
-            // Analysis/Artifact jobs: pure CPU work.
-            let node_for_panic = Arc::clone(&node);
-            let dag_for_panic = Arc::clone(&dag_handle);
-            let task_kind_for_panic = task_kind.clone();
-            let task: crate::pool::SchedulerPoolTask = Box::new(move || {
-                let job = job.started(&inbox_sender);
-                let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
-                    winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
-                Self::publish_scheduler_dispatch(
-                    crate::audit_publish::WorkerPoolTag::Cpu,
-                    crate::audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
-                    queue_dwell_ms,
-                );
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::caller_kind::with_active_path(identity, || {
-                        let cancellation = job.cancellation.clone();
-                        dispatch_ready_job_to_executor(
-                            &job,
-                            Some(&node),
-                            generation,
-                            failed_blocker_deps,
-                            executor.as_ref(),
-                            source_loader.as_ref(),
-                            &inbox_sender,
-                            Arc::clone(&dag_handle),
-                            Arc::clone(&source_root_handle),
-                            &cancellation,
-                        )
-                    })
-                }));
-                match result {
-                    Ok(completion) => {
-                        Self::deliver_stage_completion_from_pool(&inbox_sender, completion)
-                    }
-                    Err(_) => Self::surface_stage_panic_as_failed(
-                        &node_for_panic,
-                        generation,
-                        &task_kind_for_panic,
-                        &inbox_sender,
-                        dag_for_panic,
-                    ),
-                }
-            });
-            match self.try_submit_cpu(task) {
-                Ok(crate::pool::SchedulerPoolSubmitResult::Submitted) => {
-                    DispatchOutcome::SubmittedToPool
-                }
-                Err(err) => self.terminalize_pool_submit_violation(
-                    err,
-                    &dag_for_violation,
-                    &canonical_for_violation,
-                    generation,
-                    &task_kind,
-                    &inbox_for_violation,
-                ),
-            }
-        }
-    }
-
-    /// Submit a Source task to the injected I/O pool. A test-only
-    /// fault-injection seam ([`Self::pool_submit_fault`]) may force a
-    /// `Full`/`Closed` result here so the invariant-violation RELEASE
-    /// path can be characterized without the real transport ever being
-    /// saturated. Production builds compile the seam out and call
-    /// `try_submit` directly.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn try_submit_io(
-        &self,
-        task: crate::pool::SchedulerPoolTask,
-    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
-        // Record the submit ATTEMPT before doing anything else: a test
-        // that parks the single I/O worker asserts the driver reaches
-        // every admitted submit attempt while the worker is stuck. The
-        // count is incremented for the attempt itself, independent of
-        // whether the nonblocking `try_send` below succeeds.
-        #[cfg(test)]
-        self.io_submit_attempts.fetch_add(1, Ordering::AcqRel);
-        #[cfg(test)]
-        if let Some(err) = self.injected_pool_submit_fault() {
-            // Drop `task` without running it (mirrors a genuine
-            // Full/Closed where the transport consumed nothing).
-            drop(task);
-            return Err(err);
-        }
-        self.io_pool
-            .try_submit(crate::owner_command::OwnerCommand::io(task))
-    }
-
-    /// Submit an Analysis/Artifact task to the injected CPU pool. See
-    /// [`Self::try_submit_io`] for the test-only fault seam.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn try_submit_cpu(
-        &self,
-        task: crate::pool::SchedulerPoolTask,
-    ) -> Result<crate::pool::SchedulerPoolSubmitResult, crate::pool::SchedulerPoolSubmitError> {
-        #[cfg(test)]
-        if let Some(err) = self.injected_pool_submit_fault() {
-            drop(task);
-            return Err(err);
-        }
-        self.cpu_pool
-            .try_submit(crate::owner_command::OwnerCommand::cpu(task))
-    }
-
-    /// Read + clear the one-shot test-only pool-submit fault. Returns
-    /// the forced error exactly once per arming (so a single armed fault
-    /// terminalizes one job, not every subsequent dispatch). `0` = off,
-    /// `1` = force `Full`, `2` = force `Closed`. On a hit it records that
-    /// the fault was test-injected so the downstream
-    /// `terminalize_pool_submit_violation` suppresses its `debug_assert!`
-    /// (the test is characterizing the release-build RELEASE path).
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn injected_pool_submit_fault(&self) -> Option<crate::pool::SchedulerPoolSubmitError> {
-        let err = match self.pool_submit_fault.swap(0, Ordering::AcqRel) {
-            1 => Some(crate::pool::SchedulerPoolSubmitError::Full),
-            2 => Some(crate::pool::SchedulerPoolSubmitError::Closed),
-            _ => None,
-        };
-        if err.is_some() {
-            self.pool_submit_fault_was_injected
-                .store(true, Ordering::Release);
-        }
-        err
-    }
-
-    /// Test-only: arm a one-shot pool-submit fault so the NEXT non-inline
-    /// dispatch observes a forced `Full` from `try_submit`, exercising
-    /// the invariant-violation terminalize/release path without ever
-    /// saturating the real transport. Consumed once (auto-clears).
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(crate) fn arm_pool_submit_fault_full(&self) {
-        self.pool_submit_fault.store(1, Ordering::Release);
-    }
-
-    /// Test-only: number of I/O pool submit attempts the driver has made
-    /// so far (see [`Self::io_submit_attempts`]). A test parks the single
-    /// I/O worker and polls this until it reaches the full admitted
-    /// fan-out, proving the driver kept dispatching past the stuck worker.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(crate) fn io_submit_attempts(&self) -> usize {
-        self.io_submit_attempts.load(Ordering::Acquire)
-    }
-
-    /// Handle a nonblocking pool-submit failure at the dispatch site.
-    ///
-    /// Under the DAG capacity-ledger invariant the pool is NOT genuinely
-    /// full when `dispatch_ready_job` runs: `next_ready_for_pump`
-    /// reserves the CPU/IO permit (dag.rs:1762) before producing the
-    /// `ReadyJob`, credit commits only after the reservation succeeds
-    /// (dag.rs:1775), and the reservation is parked on the node
-    /// (dag.rs:1801). Inline-eligible loans (`IoWorker`×Source,
-    /// `CpuWorker`×CPU) run on the caller thread and never enter a pool
-    /// transport, so non-inline submissions are bounded by the resolved
-    /// `dag_budget` — and the host sizes the IO transport to dominate
-    /// `dag_budget.io`. A `Full`/`Closed` result is therefore an
-    /// INVARIANT VIOLATION, not backpressure.
-    ///
-    /// The violation is `debug_assert!`ed (so debug/test builds fault
-    /// loudly), then the job is terminalized via the SAME path the
-    /// worker-panic recovery uses ([`Self::terminalize_failure`] +
-    /// [`Self::requeue_terminalize_stranded`]): the DAG node is
-    /// cancelled, releasing the parked reservation through the by-value
-    /// `release(self)` consume — no permit leak. Credit was committed
-    /// exactly once at admission and is NOT re-committed (the job is not
-    /// requeued or re-admitted). The job is surfaced `Failed` with a
-    /// typed [`crate::job::SchedulerError::StageFailed`] so the caller
-    /// observes a terminal failure rather than a hang. No silent drop,
-    /// no requeue, no double-credit.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn terminalize_pool_submit_violation(
-        self: &Arc<Self>,
-        err: crate::pool::SchedulerPoolSubmitError,
-        dag: &DagMutex,
-        canonical: &Arc<str>,
-        generation: u64,
-        task_kind: &TaskKind,
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-    ) -> DispatchOutcome {
-        // The `debug_assert!` fires for GENUINE invariant violations
-        // (a real `Full`/`Closed` from the pool transport). It is
-        // suppressed only when a test deliberately injected the fault
-        // via the `pool_submit_fault` seam — that test is exercising the
-        // RELEASE path that runs in release builds (where the assert is
-        // compiled out), so faulting on the injected error would defeat
-        // the test rather than catch a bug. Production / debug builds
-        // with a real transport failure still fault loudly.
-        let test_injected = {
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            {
-                self.pool_submit_fault_was_injected
-                    .swap(false, Ordering::AcqRel)
-            }
-            #[cfg(not(all(test, not(target_arch = "wasm32"))))]
-            {
-                false
-            }
-        };
-        verter_debug_assert!(
-            test_injected,
-            "scheduler pool submit returned {err:?} at the dispatch site: the DAG \
-             capacity ledger reserves the {task_kind:?} permit in next_ready_for_pump \
-             before producing the ReadyJob, and each transport is sized to dominate \
-             its matching dag_budget (CPU dominates dag_budget.cpu, IO dominates \
-             dag_budget.io). Full/Closed is an invariant violation (fail-closed), \
-             not backpressure"
-        );
-        let error = crate::job::SchedulerError::StageFailed {
-            file_id: canonical.to_string(),
-            stage: format!("{task_kind:?}"),
-            message: format!("scheduler pool submit failed: {err:?}"),
-        };
-        let stranded = Self::terminalize_failure(dag, canonical, generation, task_kind, error);
-        Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-        DispatchOutcome::Skipped
-    }
-
-    /// Publish a single scheduler-dispatch fact through the audit
-    /// observer TLS slot if one is installed. The session-side
-    /// `RequestContext` impl writes the supplied facts into its
-    /// per-request scheduler-audit slot; non-audit callers are a
-    /// no-op via [`verter_audit::observer::AuditObserver`]'s default
-    /// implementation. Static so it can be called from worker
-    /// closures without holding `&self`.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn publish_scheduler_dispatch(
-        pool: crate::audit_publish::WorkerPoolTag,
-        depths: crate::audit_publish::SchedulerDepthsSnapshot,
-        queue_dwell_ms: f64,
-    ) {
-        if let Some(observer) = verter_audit::current_observer() {
-            let audit = verter_audit::SchedulerAudit {
-                worker_thread_id: format!("{:?}", std::thread::current().id()),
-                worker_pool: pool.into(),
-                depths: depths.into(),
-                queue_dwell_ms,
-                dispatch_count: 1,
-            };
-            observer.record_scheduler_dispatch(audit);
         }
     }
 
@@ -6175,844 +2012,6 @@ impl Scheduler {
             node.analysis.store(Arc::new(None));
         }
     }
-
-    /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).
-    fn execute_stage_inline(&self, job: ReadyJob) {
-        // Cache-node work has no file node: run it inline through the single
-        // dispatch entry, which routes to the executor's cache hook and
-        // releases the dispatched node's parked reservation. No file-stage
-        // node lookup or generation guard applies.
-        if matches!(job.identity, WorkNodeIdentity::CacheNode { .. }) {
-            if let Some(flight) = self
-                .scoped_cache_flights
-                .get(&job.identity)
-                .map(|entry| Arc::clone(entry.value()))
-            {
-                if !flight.mark_dispatched(job.cancellation.clone()) {
-                    self.terminalize_scoped_cache_flight(
-                        &job.identity,
-                        &flight,
-                        ScopedCacheTerminal::Cancelled,
-                        false,
-                    );
-                }
-                return;
-            }
-            let identity = job.identity.clone();
-            let completion = crate::caller_kind::with_active_path(identity, || {
-                let cancellation = job.cancellation.clone();
-                dispatch_ready_job_to_executor(
-                    &job,
-                    None,
-                    0,
-                    std::collections::BTreeMap::new(),
-                    self.executor.as_ref(),
-                    self.source_loader.as_ref(),
-                    &self.inbox.sender,
-                    self.dag.clone(),
-                    self.source_root.clone(),
-                    &cancellation,
-                )
-            });
-            self.deliver_stage_completion(completion);
-            return;
-        }
-        let (file_id, generation) = match &job.identity {
-            WorkNodeIdentity::FileStage {
-                canonical,
-                generation,
-                ..
-            } => (canonical.to_string(), *generation),
-            WorkNodeIdentity::Artifact {
-                canonical,
-                generation,
-                ..
-            } => (canonical.to_string(), *generation),
-            WorkNodeIdentity::CacheNode { .. } => {
-                unreachable!(
-                    "CacheNode identities are routed above and never reach file-stage \
-                              inline dispatch"
-                )
-            }
-        };
-
-        // Defensive skip invariant (inline path): mirrors the native
-        // dispatch loop. A missing `FileNode` or generation
-        // mismatch here means a prior `remove()` /
-        // `supersede_old_file_generations` already terminalized the
-        // matching DAG identity and released its parked permit; the
-        // skip is therefore safe without an extra cancel call.
-        let node = match self.nodes.get(&file_id) {
-            Some(n) => n.clone(),
-            None => {
-                verter_debug_assert!(
-                    self.dag.lock().token_for(&job.identity).is_none(),
-                    "defensive inline dispatch skip: removed-FileNode case implies the prior \
-                     `remove()` cancelled the DAG identity before clearing nodes"
-                );
-                return;
-            }
-        };
-
-        if node.generation() != generation {
-            verter_debug_assert!(
-                self.dag.lock().token_for(&job.identity).is_none(),
-                "defensive inline dispatch skip: generation-mismatch case implies the prior \
-                 `supersede_old_file_generations` cancelled the stale-generation DAG \
-                 identity before this dispatch reached the skip"
-            );
-            return;
-        }
-
-        // Push the identity onto the active-path stack so a
-        // re-entrant `wait_or_drive` from inside the executor
-        // detects same-path self-await rather than blocking on
-        // its own pending completion. The owned execution descriptor is
-        // constructed by the single dispatch entry from `job`'s own
-        // `(kind, identity)`.
-        let identity = job.identity.clone();
-        let failed_blocker_deps = job.failed_blocker_deps.clone();
-        // The terminal `StageComplete` is delivered after the stage returns
-        // and off the active path: this thread may be the inbox's sole
-        // consumer, so a full inbox must be drained, never waited on.
-        let completion = crate::caller_kind::with_active_path(identity, || {
-            let cancellation = job.cancellation.clone();
-            dispatch_ready_job_to_executor(
-                &job,
-                Some(&node),
-                generation,
-                failed_blocker_deps,
-                self.executor.as_ref(),
-                self.source_loader.as_ref(),
-                &self.inbox.sender,
-                self.dag.clone(),
-                self.source_root.clone(),
-                &cancellation,
-            )
-        });
-        self.deliver_stage_completion(completion);
-    }
-
-    /// Construct the [`WorkNodeIdentity`] for `(canonical, generation,
-    /// task_kind)` so that a failure / panic terminal path can address
-    /// the matching DAG node. The mapping is the inverse of [`admit_work`].
-    fn dag_identity_for_task(
-        canonical: &Arc<str>,
-        generation: u64,
-        task_kind: &TaskKind,
-    ) -> WorkNodeIdentity {
-        match task_kind {
-            // The live `FileStage{Source}` node maps to the `Load` label.
-            TaskKind::Load => WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(canonical),
-                generation,
-                stage: FileStageKey::Source,
-            },
-            TaskKind::Analysis => WorkNodeIdentity::FileStage {
-                canonical: Arc::clone(canonical),
-                generation,
-                stage: FileStageKey::Analysis,
-            },
-            TaskKind::Artifact { profile_hash } => WorkNodeIdentity::Artifact {
-                canonical: Arc::clone(canonical),
-                generation,
-                profile_hash: profile_hash_to_bytes(*profile_hash),
-                content_hash: [0u8; 16],
-            },
-            // Failure/terminalization addressing covers the file-stage tasks
-            // only. `Parse` shares the source stage's identity (it never
-            // terminalizes on its own), and `CacheNode` completion/release is
-            // owned by the cache dispatch path, not this inverse map.
-            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
-                "dag_identity_for_task addresses file-stage nodes (Load/Analysis/Artifact) \
-                 for terminalization; Parse and CacheNode are not addressed here"
-            ),
-        }
-    }
-
-    /// Single chokepoint for failure / panic terminal paths.
-    ///
-    /// Releases the parked capacity reservation on the matching DAG
-    /// node and signals the appropriate `Failed(error)` to file waiter
-    /// groups so callers do not hang.
-    ///
-    /// Sites that previously called `signal_file_failed*` directly are
-    /// routed through this helper — without the node-cancel step the
-    /// DAG would leak the parked admission permit and a {cpu:1, io:1}
-    /// budget would stall the class on a single failure.
-    ///
-    /// `whole_file` semantics (Source / Analysis Err, FileNotFound,
-    /// non-Artifact panic) signal `Failed` to every waiter group at
-    /// `(canonical, generation)`. `per_stage` semantics (Artifact Err
-    /// or Artifact panic) preserve other per-profile waiters at the
-    /// same `(canonical, generation)`.
-    fn terminalize_failure(
-        dag: &DagMutex,
-        canonical: &Arc<str>,
-        generation: u64,
-        task_kind: &TaskKind,
-        error: crate::job::SchedulerError,
-    ) -> Vec<crate::dag::SubmissionToken> {
-        let identity = Self::dag_identity_for_task(canonical, generation, task_kind);
-        let mut guard = dag.lock();
-        // 1. Cancel the DAG node — releases the parked capacity
-        //    reservation through the by-value `release(self)` consume
-        //    in `cancel`'s reservation drop path. Source / Analysis
-        //    identities can be observed as `DepKey` prerequisites by
-        //    downstream work (e.g., a same-file or dep-file Artifact
-        //    gating on this Analysis), so a failure cancel may leave
-        //    behind stranded waiter tokens whose only remaining gate
-        //    was the now-cancelled identity. Return the stranded
-        //    token list so the caller can re-enqueue through the
-        //    same `requeue_stranded_waiter` path used by `remove()`
-        //    — the downstream Artifact still dispatches (it will
-        //    see the missing prerequisite via `current_*().is_none()`
-        //    checks on the FileNode and surface its own failure
-        //    rather than hang).
-        // 1a. Analysis-failure fan-out to already-admitted waiters
-        //     BEFORE cancel. `cancel(&analysis_identity)` would
-        //     release each waiter's Analysis `DepKey` entry without
-        //     recording a `FailedDepRecord` on the waiter — the
-        //     downstream Artifact would then dispatch and resolve
-        //     `Ready` over a snapshot built from a dead prerequisite.
-        //     The fan-out helper records the failure marker on every
-        //     waiter so the pre-dispatch chokepoint in
-        //     `execute_stage_on_worker` surfaces a typed
-        //     `DependencyFailed` instead. This is symmetric with the
-        //     Source-side fan-out below (a Source failure also fans
-        //     out via `fanout_source_failure_to_analysis_waiters`).
-        //
-        //     The fan-out runs BEFORE cancel so the cancel's
-        //     `self.waiters.remove(&dep_key)` observes an empty
-        //     reverse-index entry — the fan-out drained it. Without
-        //     this ordering, cancel would strip the `DepKey` from
-        //     each waiter's `deps_remaining` first, leaving no
-        //     marker for the chokepoint to fire on.
-        let mut stranded = Vec::new();
-        if matches!(task_kind, TaskKind::Analysis) {
-            let analysis_stranded =
-                guard.fanout_analysis_failure_to_waiters(canonical, generation, &error);
-            stranded.extend(analysis_stranded);
-        }
-        // 1. Cancel the DAG node — releases the parked capacity
-        //    reservation through the by-value `release(self)` consume
-        //    in `cancel`'s reservation drop path. For Analysis-stage
-        //    failures the cancel's waiter sweep observes the empty
-        //    reverse-index entry left by the fan-out above; for
-        //    Source-stage failures the Source-keyed waiters are
-        //    handled here.
-        stranded.extend(guard.cancel(&identity));
-        // 1b. Source-failure fan-out to Analysis-keyed waiters at the
-        //     same `(canonical, generation)`. The Source cancel above
-        //     only fans out to `DepKey::FileStage { stage: Source }`
-        //     waiters, but downstream blockers gate on the Analysis
-        //     DepKey (Artifact admissions inherit `DepKey::FileStage
-        //     { stage: Analysis }` via the typed blocker registry).
-        //     Without this propagation the Analysis identity is
-        //     never admitted (Analysis admission is gated on Source
-        //     success), so the Analysis-keyed waiters stay pinned
-        //     forever on a dep that cannot make progress. The
-        //     `fanout_source_failure_to_analysis_waiters` helper
-        //     drops the Analysis DepKey from each waiter's
-        //     `deps_remaining` and returns any newly-stranded
-        //     waiters so the caller re-enqueues them through the
-        //     same path as the Source-key strand list. There is no
-        //     Analysis DAG identity at this `(canonical, generation)`
-        //     to double-cancel: admission requires `current_source().
-        //     is_some()`, which is false on the Source-failure path.
-        //
-        //     The producer's terminal `error` is forwarded so the
-        //     `FailedDepRecord` on each waiter carries the cause
-        //     verbatim — the downstream short-circuit then surfaces
-        //     a typed `DependencyFailed` instead of synthesising a
-        //     stage-only envelope.
-        if matches!(task_kind, TaskKind::Load | TaskKind::Parse) {
-            let analysis_stranded =
-                guard.fanout_source_failure_to_analysis_waiters(canonical, generation, &error);
-            stranded.extend(analysis_stranded);
-        }
-        // 1c. Persistent terminal-dep-failure record. The fan-out
-        //     above marks every already-admitted Analysis-keyed
-        //     waiter at this `(canonical, generation)`. The
-        //     persistent map closes the pre-admission race: a
-        //     waiter that admits AFTER the producer terminalized
-        //     consults this store (via the matrix's
-        //     [`Scheduler::file_stage_analysis_blocker_status`]) and
-        //     attaches the same `FailedDepRecord` to the freshly-
-        //     submitted node so the pre-dispatch short-circuit fires
-        //     uniformly. Recorded under the Analysis `DepKey` even
-        //     for Source-stage failures because cross-file Artifact
-        //     blockers always key on the producer's Analysis stage
-        //     (`register_resolved_deps` records `DepKey::FileStage
-        //     { stage: Analysis }`).
-        if matches!(
-            task_kind,
-            TaskKind::Load | TaskKind::Parse | TaskKind::Analysis
-        ) {
-            let analysis_dep_key = crate::dag::DepKey::FileStage {
-                canonical: Arc::clone(canonical),
-                generation,
-                stage: crate::dag::FileStageKey::Analysis,
-            };
-            guard.insert_terminal_dep_failure(crate::dag::FailedDepRecord {
-                dep_key: analysis_dep_key,
-                cause: error.clone(),
-            });
-        }
-        // 2. Signal Failed to file waiter groups. Artifact failures
-        //    must NOT terminate other-profile waiters at the same
-        //    (canonical, generation) — use the per-stage variant.
-        match task_kind {
-            TaskKind::Load | TaskKind::Parse | TaskKind::Analysis => {
-                guard.signal_file_failed(canonical, generation, error);
-            }
-            TaskKind::Artifact { .. } => {
-                guard.signal_file_failed_for_stage(canonical, generation, task_kind, error);
-            }
-            // CacheNode completion/release is owned by the cache dispatch path;
-            // it never terminalizes through the file-stage failure chokepoint.
-            TaskKind::CacheNode { .. } => unreachable!(
-                "terminalize_failure addresses file-stage tasks (Load/Parse/Analysis/Artifact); \
-                 CacheNode release is owned by the cache dispatch path"
-            ),
-        }
-        stranded
-    }
-
-    /// Static-context analogue of [`Self::requeue_stranded_waiter`]:
-    /// when `stranded` is non-empty, send a single `Wake` into the
-    /// inbox so the driver re-runs the cooperative pump and picks
-    /// up any DAG node whose `deps_remaining` cleared as a side
-    /// effect of the cancel. Used by [`Self::terminalize_failure`]'s
-    /// callers in static (worker) contexts where `&self` is not in
-    /// scope.
-    fn requeue_terminalize_stranded(
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-        stranded: &[crate::dag::SubmissionToken],
-    ) {
-        if !stranded.is_empty() {
-            let _ = inbox_sender.try_send(Submission::Wake);
-        }
-    }
-
-    /// Surface a worker-stage panic as `Failed` on all pending groups
-    /// at this `(generation, task_kind)` so callers never hang on a
-    /// crashed stage. The panic has been swallowed by the worker's
-    /// `catch_unwind` — this helper completes the signalling that the
-    /// executor's normal error path would have done AND releases the
-    /// parked capacity reservation so the resource class does not
-    /// stall.
-    ///
-    /// `terminalize_failure` runs unconditionally — BEFORE the
-    /// generation guard — so a panic on a now-superseded generation
-    /// still releases the parked admission permit and cancels the
-    /// stale DAG identity. Both inner steps are idempotent: a
-    /// `cancel` of an identity not in `by_identity` returns an empty
-    /// stranded list with no side effect, and `signal_file_failed*`
-    /// on a `(canonical, generation)` whose waiter groups were
-    /// already drained by `supersede_old_file_generations` is a
-    /// no-op. The generation guard only skips the inbox notify path
-    /// (already a no-op here).
-    #[cfg(not(target_arch = "wasm32"))]
-    fn surface_stage_panic_as_failed(
-        node: &FileNode,
-        generation: u64,
-        task_kind: &TaskKind,
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<DagMutex>,
-    ) {
-        // `terminalize_failure` runs UNCONDITIONALLY (no generation
-        // guard) so a panic on a now-superseded generation still
-        // releases the parked admission permit and cancels the
-        // stale DAG identity. An early-return on generation-mismatch
-        // here would let the parked permit linger between
-        // `bump_generation` and the supersede sweep, stalling the
-        // resource class on a panic that raced an invalidation.
-        let error = crate::job::SchedulerError::StageFailed {
-            file_id: node.canonical_id.clone(),
-            stage: format!("{task_kind:?}"),
-            message: "stage executor panicked".to_string(),
-        };
-        let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
-        let stranded = Self::terminalize_failure(&dag, &canonical, generation, task_kind, error);
-        Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-    }
-
-    /// Execute a stage on a worker (rayon thread or inline).
-    ///
-    /// This is a static method so it can be called from owner-affine CPU
-    /// pool tasks without holding a reference to &self. All shared state
-    /// is passed explicitly.
-    ///
-    /// `failed_blocker_deps` carries [`crate::dag::FailedDepRecord`]
-    /// entries for every prerequisite that the producer terminalized
-    /// before this node became dispatchable. Two population paths
-    /// feed the map (see [`crate::dag::SchedulerDag`]'s
-    /// `fanout_source_failure_to_analysis_waiters` fan-out path and
-    /// the `attach_failed_dep` admission-time attach).
-    ///
-    /// SOLE-CHOKEPOINT contract: this function short-circuits at the
-    /// top with a typed
-    /// [`crate::job::SchedulerError::DependencyFailed`] when the map
-    /// is non-empty — regardless of task kind. The Source / Analysis
-    /// / Artifact arms below ALL run with `failed_blocker_deps.is_
-    /// empty()` as a debug-assert invariant; per-arm checks would be
-    /// a rule-violation that resurrects the divergent silent-success
-    /// class the short-circuit was introduced to close. The
-    /// `failed_blocker_deps` parameter is therefore consumed before
-    /// the dispatch and is NOT forwarded to the per-kind arms.
-    ///
-    /// Returns the stage's terminal `StageComplete`; the caller delivers it
-    /// with the discipline its thread requires (see
-    /// [`Scheduler::deliver_stage_completion`]).
-    #[allow(clippy::too_many_arguments)]
-    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
-    fn execute_stage_on_worker(
-        node: &FileNode,
-        generation: u64,
-        task_kind: &TaskKind,
-        failed_blocker_deps: std::collections::BTreeMap<
-            crate::dag::DepKey,
-            crate::dag::FailedDepRecord,
-        >,
-        executor: &dyn StageExecutor,
-        source_loader: &dyn SourceLoader,
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<DagMutex>,
-        source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
-    ) -> Option<Submission> {
-        // Typed dependency-failure short-circuit BEFORE task-kind
-        // dispatch. The marker survives both the fan-out path (a
-        // producer terminalization after the consumer admitted) and
-        // the admission-time attach (a producer terminalization
-        // BEFORE the consumer admitted, observed via the persistent
-        // `terminal_dep_failures` store). Surfacing the typed error
-        // here — once, in one place — means every task kind that
-        // can wait on a `DepKey` gets the same short-circuit semantics
-        // without per-arm divergence.
-        if let Some((_first_key, first_record)) = failed_blocker_deps.iter().next() {
-            use crate::job::SchedulerError;
-            let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
-            verter_debug_assert!(
-                !matches!(first_record.dep_key, crate::dag::DepKey::CacheNode { .. }),
-                "CacheNode DepKey should not appear in failed_blocker_deps",
-            );
-            // Carry the producer's terminal cause through the typed
-            // `DependencyFailed` envelope. The record's `cause` was
-            // captured at terminalization time (either on the fan-
-            // out path or the admission-time attach path), so the
-            // consumer can disambiguate FileNotFound vs StageFailed
-            // without re-reading state from the failed file.
-            let stranded = Self::terminalize_failure(
-                &dag,
-                &canonical,
-                generation,
-                task_kind,
-                SchedulerError::DependencyFailed {
-                    dep_key: first_record.dep_key.clone(),
-                    cause: Box::new(first_record.cause.clone()),
-                },
-            );
-            Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-            return None;
-        }
-        match task_kind {
-            // The source stage runs under the `Load` label (the live
-            // `FileStage{Source}` node maps to `Load`); the load+parse work
-            // runs in this one source-stage execution path.
-            TaskKind::Load => {
-                verter_debug_assert!(
-                    failed_blocker_deps.is_empty(),
-                    "Source stage received failed_blocker_deps — pre-dispatch \
-                     short-circuit must consume the marker before kind-dispatch \
-                     (fan-out target invariant violated)",
-                );
-                Self::execute_source_stage(
-                    node,
-                    generation,
-                    executor,
-                    source_loader,
-                    inbox_sender,
-                    dag,
-                    source_root,
-                )
-            }
-            TaskKind::Analysis => {
-                verter_debug_assert!(
-                    failed_blocker_deps.is_empty(),
-                    "Analysis stage received failed_blocker_deps — pre-dispatch \
-                     short-circuit must consume the marker before kind-dispatch \
-                     (fan-out target invariant violated)",
-                );
-                Self::execute_analysis_stage(node, generation, executor, inbox_sender, dag)
-            }
-            TaskKind::Artifact { profile_hash } => {
-                verter_debug_assert!(
-                    failed_blocker_deps.is_empty(),
-                    "Artifact stage received failed_blocker_deps — pre-dispatch \
-                     short-circuit must consume the marker before kind-dispatch \
-                     (fan-out target invariant violated)",
-                );
-                Self::execute_artifact_stage(
-                    node,
-                    generation,
-                    *profile_hash,
-                    executor,
-                    inbox_sender,
-                    dag,
-                )
-            }
-            // `execute_stage_on_worker` is the file-stage executor chokepoint.
-            // `Parse` is intrinsic to the source stage (never dispatched as a
-            // standalone file stage in the single-`FileStage{Source}`-node
-            // model), and `CacheNode` is routed directly to
-            // `StageExecutor::execute_cache_node` by
-            // [`Self::dispatch_ready_job_to_executor`] — it never reaches this
-            // file-node-centric executor (it carries no `FileNode`).
-            TaskKind::Parse | TaskKind::CacheNode { .. } => unreachable!(
-                "execute_stage_on_worker runs file-stage work (Load/Analysis/Artifact); \
-                 Parse is intrinsic to the source stage and CacheNode routes through \
-                 dispatch_ready_job_to_executor to execute_cache_node"
-            ),
-        }
-    }
-
-    /// Execute the Source stage: load content, run executor, commit.
-    /// Returns the terminal `StageComplete` for the caller to deliver.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
-    fn execute_source_stage(
-        node: &FileNode,
-        generation: u64,
-        executor: &dyn StageExecutor,
-        source_loader: &dyn SourceLoader,
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<DagMutex>,
-        source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
-    ) -> Option<Submission> {
-        use crate::job::SchedulerError;
-
-        let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
-
-        // Load content: pending_source (from submit) → source_loader (from disk/memory)
-        let content = {
-            let pending = node.pending_source.load();
-            match pending.as_ref() {
-                Some((gen, buf)) if *gen == generation => Some(Arc::clone(buf)),
-                _ => None,
-            }
-        };
-        let content = content.or_else(|| source_loader.load(&node.canonical_id));
-
-        let content = match content {
-            Some(c) => c,
-            None => {
-                // File not found — signal Failed, not Ready with empty
-                // content. Route through `terminalize_failure` so the
-                // DAG node's parked admission permit releases.
-                let stranded = Self::terminalize_failure(
-                    &dag,
-                    &canonical,
-                    generation,
-                    &TaskKind::Load,
-                    SchedulerError::FileNotFound {
-                        file_id: node.canonical_id.clone(),
-                    },
-                );
-                Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return None;
-            }
-        };
-
-        let snapshot = match executor.execute_source(
-            &node.canonical_id,
-            node.file_language.clone(),
-            content,
-            generation,
-        ) {
-            Ok(snap) => Arc::new(snap),
-            Err(e) => {
-                // Preserve the executor's typed failure discriminant:
-                // a known-but-unsupported framework language surfaces
-                // as the typed `UnsupportedLanguage` error, everything
-                // else as `StageFailed`.
-                let error = match e.kind {
-                    crate::executor::StageErrorKind::UnsupportedLanguage { adapter_id } => {
-                        SchedulerError::UnsupportedLanguage {
-                            file_id: node.canonical_id.clone(),
-                            adapter_id,
-                        }
-                    }
-                    crate::executor::StageErrorKind::StackUnavailable { needed } => {
-                        SchedulerError::StackUnavailable {
-                            file_id: node.canonical_id.clone(),
-                            needed,
-                        }
-                    }
-                    crate::executor::StageErrorKind::Generic => SchedulerError::StageFailed {
-                        file_id: node.canonical_id.clone(),
-                        stage: "Source".to_string(),
-                        message: e.message,
-                    },
-                };
-                let stranded =
-                    Self::terminalize_failure(&dag, &canonical, generation, &TaskKind::Load, error);
-                Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return None;
-            }
-        };
-
-        // Commit the snapshot and publish the resulting `Present`
-        // source version under ONE publication hold. The
-        // generation-coherence check moves inside the hold too: a
-        // concurrent `invalidate` publishes its `Absent` version under
-        // the same lock, so the two can no longer interleave into a
-        // root history that ends `Present` at a superseded generation.
-        //
-        // The `pending_source` clear, the DAG signal and the inbox send
-        // stay OUTSIDE the hold — the publication lock is inner to the
-        // DAG lock and must never be held across it.
-        let committed = source_root.publish_transition(|publication| {
-            if node.generation() != generation {
-                return false;
-            }
-            node.source.store(Arc::new(Some(Arc::clone(&snapshot))));
-            publication.present(
-                &canonical,
-                node.incarnation_id(),
-                generation,
-                snapshot.whole_hash,
-            );
-            true
-        });
-        if committed {
-            let pending = node.pending_source.load();
-            if let Some((gen, _)) = pending.as_ref() {
-                if *gen == generation {
-                    node.pending_source.store(Arc::new(None));
-                }
-            }
-
-            Some(Submission::StageComplete {
-                file_id: node.canonical_id.clone(),
-                generation,
-                task_kind: TaskKind::Load,
-                incarnation: node.incarnation_id(),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Execute the Analysis stage via the executor.
-    /// Returns the terminal `StageComplete` for the caller to deliver.
-    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
-    fn execute_analysis_stage(
-        node: &FileNode,
-        generation: u64,
-        executor: &dyn StageExecutor,
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<DagMutex>,
-    ) -> Option<Submission> {
-        use crate::job::SchedulerError;
-
-        let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
-
-        // Source not ready — will be retried after Source completes.
-        let source = node.current_source()?;
-
-        let snapshot = match executor.execute_analysis(&node.canonical_id, &source, generation) {
-            Ok(snap) => Arc::new(snap),
-            Err(e) => {
-                let stranded = Self::terminalize_failure(
-                    &dag,
-                    &canonical,
-                    generation,
-                    &TaskKind::Analysis,
-                    SchedulerError::StageFailed {
-                        file_id: node.canonical_id.clone(),
-                        stage: "Analysis".to_string(),
-                        message: e.message,
-                    },
-                );
-                Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return None;
-            }
-        };
-
-        if node.generation() == generation {
-            node.analysis.store(Arc::new(Some(Arc::clone(&snapshot))));
-
-            let result = RequestResult::Analysis(snapshot);
-            dag.lock()
-                .signal_stage_complete(&canonical, generation, &TaskKind::Analysis, &result);
-
-            Some(Submission::StageComplete {
-                file_id: node.canonical_id.clone(),
-                generation,
-                task_kind: TaskKind::Analysis,
-                incarnation: node.incarnation_id(),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Return `true` when the per-profile artifact slot already holds
-    /// a snapshot at `generation`. The DashMap `Ref` is taken, read,
-    /// and dropped within this helper's body so no shard-read lock
-    /// escapes to the caller. Callers MUST use this helper rather
-    /// than holding a `node.artifacts.get(...)` `Ref` across a
-    /// subsequent `dag.lock()` acquisition: the external
-    /// `commit_artifact` path holds the DAG lock and then writes
-    /// into the same DashMap shard, so a shard-read held across
-    /// `dag.lock()` would invert that ordering and deadlock.
-    pub(crate) fn artifact_already_committed_at(
-        node: &FileNode,
-        profile_hash: u64,
-        generation: u64,
-    ) -> bool {
-        node.artifacts
-            .get(&profile_hash)
-            .map(|existing| existing.generation == generation)
-            .unwrap_or(false)
-    }
-
-    /// Execute the Artifact stage via the executor.
-    ///
-    /// The typed dependency-failure short-circuit is the
-    /// responsibility of [`Self::execute_stage_on_worker`] —
-    /// `execute_artifact_stage` ONLY sees the Artifact arm after the
-    /// pre-dispatch chokepoint has consumed any `failed_blocker_deps`
-    /// marker. Adding a per-arm `failed_blocker_deps` check back here
-    /// would resurrect the divergent silent-success class the
-    /// single-chokepoint short-circuit was introduced to close.
-    ///
-    /// Returns the terminal `StageComplete` for the caller to deliver.
-    #[must_use = "the terminal StageComplete must be delivered to the inbox"]
-    fn execute_artifact_stage(
-        node: &FileNode,
-        generation: u64,
-        profile_hash: u64,
-        executor: &dyn StageExecutor,
-        inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<DagMutex>,
-    ) -> Option<Submission> {
-        use crate::job::SchedulerError;
-
-        let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
-
-        //
-        // Lock-ordering: the artifacts DashMap shard read lock MUST
-        // be released before `dag.lock()` is acquired. The external
-        // `commit_artifact` path holds the DAG lock and then writes
-        // into the same DashMap shard; holding a `Ref` across the
-        // DAG lock acquisition here would invert that ordering and
-        // deadlock. The bool helper [`Self::artifact_already_committed_at`]
-        // takes the Ref, reads, and drops it before returning, so the
-        // caller never holds a shard-read lock across `dag.lock()`.
-        if Self::artifact_already_committed_at(node, profile_hash, generation) {
-            let artifact_id = WorkNodeIdentity::Artifact {
-                canonical: Arc::clone(&canonical),
-                generation,
-                profile_hash: profile_hash_to_bytes(profile_hash),
-                content_hash: [0u8; 16],
-            };
-            // Stranded-waiter contract: Artifact identities are
-            // graph leaves (no FileStage or Artifact lists an
-            // Artifact `DepKey` as a prerequisite), so the
-            // pre-executor race-skip cancel here cannot strand
-            // any waiter.
-            let stranded = dag.lock().cancel(&artifact_id);
-            verter_debug_assert!(
-                stranded.is_empty(),
-                "race-safe pre-executor skip must not strand DAG waiters: \
-                 Artifact identities are graph leaves"
-            );
-            return None;
-        }
-
-        let source = node.current_source()?;
-        let analysis = node.current_analysis()?;
-
-        let snapshot = match executor.execute_artifact(
-            &node.canonical_id,
-            &source,
-            &analysis,
-            profile_hash,
-            generation,
-        ) {
-            Ok(snap) => Arc::new(snap),
-            Err(e) => {
-                // Signal failure only for this specific profile, not
-                // all artifacts. Route through `terminalize_failure`
-                // so the DAG node's parked admission permit releases
-                // — the per-stage variant inside the helper preserves
-                // other-profile waiters at the same generation.
-                // Artifact identities are graph leaves so the
-                // returned stranded list is always empty; the wake
-                // helper is a no-op there.
-                let stranded = Self::terminalize_failure(
-                    &dag,
-                    &canonical,
-                    generation,
-                    &TaskKind::Artifact { profile_hash },
-                    SchedulerError::StageFailed {
-                        file_id: node.canonical_id.clone(),
-                        stage: "Artifact".to_string(),
-                        message: e.message,
-                    },
-                );
-                Self::requeue_terminalize_stranded(inbox_sender, &stranded);
-                return None;
-            }
-        };
-
-        if node.generation() == generation {
-            // Insert-if-absent: an external `commit_artifact` race
-            // with this worker is closed by re-checking under the
-            // DAG lock. The lock is the synchronization point with
-            // `commit_artifact`, which performs its insert + signal
-            // + terminalize under the same lock. If an external
-            // snapshot landed between this worker's dispatch and
-            // here, drop the worker's result so the externally-
-            // committed snapshot stays authoritative. `commit_artifact`
-            // already signalled its waiters and terminalized the DAG
-            // identity, so no further work is needed on the worker
-            // side.
-            let mut guard = dag.lock();
-            if let Some(existing) = node.artifacts.get(&profile_hash) {
-                if existing.generation == generation {
-                    drop(guard);
-                    return None;
-                }
-            }
-            node.artifacts.insert(profile_hash, Arc::clone(&snapshot));
-            let result = RequestResult::Artifact(snapshot);
-            guard.signal_stage_complete(
-                &canonical,
-                generation,
-                &TaskKind::Artifact { profile_hash },
-                &result,
-            );
-            drop(guard);
-
-            // Notify the driver loop that the Artifact stage is
-            // terminal so handle_stage_complete can release the
-            // DAG identity (and its capacity permit) via
-            // dag.complete(&artifact_id).
-            Some(Submission::StageComplete {
-                file_id: node.canonical_id.clone(),
-                generation,
-                task_kind: TaskKind::Artifact { profile_hash },
-                incarnation: node.incarnation_id(),
-            })
-        } else {
-            None
-        }
-    }
-
-    // ── Test/WASM Driver Control ──
 
     /// Whether the native driver thread owns this scheduler's pump.
     ///
@@ -7178,317 +2177,24 @@ impl Scheduler {
         // stage still gets the same active-path filtering.
         self.wait_or_drive_inline(handle)
     }
-
-    /// Cooperative pump path for CPU / I/O worker threads with a
-    /// live driver. Each iteration runs the pump under the
-    /// active-path filter so the DAG never returns the work the
-    /// caller is parked on, then waits on the handle with a short
-    /// timeout before re-pumping. The condvar wake-up bounds the
-    /// worst-case latency between the driver's dispatch and the
-    /// worker observing its handle resolved.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn wait_or_drive_cooperative<T: Clone>(
-        self: &Arc<Self>,
-        handle: &crate::job::CompletionHandle<T>,
-        caller_kind: crate::caller_kind::CallerKind,
-    ) -> crate::job::CompletionState<T> {
-        loop {
-            // Re-run terminal-or-same-path check on every
-            // iteration: handles submitted with the request-level
-            // `CompletionTarget::Request` shape are re-stamped by
-            // admission to `CompletionTarget::Work(..)` AFTER
-            // `submit_request` returns, so the loop-entry check
-            // upstream may have seen the pre-admission target.
-            // Re-reading on each iteration picks up the late
-            // stamp.
-            if let Some(state) = check_terminal_or_same_path(handle) {
-                return state;
-            }
-            // The scheduler is shutting down — the driver loop
-            // has already terminated and no further work will
-            // dispatch. Bail out with a Shutdown state so the
-            // caller does not park indefinitely on a handle
-            // whose work will never reach a worker.
-            if self.shutdown.load(Ordering::Acquire) {
-                return crate::job::CompletionState::Shutdown;
-            }
-            let active_path = crate::caller_kind::snapshot_active_path();
-            let stats =
-                self.pump_ready_with_path(PumpReason::WaitOrDrive, caller_kind, &active_path);
-            // Re-check terminal+same-path after the pump iteration:
-            // the pump may have dispatched the dep (Ready), and
-            // admission may have stamped the concrete Work target
-            // mid-flight (turning a previously-Unknown Request
-            // into an active-path same-path frame).
-            if let Some(state) = check_terminal_or_same_path(handle) {
-                return state;
-            }
-            // Park on the handle with a short timeout so we
-            // re-pump promptly if the driver makes progress.
-            // Tightening the timeout when pump_ready made no
-            // progress avoids spinning when the driver is the
-            // only thread with work to do.
-            let timeout = if stats.made_progress() {
-                std::time::Duration::from_millis(1)
-            } else {
-                std::time::Duration::from_millis(10)
-            };
-            if let Some(state) = handle.wait_timeout(timeout) {
-                return state;
-            }
-        }
-    }
-
-    /// Inline drive loop — used when the scheduler has no driver
-    /// thread (WASM, sync test mode) or the caller explicitly
-    /// adopts the `Inline` role. The legacy bound-idle behaviour
-    /// (controlled failure when the scheduler stably runs dry with
-    /// the handle still pending) is preserved.
-    fn wait_or_drive_inline<T: Clone>(
-        self: &Arc<Self>,
-        handle: &crate::job::CompletionHandle<T>,
-    ) -> crate::job::CompletionState<T> {
-        let _scope =
-            crate::caller_kind::CallerKindGuard::install(crate::caller_kind::CallerKind::Inline);
-        let mut idle_iterations = 0u32;
-        loop {
-            if let Some(state) = handle.try_get() {
-                return state;
-            }
-            self.drain_inbox();
-            let job = {
-                let active_path = crate::caller_kind::snapshot_active_path();
-                let mut dag = self.dag.lock();
-                dag.next_ready_for_pump(crate::caller_kind::CallerKind::Inline, &active_path)
-            };
-            match job {
-                Some(job) => {
-                    self.execute_stage_inline(job);
-                    idle_iterations = 0;
-                }
-                None => {
-                    if self.inbox.receiver.is_empty() {
-                        idle_iterations += 1;
-                        if idle_iterations > 2 {
-                            return crate::job::CompletionState::Failed(
-                                crate::job::SchedulerError::StageFailed {
-                                    file_id: String::new(),
-                                    stage: "wait_or_drive".into(),
-                                    message: "scheduler stably empty with handle pending".into(),
-                                },
-                            );
-                        }
-                    } else {
-                        idle_iterations = 0;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Extract a canonical-id string from a `WorkNodeIdentity` so a
-/// cooperative-pump self-await report can name the file the caller
-/// was waiting on. `CacheNode` variants return an empty string —
-/// they have no file canonical.
-fn identity_canonical(identity: &crate::dag::WorkNodeIdentity) -> String {
-    match identity {
-        crate::dag::WorkNodeIdentity::FileStage { canonical, .. } => canonical.to_string(),
-        crate::dag::WorkNodeIdentity::Artifact { canonical, .. } => canonical.to_string(),
-        crate::dag::WorkNodeIdentity::CacheNode { .. } => String::new(),
-    }
-}
-
-/// RAII guard owned by the cooperative pump's inline-execute
-/// branch. Selects between INSTALLING a winner-provided request
-/// context and CLEARING the outer worker's TLS so the inner stage
-/// runs under the correct attribution.
-///
-/// Both variants restore the prior TLS slot on drop. Two arms are
-/// required because the install path returns a trait-object
-/// `Box<dyn TlsUninstall>` (the concrete guard lives in the
-/// session crate and isn't visible to the scheduler), while the
-/// clear path is a concrete `OpaqueContextGuard` that owns the
-/// prior value directly.
-///
-/// Constructed only on the native inline-execution path.
-#[cfg(not(target_arch = "wasm32"))]
-enum InlineTlsGuard {
-    /// Winner has its own request context; install it for the
-    /// inner stage. Drop restores the prior TLS via the trait
-    /// object's underlying guard.
-    Install(#[allow(dead_code)] Box<dyn crate::request_context::TlsUninstall + Send>),
-    /// Winner has no context; clear ALL install_tls slots (scheduler
-    /// opaque, session request context + accumulator, audit observer)
-    /// so the inner stage observes `None` everywhere the outer
-    /// stage's `install_tls` would have planted state. Drop restores
-    /// every prior outer TLS slot via `AllSlotsClearGuard::Drop`.
-    ClearAll(#[allow(dead_code)] crate::request_context::AllSlotsClearGuard),
-}
-
-/// Re-reads the handle's current state and current target slot,
-/// then either returns a real terminal `CompletionState` or
-/// synthesizes a same-path `Failed(StageFailed)` when the handle's
-/// target is on the calling thread's active path.
-///
-/// Centralizes three invariants:
-/// - try_get is consulted FIRST so a resolved handle returns its
-///   real terminal state instead of being masked by the synthetic
-///   same-path Failed.
-/// - The active-path probe matches the full prerequisite-stage
-///   chain:
-///     * Source request → matches an active Source frame on the
-///       same canonical.
-///     * Analysis request → matches an active Source OR Analysis
-///       frame on the same canonical.
-///     * Artifact request → matches an active Source OR Analysis
-///       frame on the same canonical, OR an active Artifact frame
-///       on the same canonical AND the same `profile_hash`. Two
-///       Artifact frames for the same canonical with different
-///       profiles are independent work units (they share only the
-///       upstream Analysis gate, not the Artifact slot itself) and
-///       must NOT collapse into a same-path match.
-/// - try_get is re-checked IMMEDIATELY before synthesizing the
-///   Failed so a handle that resolves during the active-path
-///   probe still surfaces its real terminal state.
-///
-/// Re-readable across the cooperative loop: each call observes a
-/// fresh `handle.try_get()` and `handle.target()`. The target slot
-/// is mutated by `handle_new_request` admission (Request → Work),
-/// so the cooperative pump re-runs this helper on every iteration
-/// to pick up the late-stamped Work identity that the loop-entry
-/// read missed.
-fn check_terminal_or_same_path<T: Clone>(
-    handle: &crate::job::CompletionHandle<T>,
-) -> Option<crate::job::CompletionState<T>> {
-    use crate::job::{CompletionState, CompletionTarget, SchedulerError};
-    if let Some(state) = handle.try_get() {
-        return Some(state);
-    }
-    let target = handle.target()?;
-    let on_active_path = match &target {
-        CompletionTarget::Work(id) => crate::caller_kind::active_path_contains_work(id),
-        CompletionTarget::Request { canonical, target } => {
-            crate::caller_kind::active_path_contains_request(canonical.as_ref(), target.clone())
-        }
-    };
-    if !on_active_path {
-        return None;
-    }
-    // Test-only hook: fires between the active-path probe and the
-    // inner try_get re-check. The hook lets tests deterministically
-    // exercise the inner re-check (which otherwise sits in a tiny
-    // race window between the active-path computation and the
-    // synthetic-Failed synthesis) by resolving the handle from
-    // outside the helper. Production builds compile without the
-    // hook.
-    #[cfg(test)]
-    check_terminal_or_same_path_test_hook();
-    // Same-path match: re-check try_get RIGHT before synthesizing
-    // Failed so a handle that resolved during the active-path
-    // probe surfaces its real terminal state. Without this
-    // re-check, a Ready/Failed/Superseded/Shutdown that landed
-    // between the entry try_get and here would be masked by the
-    // synthetic `Failed(StageFailed { stage: "wait_or_drive" })`.
-    if let Some(state) = handle.try_get() {
-        return Some(state);
-    }
-    let file_id = match &target {
-        CompletionTarget::Work(id) => identity_canonical(id),
-        CompletionTarget::Request { canonical, .. } => canonical.to_string(),
-    };
-    Some(CompletionState::Failed(SchedulerError::StageFailed {
-        file_id,
-        stage: "wait_or_drive".into(),
-        message: "same-path self-await detected".into(),
-    }))
-}
-
-// Test-only hook installer. Lets a test plant a closure that
-// fires between the active-path probe and the inner try_get
-// re-check inside `check_terminal_or_same_path`, so the test
-// can resolve the handle from outside the helper at exactly the
-// right point and assert that the inner re-check observes the
-// resolved state instead of synthesizing a Failed.
-//
-// The hook is thread-local (no global mutable state across
-// tests) and clears itself on drop. Production builds compile
-// without the hook field at all.
-#[cfg(test)]
-thread_local! {
-    static CHECK_TERMINAL_HOOK: std::cell::RefCell<
-        Option<Box<dyn FnMut() + Send>>,
-    > = std::cell::RefCell::new(None);
-}
-
-#[cfg(test)]
-fn check_terminal_or_same_path_test_hook() {
-    CHECK_TERMINAL_HOOK.with(|cell| {
-        if let Some(hook) = cell.borrow_mut().as_mut() {
-            hook();
-        }
-    });
-}
-
-/// RAII guard that installs `hook` as the test-only intercept
-/// between the active-path probe and the inner try_get re-check.
-/// Restores the previous (typically `None`) on drop.
-#[cfg(test)]
-pub(crate) struct CheckTerminalHookGuard {
-    prev: Option<Box<dyn FnMut() + Send>>,
-}
-
-#[cfg(test)]
-impl CheckTerminalHookGuard {
-    pub(crate) fn install(hook: Box<dyn FnMut() + Send>) -> Self {
-        let prev = CHECK_TERMINAL_HOOK.with(|cell| cell.replace(Some(hook)));
-        Self { prev }
-    }
-}
-
-#[cfg(test)]
-impl Drop for CheckTerminalHookGuard {
-    fn drop(&mut self) {
-        let prev = self.prev.take();
-        CHECK_TERMINAL_HOOK.with(|cell| {
-            cell.replace(prev);
-        });
-    }
-}
-
-impl Drop for Scheduler {
-    fn drop(&mut self) {
-        // Set shutdown flag
-        self.shutdown.store(true, Ordering::Release);
-        // Dedicated teardown signal: the inbox wake below can be consumed
-        // by a cooperative pump before the driver parks on it.
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = self.driver_teardown.0.try_send(());
-        let _ = self.inbox.sender.try_send(Submission::Wake);
-        self.shutdown_all_scoped_cache_flights();
-
-        // Close inbox (causes driver recv to return Disconnected)
-        // Drop the sender to close the channel
-        // Note: The inbox sender is shared, but dropping the Scheduler
-        // signals shutdown via the flag
-
-        // Join driver thread
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(handle) = self.driver_handle.lock().take() {
-                if should_join_driver_thread(handle.thread().id(), std::thread::current().id()) {
-                    let _ = handle.join();
-                }
-            }
-        }
-
-        // Signal shutdown to all pending waiter groups.
-        self.dag.lock().signal_all_shutdown();
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    fn fixture_incarnation(scheduler: &Scheduler, id: &str) -> u64 {
+        scheduler
+            .nodes
+            .get(id)
+            .map_or(0, |node| node.incarnation_id())
+    }
+
+    fn source_witness(scheduler: &Scheduler, id: &str) -> crate::node::SourceWitness {
+        scheduler
+            .try_get_witnessed_source(id)
+            .expect("fixture invariant: current source is committed")
+            .witness
+    }
+
     use super::*;
     use crate::source_loader::MemorySourceLoader;
 
@@ -7499,7 +2205,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    impl crate::request_context::RequestContextLike for ScopedTestContext {
+    impl verter_execution::request_context::RequestContextLike for ScopedTestContext {
         fn request_id(&self) -> u64 {
             self.id
         }
@@ -7514,11 +2220,13 @@ mod tests {
 
         fn on_dedup_joiner(&self, _: Arc<str>, _: u64, _: bool) {}
 
-        fn record_cache_event(&self, _: crate::request_context::CacheEventKind) {}
+        fn record_cache_event(&self, _: verter_execution::request_context::CacheEventKind) {}
 
-        fn install_tls(self: Arc<Self>) -> Box<dyn crate::request_context::TlsUninstall + Send> {
+        fn install_tls(
+            self: Arc<Self>,
+        ) -> Box<dyn verter_execution::request_context::TlsUninstall + Send> {
             struct Noop;
-            impl crate::request_context::TlsUninstall for Noop {
+            impl verter_execution::request_context::TlsUninstall for Noop {
                 fn uninstall(self: Box<Self>) {}
             }
             Box::new(Noop)
@@ -7529,7 +2237,7 @@ mod tests {
     fn scoped_test_context(
         id: u64,
     ) -> (
-        crate::request_context::OpaqueRequestContext,
+        verter_execution::request_context::OpaqueRequestContext,
         CancellationToken,
     ) {
         let cancellation = CancellationToken::new();
@@ -7538,8 +2246,8 @@ mod tests {
             cancellation: cancellation.clone(),
         });
         (
-            crate::request_context::OpaqueRequestContext(
-                context as Arc<dyn crate::request_context::RequestContextLike>,
+            verter_execution::request_context::OpaqueRequestContext(
+                context as Arc<dyn verter_execution::request_context::RequestContextLike>,
             ),
             cancellation,
         )
@@ -7547,7 +2255,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn scoped_test_request(
-        request_context: crate::request_context::OpaqueRequestContext,
+        request_context: verter_execution::request_context::OpaqueRequestContext,
     ) -> ScopedCacheNodeRequest {
         ScopedCacheNodeRequest {
             cache_id: crate::cache_id::SchedulerCacheId(0x51FC),
@@ -7774,10 +2482,10 @@ mod tests {
         let (joiner_context, _joiner_token) = scoped_test_context(11);
         let leader_request = scoped_test_request(leader_context);
         let joiner_request = scoped_test_request(joiner_context);
+        let identity = leader_request.identity();
         let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let submissions_before = scheduler.counters.submit_count.load(Ordering::Relaxed);
         let (leader_entered_tx, leader_entered_rx) = std::sync::mpsc::channel();
-        let (joiner_entered_tx, joiner_entered_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         let coordinator = rayon::ThreadPoolBuilder::new()
@@ -7788,22 +2496,29 @@ mod tests {
         let scheduler_for_thread = Arc::clone(&scheduler);
         let scheduler_for_joiner = Arc::clone(&scheduler);
         let builds_for_thread = Arc::clone(&builds);
-        std::thread::spawn(move || {
+        let scheduler_for_publication = Arc::clone(&scheduler);
+        let coordinator_thread = std::thread::spawn(move || {
             let outcomes = coordinator.install(|| {
                 rayon::join(
                     || {
                         scheduler_for_thread.execute_scoped_cache_node(leader_request, move |_| {
                             builds_for_thread.fetch_add(1, Ordering::SeqCst);
-                            // The producer body only runs once its owner CLAIMED the
-                            // flight's builder slot, so announcing here (before the
-                            // joiner even submits) closes the claim-order race: a
-                            // pool-helper running the joiner branch early can no
-                            // longer win `try_claim_builder` ahead of the leader and
-                            // execute what the test requires to stay unexecuted.
+                            // Claim the builder before the coordinator re-enters
+                            // the joiner, then hold publication until it attaches.
                             leader_entered_tx.send(()).unwrap();
-                            joiner_entered_rx
-                                .recv_timeout(std::time::Duration::from_secs(5))
-                                .expect("the coordinator must re-enter the queued joiner");
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(5);
+                            while scheduler_for_publication.test_scoped_cache_owner_count(&identity)
+                                != 2
+                                && std::time::Instant::now() < deadline
+                            {
+                                std::thread::yield_now();
+                            }
+                            assert_eq!(
+                                scheduler_for_publication.test_scoped_cache_owner_count(&identity),
+                                2,
+                                "the re-entrant joiner must attach before publication"
+                            );
                             41_u64
                         })
                     },
@@ -7811,7 +2526,6 @@ mod tests {
                         leader_entered_rx
                             .recv_timeout(std::time::Duration::from_secs(5))
                             .expect("the leader must claim the builder before the joiner submits");
-                        joiner_entered_tx.send(()).unwrap();
                         scheduler_for_joiner.execute_scoped_cache_node(joiner_request, |_| -> u64 {
                             panic!("deduplicated joiner must not execute its closure")
                         })
@@ -7821,11 +2535,21 @@ mod tests {
             let _ = done_tx.send(outcomes);
         });
 
-        let (leader, joiner) = done_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("worker-side publication must release the re-entrant joiner");
-        assert_eq!(*leader.expect("leader result"), 41);
-        assert_eq!(*joiner.expect("joiner result"), 41);
+        let outcomes = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        if outcomes.is_err() {
+            scheduler.reset();
+        }
+        coordinator_thread.join().expect("coordinator must finish");
+        let (leader, joiner) =
+            outcomes.expect("worker-side publication must release the re-entrant joiner");
+        let leader = leader.expect("leader result");
+        let joiner = joiner.expect("joiner result");
+        assert_eq!(*leader, 41);
+        assert_eq!(*joiner, 41);
+        assert!(
+            Arc::ptr_eq(&leader, &joiner),
+            "owners share one publication"
+        );
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert_eq!(
             scheduler.counters.submit_count.load(Ordering::Relaxed) - submissions_before,
@@ -7986,15 +2710,17 @@ mod tests {
             file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+            incarnation: u64,
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             let inbox = self.inbox.get().expect("inbox installed before driving");
             while inbox.try_send(Submission::Wake).is_ok() {}
             assert!(inbox.is_full());
-            crate::executor::DefaultExecutor.execute_source(
+            crate::execution::executor::DefaultExecutor.execute_source(
                 canonical_id,
                 file_language,
                 content,
                 generation,
+                incarnation,
             )
         }
     }
@@ -8190,6 +2916,7 @@ mod tests {
 
         let source_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: 1,
             stage: FileStageKey::Source,
         };
@@ -8240,7 +2967,7 @@ mod tests {
             view_epoch: u64,
             snapshot_pin_id: crate::dag::PinId,
             _cancellation: &CancellationToken,
-        ) -> Result<(), crate::executor::StageError> {
+        ) -> Result<(), crate::execution::executor::StageError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             *self.last.lock() = Some((cache_id.0, key_hash, view_epoch, snapshot_pin_id.0));
             Ok(())
@@ -8411,10 +3138,10 @@ mod tests {
             _view_epoch: u64,
             _snapshot_pin_id: crate::dag::PinId,
             _cancellation: &CancellationToken,
-        ) -> Result<(), crate::executor::StageError> {
+        ) -> Result<(), crate::execution::executor::StageError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic cache-node materialisation failure".to_string(),
             })
         }
@@ -8438,7 +3165,7 @@ mod tests {
             _view_epoch: u64,
             _snapshot_pin_id: crate::dag::PinId,
             _cancellation: &CancellationToken,
-        ) -> Result<(), crate::executor::StageError> {
+        ) -> Result<(), crate::execution::executor::StageError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             panic!("synthetic cache-node materialisation panic");
         }
@@ -8635,6 +3362,7 @@ mod tests {
 
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: 1,
             profile_hash: profile_hash_to_bytes(42),
             content_hash: [0u8; 16],
@@ -8648,12 +3376,9 @@ mod tests {
         // BEFORE the internal worker reaches execute_artifact_stage.
         // The committed snapshot carries distinguishing data we will
         // assert is not overwritten by the internal worker.
-        let committed = ArtifactSnapshot {
-            generation: 1,
-            profile_hash: 42,
-            data: Arc::new(crate::node::EmptyData),
-        };
-        sched.commit_artifact("/a.vue", 42, committed);
+        let witness = source_witness(&sched, "/a.vue");
+        assert_eq!(witness.generation(), 1);
+        assert!(sched.commit_artifact(&witness, 42, Arc::new(crate::node::EmptyData)));
 
         // DISCRIMINATOR 1: the Artifact DAG identity is now terminal
         // — removed from `by_identity` and `nodes`. Without
@@ -8711,6 +3436,7 @@ mod tests {
 
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: 1,
             profile_hash: profile_hash_to_bytes(42),
             content_hash: [0u8; 16],
@@ -9055,10 +3781,10 @@ mod tests {
             &self,
             canonical_id: &str,
             _source: &SourceSnapshot,
-        ) -> crate::executor::ExtractedDeps {
+        ) -> crate::execution::executor::ExtractedDeps {
             let blocker_ids = self.blockers.get(canonical_id).cloned().unwrap_or_default();
             let forward_deps = blocker_ids.clone();
-            crate::executor::ExtractedDeps {
+            crate::execution::executor::ExtractedDeps {
                 forward_deps,
                 blocker_ids,
             }
@@ -9201,9 +3927,10 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+            _incarnation: u64,
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic source failure".to_string(),
             })
         }
@@ -9220,9 +3947,9 @@ mod tests {
             _canonical_id: &str,
             _source: &SourceSnapshot,
             _generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic analysis failure".to_string(),
             })
         }
@@ -9242,9 +3969,9 @@ mod tests {
             _analysis: &AnalysisSnapshot,
             _profile_hash: u64,
             _generation: u64,
-        ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
-            Err(crate::executor::StageError {
-                kind: crate::executor::StageErrorKind::Generic,
+        ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
+            Err(crate::execution::executor::StageError {
+                kind: crate::execution::executor::StageErrorKind::Generic,
                 message: "synthetic artifact failure".to_string(),
             })
         }
@@ -9262,7 +3989,8 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+            _incarnation: u64,
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             panic!("synthetic source panic");
         }
     }
@@ -9554,7 +4282,7 @@ mod tests {
     // ── P1 lifecycle tests ──
 
     #[test]
-    fn remove_and_readd_uses_higher_generation() {
+    fn remove_and_readd_uses_a_higher_version() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("v1"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
@@ -9569,8 +4297,8 @@ mod tests {
             request_context: None,
         });
         sched.drive_all();
-        let gen1 = match h.try_get().unwrap() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let v1 = match h.try_get().unwrap() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
@@ -9578,7 +4306,8 @@ mod tests {
         sched.remove("/a.vue");
         assert!(!sched.has_node("/a.vue"));
 
-        // Re-add v2 → must get a generation > gen1
+        // Re-add v2: a fresh node object whose versions order after every
+        // version of the removed one, without any retained removal history.
         loader.insert("/a.vue".to_string(), Arc::from("v2"));
         let h2 = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
@@ -9589,15 +4318,16 @@ mod tests {
             request_context: None,
         });
         sched.drive_all();
-        let gen2 = match h2.try_get().unwrap() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let v2 = match h2.try_get().unwrap() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
         assert!(
-            gen2 > gen1,
-            "re-added file must have generation ({gen2}) > removed generation ({gen1})"
+            v2 > v1,
+            "re-added file must have version ({v2:?}) > removed version ({v1:?})"
         );
+        assert_ne!(v2.incarnation, v1.incarnation);
     }
 
     #[test]
@@ -9714,12 +4444,12 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_rejects_pre_remove_source_submission() {
+    fn incarnation_rejects_pre_remove_source_submission() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("content"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
-        // Submit a request (stamped with current epoch=0)
+        // Bind the request to the current incarnation.
         let h1 = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Analysis,
@@ -9729,11 +4459,10 @@ mod tests {
             request_context: None,
         });
 
-        // Remove BEFORE the driver processes h1 (bumps epoch to 1)
+        // Retire that incarnation before the driver processes h1.
         sched.remove("/a.vue");
 
-        // Now drive — h1 was stamped at epoch 0, tombstone is at epoch 1
-        // so it should be rejected even though it carries source.
+        // The old incarnation is rejected even though it carries source.
         sched.drive_all();
 
         match h1.try_get().unwrap() {
@@ -9749,45 +4478,49 @@ mod tests {
     }
 
     #[test]
-    fn auto_ingress_skips_tombstoned_deps() {
-        let loader = Arc::new(MemorySourceLoader::new());
-        loader.insert("/a.vue".to_string(), Arc::from("a"));
-        loader.insert("/deleted-dep.ts".to_string(), Arc::from("dep"));
-
-        // Executor that says /a.vue depends on /deleted-dep.ts
-        let mut blockers_map = std::collections::HashMap::new();
-        blockers_map.insert("/a.vue".to_string(), vec!["/deleted-dep.ts".to_string()]);
-        let executor = Arc::new(BlockingExecutor {
-            blockers: blockers_map,
-        });
-        let sched =
-            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
-
-        // Tombstone the dep (simulating a prior deletion)
-        sched.remove("/deleted-dep.ts");
-
-        // Now process /a.vue — auto-ingress should skip the tombstoned dep
-        let h = sched.submit_request(Request {
-            file_id: "/a.vue".to_string(),
-            target: TargetStage::Artifact { profile_hash: 1 },
-            priority: Priority::Interactive,
-            source: Some(Arc::from("a")),
-            file_language: None,
-            request_context: None,
-        });
-        sched.drive_all();
-
-        // The handle should resolve (not hang on a blocker for a deleted dep)
-        assert!(
-            h.try_get().is_some(),
-            "should not hang on blocker for tombstoned dep"
-        );
-
-        // Negative: the deleted dep should NOT be recreated
-        assert!(
-            !sched.has_node("/deleted-dep.ts"),
-            "tombstoned dep must not be auto-ingested"
-        );
+    fn auto_ingress_uses_backing_availability_after_unknown_removal() {
+        for readable in [true, false] {
+            let loader = Arc::new(MemorySourceLoader::new());
+            loader.insert("/a.vue".into(), Arc::from("a"));
+            loader.insert("/deleted-dep.ts".into(), Arc::from("dep"));
+            let mut blockers_map = std::collections::HashMap::new();
+            blockers_map.insert("/a.vue".into(), vec!["/deleted-dep.ts".into()]);
+            let executor = Arc::new(BlockingExecutor {
+                blockers: blockers_map,
+            });
+            let sched = Scheduler::test_new_sync_with_executor(
+                SchedulerConfig::default(),
+                loader.clone(),
+                executor,
+            );
+            sched.remove("/deleted-dep.ts");
+            if !readable {
+                loader.remove("/deleted-dep.ts");
+            }
+            let h = sched.submit_request(Request {
+                file_id: "/a.vue".into(),
+                target: TargetStage::Artifact { profile_hash: 1 },
+                priority: Priority::Interactive,
+                source: Some(Arc::from("a")),
+                file_language: None,
+                request_context: None,
+            });
+            sched.drive_all();
+            if readable {
+                assert!(matches!(h.try_get(), Some(CompletionState::Ready(_))));
+                assert!(sched
+                    .nodes
+                    .get("/deleted-dep.ts")
+                    .unwrap()
+                    .current_analysis()
+                    .is_some());
+            } else {
+                assert!(
+                    matches!(h.try_get(), Some(CompletionState::Failed(_))),
+                    "absent backing must terminate dependants"
+                );
+            }
+        }
     }
 
     #[test]
@@ -9971,7 +4704,6 @@ mod tests {
 
         // All state cleared
         assert!(!sched.has_node("/a.vue"), "nodes must be cleared");
-        assert!(sched.tombstones.is_empty(), "tombstones must be cleared");
         assert!(
             sched.deferred_blocker_ids.is_empty(),
             "deferred blockers must be cleared"
@@ -10060,6 +4792,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&synthetic),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                 generation: 7,
                 since: Instant::now(),
             },
@@ -10098,6 +4831,7 @@ mod tests {
             sched.auto_ingested_recent.insert(
                 Arc::clone(&canonical),
                 AutoIngestedRecord {
+                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                     generation: 11,
                     since: Instant::now(),
                 },
@@ -10118,12 +4852,11 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn reset_seeds_generation_floors_for_cleared_nodes() {
+    fn reset_successor_versions_never_alias_the_cleared_node() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a"));
         let sched = Scheduler::test_new(SchedulerConfig::default(), loader);
 
-        // Build up to gen N
         let h = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Analysis,
@@ -10132,8 +4865,8 @@ mod tests {
             file_language: None,
             request_context: None,
         });
-        let pre_gen = match h.wait() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let pre = match h.wait() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
@@ -10141,7 +4874,8 @@ mod tests {
         sched.reset();
         sched.restart_driver();
 
-        // Re-add same file — must get generation > pre_gen
+        // The successor restarts its generation sequence; its committed
+        // versions are told apart by the node object that committed them.
         let h2 = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Analysis,
@@ -10150,14 +4884,17 @@ mod tests {
             file_language: None,
             request_context: None,
         });
-        let post_gen = match h2.wait() {
-            CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
+        let post = match h2.wait() {
+            CompletionState::Ready(RequestResult::Analysis(s)) => s.version(),
             other => panic!("expected Analysis, got {:?}", other),
         };
 
+        let current = sched.try_get_source("/a.vue").expect("re-added source");
+        assert_eq!(current.version(), post);
+        assert_eq!(post.generation, pre.generation);
         assert!(
-            post_gen > pre_gen,
-            "post-reset generation ({post_gen}) must be > pre-reset ({pre_gen})"
+            post.incarnation > pre.incarnation,
+            "post-reset version ({post:?}) must order after pre-reset ({pre:?})"
         );
     }
 
@@ -10257,15 +4994,9 @@ mod tests {
         };
 
         // Commit an artifact at the correct generation
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
+        let start_witness = source_witness(&sched, "/a.vue");
+        assert_eq!(start_witness.generation(), gen);
+        assert!(sched.commit_artifact(&start_witness, 42, Arc::new(crate::node::EmptyData)));
 
         // Should be readable
         assert!(
@@ -10273,16 +5004,19 @@ mod tests {
             "artifact committed at correct generation should be readable"
         );
 
-        // Commit at wrong generation should be dropped
-        sched.commit_artifact(
-            "/a.vue",
-            99,
-            crate::node::ArtifactSnapshot {
-                generation: gen + 100, // wrong generation
-                profile_hash: 99,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
+        // A compile that started before the next edit finishes after it:
+        // its start-of-compile witness is stale and must be dropped.
+        sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: Some(Arc::from("a v2")),
+            file_language: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        assert!(source_witness(&sched, "/a.vue").generation() > gen);
+        assert!(!sched.commit_artifact(&start_witness, 99, Arc::new(crate::node::EmptyData)));
 
         assert!(
             sched.try_get_artifact("/a.vue", 99).is_none(),
@@ -10378,7 +5112,7 @@ mod tests {
             request_context: None,
         });
         sched.drive_one(); // processes the Source job only
-        let gen = sched.try_get_source("/a.vue").unwrap().generation;
+        let witness = source_witness(&sched, "/a.vue");
 
         // Verify Analysis is NOT yet committed
         assert!(
@@ -10387,15 +5121,7 @@ mod tests {
         );
 
         // Attempt to commit artifact WITHOUT Analysis
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
+        assert!(!sched.commit_artifact(&witness, 42, Arc::new(crate::node::EmptyData)));
 
         // Should NOT be readable — Analysis not committed yet
         assert!(
@@ -10477,17 +5203,11 @@ mod tests {
             "precondition: Source not yet committed"
         );
 
-        let gen = sched.nodes.get("/a.vue").map(|n| n.generation()).unwrap();
-
-        // Attempt to commit artifact
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
+        // No source has been handed out, so no publication witness exists:
+        // a host cannot commit against a generation it never read.
+        assert!(
+            sched.try_get_witnessed_source("/a.vue").is_none(),
+            "no witness may be minted before Source commits"
         );
 
         // Must be rejected — Source not committed
@@ -10545,6 +5265,7 @@ mod tests {
         // /a.vue at the live generation prior to register.
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: gen,
             stage: FileStageKey::Analysis,
         };
@@ -10632,7 +5353,7 @@ mod tests {
         gates: dashmap::DashMap<String, AnalysisGate>,
     }
 
-    impl crate::executor::StageExecutor for GatedAnalysisExecutor {
+    impl crate::execution::executor::StageExecutor for GatedAnalysisExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -10641,7 +5362,7 @@ mod tests {
             canonical_id: &str,
             _source: &SourceSnapshot,
             generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
             if let Some(gate) = self.gates.get(canonical_id) {
                 // Signal that the worker has entered Analysis. The
                 // send is best-effort: if the test thread has already
@@ -10812,7 +5533,7 @@ mod tests {
         dep_id: String,
     }
 
-    impl crate::executor::StageExecutor for DepAnalysisFailExecutor {
+    impl crate::execution::executor::StageExecutor for DepAnalysisFailExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -10820,14 +5541,14 @@ mod tests {
             &self,
             canonical_id: &str,
             _source: &SourceSnapshot,
-        ) -> crate::executor::ExtractedDeps {
+        ) -> crate::execution::executor::ExtractedDeps {
             if canonical_id == self.owner_id {
-                crate::executor::ExtractedDeps {
+                crate::execution::executor::ExtractedDeps {
                     forward_deps: vec![self.dep_id.clone()],
                     blocker_ids: vec![self.dep_id.clone()],
                 }
             } else {
-                crate::executor::ExtractedDeps::default()
+                crate::execution::executor::ExtractedDeps::default()
             }
         }
 
@@ -10836,10 +5557,10 @@ mod tests {
             canonical_id: &str,
             _source: &SourceSnapshot,
             generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
             if canonical_id == self.dep_id {
-                Err(crate::executor::StageError {
-                    kind: crate::executor::StageErrorKind::Generic,
+                Err(crate::execution::executor::StageError {
+                    kind: crate::execution::executor::StageErrorKind::Generic,
                     message: "synthetic dep Analysis failure".to_string(),
                 })
             } else {
@@ -10928,7 +5649,7 @@ mod tests {
         >,
     }
 
-    impl crate::executor::StageExecutor for GatedPanickingSourceExecutor {
+    impl crate::execution::executor::StageExecutor for GatedPanickingSourceExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -10938,7 +5659,8 @@ mod tests {
             _file_language: FileLanguage,
             _content: Arc<str>,
             _generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+            _incarnation: u64,
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             if let Some(entry) = self.gates.get(canonical_id) {
                 let (entered_tx, release_rx) = entry.value();
                 let _ = entered_tx.send(());
@@ -11003,7 +5725,7 @@ mod tests {
         // live publication hold, WITHOUT the supersede sweep. This
         // isolates the permit-release responsibility on
         // `surface_stage_panic_as_failed`: there is no other code
-        // path (no `cancel_matching` from supersede) that could
+        // path (no node cancel from supersede) that could
         // release the permit on its behalf. A generation-mismatch
         // early return would leave the permit parked forever in
         // this configuration.
@@ -11069,7 +5791,7 @@ mod tests {
         worker_tag: &'static str,
     }
 
-    impl crate::executor::StageExecutor for GatedArtifactExecutor {
+    impl crate::execution::executor::StageExecutor for GatedArtifactExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -11080,7 +5802,7 @@ mod tests {
             _analysis: &AnalysisSnapshot,
             profile_hash: u64,
             generation: u64,
-        ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
+        ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
             if let Some(gate) = self.gates.get(canonical_id) {
                 let _ = gate.entered_tx.send(());
                 let _ = gate.release_rx.recv();
@@ -11146,21 +5868,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("Artifact worker must enter the gated executor");
 
-        // Look up the live generation for the file (Source + Analysis
-        // have already committed by the time the Artifact worker
-        // reached the gate).
-        let generation = sched.nodes.get("/a.vue").expect("node exists").generation();
+        // Capture the live source witness (Source + Analysis have
+        // already committed by the time the Artifact worker reached
+        // the gate).
+        let witness = source_witness(&sched, "/a.vue");
 
         // External commit lands while the worker is parked.
-        sched.commit_artifact(
-            "/a.vue",
-            17,
-            ArtifactSnapshot {
-                generation,
-                profile_hash: 17,
-                data: Arc::new(SentinelData { tag: EXTERNAL_TAG }),
-            },
-        );
+        assert!(sched.commit_artifact(&witness, 17, Arc::new(SentinelData { tag: EXTERNAL_TAG })));
 
         // Release the worker. Without the insert-if-absent re-check
         // it would overwrite the externally-committed snapshot with
@@ -11215,11 +5929,11 @@ mod tests {
     // Scheduler request context + worker TLS install
     // ──────────────────────────────────────────────────────────────────
 
-    use crate::request_context::{
-        CacheEventKind, OpaqueRequestContext, RequestContextLike, TlsUninstall,
-    };
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
     use std::sync::Mutex as StdMutex;
+    use verter_execution::request_context::{
+        CacheEventKind, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    };
 
     /// Test-only implementation of `RequestContextLike` that captures
     /// the observations each probe wants to assert on:
@@ -11250,7 +5964,7 @@ mod tests {
         }
     }
 
-    struct TestGuardBox(#[allow(dead_code)] crate::request_context::OpaqueContextGuard);
+    struct TestGuardBox(#[allow(dead_code)] verter_execution::request_context::OpaqueContextGuard);
     impl TlsUninstall for TestGuardBox {
         fn uninstall(self: Box<Self>) {}
     }
@@ -11276,9 +5990,9 @@ mod tests {
         }
         fn record_cache_event(&self, _event: CacheEventKind) {}
         fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
-            let guard = crate::request_context::OpaqueContextGuard::install(OpaqueRequestContext(
-                self as Arc<dyn RequestContextLike>,
-            ));
+            let guard = verter_execution::request_context::OpaqueContextGuard::install(
+                OpaqueRequestContext(self as Arc<dyn RequestContextLike>),
+            );
             Box::new(TestGuardBox(guard))
         }
     }
@@ -11314,8 +6028,9 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<SourceSnapshot, crate::executor::StageError> {
-            let id = crate::request_context::current_request_id().unwrap_or(0);
+            _incarnation: u64,
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
+            let id = verter_execution::request_context::current_request_id().unwrap_or(0);
             self.source_observed.store(id, AtomicOrdering::SeqCst);
             Ok(SourceSnapshot::new_empty(content, generation))
         }
@@ -11324,8 +6039,8 @@ mod tests {
             _canonical_id: &str,
             _source: &SourceSnapshot,
             generation: u64,
-        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
-            let id = crate::request_context::current_request_id().unwrap_or(0);
+        ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+            let id = verter_execution::request_context::current_request_id().unwrap_or(0);
             self.analysis_observed.store(id, AtomicOrdering::SeqCst);
             if self.panic_on_analysis.load(AtomicOrdering::SeqCst) {
                 panic!("probe executor panic_on_analysis");
@@ -11339,8 +6054,8 @@ mod tests {
             _analysis: &AnalysisSnapshot,
             profile_hash: u64,
             generation: u64,
-        ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
-            let id = crate::request_context::current_request_id().unwrap_or(0);
+        ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
+            let id = verter_execution::request_context::current_request_id().unwrap_or(0);
             self.artifact_observed.store(id, AtomicOrdering::SeqCst);
             Ok(ArtifactSnapshot {
                 generation,
@@ -11698,7 +6413,7 @@ mod tests {
     /// wait() returns. No timing/sleep is involved.
     #[test]
     fn auto_ingested_dep_source_job_inherits_parent_request_context_as_tls() {
-        use crate::executor::ExtractedDeps;
+        use crate::execution::executor::ExtractedDeps;
 
         const PARENT: &str = "/parent.vue";
         const DEP: &str = "/dep.ts";
@@ -11728,8 +6443,9 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<SourceSnapshot, crate::executor::StageError> {
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                _incarnation: u64,
+            ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 if canonical_id == DEP {
                     self.dep_source_observed.store(id, AtomicOrdering::SeqCst);
                 }
@@ -11740,8 +6456,8 @@ mod tests {
                 canonical_id: &str,
                 _source: &SourceSnapshot,
                 generation: u64,
-            ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 if canonical_id == PARENT {
                     self.parent_analysis_observed
                         .store(id, AtomicOrdering::SeqCst);
@@ -11833,14 +6549,14 @@ mod tests {
                 canonical_id: &str,
                 _source: &SourceSnapshot,
                 generation: u64,
-            ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
                 // Extract file index from canonical_id like "/f{N}.vue".
                 let idx = canonical_id
                     .trim_start_matches("/f")
                     .trim_end_matches(".vue")
                     .parse::<usize>()
                     .unwrap_or(0);
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 self.slots[idx].store(id, AtomicOrdering::SeqCst);
                 Ok(AnalysisSnapshot::new_empty(generation))
             }
@@ -11916,31 +6632,23 @@ mod tests {
         }
     }
 
-    /// Discriminator: `remove_artifact_if_not_newer_than(file, profile,
-    /// N)` MUST NOT clobber an artifact whose stored generation is
-    /// strictly greater than `N`.
+    /// Discriminator: `remove_artifact_not_newer_than(witness, profile)`
+    /// MUST NOT clobber an artifact whose stored generation is strictly
+    /// greater than the witnessed generation `N`.
     ///
     /// Race scenario: a slow compile started at generation `N` reaches
     /// its refusal arm AFTER a faster compile at `N+k` (k > 0) has
-    /// already committed a fresh artifact. The slow compile's
-    /// captured start-generation is `N`; passing `max_generation = N`
-    /// to this eviction MUST observe the stored `generation = N+k > N`
-    /// and skip the remove. The newer artifact at `N+k` survives;
-    /// `try_get_artifact` continues to serve it.
-    ///
-    /// The symmetric `commit_artifact` already rejects publishes whose
-    /// generation does not match the node's current generation; this
-    /// eviction is the inverse asymmetry: a slow refused compile must
-    /// not delete a newer winner.
+    /// already committed a fresh artifact. The slow compile's captured
+    /// start witness names `N`; the eviction MUST observe the stored
+    /// `generation = N+k > N` and skip the remove. The newer artifact at
+    /// `N+k` survives; `try_get_artifact` continues to serve it.
     ///
     /// Discriminating property: an unconditional
     /// `node.artifacts.remove(&profile_hash)` would delete the newer
     /// artifact and `try_get_artifact` would return `None` after the
-    /// call. The generation-aware `remove_if(..., snap.generation <=
-    /// max_generation)` preserves the newer artifact and
-    /// `try_get_artifact` returns the same `Arc` it returned before.
+    /// call.
     #[test]
-    fn remove_artifact_if_not_newer_than_preserves_newer_generation_artifact() {
+    fn remove_artifact_not_newer_than_preserves_newer_generation_artifact() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a v1"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
@@ -11964,21 +6672,9 @@ mod tests {
         // Commit a successful artifact at generation N. This is the
         // "slow compile's view" — the artifact it expects to evict if
         // its refusal arm runs.
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen_n,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
-        assert!(
-            sched.try_get_artifact("/a.vue", 42).is_some(),
-            "fixture invariant: an artifact must be committed at gen N \
-             so the race scenario is reproducible — without it the \
-             newer-artifact survival assertion is vacuous."
-        );
+        let witness_n = source_witness(&sched, "/a.vue");
+        assert_eq!(witness_n.generation(), gen_n);
+        assert!(sched.commit_artifact(&witness_n, 42, Arc::new(crate::node::EmptyData)));
 
         // Advance to generation N+1 (k = 1, sufficient for the
         // discriminator). A re-upsert is the natural generation bump.
@@ -11991,7 +6687,8 @@ mod tests {
             request_context: None,
         });
         sched.drive_all();
-        let gen_n_plus_k = sched.try_get_source("/a.vue").unwrap().generation;
+        let witness_n_plus_k = source_witness(&sched, "/a.vue");
+        let gen_n_plus_k = witness_n_plus_k.generation();
         assert!(
             gen_n_plus_k > gen_n,
             "fixture invariant: the second upsert must bump the node \
@@ -12002,54 +6699,28 @@ mod tests {
         // The "fast successful compile at N+k" commits a fresh artifact
         // at the bumped generation. This is the artifact the slow
         // refused compile must NOT clobber.
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen_n_plus_k,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
-        assert!(
-            sched.try_get_artifact("/a.vue", 42).is_some(),
-            "fixture invariant: the fresh artifact at gen N+k must be \
-             committed — without it the race scenario does not run."
-        );
+        assert!(sched.commit_artifact(&witness_n_plus_k, 42, Arc::new(crate::node::EmptyData)));
 
         // The slow refused compile reaches its eviction arm carrying
-        // its captured START generation (gen_n). The eviction MUST be
-        // gated on `stored_generation <= max_generation`. Since the
-        // stored snapshot is at gen_n_plus_k > gen_n, the remove must
-        // be a no-op.
-        sched.remove_artifact_if_not_newer_than("/a.vue", 42, gen_n);
+        // its captured START witness (gen_n). Since the stored snapshot
+        // is at gen_n_plus_k > gen_n, the remove must be a no-op.
+        assert!(!sched.remove_artifact_not_newer_than(&witness_n, 42));
 
         // KEY DISCRIMINATOR: the newer artifact at gen N+k MUST
-        // survive. An unconditional remove would clobber it and this
-        // assertion would fail.
+        // survive. An unconditional remove would clobber it.
         assert!(
             sched.try_get_artifact("/a.vue", 42).is_some(),
-            "DISCRIMINATOR: a slow refused compile at gen N MUST NOT \
-             clobber a fresher artifact at gen N+k. An unconditional \
-             `remove_artifact(file, profile)` would delete the newer \
-             artifact; the generation-gated \
-             `remove_artifact_if_not_newer_than(file, profile, N)` \
-             observes `stored_generation = N+k > N` and skips the \
-             remove. (gen_n = {gen_n}, gen_n_plus_k = {gen_n_plus_k})"
+            "a slow refused compile at gen N must not clobber a fresher \
+             artifact at gen N+k (gen_n = {gen_n}, gen_n_plus_k = {gen_n_plus_k})"
         );
 
-        // Symmetric positive case: a same-or-older max_generation MUST
-        // actually evict. Otherwise the new method would never remove
-        // anything — masking the legitimate refused-compile-cleanup
-        // path. Pass the CURRENT stored generation (N+k); the eviction
-        // should proceed.
-        sched.remove_artifact_if_not_newer_than("/a.vue", 42, gen_n_plus_k);
+        // Symmetric positive case: the current witness MUST evict.
+        // Otherwise the method would never remove anything — masking the
+        // legitimate refused-compile-cleanup path.
+        assert!(sched.remove_artifact_not_newer_than(&witness_n_plus_k, 42));
         assert!(
             sched.try_get_artifact("/a.vue", 42).is_none(),
-            "carrier invariant: `remove_artifact_if_not_newer_than` \
-             with `max_generation >= stored.generation` MUST evict \
-             the snapshot — the eviction is the normal-case behavior \
-             on the host's compile-refusal arm."
+            "a current witness must evict the snapshot it is not older than"
         );
     }
 
@@ -12215,6 +6886,7 @@ mod tests {
         let mut set: std::collections::BTreeSet<DepKey> = std::collections::BTreeSet::new();
         set.insert(DepKey::FileStage {
             canonical: Arc::from("/stale-dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/stale-dep.ts"),
             generation: 1,
             stage: FileStageKey::Analysis,
         });
@@ -12237,12 +6909,9 @@ mod tests {
         // the StageComplete submission that the worker would have
         // emitted. `handle_stage_complete` runs the post-completion
         // cleanup that must clear the registry.
-        let snap = ArtifactSnapshot {
-            generation: a_gen,
-            profile_hash: 7,
-            data: Arc::new(crate::node::EmptyData),
-        };
-        sched.commit_artifact("/a.vue", 7, snap);
+        let witness = source_witness(&sched, "/a.vue");
+        assert_eq!(witness.generation(), a_gen);
+        assert!(sched.commit_artifact(&witness, 7, Arc::new(crate::node::EmptyData)));
         let a_incarnation = sched.nodes.get("/a.vue").unwrap().incarnation_id();
         sched.handle_stage_complete(
             "/a.vue",
@@ -12307,6 +6976,7 @@ mod tests {
         let mut set: std::collections::BTreeSet<DepKey> = std::collections::BTreeSet::new();
         set.insert(DepKey::FileStage {
             canonical: Arc::from("/stale-dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/stale-dep.ts"),
             generation: 1,
             stage: FileStageKey::Analysis,
         });
@@ -12327,12 +6997,9 @@ mod tests {
         // External commit_artifact terminalizes the only profile at
         // this `(owner, generation)`. With no other pending profile,
         // the cleanup mirror of handle_stage_complete must fire.
-        let snap = ArtifactSnapshot {
-            generation: a_gen,
-            profile_hash: 7,
-            data: Arc::new(crate::node::EmptyData),
-        };
-        sched.commit_artifact("/a.vue", 7, snap);
+        let witness = source_witness(&sched, "/a.vue");
+        assert_eq!(witness.generation(), a_gen);
+        assert!(sched.commit_artifact(&witness, 7, Arc::new(crate::node::EmptyData)));
 
         // KEY ASSERTION: registry entry for (/a.vue, a_gen) is empty.
         // Without the external-commit cleanup the path did not touch
@@ -12384,6 +7051,7 @@ mod tests {
         // generation register_resolved_deps would have recorded.
         let dep_key = DepKey::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_recorded_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12403,23 +7071,8 @@ mod tests {
         );
     }
 
-    /// `register_resolved_deps` must NOT record a `DepKey` for a dead
-    /// producer — a blocker that will never resolve into a live
-    /// Analysis identity in the DAG. The dead cases include:
-    /// (a) FileNode missing (concurrent remove race),
-    /// (b) FileNode at generation 0 (no Source ever submitted),
-    /// (c) No DAG identity for the recorded `(canonical, gen)`.
-    ///
-    /// Recording the DepKey for any of these would pin the owner's
-    /// Artifact on a producer that cannot make progress.
-    ///
-    /// Discriminator: plant a `FileNode` at generation 0 directly
-    /// into `sched.nodes` so the second-pass DepKey would be at
-    /// generation 0, then call `register_resolved_deps`. With the
-    /// dead-producer filter, the dep is dropped BEFORE the registry
-    /// record, leaving the registry empty. Without the filter the
-    /// dep is recorded as `FileStage(/dead.ts, 0, Analysis)` — a key
-    /// the DAG can never resolve, pinning the Artifact forever.
+    /// A terminal Source failure must not become a live Analysis blocker
+    /// or be retried merely because exact dependencies are registered later.
     #[test]
     fn register_resolved_deps_skips_dead_producer_deps() {
         let loader = Arc::new(MemorySourceLoader::new());
@@ -12438,16 +7091,25 @@ mod tests {
         sched.drive_all();
         let a_gen = sched.try_get_source("/a.vue").unwrap().generation;
 
-        // Plant a /dead.ts node at gen=0 directly so the auto-ingest
-        // path in register_resolved_deps skips ingestion (node
-        // already in `nodes`) AND the second pass observes
-        // generation=0 — the dead-producer signature. Without the
-        // dead-producer filter, the recorded DepKey would be
-        // FileStage(/dead.ts, 0, Analysis), which no DAG submission
-        // path will ever produce.
-        let dead_node = sched.create_node("/dead.ts", None);
-        sched.nodes.insert("/dead.ts".to_string(), dead_node);
-        // Do NOT bump_generation; leave it at 0.
+        // Missing backing drives a real terminal producer, distinguishing it
+        // from a FileNode whose first Source request is still in the inbox.
+        let dead = sched.submit_request(Request {
+            file_id: "/dead.ts".into(),
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        assert!(matches!(
+            dead.try_get(),
+            Some(CompletionState::Failed(
+                crate::job::SchedulerError::FileNotFound { .. }
+            ))
+        ));
+        let dead_node = sched.nodes.get("/dead.ts").unwrap().clone();
+        assert!(!dead_node.source_admission_pending());
 
         sched.register_resolved_deps(
             "/a.vue",
@@ -12455,17 +7117,29 @@ mod tests {
             vec!["/dead.ts".to_string()],
         );
 
-        // KEY ASSERTION: no entry in the registry — the dead-producer
-        // filter dropped /dead.ts at recording time, and with no
-        // remaining deps the empty-set arm cleared any prior entry.
         let a_arc: Arc<str> = Arc::from("/a.vue");
         let after = sched.dag.lock().peek_artifact_blockers(&a_arc, a_gen);
         assert!(
-            after.is_empty(),
-            "register_resolved_deps must drop dead-producer DepKey \
-             entries before recording; the planted /dead.ts node at \
-             generation 0 has no DAG identity and would never resolve. \
-             observed: {after:?}",
+            after.deps.is_empty(),
+            "a terminal producer cannot gate Analysis: {after:?}"
+        );
+        assert_eq!(
+            after.failed.len(),
+            1,
+            "terminal failure must still reach the owner's Artifact"
+        );
+        assert!(
+            sched
+                .dag
+                .lock()
+                .token_for(&WorkNodeIdentity::FileStage {
+                    canonical: Arc::from("/dead.ts"),
+                    incarnation: dead_node.incarnation_id(),
+                    generation: dead_node.generation(),
+                    stage: FileStageKey::Source,
+                })
+                .is_none(),
+            "blocker registration must not restart the terminal producer"
         );
     }
 
@@ -12540,6 +7214,7 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12549,6 +7224,7 @@ mod tests {
         // never admitted in the first place.
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12634,12 +7310,14 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
         let dag = sched.dag.lock();
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12727,6 +7405,7 @@ mod tests {
         // Confirm no live Analysis DAG identity for the dead dep.
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12890,11 +7569,13 @@ mod tests {
         // dep — the NewRequest is queued but not drained.
         let dep_source_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Source,
         };
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12916,7 +7597,12 @@ mod tests {
         // `auto_ingest_tracking_gates` consult, the call intercepts
         // the terminal arm and returns Gating so a same-tick
         // Artifact admission keeps the dep as a blocker.
-        let status = sched.file_stage_analysis_blocker_status(&dag, &dep_arc, dep_gen);
+        let status = sched.file_stage_analysis_blocker_status(
+            &dag,
+            &dep_arc,
+            fixture_incarnation(&sched, dep_arc.as_ref()),
+            dep_gen,
+        );
         assert!(
             matches!(status, BlockerStatus::Gating),
             "matrix must return Gating when the dep has an \
@@ -12931,6 +7617,7 @@ mod tests {
         // `admit_artifact_with_blockers` drop the dep silently.
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -13044,6 +7731,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&dep_arc),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                 generation: 1,
                 since: Instant::now(),
             },
@@ -13058,6 +7746,7 @@ mod tests {
         // opportunistically cleans the gen=1 tracking entry.
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -13119,6 +7808,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&dep_arc),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                 generation: 2,
                 since: Instant::now(),
             },
@@ -13126,6 +7816,7 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -13187,6 +7878,10 @@ mod tests {
 
         let dep_id = "/dep.ts";
         let dep_arc: Arc<str> = Arc::from(dep_id);
+        // Capture the unpublished node's identity before publishing tracking.
+        // Both transitional states must describe the same producer.
+        let dep_node = sched.create_node(dep_id, None);
+        let dep_incarnation = dep_node.incarnation_id();
 
         // State A — post-swap intermediate state #1: tracking
         // entry has been published but FileNode has not. This is
@@ -13197,6 +7892,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&dep_arc),
             AutoIngestedRecord {
+                incarnation: dep_incarnation,
                 generation: dep_gen,
                 since: Instant::now(),
             },
@@ -13204,6 +7900,7 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: dep_incarnation,
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -13225,7 +7922,6 @@ mod tests {
         // yet drained it). The matrix's last arm (no-live-DAG
         // identity, current_analysis None) consults the tracking
         // entry and returns Gating.
-        let dep_node = sched.create_node(dep_id, None);
         sched
             .source_root
             .publish_transition(|publication| publication.bump_node_generation(&dep_node));
@@ -13293,11 +7989,16 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&canonical),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: 2,
                 since: Instant::now(),
             },
         );
-        sched.clear_auto_ingest_tracking(&canonical, /* old_gen */ 1);
+        sched.clear_auto_ingest_tracking(
+            &canonical,
+            fixture_incarnation(&sched, canonical.as_ref()),
+            /* old_gen */ 1,
+        );
         {
             let entry = sched.auto_ingested_recent.get(&canonical).expect(
                 "clear_auto_ingest_tracking with stale gen must NOT drop the newer-gen entry",
@@ -13347,6 +8048,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&canonical),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: 2,
                 since: Instant::now(),
             },
@@ -13393,6 +8095,7 @@ mod tests {
             sched_clone_b.auto_ingested_recent.insert(
                 Arc::clone(&canonical_b),
                 AutoIngestedRecord {
+                    incarnation: fixture_incarnation(&sched_clone_b, "/dep.ts"),
                     generation: 3,
                     since: Instant::now(),
                 },
@@ -13436,7 +8139,7 @@ mod tests {
         gates: dashmap::DashMap<String, SourceGate>,
     }
 
-    impl crate::executor::StageExecutor for GatedFailingSourceExecutor {
+    impl crate::execution::executor::StageExecutor for GatedFailingSourceExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -13446,7 +8149,8 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+            _incarnation: u64,
+        ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError> {
             if let Some(gate) = self.gates.get(canonical_id) {
                 // Signal entry to the test thread. Best-effort —
                 // if the test dropped the receiver the executor
@@ -13456,8 +8160,8 @@ mod tests {
                 // to signal release; recv returns Disconnected,
                 // which we treat as release.
                 let _ = gate.release_rx.recv();
-                return Err(crate::executor::StageError {
-                    kind: crate::executor::StageErrorKind::Generic,
+                return Err(crate::execution::executor::StageError {
+                    kind: crate::execution::executor::StageErrorKind::Generic,
                     message: format!("gated source failure for {canonical_id}"),
                 });
             }
@@ -13640,6 +8344,7 @@ mod tests {
 
         let artifact_identity = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: a_gen,
             profile_hash: profile_hash_to_bytes(77),
             content_hash: [0u8; 16],
@@ -13679,11 +8384,13 @@ mod tests {
                 .is_some();
             let dep_source_id = WorkNodeIdentity::FileStage {
                 canonical: Arc::from("/dep.ts"),
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: dep_gen,
                 stage: FileStageKey::Source,
             };
             let dep_analysis_id = WorkNodeIdentity::FileStage {
                 canonical: Arc::from("/dep.ts"),
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: dep_gen,
                 stage: FileStageKey::Analysis,
             };
@@ -13860,17 +8567,10 @@ mod tests {
         // Thread A: commit_artifact in a tight loop. Path:
         // `dag.lock()` → `node.artifacts.insert(...)`. dag-lock →
         // shard-write ordering.
+        let witness = source_witness(&sched_a, "/race.vue");
         let t_commit = thread::spawn(move || {
             while !stop_a.load(Ordering::Acquire) {
-                sched_a.commit_artifact(
-                    "/race.vue",
-                    42,
-                    ArtifactSnapshot {
-                        generation: 5,
-                        profile_hash: 42,
-                        data: Arc::new(crate::node::EmptyData),
-                    },
-                );
+                sched_a.commit_artifact(&witness, 42, Arc::new(crate::node::EmptyData));
             }
         });
 
@@ -13968,7 +8668,7 @@ mod tests {
     #[test]
     fn source_completion_superseded_mid_flight_publishes_nothing() {
         use crate::dag::{FileStageKey, WorkNodeIdentity};
-        use crate::executor::{ExtractedDeps, StageExecutor};
+        use crate::execution::executor::{ExtractedDeps, StageExecutor};
         use crate::node::SourceSnapshot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{OnceLock, Weak};
@@ -14034,6 +8734,7 @@ mod tests {
         for stage in [FileStageKey::Source, FileStageKey::Analysis] {
             let stale = WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(&canonical),
+                incarnation: fixture_incarnation(&sched, canonical.as_ref()),
                 generation: 1,
                 stage,
             };
@@ -14075,7 +8776,7 @@ mod tests {
     /// a replacement is validated as if it were the original. Two node
     /// objects for the same canonical can sit at the SAME generation, so
     /// the generation check cannot catch it either — a replacement
-    /// starts from generation 0 / the recorded floor and is bumped, and
+    /// starts its own generation sequence at 0 and is bumped, and
     /// nothing forces it past the value the original already had.
     ///
     /// Discriminator: the replacement here carries its OWN committed
@@ -14147,6 +8848,7 @@ mod tests {
 
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/inc.vue"),
+            incarnation: fixture_incarnation(&sched, "/inc.vue"),
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -14226,10 +8928,16 @@ mod tests {
             "precondition: generation advanced"
         );
 
-        sched.admit_pending_artifacts(&canonical, generation, Priority::Background);
+        sched.admit_pending_artifacts(
+            &canonical,
+            fixture_incarnation(&sched, canonical.as_ref()),
+            generation,
+            Priority::Background,
+        );
 
         let stale_artifact = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(&canonical),
+            incarnation: fixture_incarnation(&sched, canonical.as_ref()),
             generation,
             profile_hash: profile_hash_to_bytes(7),
             content_hash: [0u8; 16],
@@ -14257,7 +8965,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn refused_source_completion_consumes_no_deferred_blockers() {
-        use crate::executor::{ExtractedDeps, StageExecutor};
+        use crate::execution::executor::{ExtractedDeps, StageExecutor};
         use crate::node::SourceSnapshot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{OnceLock, Weak};
@@ -14320,20 +9028,8 @@ mod tests {
         );
     }
 
-    /// `remove()` must close the admission door FORWARD, not just sweep
-    /// backward.
-    ///
-    /// `remove()` tombstones the file and runs its cancel sweep, then
-    /// RELEASES the lock before the `FileNode` comes out of the map. A
-    /// queued completion entering that gap still saw a live node at a
-    /// live generation, so it could admit Artifact-G after the sweep;
-    /// once the node was gone that work could never dispatch (its
-    /// `FileNode` is missing) and its capacity reservation was never
-    /// released. Sweeping cannot fix that — the sweep already ran.
-    ///
-    /// The structural answer is a retirement FLOOR consulted by the one
-    /// admission primitive, so a post-sweep admission is refused by
-    /// construction rather than by each caller remembering to re-check.
+    /// A retained Arc to a removed node cannot authorize later admission.
+    /// The object retirement marker closes admission after the sweep.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn removal_retires_the_canonical_so_late_admission_is_refused() {
@@ -14353,7 +9049,8 @@ mod tests {
         });
         sched.drain_inbox();
         let canonical: Arc<str> = Arc::from("/gone.vue");
-        let generation = sched.nodes.get("/gone.vue").unwrap().generation();
+        let old_node = sched.nodes.get("/gone.vue").unwrap().clone();
+        let generation = old_node.generation();
 
         sched.remove("/gone.vue");
 
@@ -14361,19 +9058,22 @@ mod tests {
         // would have performed. It must be refused.
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(&canonical),
+            incarnation: old_node.incarnation_id(),
             generation,
             profile_hash: profile_hash_to_bytes(5),
             content_hash: [0u8; 16],
         };
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
+            incarnation: old_node.incarnation_id(),
             generation,
             stage: FileStageKey::Analysis,
         };
         {
             let mut dag = sched.dag.lock();
             assert!(
-                dag.submit(
+                dag.submit_file(
+                    &old_node,
                     artifact_id.clone(),
                     WorkKind::Artifact,
                     Priority::Background,
@@ -14385,7 +9085,8 @@ mod tests {
                  gone, so dispatch can never run it and never releases its reservation",
             );
             assert!(
-                dag.submit(
+                dag.submit_file(
+                    &old_node,
                     analysis_id.clone(),
                     WorkKind::Analysis,
                     Priority::Background,
@@ -14440,12 +9141,14 @@ mod tests {
 
         let owner_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&owner),
+            incarnation: fixture_incarnation(&sched, owner.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         // Gate the owner on the dep's ANALYSIS — which is never admitted.
         let gating_dep = DepKey::FileStage {
             canonical: Arc::clone(&dep),
+            incarnation: fixture_incarnation(&sched, dep.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -14466,6 +9169,7 @@ mod tests {
             assert!(
                 dag.token_for(&WorkNodeIdentity::FileStage {
                     canonical: Arc::clone(&dep),
+                    incarnation: fixture_incarnation(&sched, dep.as_ref()),
                     generation: dep_gen,
                     stage: FileStageKey::Analysis,
                 })
@@ -14516,17 +9220,13 @@ mod tests {
     /// be rejected before it registers a waiter or admits anything.
     ///
     /// `prepare_request` runs outside `dag.lock()`, so a prepared request
-    /// can cross a retirement boundary: `remove()` installs the floor,
+    /// can cross a retirement boundary: `remove()` retires the object,
     /// cancels the DAG, deletes the `FileNode` and drains the shutdown
-    /// waiters, all in the gap. The captured `Arc` survives — this
-    /// request holds it — but it is DETACHED from the canonical.
+    /// waiters, all in the gap. A prepared request holds only its lifetime
+    /// witness, which cannot authorize the next lifetime at that canonical.
     ///
-    /// The retirement floor alone cannot catch this. Bumping a detached
-    /// node lands its generation exactly ON the floor (`last_gen + 1`),
-    /// and `submit` admits at the floor because a legitimate re-add
-    /// arrives at exactly the same value. Liveness is what separates
-    /// them, which is why the crossing gate is an incarnation check
-    /// rather than a generation one.
+    /// Generations can coincide on different objects. The crossing gate
+    /// must compare the captured submission lifetime with the published node.
     ///
     /// Discriminator: without the gate the waiter is registered and
     /// either the admission succeeds against a node no dispatcher can
@@ -14563,7 +9263,7 @@ mod tests {
             source: Some(Arc::from("x")),
             file_language: None,
             sender,
-            submitted_epoch: sched.removal_epoch.load(Ordering::Acquire),
+            submitted_lifetime: fixture_incarnation(&sched, "/cross.vue"),
             request_context: None,
         };
         let prepared = sched
@@ -14647,72 +9347,33 @@ mod tests {
         }
     }
 
-    /// The anti-hang path: an admission refused by the retirement floor
-    /// AFTER its waiter group was registered must terminalize that group.
-    ///
-    /// Registration precedes admission, so a refusal whose `None` is
-    /// dropped leaves a group waiting on work no producer will ever run —
-    /// a permanent park. This is the single path standing between a
-    /// refusal and a stranded waiter, and it is the whole subject of this
-    /// train, so it is pinned rather than assumed.
-    ///
-    /// The floor is raised above the LIVE generation directly, which is
-    /// the one state that reaches `submit`'s refusal with the node still
-    /// live and its incarnation intact — so the crossing gate passes and
-    /// only the floor refuses.
+    /// A queued request bound to a retired incarnation terminates before
+    /// registering a waiter that no producer can satisfy.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn admission_refused_by_the_floor_terminalizes_its_registered_waiter() {
-        use crate::job::CompletionState;
-
+    fn retired_queued_request_terminates_before_registering_a_waiter() {
         let loader = Arc::new(MemorySourceLoader::new());
-        loader.insert("/refused.vue".to_string(), Arc::from("x"));
+        loader.insert("/refused.vue".into(), Arc::from("x"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
-
-        // Materialize the node, then retire ABOVE its live generation
-        // without removing it: the node stays published at its own
-        // incarnation, so the crossing gate passes and the floor is the
-        // only thing that can refuse.
-        sched.submit_request(Request {
-            file_id: "/refused.vue".to_string(),
-            target: TargetStage::Analysis,
-            priority: Priority::Background,
-            source: Some(Arc::from("x")),
-            file_language: None,
-            request_context: None,
-        });
-        sched.drain_inbox();
-        let canonical: Arc<str> = Arc::from("/refused.vue");
-        let live_gen = sched.nodes.get("/refused.vue").unwrap().generation();
-        sched
-            .dag
-            .lock()
-            .retire_generations_below(&canonical, live_gen + 5);
-
-        let handle = sched.submit_request(Request {
-            file_id: "/refused.vue".to_string(),
+        let incarnation = sched.stamp_request("/refused.vue", None);
+        let (handle, sender) = completion_pair();
+        sched.remove("/refused.vue");
+        let prepared = sched.prepare_request(QueuedRequest {
+            file_id: "/refused.vue".into(),
             target: TargetStage::Analysis,
             priority: Priority::Background,
             source: None,
             file_language: None,
+            sender,
+            submitted_lifetime: incarnation,
             request_context: None,
         });
-        sched.drain_inbox();
-
-        assert!(
-            handle.try_get().is_some(),
-            "an admission refused by the retirement floor left its already-registered waiter \
-             parked forever — nothing will ever produce that identity",
-        );
-        assert!(
-            matches!(handle.try_get(), Some(CompletionState::Shutdown)),
-            "the refused admission must terminalize as Shutdown; got {:?}",
-            handle.try_get(),
-        );
+        assert!(prepared.is_none());
+        assert!(matches!(handle.try_get(), Some(CompletionState::Shutdown)));
+        assert_eq!(sched.dag.lock().total_active(), 0);
+        assert!(!sched.has_node("/refused.vue"));
     }
 
-    /// `signal_file_shutdown_at` must be scoped to the ONE generation it
-    /// names — a neighbouring live generation's waiters must survive.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn signal_file_shutdown_at_is_scoped_to_one_generation() {
@@ -14759,7 +9420,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn host_classifier_is_never_called_while_the_dag_lock_is_held() {
-        use crate::executor::{ExtractedDeps, StageExecutor};
+        use crate::execution::executor::{ExtractedDeps, StageExecutor};
         use crate::node::SourceSnapshot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{OnceLock, Weak};
@@ -14912,6 +9573,7 @@ mod tests {
         );
         let _ = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/bare-dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/bare-dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Source,
         };
@@ -14958,6 +9620,302 @@ mod tests {
         );
     }
 
+    #[test]
+    fn queued_language_rehome_preserves_later_source_updates() {
+        for initial_language in [FileLanguage::vue(), FileLanguage::script_ts()] {
+            let sched = Scheduler::test_new_sync(
+                SchedulerConfig::default(),
+                Arc::new(MemorySourceLoader::new()),
+            );
+            let request = |source: &'static str, language| Request {
+                file_id: "/queued.vue".into(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: Some(Arc::from(source)),
+                file_language: Some(language),
+                request_context: None,
+            };
+            let initial = sched.submit_request(request("initial", initial_language));
+            assert!(sched.wait_or_drive(&initial).is_ready());
+            let first = sched.submit_request(request("first", FileLanguage::script_ts()));
+            let last = sched.submit_request(request("last", FileLanguage::script_ts()));
+            sched.drive_all();
+            assert!(matches!(first.try_get(), Some(CompletionState::Superseded)));
+            assert!(
+                matches!(last.try_get(), Some(CompletionState::Ready(_))),
+                "{:?}",
+                last.try_get()
+            );
+            assert_eq!(
+                sched.try_get_source("/queued.vue").unwrap().source.as_ref(),
+                "last"
+            );
+            let obsolete = sched.submit_request(request("obsolete", FileLanguage::script_ts()));
+            sched.remove("/queued.vue");
+            let replacement =
+                sched.submit_request(request("replacement", FileLanguage::script_ts()));
+            sched.drive_all();
+            assert!(matches!(
+                obsolete.try_get(),
+                Some(CompletionState::Shutdown)
+            ));
+            assert!(matches!(
+                replacement.try_get(),
+                Some(CompletionState::Ready(_))
+            ));
+            assert_eq!(
+                sched.try_get_source("/queued.vue").unwrap().source.as_ref(),
+                "replacement"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_source_dependency_analysis_precedes_owner_artifact() {
+        struct OrderProbe {
+            events: StdMutex<Vec<String>>,
+            extracted: bool,
+        }
+        impl StageExecutor for OrderProbe {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn extract_deps(
+                &self,
+                id: &str,
+                _: &SourceSnapshot,
+            ) -> crate::execution::executor::ExtractedDeps {
+                if self.extracted && id == "/owner.vue" {
+                    crate::execution::executor::ExtractedDeps {
+                        forward_deps: vec!["/dep.ts".into()],
+                        blocker_ids: vec!["/dep.ts".into()],
+                    }
+                } else {
+                    crate::execution::executor::ExtractedDeps::default()
+                }
+            }
+            fn execute_analysis(
+                &self,
+                id: &str,
+                _: &SourceSnapshot,
+                generation: u64,
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+                self.events.lock().unwrap().push(id.to_owned());
+                Ok(AnalysisSnapshot::new_empty(generation))
+            }
+            fn execute_artifact(
+                &self,
+                _: &str,
+                _: &SourceSnapshot,
+                _: &AnalysisSnapshot,
+                profile_hash: u64,
+                generation: u64,
+            ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
+                self.events.lock().unwrap().push("artifact".into());
+                Ok(ArtifactSnapshot {
+                    generation,
+                    profile_hash,
+                    data: Arc::new(crate::node::EmptyData),
+                })
+            }
+        }
+        for (prequeued, extracted, reload) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (false, true, false),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            let loader = Arc::new(MemorySourceLoader::new());
+            loader.insert("/owner.vue".into(), Arc::from("owner"));
+            loader.insert("/dep.ts".into(), Arc::from("dep"));
+            let executor = Arc::new(OrderProbe {
+                events: StdMutex::new(Vec::new()),
+                extracted,
+            });
+            let sched = Scheduler::test_new_sync_with_executor(
+                SchedulerConfig::default(),
+                loader,
+                executor.clone(),
+            );
+            let request = |id: &str, target| Request {
+                file_id: id.into(),
+                target,
+                priority: Priority::Interactive,
+                source: None,
+                file_language: None,
+                request_context: None,
+            };
+            if reload {
+                let initial = sched.submit_request(request("/dep.ts", TargetStage::Analysis));
+                assert!(sched.wait_or_drive(&initial).is_ready());
+                executor.events.lock().unwrap().clear();
+            }
+            let owner = sched.submit_request(request("/owner.vue", TargetStage::Analysis));
+            if extracted {
+                // Leave the owner's Source completion ahead of the dependency
+                // request in the inbox, while its node is already published.
+                sched.drain_inbox();
+                assert!(sched.drive_one());
+            } else {
+                assert!(sched.wait_or_drive(&owner).is_ready());
+            }
+            let dep = if reload {
+                sched.close_file("/dep.ts");
+                None
+            } else {
+                prequeued.then(|| sched.submit_request(request("/dep.ts", TargetStage::Source)))
+            };
+            if !extracted {
+                sched.register_resolved_deps(
+                    "/owner.vue",
+                    vec!["/dep.ts".into()],
+                    vec!["/dep.ts".into()],
+                );
+            }
+            let artifact = sched.submit_request(request(
+                "/owner.vue",
+                TargetStage::Artifact { profile_hash: 7 },
+            ));
+            sched.drive_all();
+            assert!(matches!(
+                artifact.try_get(),
+                Some(CompletionState::Ready(_))
+            ));
+            if let Some(dep) = dep {
+                assert!(matches!(dep.try_get(), Some(CompletionState::Ready(_))));
+            }
+            let events = executor.events.lock().unwrap();
+            assert_eq!(
+                events.len(),
+                3,
+                "prequeued={prequeued}, extracted={extracted}, reload={reload}: {events:?}"
+            );
+            assert!(events[..2].iter().any(|id| id == "/owner.vue"));
+            assert!(events[..2].iter().any(|id| id == "/dep.ts"));
+            assert_eq!(
+                events[2], "artifact",
+                "both Analysis producers must precede Artifact"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_registration_reset_during_backpressure_cannot_recreate_work() {
+        struct ResetJoiner {
+            scheduler: std::sync::Weak<Scheduler>,
+            calls: AtomicU64,
+        }
+        impl RequestContextLike for ResetJoiner {
+            fn request_id(&self) -> u64 {
+                42
+            }
+            fn capture_enabled(&self) -> bool {
+                false
+            }
+            fn on_dedup_joiner(&self, _: Arc<str>, _: u64, _: bool) {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    self.scheduler.upgrade().unwrap().reset();
+                }
+            }
+            fn record_cache_event(&self, _: CacheEventKind) {}
+            fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+                struct Guard;
+                impl TlsUninstall for Guard {
+                    fn uninstall(self: Box<Self>) {}
+                }
+                Box::new(Guard)
+            }
+        }
+        let loader = Arc::new(MemorySourceLoader::new());
+        for id in ["/owner.vue", "/dup.vue", "/dep1.ts", "/dep2.ts", "/dep3.ts"] {
+            loader.insert(id.into(), Arc::from("source"));
+        }
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
+        let request = |id: &str| Request {
+            file_id: id.into(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        };
+        let owner = sched.submit_request(request("/owner.vue"));
+        assert!(sched.wait_or_drive(&owner).is_ready());
+        let mut dup = request("/dup.vue");
+        dup.request_context = Some(OpaqueRequestContext(TestContext::new(1, false)));
+        let _winner = sched.submit_request(dup);
+        sched.drain_inbox();
+        let joiner = Arc::new(ResetJoiner {
+            scheduler: Arc::downgrade(&sched),
+            calls: AtomicU64::new(0),
+        });
+        for _ in 0..sched.inbox.sender.capacity().unwrap() {
+            let (_, sender) = completion_pair::<RequestResult>();
+            assert!(sched
+                .inbox
+                .sender
+                .try_send(Submission::NewRequest {
+                    file_id: "/dup.vue".into(),
+                    target: TargetStage::Analysis,
+                    priority: Priority::Interactive,
+                    source: None,
+                    file_language: None,
+                    sender,
+                    submitted_lifetime: fixture_incarnation(&sched, "/dup.vue"),
+                    request_context: Some(OpaqueRequestContext(joiner.clone())),
+                })
+                .is_ok());
+        }
+        let deps = vec!["/dep1.ts".into(), "/dep2.ts".into(), "/dep3.ts".into()];
+        sched.register_resolved_deps("/owner.vue", deps.clone(), deps);
+        assert_eq!(
+            joiner.calls.load(Ordering::SeqCst),
+            2,
+            "reset must occur inside dependency enqueue backpressure"
+        );
+        sched.drive_all();
+        assert!(
+            sched.nodes.is_empty(),
+            "retired registration recreated nodes after reset"
+        );
+        assert!(sched.auto_ingested_recent.is_empty());
+        assert_eq!(sched.dag.lock().total_active(), 0);
+    }
+
+    #[test]
+    fn exhausted_live_generation_refuses_advancement_and_leaves_no_history() {
+        let sched = Scheduler::test_new_sync(
+            SchedulerConfig::default(),
+            Arc::new(MemorySourceLoader::new()),
+        );
+        let node = sched.create_node_at("/exhausted.vue", Some(FileLanguage::vue()), u64::MAX);
+        let exhausted_incarnation = node.incarnation_id();
+        let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sched
+                .source_root
+                .publish_transition(|publication| publication.bump_node_generation(&node))
+        }));
+        assert!(
+            advance.is_err(),
+            "live generation exhaustion must refuse advancement"
+        );
+        assert_eq!(
+            node.generation(),
+            u64::MAX,
+            "refused advancement must not wrap the stored generation"
+        );
+        sched.nodes.insert("/exhausted.vue".into(), node);
+        sched.remove("/exhausted.vue");
+        assert!(!sched.has_node("/exhausted.vue"));
+        // The successor is a new object, not a continuation of the exhausted
+        // one, so it starts a fresh generation sequence.
+        let successor = sched.create_node("/exhausted.vue", Some(FileLanguage::vue()));
+        assert_eq!(successor.generation(), 0);
+        assert!(successor.incarnation_id() > exhausted_incarnation);
+    }
+
     /// A language re-home advances a PUBLISHED file's generation, so it
     /// must run under the DAG lock and sweep the identities and waiters
     /// it retires — exactly like `invalidate()` and `close_file()`.
@@ -14997,6 +9955,7 @@ mod tests {
 
         let canonical: Arc<str> = Arc::from("/reh.vue");
         let gen_before = sched.nodes.get("/reh.vue").unwrap().generation();
+        let incarnation_before = fixture_incarnation(&sched, "/reh.vue");
         let admitted_stage = {
             let dag = sched.dag.lock();
             [FileStageKey::Source, FileStageKey::Analysis]
@@ -15004,6 +9963,7 @@ mod tests {
                 .find(|stage| {
                     dag.token_for(&WorkNodeIdentity::FileStage {
                         canonical: Arc::clone(&canonical),
+                        incarnation: incarnation_before,
                         generation: gen_before,
                         stage: *stage,
                     })
@@ -15040,6 +10000,7 @@ mod tests {
         // 1. Stale-token removal.
         let stale = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
+            incarnation: incarnation_before,
             generation: gen_before,
             stage: admitted_stage,
         };
@@ -15279,15 +10240,13 @@ mod tests {
                     0 => sched_lifecycle.invalidate(&id),
                     1 => sched_lifecycle.close_file(&id),
                     _ => {
-                        let snap = ArtifactSnapshot {
-                            generation: sched_lifecycle
-                                .try_get_source(&id)
-                                .map(|s| s.generation)
-                                .unwrap_or(1),
-                            profile_hash: 42,
-                            data: Arc::new(crate::node::EmptyData),
-                        };
-                        sched_lifecycle.commit_artifact(&id, 42, snap);
+                        if let Some(source) = sched_lifecycle.try_get_witnessed_source(&id) {
+                            sched_lifecycle.commit_artifact(
+                                &source.witness,
+                                42,
+                                Arc::new(crate::node::EmptyData),
+                            );
+                        }
                     }
                 }
                 tick = tick.wrapping_add(1);
@@ -15490,6 +10449,7 @@ mod tests {
                 dep_gen_observed = dep_gen;
                 let key = DepKey::FileStage {
                     canonical: Arc::clone(&dep_arc),
+                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                     generation: dep_gen,
                     stage: FileStageKey::Analysis,
                 };
@@ -15578,6 +10538,7 @@ mod tests {
         loader.insert("/paused.vue".to_string(), Arc::from("<template />"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
+        let _prior_node = sched.create_node("/prior.ts", Some(FileLanguage::script_ts()));
         let initial = sched.submit_request(Request {
             file_id: "/paused.vue".to_string(),
             target: TargetStage::Source,
@@ -15602,6 +10563,7 @@ mod tests {
         );
         let source_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
+            incarnation: fixture_incarnation(&sched, canonical.as_ref()),
             generation,
             stage: FileStageKey::Source,
         };
@@ -15618,7 +10580,7 @@ mod tests {
             None,
             None,
             source_sender,
-            sched.removal_epoch.load(Ordering::Acquire),
+            fixture_incarnation(&sched, "/paused.vue"),
             None,
         );
         let (analysis_joiner, analysis_sender) = completion_pair::<RequestResult>();
@@ -15629,7 +10591,7 @@ mod tests {
             None,
             None,
             analysis_sender,
-            sched.removal_epoch.load(Ordering::Acquire),
+            fixture_incarnation(&sched, "/paused.vue"),
             None,
         );
 
@@ -15639,6 +10601,7 @@ mod tests {
         );
         let analysis_identity = WorkNodeIdentity::FileStage {
             canonical,
+            incarnation: node.incarnation_id(),
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -15693,6 +10656,7 @@ mod tests {
         let dep_canonical: Arc<str> = Arc::from("/dep.ts");
         let dep_analysis = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&dep_canonical),
+            incarnation: fixture_incarnation(&sched, dep_canonical.as_ref()),
             generation: dep_generation,
             stage: FileStageKey::Analysis,
         };
@@ -15745,7 +10709,7 @@ mod tests {
         struct CountingAnalysisExecutor {
             analysis_hits: AtomicU64,
         }
-        impl crate::executor::StageExecutor for CountingAnalysisExecutor {
+        impl crate::execution::executor::StageExecutor for CountingAnalysisExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -15754,7 +10718,8 @@ mod tests {
                 _canonical_id: &str,
                 _source: &crate::node::SourceSnapshot,
                 generation: u64,
-            ) -> Result<crate::node::AnalysisSnapshot, crate::executor::StageError> {
+            ) -> Result<crate::node::AnalysisSnapshot, crate::execution::executor::StageError>
+            {
                 self.analysis_hits.fetch_add(1, Ordering::AcqRel);
                 Ok(crate::node::AnalysisSnapshot::new_empty(generation))
             }
@@ -15768,7 +10733,7 @@ mod tests {
         let sched = Scheduler::test_new_sync_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::clone(&executor) as Arc<dyn crate::executor::StageExecutor>,
+            Arc::clone(&executor) as Arc<dyn crate::execution::executor::StageExecutor>,
         );
 
         // Submit /owner.vue Analysis. Drive Source only — handle
@@ -15807,11 +10772,13 @@ mod tests {
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&owner_arc),
+            incarnation: fixture_incarnation(&sched, owner_arc.as_ref()),
             generation: owner_gen,
             stage: FileStageKey::Analysis,
         };
@@ -15930,7 +10897,7 @@ mod tests {
         /// Custom executor: `/a.vue` extracts `/dep.ts` as a blocker.
         /// `/dep.ts` itself extracts nothing.
         struct OwnerWithDepExtractor;
-        impl crate::executor::StageExecutor for OwnerWithDepExtractor {
+        impl crate::execution::executor::StageExecutor for OwnerWithDepExtractor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -15938,14 +10905,14 @@ mod tests {
                 &self,
                 canonical_id: &str,
                 _source: &crate::node::SourceSnapshot,
-            ) -> crate::executor::ExtractedDeps {
+            ) -> crate::execution::executor::ExtractedDeps {
                 if canonical_id == "/a.vue" {
-                    crate::executor::ExtractedDeps {
+                    crate::execution::executor::ExtractedDeps {
                         forward_deps: vec!["/dep.ts".to_string()],
                         blocker_ids: vec!["/dep.ts".to_string()],
                     }
                 } else {
-                    crate::executor::ExtractedDeps::default()
+                    crate::execution::executor::ExtractedDeps::default()
                 }
             }
         }
@@ -15956,7 +10923,8 @@ mod tests {
         // execute_source_stage routes through terminalize_failure
         // with FileNotFound, populating terminal_dep_failures.
 
-        let executor: Arc<dyn crate::executor::StageExecutor> = Arc::new(OwnerWithDepExtractor);
+        let executor: Arc<dyn crate::execution::executor::StageExecutor> =
+            Arc::new(OwnerWithDepExtractor);
         let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
 
         // Step 1: submit /dep.ts directly and drive to terminal
@@ -15989,6 +10957,7 @@ mod tests {
                 if dep_gen > 0 {
                     let key = DepKey::FileStage {
                         canonical: Arc::clone(&dep_arc),
+                        incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                         generation: dep_gen,
                         stage: FileStageKey::Analysis,
                     };
@@ -16207,6 +11176,7 @@ mod tests {
                 if dep_gen > 0 {
                     let key = DepKey::FileStage {
                         canonical: Arc::clone(&dep_arc),
+                        incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                         generation: dep_gen,
                         stage: FileStageKey::Analysis,
                     };
@@ -16415,7 +11385,7 @@ mod tests {
             gates: dashmap::DashMap<String, AnalysisGate>,
         }
 
-        impl crate::executor::StageExecutor for GatedFailingAnalysisExecutor {
+        impl crate::execution::executor::StageExecutor for GatedFailingAnalysisExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -16424,12 +11394,13 @@ mod tests {
                 canonical_id: &str,
                 _source: &crate::node::SourceSnapshot,
                 generation: u64,
-            ) -> Result<crate::node::AnalysisSnapshot, crate::executor::StageError> {
+            ) -> Result<crate::node::AnalysisSnapshot, crate::execution::executor::StageError>
+            {
                 if let Some(gate) = self.gates.get(canonical_id) {
                     let _ = gate.entered_tx.send(());
                     let _ = gate.release_rx.recv();
-                    return Err(crate::executor::StageError {
-                        kind: crate::executor::StageErrorKind::Generic,
+                    return Err(crate::execution::executor::StageError {
+                        kind: crate::execution::executor::StageErrorKind::Generic,
                         message: format!("gated analysis failure for {canonical_id}"),
                     });
                 }
@@ -16520,6 +11491,7 @@ mod tests {
 
         let artifact_identity = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: a_gen,
             profile_hash: profile_hash_to_bytes(99),
             content_hash: [0u8; 16],
@@ -16647,6 +11619,7 @@ mod tests {
 
         let key_v1 = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen_v1,
             stage: FileStageKey::Analysis,
         };
@@ -16676,6 +11649,7 @@ mod tests {
             let mut dag = sched.dag.lock();
             dag.signal_stage_complete(
                 &dep_arc,
+                fixture_incarnation(&sched, dep_arc.as_ref()),
                 dep_gen_v1,
                 &TaskKind::Load,
                 &RequestResult::Source(Arc::clone(&source_snap)),
@@ -16710,6 +11684,7 @@ mod tests {
             let mut dag = sched.dag.lock();
             dag.signal_stage_complete(
                 &dep_arc,
+                fixture_incarnation(&sched, dep_arc.as_ref()),
                 dep_gen_v1,
                 &TaskKind::Analysis,
                 &RequestResult::Analysis(Arc::clone(&analysis_snap)),
@@ -16743,6 +11718,7 @@ mod tests {
             let mut dag = sched.dag.lock();
             dag.signal_stage_complete(
                 &dep_arc,
+                fixture_incarnation(&sched, dep_arc.as_ref()),
                 dep_gen_v1,
                 &TaskKind::Artifact { profile_hash: 1 },
                 &RequestResult::Artifact(Arc::clone(&artifact_snap)),
@@ -16791,6 +11767,7 @@ mod tests {
         sched.nodes.insert("/dep.ts".to_string(), dep_node);
         let key_v1 = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen_v1,
             stage: FileStageKey::Analysis,
         };
@@ -16837,12 +11814,14 @@ mod tests {
         // /dep.ts references and not other files.
         let key_v2 = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen_v2,
             stage: FileStageKey::Analysis,
         };
         let sibling_arc: Arc<str> = Arc::from("/sibling.ts");
         let sibling_key = DepKey::FileStage {
             canonical: Arc::clone(&sibling_arc),
+            incarnation: fixture_incarnation(&sched, sibling_arc.as_ref()),
             generation: 5,
             stage: FileStageKey::Analysis,
         };
@@ -16955,6 +11934,7 @@ mod tests {
             if dep_gen > 0 {
                 let key = DepKey::FileStage {
                     canonical: Arc::clone(&dep_arc),
+                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                     generation: dep_gen,
                     stage: FileStageKey::Analysis,
                 };
@@ -17133,6 +12113,7 @@ mod tests {
         // race covered by the sibling test).
         let artifact_identity = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: a_gen,
             profile_hash: profile_hash_to_bytes(77),
             content_hash: [0u8; 16],
@@ -17288,6 +12269,7 @@ mod tests {
         // persistent store carries the record.
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -17322,6 +12304,7 @@ mod tests {
             sched.admit_artifact_with_blockers(
                 &mut dag,
                 &a_arc,
+                fixture_incarnation(&sched, a_arc.as_ref()),
                 a_gen,
                 /* profile_hash = */ 77,
                 Priority::Interactive,
@@ -17335,7 +12318,7 @@ mod tests {
         assert!(
             registry_after_p1.failed.iter().any(|r| matches!(
                 &r.dep_key,
-                DepKey::FileStage { canonical, stage, generation }
+                DepKey::FileStage { canonical, stage, generation, .. }
                 if canonical.as_ref() == "/dep.ts"
                     && *stage == FileStageKey::Analysis
                     && *generation == dep_gen
@@ -17357,12 +12340,13 @@ mod tests {
                 .admit_artifact_with_blockers(
                     &mut dag,
                     &a_arc,
+                    fixture_incarnation(&sched, a_arc.as_ref()),
                     a_gen,
                     /* profile_hash = */ 99,
                     Priority::Interactive,
                     None,
                 )
-                .expect("test artifact admission refused by the retirement floor")
+                .expect("test artifact admission refused by the live object witness")
         };
 
         // Discriminating assertion #2: drain `next_ready` and verify
@@ -17511,6 +12495,7 @@ mod tests {
         // (no entry there).
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -17549,12 +12534,13 @@ mod tests {
                 .admit_artifact_with_blockers(
                     &mut dag,
                     &a_arc,
+                    fixture_incarnation(&sched, a_arc.as_ref()),
                     a_gen,
                     /* profile_hash = */ 31,
                     Priority::Interactive,
                     None,
                 )
-                .expect("test artifact admission refused by the retirement floor")
+                .expect("test artifact admission refused by the live object witness")
         };
 
         // Discriminating assertion #1: the registry slot for the
@@ -17617,7 +12603,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    impl crate::executor::StageExecutor for HookExecutor {
+    impl crate::execution::executor::StageExecutor for HookExecutor {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -17627,7 +12613,8 @@ mod tests {
             _file_language: FileLanguage,
             content: Arc<str>,
             generation: u64,
-        ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+            _incarnation: u64,
+        ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError> {
             Ok(crate::node::SourceSnapshot::new_empty(content, generation))
         }
         fn execute_analysis(
@@ -17635,7 +12622,7 @@ mod tests {
             canonical_id: &str,
             _source: &crate::node::SourceSnapshot,
             generation: u64,
-        ) -> Result<crate::node::AnalysisSnapshot, crate::executor::StageError> {
+        ) -> Result<crate::node::AnalysisSnapshot, crate::execution::executor::StageError> {
             (self.analysis_hook)(canonical_id);
             Ok(crate::node::AnalysisSnapshot::new_empty(generation))
         }
@@ -17881,11 +12868,12 @@ mod tests {
                 ..SchedulerConfig::default()
             },
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         );
 
         let identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -17956,7 +12944,7 @@ mod tests {
                 ..SchedulerConfig::default()
             },
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         );
 
         // A handle that resolves only when the test explicitly
@@ -18248,11 +13236,12 @@ mod tests {
         let owner: Arc<str> = Arc::from("/a.vue");
         let self_dep = DepKey::FileStage {
             canonical: Arc::clone(&owner),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let (kept, dropped) =
-            Scheduler::filter_macro_cycle_deps(&dag, &owner, 1, vec![self_dep.clone()]);
+            Scheduler::filter_macro_cycle_deps(&dag, &owner, 1, 1, vec![self_dep.clone()]);
         assert!(
             kept.is_empty(),
             "self-cycle dep must be filtered out: kept={kept:?}"
@@ -18281,11 +13270,13 @@ mod tests {
         // gating on B" half of the mutual cycle.
         let a_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&a),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let b_dep = DepKey::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -18302,10 +13293,12 @@ mod tests {
         // dep so B can admit and break the cycle.
         let a_dep = DepKey::FileStage {
             canonical: Arc::clone(&a),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
-        let (kept, dropped) = Scheduler::filter_macro_cycle_deps(&dag, &b, 1, vec![a_dep.clone()]);
+        let (kept, dropped) =
+            Scheduler::filter_macro_cycle_deps(&dag, &b, 1, 1, vec![a_dep.clone()]);
         assert!(
             kept.is_empty(),
             "mutual-cycle dep must be filtered out on the immediate path: kept={kept:?}",
@@ -18336,21 +13329,25 @@ mod tests {
         // transitive chain and reports the cycle.
         let b_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let c_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&c),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let c_dep = DepKey::FileStage {
             canonical: Arc::clone(&c),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let a_dep = DepKey::FileStage {
             canonical: Arc::clone(&a),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -18373,10 +13370,12 @@ mod tests {
         // it.
         let b_dep = DepKey::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
-        let (kept, dropped) = Scheduler::filter_macro_cycle_deps(&dag, &a, 1, vec![b_dep.clone()]);
+        let (kept, dropped) =
+            Scheduler::filter_macro_cycle_deps(&dag, &a, 1, 1, vec![b_dep.clone()]);
         assert!(
             kept.is_empty(),
             "three-node transitive cycle A→B→C→A must be filtered: kept={kept:?}",
@@ -18399,6 +13398,7 @@ mod tests {
         // B's Analysis is admitted with NO deps back to A.
         let b_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -18413,10 +13413,12 @@ mod tests {
         // A→B dep must survive the filter.
         let b_dep = DepKey::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
-        let (kept, dropped) = Scheduler::filter_macro_cycle_deps(&dag, &a, 1, vec![b_dep.clone()]);
+        let (kept, dropped) =
+            Scheduler::filter_macro_cycle_deps(&dag, &a, 1, 1, vec![b_dep.clone()]);
         assert!(
             dropped.is_empty(),
             "non-cycle dep must be preserved: dropped={dropped:?}",
@@ -18461,7 +13463,7 @@ mod tests {
         let sched = StdArc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            StdArc::new(crate::executor::DefaultExecutor),
+            StdArc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Drive both files' Source to completion FIRST so the
@@ -18529,21 +13531,25 @@ mod tests {
         let b_arc: Arc<str> = Arc::from("/b.vue");
         let a_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&a_arc),
+            incarnation: fixture_incarnation(&sched, a_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let b_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&b_arc),
+            incarnation: fixture_incarnation(&sched, b_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let dep_on_a = DepKey::FileStage {
             canonical: Arc::clone(&a_arc),
+            incarnation: fixture_incarnation(&sched, a_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let dep_on_b = DepKey::FileStage {
             canonical: Arc::clone(&b_arc),
+            incarnation: fixture_incarnation(&sched, b_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -18576,132 +13582,109 @@ mod tests {
     // silent deadlock.
     // ──────────────────────────────────────────────────────────────
 
-    /// A worker running A.Analysis that submits a request for
-    /// A.Artifact{X} and waits must reach a TERMINAL state instead of
-    /// parking on its own pending completion.
-    ///
-    /// **This contract has TWO legitimate arms; both are correct.**
-    /// [`check_terminal_or_same_path`] checks `handle.try_get()` FIRST,
-    /// and re-checks it again immediately before synthesizing the
-    /// same-path failure, specifically so a genuinely-resolved handle is
-    /// never masked by the synthetic `Failed`. Which arm appears depends
-    /// only on what happens first:
-    ///
-    /// 1. the caller reaches the same-path probe while the handle is
-    ///    still pending → `Failed(StageFailed { stage: "wait_or_drive" })`
-    /// 2. the work resolves first → `Ready(Artifact { profile_hash: 7 })`
-    ///
-    /// Arm 2 is reachable HERE BY DESIGN and is not a defect. The
-    /// active-path frame is thread-local to this caller, so the
-    /// `SchedulerConfig::default()` pool — `num_cpus()` CPU workers plus
-    /// 4 I/O workers, every one of them with an EMPTY active path — is
-    /// free to run `/a.vue` Source → Analysis → Artifact to completion.
-    /// Nothing here is actually blocked on `/a.vue` Analysis; the caller
-    /// merely pushed a frame CLAIMING it is. Pinning arm 1 as the only
-    /// acceptable outcome therefore makes this test a race on pool
-    /// scheduling — it used to do exactly that, and it failed under
-    /// concurrent load having observed arm 2.
-    ///
-    /// **Do not "reconcile" this with
-    /// `wait_or_drive_inner_re_check_observes_handle_resolved_during_same_path_probe`
-    /// by making a resolved handle lose to the synthetic failure.** That
-    /// sibling test deterministically pins the opposite direction — a
-    /// handle that resolves during the same-path window MUST surface its
-    /// real terminal state — and it is the authority on arm 2. The two
-    /// tests are the two arms of ONE contract, not a contradiction.
-    ///
-    /// What this test guards is the anti-deadlock property described in
-    /// the section comment above: without the concrete
-    /// `CompletionTarget::Work` target stamping, the caller would dedup
-    /// onto the in-flight Artifact, which gates on its own Analysis, and
-    /// PARK forever. So the discriminating assertions are (a) a terminal
-    /// state ARRIVES at all, enforced by an off-thread liveness
-    /// watchdog, and (b) it is one of exactly the two legitimate shapes
-    /// — never `Superseded`, never `Shutdown`, never a differently
-    /// tagged `Failed`, never a `Ready` carrying some other target.
-    ///
-    /// The bound is a LIVENESS watchdog, NOT a latency budget: a parked
-    /// waiter never completes at all, so a generous bound separates
-    /// "parked" from "returned" perfectly while staying immune to
-    /// machine load. A tight wall-clock assertion here would only
-    /// re-introduce a load-sensitive flake — which is why the previous
-    /// `elapsed < 2s` check is gone.
+    /// The real Analysis producer waits for its own Artifact while its
+    /// Analysis snapshot is still unpublished. Only self-await rejection
+    /// can release that physical dependency cycle.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn analysis_executor_submits_same_file_artifact_reaches_a_terminal_state() {
-        use crate::caller_kind::{with_active_path, CallerKind};
-        use crate::dag::{FileStageKey, WorkNodeIdentity};
-        use crate::job::{CompletionState, SchedulerError};
+        use crate::job::SchedulerError;
 
-        let loader = Arc::new(MemorySourceLoader::new());
-        loader.insert("/a.vue".to_string(), Arc::from("a content"));
-        let sched = Arc::new(Scheduler::test_with_executor(
-            SchedulerConfig::default(),
-            loader,
-            Arc::new(crate::executor::DefaultExecutor),
-        ));
-
-        // Run the waiter on its own thread so a PARK is observable as a
-        // missing message rather than hanging the whole test binary.
-        // `with_active_path` is thread-local, so the simulated Analysis
-        // frame must be pushed on the same thread that waits.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sched_for_waiter = Arc::clone(&sched);
-        let waiter = std::thread::spawn(move || {
-            let analysis_id = WorkNodeIdentity::FileStage {
-                canonical: Arc::from("/a.vue"),
-                generation: 1,
-                stage: FileStageKey::Analysis,
-            };
-            let state = with_active_path(analysis_id, || {
-                let handle = sched_for_waiter.submit_request(Request {
-                    file_id: "/a.vue".to_string(),
+        struct SelfAwaitExecutor {
+            scheduler: StdMutex<std::sync::Weak<Scheduler>>,
+            entered: std::sync::mpsc::Sender<()>,
+            result: std::sync::mpsc::Sender<CompletionState<RequestResult>>,
+            release: StdMutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl StageExecutor for SelfAwaitExecutor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn execute_analysis(
+                &self,
+                id: &str,
+                _: &SourceSnapshot,
+                generation: u64,
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+                let sched = self.scheduler.lock().unwrap().upgrade().unwrap();
+                self.entered.send(()).unwrap();
+                let artifact = sched.submit_request(Request {
+                    file_id: id.into(),
                     target: TargetStage::Artifact { profile_hash: 7 },
                     priority: Priority::Interactive,
-                    source: Some(Arc::from("a content")),
+                    source: None,
                     file_language: None,
                     request_context: None,
                 });
-                sched_for_waiter.wait_or_drive_with_caller(&handle, CallerKind::CpuWorker)
-            });
-            // A send failure only happens if the watchdog already failed
-            // the test and dropped the receiver.
-            let _ = tx.send(state);
-        });
-
-        // Liveness watchdog — the anti-deadlock discriminator. A parked
-        // waiter never sends, so this timeout is what converts the
-        // deadlock into a test failure.
-        let liveness_bound = std::time::Duration::from_secs(60);
-        let state = match rx.recv_timeout(liveness_bound) {
-            Ok(state) => state,
-            Err(_) => panic!(
-                "wait_or_drive reached NO terminal state within {liveness_bound:?}: the \
-                 Analysis→Artifact same-path waiter parked on its own pending completion \
-                 instead of returning. This is precisely the silent deadlock the concrete \
-                 `CompletionTarget::Work` target stamping exists to prevent.",
-            ),
-        };
-        waiter.join().expect("waiter thread panicked");
-
-        // Exactly TWO shapes are legitimate. Everything else — including
-        // `Superseded`, `Shutdown`, a `Failed` tagged with another stage,
-        // or a `Ready` for a different target — is a real failure.
-        match &state {
-            // Arm 1: same-path self-await detected while still pending.
-            CompletionState::Failed(SchedulerError::StageFailed { stage, .. })
-                if stage == "wait_or_drive" => {}
-            // Arm 2: the requested Artifact genuinely resolved first.
-            // `profile_hash` is checked so a `Ready` for the wrong target
-            // cannot satisfy this arm.
-            CompletionState::Ready(RequestResult::Artifact(snapshot))
-                if snapshot.profile_hash == 7 => {}
-            other => panic!(
-                "expected ONE of the two legitimate terminal arms — \
-                 Failed(StageFailed {{ stage: \"wait_or_drive\" }}) or \
-                 Ready(Artifact {{ profile_hash: 7 }}) — got {other:?}",
-            ),
+                let state = sched.wait_or_drive_with_caller(
+                    &artifact,
+                    crate::caller_kind::CallerKind::CpuWorker,
+                );
+                let _ = self.result.send(state);
+                let _ = self.release.lock().unwrap().recv();
+                Ok(AnalysisSnapshot::new_empty(generation))
+            }
         }
+        struct ReleaseOnDrop {
+            sched: Arc<Scheduler>,
+            release: std::sync::mpsc::Sender<()>,
+        }
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.sched.dag.lock().signal_all_shutdown();
+                let _ = self.release.send(());
+            }
+        }
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let executor = Arc::new(SelfAwaitExecutor {
+            scheduler: StdMutex::new(std::sync::Weak::new()),
+            entered: entered_tx,
+            result: result_tx,
+            release: StdMutex::new(release_rx),
+        });
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".into(), Arc::from("source"));
+        let sched = Scheduler::test_with_executor(
+            SchedulerConfig {
+                cpu_threads: 2,
+                io_threads: 1,
+                dag_budget: None,
+            },
+            loader,
+            executor.clone(),
+        );
+        *executor.scheduler.lock().unwrap() = Arc::downgrade(&sched);
+        let release = ReleaseOnDrop {
+            sched: sched.clone(),
+            release: release_tx,
+        };
+        let analysis = sched.submit_request(Request {
+            file_id: "/a.vue".into(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        let watchdog = std::time::Duration::from_secs(60);
+        entered_rx
+            .recv_timeout(watchdog)
+            .expect("the real Analysis executor must enter");
+        let state = result_rx
+            .recv_timeout(watchdog)
+            .expect("self-await must release the blocked Analysis producer");
+        assert!(
+            sched.try_get_analysis("/a.vue").is_none(),
+            "producer must remain unpublished while its self-await result is checked"
+        );
+        assert!(
+            matches!(state, CompletionState::Failed(SchedulerError::StageFailed { ref stage, .. }) if stage == "wait_or_drive"),
+            "{state:?}"
+        );
+        release.release.send(()).unwrap();
+        assert!(sched.wait_or_drive(&analysis).is_ready());
     }
 
     /// A single I/O worker that calls `wait_or_drive` on an
@@ -18729,7 +13712,7 @@ mod tests {
         struct SourceHookExecutor {
             source_hook: Box<dyn Fn(&str) + Send + Sync>,
         }
-        impl crate::executor::StageExecutor for SourceHookExecutor {
+        impl crate::execution::executor::StageExecutor for SourceHookExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -18739,7 +13722,9 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+                _incarnation: u64,
+            ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
+            {
                 (self.source_hook)(canonical_id);
                 Ok(crate::node::SourceSnapshot::new_empty(content, generation))
             }
@@ -18853,7 +13838,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Submit a request and wait for it to be admitted. Once
@@ -18988,7 +13973,7 @@ mod tests {
                 }
             } else if canonical == "/b.vue" {
                 // Inner execution: record the observed TLS id.
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 inner_observed_for_hook.store(id, MOrd::SeqCst);
             }
         });
@@ -19073,7 +14058,7 @@ mod tests {
         struct SourceHookExecutorIo {
             source_hook: Box<dyn Fn(&str) + Send + Sync>,
         }
-        impl crate::executor::StageExecutor for SourceHookExecutorIo {
+        impl crate::execution::executor::StageExecutor for SourceHookExecutorIo {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -19083,7 +14068,9 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+                _incarnation: u64,
+            ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
+            {
                 (self.source_hook)(canonical_id);
                 Ok(crate::node::SourceSnapshot::new_empty(content, generation))
             }
@@ -19127,7 +14114,7 @@ mod tests {
             fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
             fn record_cache_event(&self, _e: CacheEventKind) {}
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
-                let ctx_guard = crate::request_context::OpaqueContextGuard::install(
+                let ctx_guard = verter_execution::request_context::OpaqueContextGuard::install(
                     OpaqueRequestContext(Arc::clone(&self) as Arc<dyn RequestContextLike>),
                 );
                 let observer_guard = verter_audit::observer::install_observer(Arc::clone(
@@ -19141,7 +14128,7 @@ mod tests {
             }
         }
         struct BothGuards {
-            _ctx: crate::request_context::OpaqueContextGuard,
+            _ctx: verter_execution::request_context::OpaqueContextGuard,
             _obs: verter_audit::observer::ObserverGuard,
         }
         impl TlsUninstall for BothGuards {
@@ -19306,7 +14293,7 @@ mod tests {
             } else if canonical == "/b.vue" {
                 // Inner execution: record the observed TLS state
                 // for each install_tls slot. 0 means cleared.
-                let id = crate::request_context::current_request_id().unwrap_or(0);
+                let id = verter_execution::request_context::current_request_id().unwrap_or(0);
                 inner_observed_for_hook.store(id as i64, MOrd::SeqCst);
                 // Audit observer slot must also be cleared on the
                 // inline-execute None-winner_ctx path. A non-None
@@ -19402,11 +14389,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn all_slots_clear_guard_clears_scheduler_opaque_slot_and_restores_on_drop() {
-        use crate::request_context::{
+        use std::sync::atomic::AtomicU64;
+        use verter_execution::request_context::{
             AllSlotsClearGuard, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike,
             TlsUninstall,
         };
-        use std::sync::atomic::AtomicU64;
 
         struct DummyCtx {
             id: u64,
@@ -19419,7 +14406,11 @@ mod tests {
                 false
             }
             fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
-            fn record_cache_event(&self, _event: crate::request_context::CacheEventKind) {}
+            fn record_cache_event(
+                &self,
+                _event: verter_execution::request_context::CacheEventKind,
+            ) {
+            }
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
                 struct NoopUninstall;
                 impl TlsUninstall for NoopUninstall {
@@ -19434,7 +14425,7 @@ mod tests {
         let _outer =
             OpaqueContextGuard::install(OpaqueRequestContext(ctx as Arc<dyn RequestContextLike>));
         assert_eq!(
-            crate::request_context::current_request_id(),
+            verter_execution::request_context::current_request_id(),
             Some(12345),
             "outer install must show in scheduler opaque slot",
         );
@@ -19442,14 +14433,14 @@ mod tests {
         {
             let _clear = AllSlotsClearGuard::clear_all();
             assert_eq!(
-                crate::request_context::current_request_id(),
+                verter_execution::request_context::current_request_id(),
                 None,
                 "AllSlotsClearGuard must clear scheduler opaque slot while alive",
             );
         }
 
         assert_eq!(
-            crate::request_context::current_request_id(),
+            verter_execution::request_context::current_request_id(),
             Some(12345),
             "AllSlotsClearGuard drop must restore prior scheduler opaque slot",
         );
@@ -19476,7 +14467,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Build a handle, stamp it with a Work target that
@@ -19486,6 +14477,7 @@ mod tests {
         // a synthetic Failed.
         let identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -19543,13 +14535,14 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Manually construct a handle with the pre-admission
         // `Request{Artifact{..}}` target — the race-window state.
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -19604,13 +14597,14 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Hand-constructed handle with the pre-admission
         // `Request{Analysis}` target — the race-window state.
         let source_frame = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Source,
         };
@@ -19659,12 +14653,13 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         let profile = 0x42u64;
         let artifact_frame = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             profile_hash: profile_hash_to_bytes(profile),
             content_hash: [1u8; 16],
@@ -19732,6 +14727,7 @@ mod tests {
 
         let artifact_frame = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 1,
             profile_hash: profile_hash_to_bytes(active_profile),
             content_hash: [1u8; 16],
@@ -19792,7 +14788,7 @@ mod tests {
         let sched = Arc::new(Scheduler::test_with_executor(
             SchedulerConfig::default(),
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Active frame: /x.vue Analysis. Handle target: Request{
@@ -19802,6 +14798,7 @@ mod tests {
         // catches the resolution.
         let active_frame = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -19891,7 +14888,7 @@ mod tests {
                 ..SchedulerConfig::default()
             },
             loader,
-            Arc::new(crate::executor::DefaultExecutor),
+            Arc::new(crate::execution::executor::DefaultExecutor),
         ));
 
         // Active-path frame is /y.vue Analysis. The handle's
@@ -19902,11 +14899,13 @@ mod tests {
         // Failed must surface.
         let active_frame = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/y.vue"),
+            incarnation: fixture_incarnation(&sched, "/y.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let late_stamped_work = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/y.vue"),
+            incarnation: fixture_incarnation(&sched, "/y.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -20295,7 +15294,7 @@ mod tests {
             try_lock_succeeded: Arc<std::sync::atomic::AtomicBool>,
             fire_count: Arc<std::sync::atomic::AtomicU64>,
         }
-        impl crate::request_context::RequestContextLike for LockProbeCtx {
+        impl verter_execution::request_context::RequestContextLike for LockProbeCtx {
             fn request_id(&self) -> u64 {
                 self.id
             }
@@ -20314,12 +15313,16 @@ mod tests {
                 self.try_lock_succeeded
                     .store(got.is_some(), std::sync::atomic::Ordering::SeqCst);
             }
-            fn record_cache_event(&self, _event: crate::request_context::CacheEventKind) {}
+            fn record_cache_event(
+                &self,
+                _event: verter_execution::request_context::CacheEventKind,
+            ) {
+            }
             fn install_tls(
                 self: Arc<Self>,
-            ) -> Box<dyn crate::request_context::TlsUninstall + Send> {
+            ) -> Box<dyn verter_execution::request_context::TlsUninstall + Send> {
                 struct NoopUninstall;
-                impl crate::request_context::TlsUninstall for NoopUninstall {
+                impl verter_execution::request_context::TlsUninstall for NoopUninstall {
                     fn uninstall(self: Box<Self>) {}
                 }
                 Box::new(NoopUninstall)
@@ -20336,14 +15339,14 @@ mod tests {
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
             fire_count: Arc::clone(&fire_count),
         })
-            as Arc<dyn crate::request_context::RequestContextLike>);
+            as Arc<dyn verter_execution::request_context::RequestContextLike>);
         let joiner_ctx = OpaqueRequestContext(Arc::new(LockProbeCtx {
             id: 2,
             dag: Arc::clone(&sched.dag),
             try_lock_succeeded: Arc::clone(&try_lock_succeeded),
             fire_count: Arc::clone(&fire_count),
         })
-            as Arc<dyn crate::request_context::RequestContextLike>);
+            as Arc<dyn verter_execution::request_context::RequestContextLike>);
 
         let reqs = vec![
             Request {
@@ -20728,7 +15731,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader,
-                Arc::new(crate::executor::DefaultExecutor),
+                Arc::new(crate::execution::executor::DefaultExecutor),
             );
             let cap = sched.io_pool.transport_capacity();
             assert!(
@@ -20752,7 +15755,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader,
-                Arc::new(crate::executor::DefaultExecutor),
+                Arc::new(crate::execution::executor::DefaultExecutor),
             );
             let cap = sched.cpu_pool.transport_capacity();
             assert!(
@@ -20786,8 +15789,8 @@ mod tests {
         /// inside each stage.
         #[test]
         fn scheduler_stages_run_on_scheduler_pools_never_external() {
+            use crate::execution::pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};
             use crate::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
-            use crate::pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};
 
             struct CallerKindProbe {
                 source_kind: Arc<AtomicU64>,
@@ -20806,7 +15809,7 @@ mod tests {
                     crate::caller_kind::CallerKind::Inline => 5,
                 }
             }
-            impl crate::executor::StageExecutor for CallerKindProbe {
+            impl crate::execution::executor::StageExecutor for CallerKindProbe {
                 fn as_any(&self) -> &dyn std::any::Any {
                     self
                 }
@@ -20816,7 +15819,9 @@ mod tests {
                     _k: FileLanguage,
                     content: Arc<str>,
                     generation: u64,
-                ) -> Result<SourceSnapshot, crate::executor::StageError> {
+                    _incarnation: u64,
+                ) -> Result<SourceSnapshot, crate::execution::executor::StageError>
+                {
                     self.source_kind.store(
                         kind_code(crate::caller_kind::CallerKind::current()),
                         AtomOrd::SeqCst,
@@ -20833,7 +15838,8 @@ mod tests {
                     _c: &str,
                     _s: &SourceSnapshot,
                     generation: u64,
-                ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+                ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError>
+                {
                     self.analysis_kind.store(
                         kind_code(crate::caller_kind::CallerKind::current()),
                         AtomOrd::SeqCst,
@@ -20851,7 +15857,8 @@ mod tests {
                     _a: &AnalysisSnapshot,
                     profile_hash: u64,
                     generation: u64,
-                ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
+                ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError>
+                {
                     Ok(ArtifactSnapshot {
                         generation,
                         profile_hash,
@@ -20882,7 +15889,7 @@ mod tests {
                     dag_budget: None,
                 },
                 Arc::clone(&loader) as Arc<dyn crate::source_loader::SourceLoader>,
-                probe as Arc<dyn crate::executor::StageExecutor>,
+                probe as Arc<dyn crate::execution::executor::StageExecutor>,
             );
 
             let handle = sched.submit_request(Request {
@@ -20938,7 +15945,7 @@ mod tests {
         struct GatedSourceExecutor {
             gates: dashmap::DashMap<String, SourceGate>,
         }
-        impl crate::executor::StageExecutor for GatedSourceExecutor {
+        impl crate::execution::executor::StageExecutor for GatedSourceExecutor {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -20948,7 +15955,9 @@ mod tests {
                 _file_language: FileLanguage,
                 content: Arc<str>,
                 generation: u64,
-            ) -> Result<crate::node::SourceSnapshot, crate::executor::StageError> {
+                _incarnation: u64,
+            ) -> Result<crate::node::SourceSnapshot, crate::execution::executor::StageError>
+            {
                 if let Some(gate) = self.gates.get(canonical_id) {
                     let _ = gate.entered_tx.send(());
                     let _ = gate.release_rx.recv();
@@ -21027,7 +16036,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader as Arc<dyn crate::source_loader::SourceLoader>,
-                executor as Arc<dyn crate::executor::StageExecutor>,
+                executor as Arc<dyn crate::execution::executor::StageExecutor>,
             );
 
             // Submit all N Source requests. The single IO worker picks up
@@ -21174,7 +16183,7 @@ mod tests {
             let sched = Scheduler::test_with_executor(
                 config,
                 loader as Arc<dyn crate::source_loader::SourceLoader>,
-                Arc::new(crate::executor::DefaultExecutor),
+                Arc::new(crate::execution::executor::DefaultExecutor),
             );
 
             // Arm a one-shot Full fault: the NEXT non-inline pool submit

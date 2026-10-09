@@ -3,10 +3,9 @@
 //! and cold-compute paths.
 
 use verter_session::for_tests::install_fact_tracer_for_tests;
-use verter_session::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, PermissiveStoreView, RouteDb, RouteResult,
-};
+use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
 use verter_session::VerterHost;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())
@@ -16,7 +15,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
     verter_session::resolver_core::RouteNameKey::new(
         provider,
         name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
         [0u8; 16],
         [0u8; 16],

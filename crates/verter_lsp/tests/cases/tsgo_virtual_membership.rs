@@ -26,12 +26,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::OnceCell;
-use tower_lsp_server::Client;
 use verter_lsp::tsgo::composite::TsgoCompositeProvider;
 use verter_lsp::type_provider::traits::TypeProvider;
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::ProjectId;
 use verter_tsgo_api::actor::spawn_actor;
 use verter_tsgo_api::proto::types::{
     method, Diagnostic, InitializeResponse, UpdateSnapshotResponse,
@@ -49,7 +48,7 @@ use verter_workspace::{
     snapshot_builder::{
         build_workspace_snapshot_simple, membership_to_spec, supported_extensions_for,
     },
-    workspace_snapshot::{OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration},
+    workspace_snapshot::{OwnershipProject, ProjectPayload, SnapshotGeneration},
     FilesystemOptions, FilesystemWorkspace, WorkspaceAccess,
 };
 
@@ -412,7 +411,7 @@ async fn vue_only_owner_preserves_managed_lsp_mutation_diagnostics() {
     let resilient = verter_lsp::tsgo::resilient::establish_owned(
         tsgo_bin,
         root_uri,
-        Arc::new(OnceCell::<Client>::new()),
+        verter_lsp::outbound::Outbound::default(),
         3,
         verter_lsp::tsgo::resilient::OwnedStartAnnouncements::All,
     )

@@ -10,8 +10,8 @@ use verter_compiler::framework_common::carrier_compiler::{
     RuntimeDiagnostic, RuntimeDiagnosticSeverity,
 };
 use verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct;
-use verter_semantic::analysis::macro_usage::MacroUsageFacts;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::macro_usage::MacroUsageFacts;
+use verter_session_query::analysis::template::{
     AnalyzedEmitDefinition, AnalyzedPropDefinition, AnalyzedSlotDeclaration, BindingUsageKind,
     CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace, IfChain,
     PropValueConstness, SnippetDefinition, SvelteDirectiveInfo, TemplateAnalysisSnapshot,
@@ -21,7 +21,7 @@ use verter_semantic::analysis::template::{
     TemplateExpressionRecord, TemplateMemberRead, TemplatePropUsage, TemplateRef,
     TemplateTextSegment, UnresolvedBinding, VForDirective, VModelDirective,
 };
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedBinding, AnalyzedMacro, AnalyzedMacroKind, VueApiCallSite, VueApiClassification,
 };
 
@@ -55,7 +55,7 @@ impl<'a> UnusedDeclarationContext<'a> {
         let use_slots_called = vue_api_calls
             .iter()
             .any(|call| matches!(call.api, VueApiClassification::UseSlots));
-        let props_binding = verter_semantic::analysis::props_root_binding(macros);
+        let props_binding = verter_session_query::analysis::macros::props_root_binding(macros);
         let props_root_used_in_style = props_binding.is_some_and(|name| {
             bindings
                 .iter()
@@ -498,23 +498,23 @@ pub(crate) fn convert_raw_to_analysis(
             }
 
             // Extract CSS variables from :style bindings (e.g., { '--color': val })
-            let dynamic_style_vars: Vec<verter_semantic::analysis::template::DynamicStyleVar> = e
-                .attributes
-                .iter()
-                .filter(|a| a.is_dynamic && a.name == "style")
-                .filter_map(|a| a.value.as_deref())
-                .chain(bind_style_expressions.iter().copied())
-                .flat_map(verter_semantic::analysis::template::extract_dynamic_style_vars)
-                .collect();
+            let dynamic_style_vars: Vec<verter_session_query::analysis::template::DynamicStyleVar> =
+                e.attributes
+                    .iter()
+                    .filter(|a| a.is_dynamic && a.name == "style")
+                    .filter_map(|a| a.value.as_deref())
+                    .chain(bind_style_expressions.iter().copied())
+                    .flat_map(verter_semantic::analysis::template::extract_dynamic_style_vars)
+                    .collect();
 
             // Extract CSS variables from static style attributes (e.g., style="--color: red")
-            let static_style_vars: Vec<verter_semantic::analysis::template::StaticStyleVar> = e
-                .attributes
-                .iter()
-                .filter(|a| !a.is_dynamic && a.name == "style")
-                .filter_map(|a| a.value.as_deref())
-                .flat_map(verter_semantic::analysis::template::extract_static_style_vars)
-                .collect();
+            let static_style_vars: Vec<verter_session_query::analysis::template::StaticStyleVar> =
+                e.attributes
+                    .iter()
+                    .filter(|a| !a.is_dynamic && a.name == "style")
+                    .filter_map(|a| a.value.as_deref())
+                    .flat_map(verter_semantic::analysis::template::extract_static_style_vars)
+                    .collect();
 
             let component_usage_index = if e.is_component {
                 let pascal_tag = to_pascal_case(&e.tag);
@@ -737,7 +737,7 @@ fn populate_unused_declaration_facts(
         };
 
     // ── Props ──
-    let props_root = verter_semantic::analysis::props_root_binding(ctx.macros);
+    let props_root = verter_session_query::analysis::macros::props_root_binding(ctx.macros);
     let props_root_template = match props_root {
         Some(root) => bounded_member_reads(tpl, root),
         None => Some(FxHashSet::default()),
@@ -937,9 +937,9 @@ type ClosedClassMembers = std::sync::Arc<[std::sync::Arc<str>]>;
 
 impl TemplateClassDomainIndex {
     pub(crate) fn from_semantic_facts(
-        facts: &crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts,
+        facts: &crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts,
         expected_canonical: &str,
-        expected_whole_hash: verter_semantic::analysis::Hash16,
+        expected_whole_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Self> {
         if facts.owner_canonical() != expected_canonical
             || facts.owner_whole_hash() != expected_whole_hash
@@ -961,7 +961,7 @@ impl TemplateClassDomainIndex {
                 _ => None,
             };
             match &row.subject {
-                verter_semantic::analysis::TemplateClassSubject::Binding { label, .. } => {
+                verter_session_query::analysis::template_class_facts::TemplateClassSubject::Binding { label, .. } => {
                     match admitted {
                         Some(classes) => {
                             index.binding_domains.insert(
@@ -974,7 +974,7 @@ impl TemplateClassDomainIndex {
                         }
                     }
                 }
-                verter_semantic::analysis::TemplateClassSubject::Prop {
+                verter_session_query::analysis::template_class_facts::TemplateClassSubject::Prop {
                     label, props_root, ..
                 } => {
                     // An EMPTY `props_root` marks a BARE-requested prop; a
@@ -1005,7 +1005,7 @@ impl TemplateClassDomainIndex {
                         }
                     }
                 }
-                verter_semantic::analysis::TemplateClassSubject::Unresolved {
+                verter_session_query::analysis::template_class_facts::TemplateClassSubject::Unresolved {
                     label,
                     props_root,
                 } => match props_root {

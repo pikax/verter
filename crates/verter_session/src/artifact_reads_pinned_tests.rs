@@ -30,9 +30,10 @@
 //! the stale artifact. A pre-fix `get_any` tree returns the planted stale
 //! hash and the assertions FAIL.
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
-use crate::resolver_core::DerivedFactKind;
 use crate::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::DerivedFactKind;
 
 /// Doctored hash that no real content ever produces — the planted
 /// stale artifact carries this so a permissive `get_any` read is
@@ -330,7 +331,7 @@ fn import_route_witness_ignores_a_planted_stale_artifact() {
 /// artifact whose `whole_hash == overlay_hash`.
 #[test]
 fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
-    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
     use crate::session_view::{OverlaidView, SessionView};
     use rustc_hash::FxHashMap;
 
@@ -463,7 +464,10 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
     // from the live (current-content) shallow state. This is the hash a
     // correct `HostStoreView` build must publish.
     let current_route_surface = host
-        .current_derived_fact_hash(probe, crate::resolver_core::DerivedFactKind::Route)
+        .current_derived_fact_hash(
+            probe,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+        )
         .expect("probe declares a resolvable route surface → current Route hash is Some");
 
     // A DONOR file with a DIFFERENT export surface. Its shallow state is
@@ -519,7 +523,10 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
 
     // Capture the production root-backed `HostStoreView`.
     let view = host.resolver_store_view_read().into_owned_view();
-    let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
+    let view_route_hash = view.derived_hash(
+        probe,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
 
     // Discriminating assertion: the view's point lookup must return the
     // CURRENT route surface, not the planted stale artifact's surface.
@@ -544,7 +551,10 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
     // route-dependent cache entry.
     assert_eq!(
         view_route_hash,
-        host.current_derived_fact_hash(probe, crate::resolver_core::DerivedFactKind::Route),
+        host.current_derived_fact_hash(
+            probe,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route
+        ),
         "HostStoreView's root-backed `Route` lookup MUST agree with \
          `current_derived_fact_hash(Route)` — the producer and the validator must observe \
          one route surface for the canonical",

@@ -55,9 +55,9 @@ use verter_audit::{
 
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::project_type_store::{AnalysisArtifactKey, AnalysisReady};
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::types::FileAnalysisSnapshot;
 use crate::VerterHost;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 impl VerterHost {
     /// Run a semantic-analysis request through the host's shared
@@ -111,7 +111,7 @@ impl VerterHost {
             let request_id = self.next_request_id();
             let analysis = self.materialize_analysis_ready(canonical_id);
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_semantic_analysis_record(
                 request_id,
                 canonical_id,
@@ -127,7 +127,7 @@ impl VerterHost {
         // correctly when a closure issues both a component-meta and
         // analyze call inside the same `run` window.
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         // Build the per-request context. Footprint capture follows
         // the host config; semantic-analysis requests do NOT install
@@ -154,7 +154,7 @@ impl VerterHost {
             ctx.audit_registration.get().is_none(),
             "freshly-constructed RequestContext must have no audit_registration",
         );
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         // Install the matching TLS observer at the audit boundary.
         // Active registrations install the real
@@ -365,13 +365,13 @@ fn build_payload_from_analysis(analysis: &AnalysisReady) -> SemanticAnalysisPayl
     if let Some(script) = analysis.script_analysis.as_ref() {
         for entry in &script.declaration_entries {
             match entry.kind {
-                verter_semantic::analysis::LocalDeclarationKind::Type => {
+                verter_session_query::analysis::types::LocalDeclarationKind::Type => {
                     num_type_decls = num_type_decls.saturating_add(1);
                 }
-                verter_semantic::analysis::LocalDeclarationKind::Value => {
+                verter_session_query::analysis::types::LocalDeclarationKind::Value => {
                     num_value_decls = num_value_decls.saturating_add(1);
                 }
-                verter_semantic::analysis::LocalDeclarationKind::TypeAndValue => {
+                verter_session_query::analysis::types::LocalDeclarationKind::TypeAndValue => {
                     num_type_decls = num_type_decls.saturating_add(1);
                     num_value_decls = num_value_decls.saturating_add(1);
                 }

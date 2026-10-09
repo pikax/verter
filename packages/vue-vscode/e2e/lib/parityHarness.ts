@@ -22,7 +22,7 @@ import {
   waitForDiagnostics,
   waitForDiagnosticsSettled,
 } from "../helpers";
-import { didOpenHandlersInFlight } from "./serverLog";
+import { typeProviderSyncCompleteSince } from "./typeProviderSyncLog";
 import { VIRTUAL_CARRIER_PATTERN } from "./virtualCarrier";
 
 export type ParityFramework = "vue" | "svelte";
@@ -105,29 +105,56 @@ async function closeAllEditors(): Promise<void> {
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
 }
 
-/** Start a clean provider epoch for a state-sensitive parity suite. */
-export async function restartParityReady(entry: string): Promise<vscode.TextDocument> {
+/**
+ * Start a clean provider epoch for a state-sensitive parity suite, ready for
+ * what the suite asserts: its entry document's own merged diagnostics.
+ *
+ * Nothing workspace-wide is awaited. The restarted server certifies a document
+ * while its workspace scan is still running once the document's own sync and
+ * its import closure are current, so neither level 2 of the readiness ladder
+ * (`typeProviderSyncComplete`, sent only after the whole scan) nor the replay
+ * of every document VS Code still holds stands between the suite and its
+ * entry. The entry is opened FIRST, straight after the restart. A document VS
+ * Code still holds is not re-opened — its replayed open is all the server has,
+ * and nothing about that open singles it out — so the priority comes from the
+ * diagnostics-status poll instead: `verter._getDiagnosticStatus` first awaits
+ * an existing per-document request for the entry (`getAnalysis {uri}`), which
+ * the server records as demand for it (its owed work served first, its
+ * dependency publication enqueued, the scanner promoting it and its imports),
+ * and only then reads the unchanged statistics.
+ *
+ * A suite that asserts workspace-wide state (closed-file references, project
+ * rename, workspace symbols) passes `workspaceWide` with the reason: the server
+ * answers those requests only once its configured-project frontier is complete,
+ * so level 2 is awaited too. The restart invalidated the cached level-2 fact,
+ * so that wait is for the new server's own announcement.
+ */
+export async function restartParityReady(
+  entry: string,
+  options?: { workspaceWide?: string },
+): Promise<vscode.TextDocument> {
   await closeAllEditors();
   // Marked BEFORE the restart: init generations restart at 1, so the previous
   // server's readiness lines would otherwise vouch for the one still booting.
   const logFloor = logMark();
-  const started = Date.now();
-  // A restart repeats the root provider handshake, so it takes that budget
-  // explicitly rather than the ordinary per-wait default.
-  const budgetMs = pollBudget("restartTypeProviderSync");
+  const deadline = Date.now() + pollBudget("restartEntryDiagnostics");
+  const remaining = () => Math.max(deadline - Date.now(), 1_000);
   await vscode.commands.executeCommand("verter.restartLanguageServer");
   invalidateTypeProviderSyncCache(logFloor);
-  await ensureTypeProviderSynced({ syncBudgetMs: budgetMs });
-  // A document held without an editor is still replayed. The epoch is usable
-  // once the server has answered every open it was handed, under what is left
-  // of the same handshake budget; a document opened below starts a fair clock.
+  const doc = await openRelative(entry);
+  // Level 1 only: the readiness the entry is about to be asked for must come
+  // from the server that is running NOW.
   await pollUntilWithin(
-    "restarted server still answering replayed opens",
-    async () => didOpenHandlersInFlight(readTestLog(), logFloor),
-    (inFlight) => inFlight === 0,
-    Math.max(budgetMs - (Date.now() - started), 1_000),
+    "restarted server announced ready",
+    async () => typeProviderSyncCompleteSince(readTestLog(), logFloor),
+    (progress) => progress !== "awaiting-ready",
+    remaining(),
   );
-  return openRelative(entry);
+  await waitForDiagnosticsSettled(doc.uri, { timeoutMs: remaining() });
+  if (options?.workspaceWide) {
+    await ensureTypeProviderSynced({ syncBudgetMs: pollBudget("restartTypeProviderSync") });
+  }
+  return doc;
 }
 
 export function tokenOffset(doc: vscode.TextDocument, anchor: TokenAnchor): number {

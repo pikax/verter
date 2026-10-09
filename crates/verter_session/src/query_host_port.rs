@@ -15,9 +15,9 @@
 //! materialization refusal fails closed and cannot serve or publish the base
 //! artifact. The authored-body-lowering demand
 //! delegates to the decl-body memo's locator deref
-//! ([`crate::decl_body_memo::DeclBodyMemo::deref_locator_body`]), whose
+//! ([`verter_semantic_source::decl_body_memo::DeclBodyMemo::deref_locator_body`]), whose
 //! demanded lowering runs LEASE-ONLY through
-//! [`crate::decl_lowering::DeclLoweringService::run_leased`] against the
+//! [`verter_semantic_source::decl_lowering::DeclLoweringService::run_leased`] against the
 //! scheduler-retained parse snapshot. The port adds NO second lowering path
 //! and NO resolution of its own — it routes, delegates, maps the typed
 //! product onto the neutral wire vocabulary, and carries the serve's
@@ -25,14 +25,13 @@
 //! signal on every outcome arm, success and failure alike.
 
 use verter_session_query::{
-    AuthoredBodyLowering, AuthoredBodyShape, QueryHostAdmission, QueryHostError, QueryHostPort,
-    QueryHostServe,
+    AuthoredBodyLowering, AuthoredBodyShape, QueryHostError, QueryHostPort, QueryHostServe,
 };
 use verter_type_expr::locators::AuthoredBodyLocator;
 
-use crate::decl_body_memo::locator_deref::DerefedAuthoredBody;
-use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
-use crate::resolver_core::RequestBoundResolverContext;
+use verter_session_query::source::deref::DerefedAuthoredBody;
+use verter_session_query::source::deref::{DerefedBodyShape, LocatorBodyDerefError};
+use verter_type_engine::resolver_core::RequestBoundResolverContext;
 
 /// Host-backed adapter implementing the query layer's host port.
 ///
@@ -54,7 +53,7 @@ use crate::resolver_core::RequestBoundResolverContext;
 /// boundary instead of stopping at the request-sticky / traced-scope
 /// suppression rails inside the bridge.
 pub struct SessionQueryHostPort<'ctx> {
-    ctx: &'ctx dyn RequestBoundResolverContext,
+    ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
 }
 
 impl<'ctx> SessionQueryHostPort<'ctx> {
@@ -70,7 +69,9 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
     /// therefore redundant defense-in-depth (it can only ever hold),
     /// retained so a hypothetical future marker misuse trips loudly in dev
     /// builds.
-    pub(crate) fn new(ctx: &'ctx dyn RequestBoundResolverContext) -> Self {
+    pub(crate) fn new(
+        ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
+    ) -> Self {
         verter_debug_assert!(
             ctx.is_request_bound(),
             "QueryHostPort binds a request-view-bound ResolverContext"
@@ -92,7 +93,9 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
 
 // NEGATIVE — the direct host cannot satisfy the request-bound marker. Adding
 // any such implementation makes this assertion fail to compile.
-static_assertions::assert_not_impl_all!(crate::VerterHost: RequestBoundResolverContext);
+static_assertions::assert_not_impl_all!(
+    crate::VerterHost: RequestBoundResolverContext<crate::resolver_core::HostCapabilities>
+);
 
 const _: () = {
     // POSITIVE — both genuinely request-bound contexts coerce to the
@@ -116,52 +119,14 @@ const _: () = {
 
 impl QueryHostPort for SessionQueryHostPort<'_> {
     fn lower_authored_body(&self, locator: &AuthoredBodyLocator) -> QueryHostServe {
-        // A locator derefs through the memo of its OWN producing canonical;
-        // the anchor names that canonical for every locator kind.
-        let anchor = match locator {
-            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
-            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
-            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
-            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
-        };
-        // The single materialization bridge for the canonical post-parse
-        // artifact. `None` = the producing canonical is unknown to the live
-        // view: a transient no-warm non-result on BOTH axes — no serve was
-        // produced, so there is no publication status to map and nothing
-        // derived from this answer may be admitted warm.
-        let Some(serve) = self
-            .ctx
-            .ensure_indexed_ready_serve(anchor.canonical_id.as_ref())
-        else {
-            return QueryHostServe {
-                admission: QueryHostAdmission::ReturnOnly,
-                outcome: Err(QueryHostError::UnknownFile),
-            };
-        };
-        // The serve's by-value publication status IS the port's admission
-        // signal: `store_published == false` marks a FENCED flight that
-        // published nothing — its answers (the lowering AND any genuine
-        // miss derefed against the fenced surface) serve this caller's
-        // read only and must never be admitted warm into a shared cache.
-        // The admission rides the wrapper for BOTH outcome arms; the error
-        // CLASS stays orthogonal and is never reclassified to smuggle the
-        // fence through.
-        let admission = QueryHostAdmission::from_store_published(serve.store_published);
-        let outcome = serve
-            .indexed
-            .shallow_state
-            .decl_bodies()
-            .deref_locator_body(locator)
-            .map(neutral_lowering)
-            .map_err(neutral_error);
-        QueryHostServe { admission, outcome }
+        self.ctx.lower_authored_body(locator)
     }
 }
 
 /// Maps the memo's owned deref product onto the port's neutral DTO — a 1:1
 /// structural map (both sides carry the same lower-crate typed IR; the
 /// merged-contributor carrier stays distinct, never an intersection).
-fn neutral_lowering(derefed: DerefedAuthoredBody) -> AuthoredBodyLowering {
+pub(crate) fn neutral_lowering(derefed: DerefedAuthoredBody) -> AuthoredBodyLowering {
     AuthoredBodyLowering {
         shape: match derefed.shape {
             DerefedBodyShape::Single(body) => AuthoredBodyShape::Single(body),
@@ -179,7 +144,7 @@ fn neutral_lowering(derefed: DerefedAuthoredBody) -> AuthoredBodyLowering {
 /// authored-absence pair), the transient no-warm lease signal (never
 /// collapsed into a cacheable miss), and the structural fail-closed
 /// non-results.
-fn neutral_error(error: LocatorBodyDerefError) -> QueryHostError {
+pub(crate) fn neutral_error(error: LocatorBodyDerefError) -> QueryHostError {
     match error {
         LocatorBodyDerefError::UnknownSymbol => QueryHostError::UnknownSymbol,
         LocatorBodyDerefError::LeaseMiss => QueryHostError::LeaseMiss,

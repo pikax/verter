@@ -4,7 +4,7 @@
 //! `VerterHost` owns a single `AuditRecordsStore` instance;
 //! every audited request inserts its `RequestAuditRecord` at completion;
 //! consumers (harness, NAPI, WASM, LSP) retrieve via
-//! `take_audit_record(request_id)` — a strict insert-then-take flow.
+//! `take_record(request_id)` — a strict insert-then-take flow.
 //!
 //! Capacity is bounded to 256 by oldest-by-insertion eviction on
 //! insert-overflow. No access-refresh semantics are needed because
@@ -23,7 +23,7 @@
 //! can honour an `Instant`-keyed `since` window without having to
 //! re-key records by wall-clock time.
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 use std::collections::BTreeMap;
 

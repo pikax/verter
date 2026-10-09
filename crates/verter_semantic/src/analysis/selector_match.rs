@@ -14,11 +14,11 @@
 //! 3. Runtime pseudo-classes (`:hover`, `:focus`) don't prevent matching.
 //! 4. `:not()` inverts, `:is()`/`:where()` takes best match across alternatives.
 
-use crate::analysis::style::{
+use verter_session_query::analysis::style::{
     AttributeOperator, CompoundSelector, SelectorCombinator, SelectorPseudoClass,
     StructuredSelector,
 };
-use crate::analysis::template::TemplateElement;
+use verter_session_query::analysis::template::TemplateElement;
 
 /// Result of matching a CSS selector against a template element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -335,7 +335,7 @@ fn match_compound(
 
 /// Match an attribute selector against an element's attributes.
 fn match_attribute_selector(
-    attr_sel: &crate::analysis::style::AttributeSelector,
+    attr_sel: &verter_session_query::analysis::style::AttributeSelector,
     element: &TemplateElement,
 ) -> MatchResult {
     // Find matching attribute
@@ -415,7 +415,7 @@ fn has_dynamic_attr(element: &TemplateElement, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::template::{TemplateAttribute, TemplateElement};
+    use verter_session_query::analysis::template::{TemplateAttribute, TemplateElement};
     use verter_span::Span;
 
     fn make_element(tag: &str, classes: &str, id: Option<&str>) -> TemplateElement {

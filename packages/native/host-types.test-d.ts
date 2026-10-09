@@ -472,6 +472,16 @@ const blockOverrideRequest: NativeBlockOverrideRequest = {
 const ide = boundHost.getIde("/App.vue");
 const ensured = boundHost.ensureIdeCompiled("/App.vue");
 
+// Framework admission is reachable through the published constructor: the
+// config the class declares carries the optional typed name list, so a
+// TypeScript caller passing it is not rejected by excess-property checking.
+declare const VerterHostClass: typeof VerterHost;
+type VerterHostConstructorConfig = NonNullable<ConstructorParameters<typeof VerterHost>[0]>;
+type FrameworksIsAnOptionalNameList = Expect<
+  Equal<VerterHostConstructorConfig["frameworks"], string[] | undefined>
+>;
+const narrowedHost = new VerterHostClass({ frameworks: ["vue"] });
+
 export {
   blockOverrideRequest,
   blockOverrideRequestWithProfile,
@@ -479,6 +489,7 @@ export {
   ensuredWithProfile,
   ide,
   ideWithProfile,
+  narrowedHost,
   virtualQuery,
   virtualQueryWithProfile,
 };

@@ -18,7 +18,7 @@
 //! `R22_CARRIER_GATE_SELF` so the recursive walk skips this file.
 //!
 //! `PublishedSurfaceKind` is NOT forbidden —
-//! `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
+//! `crate::component_meta_caches::PublishedSurfaceKind`
 //! is a separate, live type that legitimately owns the same
 //! identifier. Forbidding the bare token would false-positive on it.
 //!
@@ -63,7 +63,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Module path of the retired `crate::carrier_verdict_db` module.
     "carrier_verdict_db",
     // NOTE: `PublishedSurfaceKind` is INTENTIONALLY omitted — the
-    // live `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
+    // live `crate::component_meta_caches::PublishedSurfaceKind`
     // is a different, kept type that legitimately owns the same
     // identifier.
 ];
@@ -71,7 +71,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
 /// File names whose presence at the head of the path should make us
 /// self-exclude (this gate file itself plus the sibling
 /// `architecture_guards.rs`).
-const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["no_carrier_verdict_db.rs", "architecture_guards.rs"];
+const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["no_carrier_verdict_db.rs"];
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -447,7 +447,7 @@ fn no_carrier_verdict_db_in_production() {
     // exist has to be in the collected set. If the traversal returned
     // empty/partial, this fails loudly instead of passing silently.
     let sentinel = std::path::Path::new("crates")
-        .join("verter_session")
+        .join("verter_type_engine")
         .join("src")
         .join("component_meta_caches.rs");
     assert!(

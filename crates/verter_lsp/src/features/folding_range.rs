@@ -1,7 +1,7 @@
 // Folding ranges from SFC block boundaries + template elements.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -74,7 +74,7 @@ mod tests {
     use crate::documents::carrier_structure::{
         test_carrier_blocks, test_carrier_blocks_with, TestCarrierKind,
     };
-    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
+    use verter_session_query::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 
     #[test]
     fn test_basic_folding() {

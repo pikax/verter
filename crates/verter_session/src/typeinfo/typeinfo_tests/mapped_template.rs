@@ -220,7 +220,7 @@ fn template_literal_key_reducer_projects_callable_slots() {
 /// under the production ledger enumerates.
 #[test]
 pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
-    use crate::semantic_query::{QueryResult, SemanticNodeData};
+    use verter_type_engine::semantic_query::{QueryResult, SemanticNodeData};
 
     let host = make_host_with_footprint();
 

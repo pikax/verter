@@ -128,28 +128,28 @@ fn flow_return_fp_fixture_routes_are_hermetic_and_resolvable() {
     let owner_barrel = host.resolve_loaded_dependency_canonical(
         OWNER,
         "./flow_return_path_barrel",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(owner_barrel.as_deref(), Some(BARREL));
 
     let selected = host.resolve_loaded_dependency_canonical(
         BARREL,
         "./flow_return_path_selected",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(selected.as_deref(), Some(SELECTED));
 
     let alternate = host.resolve_loaded_dependency_canonical(
         BARREL,
         "./flow_return_path_alternate",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(alternate.as_deref(), Some(ALTERNATE));
 
     let unused = host.resolve_loaded_dependency_canonical(
         BARREL,
         "./flow_return_path_unused",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(unused.as_deref(), Some(UNUSED));
 }

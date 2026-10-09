@@ -101,7 +101,7 @@ struct Answer {
 /// lifecycle identity, not a resolved answer, and is the ONE field the
 /// same-content overlay is entitled to differ in.
 fn render_semantic_output(
-    mut analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    mut analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     types: crate::meta_resolve::MaterializedComponentMetaTypes,
 ) -> String {
     assert!(

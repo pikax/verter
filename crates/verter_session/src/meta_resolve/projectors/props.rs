@@ -7,14 +7,15 @@
 //! from the parser-side payload locator and type annotation when available
 //! (preserves section 7.4b parity).
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::ExpandedField;
-use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::ExpandedField;
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::DeclIdentity;
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::DeclIdentity;
 
 use super::output_sink::{surface_member_to_expanded_field, MemberValuePosition};
 use super::publication_authority::{
@@ -44,7 +45,7 @@ pub(crate) fn project_props(
         return Vec::new();
     }
 
-    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
     // Resolve the payload + surface through the publication-authority token
     // API, enumerate candidates, and ADMIT each under the cursor. Admission
     // applies the public-visibility filter, the derived-kind/cursor match, the
@@ -62,9 +63,9 @@ pub(crate) fn project_props(
     // attach `PublishedField` edges to — only concretely enumerated surface
     // members carry a member-edge origin here.
     let admitted: Vec<(AdmittedPublishedMember<'_>, _, _)> = {
-        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let dispatch = query_engine.dispatch;
         let payload = match resolve_macro_payload(
-            &dispatch,
+            dispatch,
             owner,
             file,
             macro_index,
@@ -78,7 +79,7 @@ pub(crate) fn project_props(
         };
 
         let surface = match resolve_payload_surface(
-            &dispatch,
+            dispatch,
             &payload,
             MacroExpansionKind::DefineProps,
             diag_sink,
@@ -87,7 +88,7 @@ pub(crate) fn project_props(
             None => return Vec::new(),
         };
 
-        read_surface_member_candidates(ctx, &surface)
+        read_surface_member_candidates(ctx, dispatch, &surface)
             .into_iter()
             .filter_map(|candidate| {
                 let analyzed = mac.prop_fields.iter().find(|p| {
@@ -98,7 +99,7 @@ pub(crate) fn project_props(
                 });
                 let raw_type = analyzed.and_then(|p| p.type_annotation.clone());
                 let shallow_payload = analyzed.and_then(|p| p.payload.clone());
-                let admitted = admit_published_member(candidate, &cursor, &dispatch)?;
+                let admitted = admit_published_member(candidate, &cursor, dispatch)?;
                 Some((admitted, raw_type, shallow_payload))
             })
             .collect()

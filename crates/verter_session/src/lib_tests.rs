@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use verter_session_query::analysis::types::Hash16;
 
 use rustc_hash::FxHashMap;
 
@@ -22,7 +23,7 @@ fn parse_vue_snapshot(
         canonical_id,
         source,
         analysis_scope,
-        &crate::types::MetaProvenance::default(),
+        &crate::meta_provenance::MetaProvenance::default(),
     );
     let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
         .expect("a Vue carrier artifact carries a ParsedSfc")
@@ -80,8 +81,8 @@ struct DependentView {
     import_routes: rustc_hash::FxHashMap<String, DependencyResolution>,
     dependencies: BTreeSet<String>,
     script_lang: Option<String>,
-    macro_type_deps: Vec<verter_semantic::analysis::MacroTypeDep>,
-    imports: Vec<verter_semantic::analysis::AnalyzedImport>,
+    macro_type_deps: Vec<verter_session_query::analysis::types::MacroTypeDep>,
+    imports: Vec<verter_session_query::analysis::types::AnalyzedImport>,
     resolved_type_hashes: rustc_hash::FxHashMap<(String, String), Hash16>,
 }
 
@@ -209,7 +210,8 @@ fn analysis_level_essential_runs_script_not_style() {
             !hd.parse.script_analysis.imports.is_empty(),
             "script analysis should be populated at AnalysisLevel::Essential"
         );
-        let empty_styles: Vec<verter_semantic::analysis::StyleBlockAnalysis> = Vec::new();
+        let empty_styles: Vec<verter_session_query::analysis::style::StyleBlockAnalysis> =
+            Vec::new();
         let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
         let style_analyses = analysis_snap
             .as_ref()
@@ -260,7 +262,8 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
             hd.parse.script_analysis.imports.is_empty(),
             "script analysis should not be populated at AnalysisLevel::None"
         );
-        let empty_styles: Vec<verter_semantic::analysis::StyleBlockAnalysis> = Vec::new();
+        let empty_styles: Vec<verter_session_query::analysis::style::StyleBlockAnalysis> =
+            Vec::new();
         let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
         assert!(
             analysis_snap.is_none(),
@@ -766,7 +769,7 @@ fn invalidate_nodes_removes_last_good() {
             },
             diagnostics: DiagnosticsSnapshot::default(),
             last_access_tick: 1,
-            fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         },
     );
 
@@ -1313,7 +1316,7 @@ fn route_consuming_compile_slot_goes_stale_after_exact_resolution_retarget() {
 
     // The embedder's resolver retargets `./types` → `/src/alt_types.ts`
     // on every (phase, kind) lane. The owner's content is untouched.
-    use verter_semantic::resolver_core::{ResolvePhase as P, ResolveRequestKind as K};
+    use verter_session_query::resolution::{ResolvePhase as P, ResolveRequestKind as K};
     let rows = [
         (P::CodegenBlocker, K::EsmImport),
         (P::CodegenBlocker, K::TypeImport),
@@ -1402,15 +1405,15 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
 
     let src_row = |target: &str| verter_workspace::ExactResolution {
         specifier: "@/partials/panel.html".to_string(),
-        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-        kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+        kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
         resolved_canonical_id: Some(target.to_string()),
         possible_canonical_ids: vec![target.to_string()],
     };
     let types_row = || verter_workspace::ExactResolution {
         specifier: "@/types".to_string(),
-        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
         resolved_canonical_id: Some("/workspace/src/types.ts".to_string()),
         possible_canonical_ids: vec!["/workspace/src/types.ts".to_string()],
     };
@@ -2233,7 +2236,7 @@ fn close_allows_reuse() {
 fn make_project_config(
     root: &str,
     paths: Vec<(&str, Vec<&str>)>,
-) -> verter_semantic::resolver_core::IdeProjectConfig {
+) -> verter_session_query::resolution::IdeProjectConfig {
     let mut config = verter_workspace::ide_project_config(root.to_string(), root.to_string(), None);
     config.compiler_options.paths = paths
         .into_iter()
@@ -2576,8 +2579,8 @@ fn resolve_import_transient_uses_exact_resolutions() {
         "/src/App.vue",
         vec![verter_workspace::ExactResolution {
             specifier: "./Child.vue".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/src/Child.vue".to_string()),
             possible_canonical_ids: vec!["/src/Child.vue".to_string()],
         }],
@@ -2629,15 +2632,15 @@ fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
         vec![
             verter_workspace::ExactResolution {
                 specifier: "@/partials/panel.html".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                 resolved_canonical_id: Some("/workspace/src/partials/panel.html".to_string()),
                 possible_canonical_ids: vec!["/workspace/src/partials/panel.html".to_string()],
             },
             verter_workspace::ExactResolution {
                 specifier: "@/types".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some("/workspace/src/types.ts".to_string()),
                 possible_canonical_ids: vec!["/workspace/src/types.ts".to_string()],
             },
@@ -2736,8 +2739,8 @@ fn set_workspace_swaps_resolution_source() {
         "/src/App.vue",
         vec![verter_workspace::ExactResolution {
             specifier: "./Btn.vue".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/src/Btn.vue".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -2760,6 +2763,54 @@ fn set_workspace_swaps_resolution_source() {
     assert!(
         no_result.is_none(),
         "specifiers not in the new workspace should not resolve"
+    );
+}
+
+/// A request snapshot is captured ONCE at request admission and every hot
+/// read goes through it, so its handles must be live: a workspace
+/// replacement that lands mid-request (which also advances the project
+/// generation) has to be visible to the request's NEXT read, or a stale
+/// basis would be published as if it were current. This drives the
+/// production capture path — a real request-bound host context's snapshot —
+/// rather than hand-built atomics.
+#[test]
+fn request_snapshot_captured_at_admission_observes_a_mid_request_workspace_replacement() {
+    use verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let snapshot = ctx.request_snapshot();
+    let generation_before = snapshot.current_project_generation();
+    let content_before = snapshot.clocks().live().content;
+
+    // One mid-request mutation of the outside world: a replacement
+    // workspace carrying one file, installed through the host's own
+    // lifecycle (which also advances the project generation).
+    let replacement = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    replacement.inject_file(
+        "/mid/request.ts".to_string(),
+        Arc::from("export type Mid = 1;"),
+    );
+    host.set_workspace(replacement);
+
+    assert!(
+        snapshot.current_project_generation() > generation_before,
+        "the captured snapshot must observe the project-generation bump the          replacement caused: before {generation_before}, after {}",
+        snapshot.current_project_generation(),
+    );
+    let live = snapshot.clocks().live();
+    assert_ne!(
+        live.content, content_before,
+        "the captured snapshot must read the replacement workspace's content          generation, not the value captured at admission"
+    );
+    assert_eq!(
+        live.workspace_shape,
+        snapshot.current_project_generation(),
+        "the aggregate clocks' workspace-shape read and the snapshot's own          project-generation read must agree, both being live handles"
     );
 }
 
@@ -2796,9 +2847,9 @@ fn configure_projects_syncs_to_workspace() {
     let result = ws.resolve_import(
         "/my-project/src/App.vue",
         "@/Foo.vue",
-        verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         },
     );
     assert!(
@@ -2815,9 +2866,9 @@ fn configure_projects_syncs_to_workspace() {
     let no_result = ws.resolve_import(
         "/my-project/src/App.vue",
         "~/Bar.vue",
-        verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         },
     );
     assert!(
@@ -2860,9 +2911,9 @@ fn set_import_dependencies_syncs_exact_resolutions_to_workspace() {
     let result = ws.resolve_import(
         "/src/App.vue",
         "@comp/Btn.vue",
-        verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         },
     );
     assert!(
@@ -2879,9 +2930,9 @@ fn set_import_dependencies_syncs_exact_resolutions_to_workspace() {
     let no_result = ws.resolve_import(
         "/src/App.vue",
         "@comp/Other.vue",
-        verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         },
     );
     assert!(
@@ -2930,8 +2981,8 @@ fn workspace_resolution_is_phase_0_primary() {
         "/src/App.vue",
         vec![verter_workspace::ExactResolution {
             specifier: "./types".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/src/types.ts".to_string()),
             possible_canonical_ids: vec![],
         }],
@@ -3273,13 +3324,13 @@ const count = ref(0)
             "/src/App.vue",
             v1,
             AnalysisScope::LSP,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         let (p2, _) = crate::parse::parse_vue_snapshot(
             "/src/App.vue",
             v2,
             AnalysisScope::LSP,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         assert_eq!(
             p1.semantic_hash, p2.semantic_hash,
@@ -3465,10 +3516,12 @@ mod phase1_structural_tests {
     #[test]
     fn test_analysis_arcs_from_analysis() {
         // Build a ScriptAnalysisSnapshot with some data
-        let sa = verter_semantic::analysis::ScriptAnalysisSnapshot {
-            module_references: vec![verter_semantic::analysis::AnalyzedModuleReference {
-                syntax: verter_semantic::analysis::types::ModuleReferenceSyntax::StaticImport,
-                semantics: verter_semantic::analysis::types::ModuleReferenceSemantics::Import,
+        let sa =
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
+                module_references:
+                    vec![verter_session_query::analysis::types::AnalyzedModuleReference {
+                syntax: verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport,
+                semantics: verter_session_query::analysis::types::ModuleReferenceSemantics::Import,
                 is_type_only: false,
                 span: verter_span::Span::new(0, 30),
                 expr_span: verter_span::Span::new(20, 25),
@@ -3477,10 +3530,10 @@ mod phase1_structural_tests {
                 finite_specifiers: vec![],
                 static_prefix: None,
                 analyzability:
-                    verter_semantic::analysis::types::ModuleReferenceAnalyzability::Exact,
+                    verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
             }],
-            ..Default::default()
-        };
+                ..Default::default()
+            };
 
         let arcs = AnalysisArcs::from_analysis(&sa);
         assert_eq!(arcs.module_references.len(), 1);
@@ -3590,7 +3643,8 @@ mod upsert_compile_cache_tests {
                     },
                     diagnostics: Default::default(),
                     last_access_tick: 0,
-                    fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                    fact_dep_signature:
+                        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 },
             );
         }
@@ -4102,11 +4156,11 @@ mod upsert_compile_cache_tests {
     /// second occurrence is silently dropped.
     #[test]
     fn build_parsed_edges_emits_distinct_kinds_for_same_specifier() {
-        use verter_semantic::resolver_core::ResolveRequestKind;
+        use verter_session_query::resolution::ResolveRequestKind;
         use verter_workspace::ParsedEdge;
 
         let imports = vec![
-            verter_semantic::analysis::AnalyzedImport {
+            verter_session_query::analysis::types::AnalyzedImport {
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 source: "./x".to_string(),
                 is_type_only: false,
@@ -4114,7 +4168,7 @@ mod upsert_compile_cache_tests {
                 span: verter_span::Span::default(),
                 resolved_canonical_id: None,
             },
-            verter_semantic::analysis::AnalyzedImport {
+            verter_session_query::analysis::types::AnalyzedImport {
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 source: "./x".to_string(),
                 is_type_only: true,

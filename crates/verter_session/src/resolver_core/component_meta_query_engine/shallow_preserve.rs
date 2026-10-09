@@ -45,26 +45,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         macro_index: usize,
-        output_path: &[verter_semantic::analysis::type_eval_build::PathSegment],
+        output_path: &[verter_session_query::analysis::field_path::PathSegment],
     ) -> bool {
-        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+        use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
 
-        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            self.ctx,
-            scope_canonical_id,
-            macro_index,
-        ) else {
-            return true;
-        };
-        let Some(data) =
-            crate::project_semantic_dispatch::node_data_for(self.ctx, product.hot.node())
+        let Some(product) = self
+            .dispatch
+            .macro_type_arg_hot_ref(scope_canonical_id, macro_index)
         else {
             return true;
         };
+        let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
+            self.dispatch.graph(),
+            product.hot.node(),
+        ) else {
+            return true;
+        };
         let Some(scope_owner) = self
-            .ctx
-            .project_type_store()
-            .semantic_graph()
+            .dispatch
+            .graph()
             .node_scope(product.hot.node())
             .and_then(|scope| scope.top_level_owner())
         else {
@@ -111,19 +110,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .iter()
             .map(|param| param.name.as_str())
             .collect();
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.dispatch;
         let Some(member_node) = dispatch
             .raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
             )
             .at_optional_boundary()
         else {
             return true;
         };
-        node_references_type_param_names(self.ctx, member_node.node(), &param_names)
+        node_references_type_param_names(self.dispatch, member_node.node(), &param_names)
     }
 
     /// Node-domain fast-path classifier for one macro field: decide whether
@@ -135,7 +134,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// through the one dispatch for a named shell (see
     /// [`Self::macro_field_value_node`]). The routes mirror the former
     /// `TypeExpr`-shape classifier one-for-one, decided off
-    /// [`crate::semantic_query::SemanticNodeData`] carriers:
+    /// [`verter_type_engine::semantic_query::SemanticNodeData`] carriers:
     ///
     /// 1. a direct imported utility route anywhere under the field value
     ///    (a builtin utility applied over an imported argument) stays the
@@ -156,9 +155,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         payload: &verter_type_expr::locators::MacroPayloadLocator,
-        field_value: crate::semantic_query::HotTypeRef,
+        field_value: verter_type_engine::semantic_query::HotTypeRef,
     ) -> Option<FastShallowFieldExpr> {
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        use verter_session_query::type_solver::host::BareRefOrigin;
         let scope_owner = payload.anchor.owner;
 
         let authored_source = || {
@@ -166,7 +165,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload.clone()),
             )
         };
-        let symbolic_preserve = |hot: crate::semantic_query::HotTypeRef| {
+        let symbolic_preserve = |hot: verter_type_engine::semantic_query::HotTypeRef| {
             Some(FastShallowFieldExpr {
                 hot,
                 semantic_source: authored_source(),
@@ -183,8 +182,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return symbolic_preserve(field_value);
         }
 
-        let root_data =
-            crate::project_semantic_dispatch::node_data_for(self.ctx, field_value.node())?;
+        let root_data = verter_type_engine::project_semantic_dispatch::node_data_for(
+            self.dispatch.graph(),
+            field_value.node(),
+        )?;
 
         // (2) Imported generic reference root.
         if let Some((name, _)) = root_data.bare_ref_head() {
@@ -198,13 +199,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 return symbolic_preserve(field_value);
             }
         }
-        if let crate::semantic_query::SemanticNodeData::InstantiationRef { base, .. } =
-            root_data.as_ref()
+        if let verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
+            base, ..
+        } = root_data.as_ref()
         {
             // A pre-resolved generic application whose base lives outside the
             // owner scope is the imported-generic class.
             if base.canonical_id.as_ref() != scope_canonical_id
-                && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                && verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                     base.decl_name.as_ref(),
                 )
                 .is_none()
@@ -214,12 +216,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         // (3) Single-member import path: `ImportedRoot['member']`.
-        if let crate::semantic_query::SemanticNodeData::IndexedAccess {
+        if let verter_type_engine::semantic_query::SemanticNodeData::IndexedAccess {
             object,
-            index: crate::semantic_query::IndexKey::String(member_name),
+            index: verter_type_engine::semantic_query::IndexKey::String(member_name),
         } = root_data.as_ref()
         {
-            let object_data = crate::project_semantic_dispatch::node_data_for(self.ctx, *object);
+            let object_data = verter_type_engine::project_semantic_dispatch::node_data_for(
+                self.dispatch.graph(),
+                *object,
+            );
             let root_name = object_data.as_deref().and_then(|data| {
                 data.bare_ref_head().and_then(|(name, _)| {
                     data.carrier_type_args()
@@ -256,27 +261,29 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .iter()
                         .map(|param| param.name.as_str())
                         .collect();
-                    let dispatch =
-                        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+                    let dispatch = self.dispatch;
                     let member_node = dispatch
                         .raise_authored_locator_to_hot(
                             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                 member.ty.clone(),
                             ),
-                            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                                crate::semantic_query::ProjectionMode::Navigate,
+                            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                verter_type_engine::semantic_query::ProjectionMode::Navigate,
                             ),
                         )
                         .at_optional_boundary()?;
-                    if node_references_type_param_names(self.ctx, member_node.node(), &param_names)
-                    {
+                    if node_references_type_param_names(
+                        self.dispatch,
+                        member_node.node(),
+                        &param_names,
+                    ) {
                         return None;
                     }
                     let exactness = match crate::meta_resolve::exactness::classify_node(
-                        &dispatch,
+                        dispatch,
                         member_node.node(),
                     ) {
-                        verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                        verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
                             FastShallowFieldExprExactness::Concrete
                         }
                         _ => FastShallowFieldExprExactness::Symbolic,
@@ -314,24 +321,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         ) {
                             if prepared.type_parameters.is_empty() {
                                 let body_slot = prepared.body_facts.body_slot.clone();
-                                let dispatch =
-                                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                        self.ctx,
-                                    );
+                                let dispatch = self.dispatch;
                                 if let Some(body_node) = dispatch.raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot.clone(),
                                     ),
-                                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                                        crate::semantic_query::ProjectionMode::Navigate,
+                                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
                                 ).at_optional_boundary() {
                                     let exactness =
                                         match crate::meta_resolve::exactness::classify_node(
-                                            &dispatch,
+                                            dispatch,
                                             body_node.node(),
                                         ) {
-                                            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                                            verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
                                                 FastShallowFieldExprExactness::Concrete
                                             }
                                             _ => FastShallowFieldExprExactness::Symbolic,
@@ -379,31 +383,32 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         macro_index: usize,
-        output_path: &[verter_semantic::analysis::type_eval_build::PathSegment],
-    ) -> Option<crate::semantic_query::HotTypeRef> {
-        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+        output_path: &[verter_session_query::analysis::field_path::PathSegment],
+    ) -> Option<verter_type_engine::semantic_query::HotTypeRef> {
+        use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
 
         let [MacroPathSegment::Member(field_name)] = output_path else {
             return None;
         };
-        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            self.ctx,
-            scope_canonical_id,
-            macro_index,
-        )?;
+        let product = self
+            .dispatch
+            .macro_type_arg_hot_ref(scope_canonical_id, macro_index)?;
         let scope_owner = self
-            .ctx
-            .project_type_store()
-            .semantic_graph()
+            .dispatch
+            .graph()
             .node_scope(product.hot.node())?
             .top_level_owner()?;
-        let data = crate::project_semantic_dispatch::node_data_for(self.ctx, product.hot.node())?;
-        if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
+        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+            self.dispatch.graph(),
+            product.hot.node(),
+        )?;
+        if let verter_type_engine::semantic_query::SemanticNodeData::Object(surface) = data.as_ref()
+        {
             return match surface.project_string_key(field_name.as_ref()) {
-                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                    Some(crate::semantic_query::HotTypeRef::new(member.value))
-                }
-                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+                verter_type_engine::semantic_query::SurfaceKeyProjection::Exact(member) => Some(
+                    verter_type_engine::semantic_query::HotTypeRef::new(member.value),
+                ),
+                verter_type_engine::semantic_query::SurfaceKeyProjection::AbsentProven => None,
             };
         }
         let (name, _) = data.bare_ref_head()?;
@@ -423,12 +428,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )?;
         let field_key = verter_type_expr::facts::FactPropertyKey::identifier(field_name.as_ref());
         let member = prepared.member_index.get(&field_key)?;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let dispatch = self.dispatch;
         dispatch
             .raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
             )
             .at_optional_boundary()
@@ -442,50 +447,52 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
-        node: crate::semantic_query::SemanticNodeId,
+        node: verter_type_engine::semantic_query::SemanticNodeId,
     ) -> bool {
-        use crate::graph_walk::Reach;
-        use crate::semantic_query::SemanticNodeData;
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        use verter_session_query::type_solver::host::BareRefOrigin;
+        use verter_type_engine::graph_walk::Reach;
+        use verter_type_engine::semantic_query::SemanticNodeData;
 
-        crate::graph_walk::reaches(UtilityQuestion::Route(node), |question| match question {
-            UtilityQuestion::Route(node) => {
-                let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node)
-                else {
-                    return Reach::Parts(Vec::new());
-                };
-                Reach::Parts(match data.as_ref() {
-                    data_ref if data_ref.bare_ref_head().is_some() => {
-                        let args = data_ref.carrier_type_args();
-                        let utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
-                            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+        verter_type_engine::graph_walk::reaches(UtilityQuestion::Route(node), |question| {
+            match question {
+                UtilityQuestion::Route(node) => {
+                    let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
+                        self.dispatch.graph(),
+                        node,
+                    ) else {
+                        return Reach::Parts(Vec::new());
+                    };
+                    Reach::Parts(match data.as_ref() {
+                        data_ref if data_ref.bare_ref_head().is_some() => {
+                            let args = data_ref.carrier_type_args();
+                            let utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
+                            verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                                 name.as_ref(),
                             )
                             .is_some()
                         });
-                        utility_arguments(utility, args)
-                    }
-                    SemanticNodeData::InstantiationRef { base, args } => {
-                        let utility =
-                            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                            utility_arguments(utility, args)
+                        }
+                        SemanticNodeData::InstantiationRef { base, args } => {
+                            let utility =
+                            verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                                 base.decl_name.as_ref(),
                             )
                             .is_some();
-                        utility_arguments(utility, args)
-                    }
-                    composite
-                    @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                        routes(composite.composite_members().expect("composite arm").iter())
-                    }
-                    SemanticNodeData::MergedDecl {
-                        contributors: members,
-                    } => routes(members.iter()),
-                    SemanticNodeData::Array { element, .. } => routes([element]),
-                    SemanticNodeData::Tuple { elements, .. } => {
-                        routes(elements.iter().map(|element| &element.value))
-                    }
-                    SemanticNodeData::Object(surface) => {
-                        routes(
+                            utility_arguments(utility, args)
+                        }
+                        composite @ (SemanticNodeData::Union(_)
+                        | SemanticNodeData::Intersection(_)) => {
+                            routes(composite.composite_members().expect("composite arm").iter())
+                        }
+                        SemanticNodeData::MergedDecl {
+                            contributors: members,
+                        } => routes(members.iter()),
+                        SemanticNodeData::Array { element, .. } => routes([element]),
+                        SemanticNodeData::Tuple { elements, .. } => {
+                            routes(elements.iter().map(|element| &element.value))
+                        }
+                        SemanticNodeData::Object(surface) => routes(
                             surface
                                 .positive_members()
                                 .iter()
@@ -495,76 +502,78 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                 }))
                                 .chain(surface.call_signatures.iter())
                                 .chain(surface.construct_signatures.iter()),
-                        )
+                        ),
+                        SemanticNodeData::Signature {
+                            params,
+                            return_type,
+                            predicate,
+                            ..
+                        } => params
+                            .iter()
+                            .map(|param| param.ty)
+                            .chain(std::iter::once(*return_type))
+                            .chain(predicate.and_then(|predicate| predicate.ty))
+                            .map(UtilityQuestion::Route)
+                            .collect(),
+                        SemanticNodeData::Alias(inner) => routes([inner]),
+                        _ => Vec::new(),
+                    })
+                }
+                // One utility ARGUMENT node is imported-routed: an imported bare
+                // reference, an imported `typeof` root, an indexed access over an
+                // imported root, a foreign resolved reference, or another imported
+                // utility route.
+                UtilityQuestion::Argument(node) => {
+                    let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
+                        self.dispatch.graph(),
+                        node,
+                    ) else {
+                        return Reach::Parts(Vec::new());
+                    };
+                    if let Some((name, _)) = data.bare_ref_head() {
+                        let name = std::sync::Arc::clone(name);
+                        if data.carrier_type_args().is_empty()
+                            && self.bare_ref_origin_in_scope(
+                                scope_canonical_id,
+                                scope_owner,
+                                name.as_ref(),
+                            ) == BareRefOrigin::Imported
+                        {
+                            return Reach::Hit;
+                        }
+                        return Reach::Parts(vec![UtilityQuestion::Route(node)]);
                     }
-                    SemanticNodeData::Signature {
-                        params,
-                        return_type,
-                        predicate,
-                        ..
-                    } => params
-                        .iter()
-                        .map(|param| param.ty)
-                        .chain(std::iter::once(*return_type))
-                        .chain(predicate.and_then(|predicate| predicate.ty))
-                        .map(UtilityQuestion::Route)
-                        .collect(),
-                    SemanticNodeData::Alias(inner) => routes([inner]),
-                    _ => Vec::new(),
-                })
-            }
-            // One utility ARGUMENT node is imported-routed: an imported bare
-            // reference, an imported `typeof` root, an indexed access over an
-            // imported root, a foreign resolved reference, or another imported
-            // utility route.
-            UtilityQuestion::Argument(node) => {
-                let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node)
-                else {
-                    return Reach::Parts(Vec::new());
-                };
-                if let Some((name, _)) = data.bare_ref_head() {
-                    let name = std::sync::Arc::clone(name);
-                    if data.carrier_type_args().is_empty()
-                        && self.bare_ref_origin_in_scope(
+                    if let Some((value_root, _)) = data.typeof_head() {
+                        return if self.bare_ref_origin_in_scope(
                             scope_canonical_id,
                             scope_owner,
-                            name.as_ref(),
+                            value_root.name.as_ref(),
                         ) == BareRefOrigin::Imported
-                    {
-                        return Reach::Hit;
+                        {
+                            Reach::Hit
+                        } else {
+                            Reach::Parts(Vec::new())
+                        };
                     }
-                    return Reach::Parts(vec![UtilityQuestion::Route(node)]);
-                }
-                if let Some((value_root, _)) = data.typeof_head() {
-                    return if self.bare_ref_origin_in_scope(
-                        scope_canonical_id,
-                        scope_owner,
-                        value_root.name.as_ref(),
-                    ) == BareRefOrigin::Imported
-                    {
-                        Reach::Hit
-                    } else {
-                        Reach::Parts(Vec::new())
+                    let foreign = |canonical_id: &str| {
+                        if canonical_id != scope_canonical_id {
+                            Reach::Hit
+                        } else {
+                            Reach::Parts(Vec::new())
+                        }
                     };
-                }
-                let foreign = |canonical_id: &str| {
-                    if canonical_id != scope_canonical_id {
-                        Reach::Hit
-                    } else {
-                        Reach::Parts(Vec::new())
+                    match data.as_ref() {
+                        SemanticNodeData::IndexedAccess { object, .. } => {
+                            Reach::Parts(vec![UtilityQuestion::Argument(*object)])
+                        }
+                        SemanticNodeData::DeclRef { identity } => {
+                            foreign(identity.canonical_id.as_ref())
+                        }
+                        SemanticNodeData::InstantiationRef { base, .. } => {
+                            foreign(base.canonical_id.as_ref())
+                        }
+                        _ => Reach::Parts(vec![UtilityQuestion::Route(node)]),
                     }
-                };
-                match data.as_ref() {
-                    SemanticNodeData::IndexedAccess { object, .. } => {
-                        Reach::Parts(vec![UtilityQuestion::Argument(*object)])
-                    }
-                    SemanticNodeData::DeclRef { identity } => {
-                        foreign(identity.canonical_id.as_ref())
-                    }
-                    SemanticNodeData::InstantiationRef { base, .. } => {
-                        foreign(base.canonical_id.as_ref())
-                    }
-                    _ => Reach::Parts(vec![UtilityQuestion::Route(node)]),
                 }
             }
         })
@@ -581,22 +590,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
-        node: crate::semantic_query::SemanticNodeId,
+        node: verter_type_engine::semantic_query::SemanticNodeId,
     ) -> bool {
-        use crate::graph_walk::Reach;
-        use crate::semantic_query::SemanticNodeData;
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        use verter_session_query::type_solver::host::BareRefOrigin;
+        use verter_type_engine::graph_walk::Reach;
+        use verter_type_engine::semantic_query::SemanticNodeData;
 
         // The scopes the walk reads nodes in: the field's, then each local
         // alias declaration's it hops into.
         let mut scopes: Vec<(std::sync::Arc<str>, verter_type_expr::TopLevelOwnerId)> =
             vec![(std::sync::Arc::from(scope_canonical_id), scope_owner)];
-        crate::graph_walk::reaches((node, 0usize), |(node, scope)| {
+        verter_type_engine::graph_walk::reaches((node, 0usize), |(node, scope)| {
             let (scope_canonical_id, scope_owner) = scopes[scope].clone();
             let in_scope = |nodes: &mut dyn Iterator<
-                Item = crate::semantic_query::SemanticNodeId,
+                Item = verter_type_engine::semantic_query::SemanticNodeId,
             >| { nodes.map(|node| (node, scope)).collect::<Vec<_>>() };
-            let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
+            let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
+                self.dispatch.graph(),
+                node,
+            ) else {
                 return Reach::Parts(Vec::new());
             };
             if let Some((name, _)) = data.bare_ref_head() {
@@ -626,15 +638,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             .map(|prepared| prepared.body_facts.body_slot.clone())
                             .and_then(|body_slot| {
                                 let dispatch =
-                                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                        self.ctx,
-                                    );
+                                    self.dispatch;
                                 dispatch.raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot,
                                     ),
-                                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                                        crate::semantic_query::ProjectionMode::Navigate,
+                                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
                                 ).at_optional_boundary()
                             });
@@ -661,7 +671,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             Reach::Parts(match data.as_ref() {
                 SemanticNodeData::InstantiationRef { base, args } => {
                     if base.canonical_id.as_ref() != scope_canonical_id.as_ref()
-                        && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                        && verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                             base.decl_name.as_ref(),
                         )
                         .is_none()
@@ -696,8 +706,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> verter_semantic::analysis::type_solver::host::BareRefOrigin {
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+    ) -> verter_session_query::type_solver::host::BareRefOrigin {
+        use verter_session_query::type_solver::host::BareRefOrigin;
         if let Some(state) = self.ctx.shallow_file_state(scope_canonical_id) {
             if state.import_target_in(scope_owner, name).is_some() {
                 return BareRefOrigin::Imported;
@@ -734,10 +744,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::host::ResolvedRootIdentity> {
         let payload = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
-        crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
+            self.dispatch,
             scope_canonical_id,
             scope_owner,
             payload.as_deref(),
@@ -793,18 +804,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 /// IS a parent-parameter reference). Every node is read once, whatever the
 /// nesting; purely carrier-data-driven.
 fn node_references_type_param_names(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    node: crate::semantic_query::SemanticNodeId,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     param_names: &FxHashSet<&str>,
 ) -> bool {
-    use crate::graph_walk::Reach;
-    use crate::semantic_query::SemanticNodeData;
+    use verter_type_engine::graph_walk::Reach;
+    use verter_type_engine::semantic_query::SemanticNodeData;
 
     if param_names.is_empty() {
         return false;
     }
-    crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+    verter_type_engine::graph_walk::reaches(node, |node| {
+        let Some(data) =
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        else {
             return Reach::Parts(Vec::new());
         };
         Reach::Parts(match data.as_ref() {
@@ -824,7 +840,7 @@ fn node_references_type_param_names(
             SemanticNodeData::KeyOf { base } => vec![*base],
             SemanticNodeData::IndexedAccess { object, index } => {
                 let mut parts = vec![*object];
-                if let crate::semantic_query::IndexKey::Computed(inner) = index {
+                if let verter_type_engine::semantic_query::IndexKey::Computed(inner) = index {
                     parts.push(*inner);
                 }
                 parts
@@ -899,9 +915,9 @@ fn node_references_type_param_names(
 enum UtilityQuestion {
     /// Does a builtin utility applied to an imported argument occur under
     /// the node?
-    Route(crate::semantic_query::SemanticNodeId),
+    Route(verter_type_engine::semantic_query::SemanticNodeId),
     /// Is the node, as a utility's argument, imported-routed?
-    Argument(crate::semantic_query::SemanticNodeId),
+    Argument(verter_type_engine::semantic_query::SemanticNodeId),
 }
 
 /// A type application's parts for the imported-utility scan: under a
@@ -909,7 +925,7 @@ enum UtilityQuestion {
 /// scanned for a route.
 fn utility_arguments(
     utility: bool,
-    args: &[crate::semantic_query::SemanticNodeId],
+    args: &[verter_type_engine::semantic_query::SemanticNodeId],
 ) -> Vec<UtilityQuestion> {
     let mut parts = Vec::with_capacity(args.len() * 2);
     if utility {
@@ -921,7 +937,7 @@ fn utility_arguments(
 
 /// `nodes` scanned for an imported-utility route.
 fn routes<'n>(
-    nodes: impl IntoIterator<Item = &'n crate::semantic_query::SemanticNodeId>,
+    nodes: impl IntoIterator<Item = &'n verter_type_engine::semantic_query::SemanticNodeId>,
 ) -> Vec<UtilityQuestion> {
     nodes
         .into_iter()

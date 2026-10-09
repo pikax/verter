@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use super::*;
+use verter_session_query::retention::SemanticRetentionAccount;
 
 const VPATH: &str = "/src/Child.vue.ts";
 const CANONICAL: &str = "/src/Child.vue";
@@ -58,9 +59,7 @@ fn record_surface_for(index: usize, revision: usize) -> RecordSurface {
 
 /// A private account, so retention assertions read only THIS test's activity.
 fn private_account() -> Arc<SemanticRetentionAccount> {
-    SemanticRetentionAccount::new(
-        verter_session::semantic_retention_account::RetentionLimits::defaults(),
-    )
+    SemanticRetentionAccount::new(verter_session_query::retention::RetentionLimits::defaults())
 }
 
 /// Open, edit a few times, then close one document — one editing cycle.
@@ -266,11 +265,49 @@ fn captured_provider_paths_use_filesystem_identity() {
 }
 
 #[test]
+fn two_tracked_spellings_of_one_identity_resolve_exactly_or_fail_closed() {
+    let store = ProviderSurfaceStore::new();
+    for (provider, content) in [
+        (r"D:\src\Twin.svelte.verter.ts", "first\n"),
+        ("d:/src/Twin.svelte.verter.ts", "second\n"),
+    ] {
+        store.record(RecordSurface::carrier_api_legacy(
+            provider.to_string(),
+            r"D:\src\Twin.svelte".to_string(),
+            Arc::from(content),
+            None,
+            Arc::from("carrier\n"),
+        ));
+    }
+
+    let captured = store.capture_current_carrier_api_set();
+    let exact = |spelling: &str| {
+        captured
+            .snapshot_for(spelling)
+            .map(|s| s.provider_content.to_string())
+    };
+    assert_eq!(
+        exact(r"D:\src\Twin.svelte.verter.ts").as_deref(),
+        Some("first\n")
+    );
+    assert_eq!(
+        exact("d:/src/Twin.svelte.verter.ts").as_deref(),
+        Some("second\n")
+    );
+    assert!(matches!(
+        captured.captured_state_for("D:/src/Twin.svelte.verter.ts"),
+        Some(CapturedPathState::KnownNonMappable)
+    ));
+}
+
+#[test]
 fn captured_foreign_ide_surface_maps_when_imported_carrier_is_closed() {
     use tower_lsp_server::ls_types::PositionEncodingKind;
 
-    let store = ProviderSurfaceStore::new();
+    let (store, ledger) = witnessed_store();
     let provider_path = "/src/Child.svelte.tsx";
+    // The engine holds the imported carrier's IDE bytes.
+    ledger.apply(provider_path, "contractProp\n");
     let source_map = crate::documents::provider_projection::ProviderPositionMapper::source_map(
         crate::documents::position_map::PositionMapper::from_json(
             r#"{"version":3,"sources":["Child.svelte"],"names":[],"mappings":"AAAA"}"#,
@@ -300,6 +337,114 @@ fn captured_foreign_ide_surface_maps_when_imported_carrier_is_closed() {
         )
         .is_some(),
         "a closed imported carrier must map through the captured provider/source generation"
+    );
+}
+
+/// A captured carrier whose open document is spelled differently from the
+/// snapshot's canonical id (drive-letter case) is still the open document: a
+/// stale snapshot is refused rather than decoded against bytes the client no
+/// longer holds, and a coherent one maps.
+#[test]
+fn captured_surfaces_find_the_open_carrier_by_filesystem_identity() {
+    use crate::type_provider::merge::ApiSurfaceResolution;
+    use tower_lsp_server::ls_types::{PositionEncodingKind, TextDocumentItem, Uri};
+
+    let documents = crate::documents::DocumentRegistry::new(Arc::new(
+        verter_session::VerterHost::new_standalone(verter_session::HostConfig::default()),
+    ));
+    let uri: Uri = "file:///c:/ws/Child.vue".parse().unwrap();
+    let open_source = "<template><div/></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: open_source.to_string(),
+    });
+    let open_canonical = documents
+        .get_canonical_id(&"file:///c:/ws/Child.vue".parse().unwrap())
+        .expect("the open carrier has a canonical id");
+    let respelled: String = {
+        let mut chars = open_canonical.chars();
+        let first = chars.next().expect("a non-empty canonical id");
+        let flipped = if first.is_ascii_lowercase() {
+            first.to_ascii_uppercase()
+        } else {
+            first.to_ascii_lowercase()
+        };
+        std::iter::once(flipped).chain(chars).collect()
+    };
+    assert_ne!(respelled, open_canonical);
+    assert!(
+        verter_span::path::fs_paths_equal(&respelled, &open_canonical),
+        "the respelling names the same file"
+    );
+    assert!(
+        documents.canonical_id_to_uri(&respelled).is_none(),
+        "the exact-id lookup misses the respelled path"
+    );
+
+    let record = |carrier_source: &str| {
+        let (store, ledger) = witnessed_store();
+        let provider_path = format!("{respelled}.ts");
+        let api = "declare const Child: {}\n";
+        ledger.apply(&provider_path, api);
+        let source_map = crate::documents::provider_projection::ProviderPositionMapper::source_map(
+            crate::documents::position_map::PositionMapper::from_json(
+                r#"{"version":3,"sources":["Child.vue"],"names":[],"mappings":"AAAA"}"#,
+            )
+            .expect("valid source map"),
+        );
+        store.record(RecordSurface::carrier_api_legacy(
+            provider_path.clone(),
+            respelled.clone(),
+            Arc::from(api),
+            Some(source_map),
+            Arc::from(carrier_source),
+        ));
+        (
+            store.capture_current_carrier_api_set(),
+            provider_path,
+            store,
+        )
+    };
+
+    let (stale, stale_path, stale_store) = record("<template><span/></template>\n");
+    assert!(
+        matches!(
+            classify_captured_api_surface(
+                Some(&documents),
+                &stale,
+                &stale_path,
+                PositionEncodingKind::UTF16
+            ),
+            ApiSurfaceResolution::VirtualDrop
+        ),
+        "a snapshot of other bytes than the open document holds is never decoded"
+    );
+    assert!(
+        foreign_ide_context_from_captured(
+            &stale_store,
+            &documents,
+            &stale,
+            &stale_path,
+            PositionEncodingKind::UTF16,
+        )
+        .is_none(),
+        "a foreign surface of other bytes than the open document holds is never mapped"
+    );
+
+    let (current, current_path, _store) = record(open_source);
+    assert!(
+        matches!(
+            classify_captured_api_surface(
+                Some(&documents),
+                &current,
+                &current_path,
+                PositionEncodingKind::UTF16
+            ),
+            ApiSurfaceResolution::Vouched(_)
+        ),
+        "a snapshot of the open document's bytes maps"
     );
 }
 
@@ -738,14 +883,16 @@ fn carrier_companions_record_every_role_and_advance_version_on_content_change() 
         "export default {}; /* ide v1 */\n",
         "declare const C: {}; /* api v1 */\n",
     );
-    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v1, None);
+    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v1, None)
+        .expect("an unpinned record is never superseded");
     let (ide_v1, api_v1) = (v1[0].version, v1[1].version);
 
     let mut v2 = make(
         "export default {}; /* ide v2 CHANGED */\n",
         "declare const C: {}; /* api v2 CHANGED */\n",
     );
-    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v2, None);
+    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v2, None)
+        .expect("an unpinned record is never superseded");
     let (ide_v2, api_v2) = (v2[0].version, v2[1].version);
 
     assert!(
@@ -1173,7 +1320,7 @@ fn classify_captured_miss_routes_known_virtual_to_drop_and_unknown_to_not_virtua
 
     // A Closing-at-capture virtual surface → captured KnownNonMappable → VirtualDrop (NEVER
     // edit a real same-named file). Classify reads ONLY the captured snapshot now (no `store`).
-    let known = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let known = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(known, ApiSurfaceResolution::VirtualDrop),
         "a captured-miss path the store KNOWS as a virtual surface (tombstone) must route \
@@ -1184,7 +1331,7 @@ fn classify_captured_miss_routes_known_virtual_to_drop_and_unknown_to_not_virtua
     // its own real file).
     let unknown_path = "/src/Unknown.vue.ts";
     let unknown =
-        classify_captured_api_surface(&captured, unknown_path, PositionEncodingKind::UTF16);
+        classify_captured_api_surface(None, &captured, unknown_path, PositionEncodingKind::UTF16);
     assert!(
         matches!(unknown, ApiSurfaceResolution::NotVirtual),
         "a captured-miss path the store does NOT know as virtual must route NotVirtual"
@@ -1747,7 +1894,7 @@ fn captured_miss_during_closing_then_finalize_still_drops_not_not_virtual() {
 
     // CLASSIFY from the captured snapshot. The captured KnownNonMappable state must
     // drive VirtualDrop (fail closed) WITHOUT consulting the now-cleared live store.
-    let res = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let res = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(res, ApiSurfaceResolution::VirtualDrop),
         "a path that was Closing at capture and finalized before classify MUST classify \
@@ -1797,7 +1944,8 @@ fn classify_ignores_live_mutation_after_capture_for_current_path() {
     builder.add_token(api_line, api_col, 1, want_utf16_col, Some(source_id), None);
     let source_map_json = builder.into_sourcemap().to_json_string();
 
-    let store = ProviderSurfaceStore::new();
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, api);
     store.record(RecordSurface::carrier_api_legacy(
         VPATH.to_string(),
         CANONICAL.to_string(),
@@ -1826,7 +1974,7 @@ fn classify_ignores_live_mutation_after_capture_for_current_path() {
         "carrier B\n",
     ));
 
-    let res = classify_captured_api_surface(&captured, VPATH, PositionEncodingKind::UTF16);
+    let res = classify_captured_api_surface(None, &captured, VPATH, PositionEncodingKind::UTF16);
     assert!(
         matches!(res, ApiSurfaceResolution::Vouched(_)),
         "classify must map through the CAPTURED generation-A snapshot regardless of a live \
@@ -2271,9 +2419,7 @@ fn map_hash_is_none_for_a_surface_without_a_source_map_fail_closed() {
 /// carrier source) and returns `Some`, so the `is_none()` assertion fails.
 #[test]
 fn committed_ide_capture_drops_a_newly_recorded_but_uncommitted_surface() {
-    use crate::provider_sync::{
-        CommittedCarrierIdeSurface, ProviderOwnerBinding, ProviderSyncState,
-    };
+    use crate::provider_sync::{CommittedCarrierSurface, ProviderOwnerBinding, ProviderSyncState};
     use dashmap::DashMap;
     use tower_lsp_server::ls_types::{TextDocumentItem, Uri};
 
@@ -2315,7 +2461,7 @@ fn committed_ide_capture_drops_a_newly_recorded_but_uncommitted_surface() {
             owner_binding: ProviderOwnerBinding::Owned("/ws/tsconfig.json".to_string()),
             ide_path: Some(ide_path.clone()),
             ide_background_loaded: true,
-            committed_ide_surface: Some(CommittedCarrierIdeSurface {
+            committed_ide_surface: Some(CommittedCarrierSurface {
                 content_hash: v1.stamp.content_hash.to_hash16(),
                 map_hash: v1.stamp.map_hash,
             }),
@@ -2346,4 +2492,442 @@ fn committed_ide_capture_drops_a_newly_recorded_but_uncommitted_surface() {
         capture_committed_carrier_ide_surface(&store, &states, &documents, &canonical).is_none(),
         "a newly-recorded-but-uncommitted IDE surface must NOT be capturable (fail closed)"
     );
+}
+
+/// A path that stays `Current` through byte-identical re-syncs always resolves to a
+/// current snapshot, and a capture taken before them stays honoured.
+///
+/// Every background re-sync of an unchanged open carrier records the same surface
+/// under a fresh generation and drops the displaced one. A reader that resolved the
+/// path's generation and then looked the snapshot up OUTSIDE the lifecycle guard
+/// could find that generation already dropped and answer "no current surface" for a
+/// path that was current at every instant — which drops a valid provider answer (a
+/// hover or definition vanishes) and refuses the request capture outright.
+#[test]
+fn current_path_resolves_through_concurrent_identical_resyncs() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+
+    let store = ProviderSurfaceStore::new();
+    let captured = store.record(record_surface("api same\n", "carrier same\n"));
+
+    const READERS: usize = 4;
+    const RESYNCS: usize = 50_000;
+
+    let stop = StdArc::new(AtomicBool::new(false));
+    let missing = StdArc::new(AtomicUsize::new(0));
+    let dishonoured = StdArc::new(AtomicUsize::new(0));
+
+    let mut readers = Vec::with_capacity(READERS);
+    for _ in 0..READERS {
+        let store = store.clone();
+        let captured = Arc::clone(&captured);
+        let stop = StdArc::clone(&stop);
+        let missing = StdArc::clone(&missing);
+        let dishonoured = StdArc::clone(&dishonoured);
+        readers.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if store.current_snapshot(VPATH).is_none() {
+                    missing.fetch_add(1, Ordering::Relaxed);
+                }
+                if !store.captured_snapshot_still_honored(&captured) {
+                    dishonoured.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+
+    for _ in 0..RESYNCS {
+        store.record(record_surface("api same\n", "carrier same\n"));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for reader in readers {
+        reader.join().expect("reader thread panicked");
+    }
+
+    assert_eq!(
+        (
+            missing.load(Ordering::Relaxed),
+            dishonoured.load(Ordering::Relaxed)
+        ),
+        (0, 0),
+        "(missing current snapshots, dishonoured captures) for a path that was \
+         `Current` with byte-identical content at every instant"
+    );
+}
+
+/// The foreground surface bracket follows the content epoch, not the bytes: an
+/// identical re-record keeps the captured surface current, while a change that
+/// changes back, a map-only change, a close with an identical reopen, and a
+/// project owner that changes and changes back over identical bytes each fail
+/// it. The byte oracle honors the change-back, the reopen and the owner round
+/// trip, which is why a request settles through the epochs instead.
+#[test]
+fn foreground_bracket_survives_only_identical_re_records() {
+    enum Step {
+        IdenticalReRecord,
+        ChangeAndChangeBack,
+        MapOnlyChange,
+        CloseAndIdenticalReopen,
+        OwnerChangeAndChangeBack,
+    }
+    for step in [
+        Step::IdenticalReRecord,
+        Step::ChangeAndChangeBack,
+        Step::MapOnlyChange,
+        Step::CloseAndIdenticalReopen,
+        Step::OwnerChangeAndChangeBack,
+    ] {
+        // The engine holds the captured bytes throughout: the bracket follows
+        // the recorded epochs alone.
+        let (store, ledger) = witnessed_store();
+        ledger.apply(VPATH, "API A\n");
+        let carrier = "carrier A\n";
+        let owned = |provider: &str, owner: &str| {
+            let mut surface = record_surface(provider, carrier);
+            surface.project_owner = Some(Arc::from(owner));
+            surface
+        };
+        let captured = store.record(owned("API A\n", "/a/tsconfig.json"));
+        let (bracket_holds, bytes_honored) = match step {
+            Step::IdenticalReRecord => (true, true),
+            Step::ChangeAndChangeBack => (false, true),
+            Step::MapOnlyChange => (false, false),
+            Step::CloseAndIdenticalReopen => (false, true),
+            Step::OwnerChangeAndChangeBack => (false, true),
+        };
+        match step {
+            Step::IdenticalReRecord => {
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+            Step::ChangeAndChangeBack => {
+                store.record(owned("API B\n", "/a/tsconfig.json"));
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+            Step::MapOnlyChange => {
+                let mut surface = owned("API A\n", "/a/tsconfig.json");
+                surface.map_hash = [7u8; 16];
+                store.record(surface);
+            }
+            Step::CloseAndIdenticalReopen => {
+                let _token = store.forget(VPATH);
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+            Step::OwnerChangeAndChangeBack => {
+                store.record(owned("API A\n", "/b/tsconfig.json"));
+                store.record(owned("API A\n", "/a/tsconfig.json"));
+            }
+        }
+        let current = store.current_snapshot(VPATH).expect("the path is current");
+        assert_ne!(current.stamp.generation, captured.stamp.generation);
+        assert_eq!(
+            store.captured_surface_is_current(&captured),
+            bracket_holds,
+            "bracket after {:?}",
+            (
+                current.stamp.content_epoch,
+                current.stamp.incarnation,
+                current.stamp.owner_epoch
+            )
+        );
+        assert_eq!(
+            store.captured_snapshot_still_honored(&captured),
+            bytes_honored
+        );
+    }
+}
+
+/// A warm foreground capture does no work proportional to the workspace.
+///
+/// Definition and rename pin BOTH the carrier-IDE and carrier-API views before
+/// their provider await. Those captures must share the store's published
+/// lifecycle root rather than materialise a per-request map of every tracked
+/// path: a request that later looks up one path must not visit, copy or take a
+/// reference on the hundreds of unrelated surfaces the workspace also tracks.
+///
+/// The work count is each unrelated snapshot's strong-reference count. A capture
+/// that visits a path to copy it into a request-owned map must clone that path's
+/// snapshot `Arc`, so the count moves by one per capture; a capture of the shared
+/// root leaves every count untouched. Timing and allocation are deliberately not
+/// gated — the count is exact on every host.
+#[test]
+fn warm_capture_neither_visits_nor_pins_unrelated_tracked_paths() {
+    const UNRELATED: usize = 256;
+
+    let store = ProviderSurfaceStore::new();
+    let unrelated: Vec<Arc<ProviderSurfaceSnapshot>> = (0..UNRELATED)
+        .map(|index| store.record(record_surface_for(index, 0)))
+        .collect();
+    let references_before: Vec<usize> = unrelated.iter().map(Arc::strong_count).collect();
+
+    let api_set = store.capture_current_carrier_api_set();
+    let ide_set = store.capture_current_carrier_ide_set();
+
+    let references_after: Vec<usize> = unrelated.iter().map(Arc::strong_count).collect();
+    assert_eq!(
+        references_after, references_before,
+        "a warm capture must not visit or pin tracked paths the request never looks up"
+    );
+
+    // The shared root still answers every lookup the captured map answered:
+    // a matching-role surface maps, another role is known but not mappable, and
+    // an untracked path stays absent.
+    assert!(api_set.snapshot_for("/src/Doc7.vue.ts").is_some());
+    assert!(matches!(
+        ide_set.captured_state_for("/src/Doc7.vue.ts"),
+        Some(CapturedPathState::KnownNonMappable)
+    ));
+    assert!(api_set
+        .captured_state_for("/src/Untracked.vue.ts")
+        .is_none());
+
+    // A later write never reaches back into the captured root.
+    store.record(record_surface_for(7, 1));
+    assert!(Arc::ptr_eq(
+        api_set
+            .snapshot_for("/src/Doc7.vue.ts")
+            .expect("captured surface"),
+        &unrelated[7],
+    ));
+}
+
+/// A provider delivery ledger a test drives directly: what the serving
+/// provider holds per provider path, and how many times the store read it.
+#[derive(Default)]
+struct ScriptedLedger {
+    serving: parking_lot::Mutex<std::collections::HashMap<String, ServingDelivery>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedLedger {
+    fn serve(&self, path: &str, delivery: ServingDelivery) {
+        self.serving.lock().insert(path.to_string(), delivery);
+    }
+
+    fn apply(&self, path: &str, bytes: &str) {
+        self.serve(path, ServingDelivery::Applied(Arc::from(bytes)));
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ProviderDeliveryWitness for ScriptedLedger {
+    fn serving_delivery(&self, surface: &ProviderSurfaceSnapshot) -> ServingDelivery {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.serving
+            .lock()
+            .get(surface.stamp.provider_path.as_ref())
+            .cloned()
+            .unwrap_or(ServingDelivery::NotApplied)
+    }
+}
+
+fn witnessed_store() -> (ProviderSurfaceStore, Arc<ScriptedLedger>) {
+    let store = ProviderSurfaceStore::new();
+    let ledger = Arc::new(ScriptedLedger::default());
+    store.bind_delivery_witness(Arc::clone(&ledger) as Arc<dyn ProviderDeliveryWitness>);
+    (store, ledger)
+}
+
+/// A recorded surface is servable only while the serving provider holds
+/// exactly its bytes, whichever of the record and the delivery lands first.
+///
+/// - record before delivery: the newly recorded bytes are not the engine's
+///   until it acknowledges them — the bracket refuses them, then holds;
+/// - delivery before record: the engine already evaluates newer bytes while
+///   the store still records the older surface — the bracket refuses the
+///   older surface, and the record of the newer one is servable at once;
+/// - an engine restart loses an acknowledged surface, and a re-delivery of the
+///   same bytes restores it;
+/// - a surface no engine ever held is awaiting delivery, never current.
+#[test]
+fn the_bracket_holds_only_while_the_serving_provider_holds_the_recorded_bytes() {
+    let carrier = "carrier\n";
+
+    // Record before delivery.
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    let b = store.record(record_surface("API B\n", carrier));
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::AwaitingDelivery);
+    assert!(!store.captured_surface_is_current(&b));
+    ledger.apply(VPATH, "API B\n");
+    assert_eq!(store.delivery_of(&b), SurfaceDelivery::Delivered);
+    assert!(store.captured_surface_is_current(&b));
+
+    // Delivery before record.
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert!(store.captured_surface_is_current(&a));
+    ledger.apply(VPATH, "API B\n");
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::EngineDiverged);
+    assert!(!store.captured_surface_is_current(&a));
+    let b = store.record(record_surface("API B\n", carrier));
+    assert!(store.captured_surface_is_current(&b));
+
+    // Engine restart, then a re-delivery of the same bytes.
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert!(store.captured_surface_is_current(&a));
+    ledger.serve(VPATH, ServingDelivery::NotApplied);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::DeliveryLost);
+    assert!(!store.captured_surface_is_current(&a));
+    ledger.apply(VPATH, "API A\n");
+    assert!(store.captured_surface_is_current(&a));
+
+    // Never delivered.
+    let (store, _ledger) = witnessed_store();
+    let a = store.record(record_surface("API A\n", carrier));
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::AwaitingDelivery);
+    assert!(!store.captured_surface_is_current(&a));
+}
+
+/// The membership-only topology attests a surface through its committed
+/// publication, not a delivered buffer; a publication that stops attesting an
+/// acknowledged surface has lost it, while one that never attested it is
+/// still awaiting delivery. A provider that keeps no ledger, and a store with
+/// no provider bound, leave the record as the only evidence — and a record is
+/// never evidence of its own delivery, so neither serves a provider answer.
+#[test]
+fn membership_and_unwitnessed_delivery_states_are_typed() {
+    let carrier = "carrier\n";
+    let (store, ledger) = witnessed_store();
+    let a = store.record(record_surface("API A\n", carrier));
+    ledger.serve(VPATH, ServingDelivery::Unpublished);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::AwaitingDelivery);
+    ledger.serve(VPATH, ServingDelivery::Published);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    ledger.serve(VPATH, ServingDelivery::Unpublished);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::DeliveryLost);
+    assert!(!store.captured_surface_is_current(&a));
+
+    ledger.serve(VPATH, ServingDelivery::Published);
+    assert!(store.captured_surface_is_current(&a));
+    ledger.serve(VPATH, ServingDelivery::Uncertified);
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Unwitnessed);
+    assert!(
+        !store.captured_surface_is_current(&a),
+        "a provider that cannot certify what it holds proves nothing about the record"
+    );
+
+    let unbound = ProviderSurfaceStore::new();
+    let a = unbound.record(record_surface("API A\n", carrier));
+    assert_eq!(unbound.delivery_of(&a), SurfaceDelivery::Unwitnessed);
+    assert!(!unbound.captured_surface_is_current(&a));
+}
+
+/// The acknowledgement rides the shared payload: an identical re-record
+/// inherits it without the store reading the provider's ledger, so a re-record
+/// during a request leaves the request's surface delivered, and a later loss
+/// is reported as a loss rather than as a surface that was never delivered.
+/// Recording never reads the ledger at all — acknowledgement costs no provider
+/// interaction on the record path.
+#[test]
+fn an_identical_re_record_inherits_the_acknowledgement_without_a_ledger_read() {
+    let carrier = "carrier\n";
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, "API A\n");
+    let a = store.record(record_surface("API A\n", carrier));
+    assert_eq!(ledger.reads(), 0, "recording reads no delivery ledger");
+    assert_eq!(store.delivery_of(&a), SurfaceDelivery::Delivered);
+    assert_eq!(ledger.reads(), 1, "one verdict, one ledger read");
+
+    let again = store.record(record_surface("API A\n", carrier));
+    assert!(Arc::ptr_eq(&a.payload, &again.payload));
+    assert_eq!(ledger.reads(), 1, "an identical re-record reads no ledger");
+    assert!(store.captured_surface_is_current(&a));
+
+    ledger.serve(VPATH, ServingDelivery::NotApplied);
+    assert_eq!(store.delivery_of(&again), SurfaceDelivery::DeliveryLost);
+}
+
+/// A mapped carrier-API surface recorded at `VPATH` over a fixed carrier: its
+/// source map sends the API `foo` token to the carrier's `foo`.
+fn mapped_api_record(api: &str) -> RecordSurface {
+    let carrier =
+        "<script setup lang=\"ts\">\nconst foo = defineProps<{ foo: string }>();\n</script>\n";
+    let api_foo = api.find("foo").expect("the API spells foo") as u32;
+    let line1 = carrier.lines().nth(1).unwrap();
+    let carrier_col = line1.find("foo").unwrap() as u32;
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Child.vue", carrier);
+    builder.add_token(0, api_foo, 1, carrier_col, Some(source_id), None);
+    let source_map_json = builder.into_sourcemap().to_json_string();
+    RecordSurface::carrier_api_legacy(
+        VPATH.to_string(),
+        CANONICAL.to_string(),
+        Arc::from(api),
+        Some(
+            crate::documents::provider_projection::ProviderPositionMapper::source_map(
+                crate::documents::position_map::PositionMapper::from_json(&source_map_json)
+                    .unwrap(),
+            ),
+        ),
+        Arc::from(carrier),
+    )
+}
+
+/// The captured API classifier decodes a foreign API answer only through a
+/// surface the serving provider holds at that decode: a mapped surface recorded
+/// ahead of its delivery, or one whose delivery was lost or overtaken before
+/// the decode, is known virtual but unmappable. A matching delivery makes the
+/// same capture mappable at the next decode, with no new record.
+#[test]
+fn the_captured_api_classifier_decodes_only_through_delivered_surfaces() {
+    use crate::type_provider::merge::ApiSurfaceResolution;
+    use tower_lsp_server::ls_types::PositionEncodingKind;
+    let classify = |captured: &ProviderQuerySnapshot| {
+        classify_captured_api_surface(None, captured, VPATH, PositionEncodingKind::UTF16)
+    };
+    let api_a = "declare const Child: { new(props?: { foo: string }): {} }\n";
+    let api_b = "declare const Child: { new(props?: { bar: number; foo: string }): {} }\n";
+
+    let (store, ledger) = witnessed_store();
+    ledger.apply(VPATH, api_a);
+    store.record(mapped_api_record(api_a));
+    assert!(matches!(
+        classify(&store.capture_current_carrier_api_set()),
+        ApiSurfaceResolution::Vouched(_)
+    ));
+
+    // B is recorded while the engine still holds A.
+    store.record(mapped_api_record(api_b));
+    let captured = store.capture_current_carrier_api_set();
+    assert!(
+        matches!(classify(&captured), ApiSurfaceResolution::VirtualDrop),
+        "B's map would decode an answer the engine produced against A"
+    );
+
+    // B's delivery lands: the same capture now decodes through B.
+    ledger.apply(VPATH, api_b);
+    assert!(matches!(
+        classify(&captured),
+        ApiSurfaceResolution::Vouched(_)
+    ));
+
+    // The delivery is lost, or overtaken by other bytes, before the decode.
+    ledger.serve(VPATH, ServingDelivery::NotApplied);
+    assert!(matches!(
+        classify(&captured),
+        ApiSurfaceResolution::VirtualDrop
+    ));
+    ledger.apply(VPATH, api_a);
+    assert!(matches!(
+        classify(&captured),
+        ApiSurfaceResolution::VirtualDrop
+    ));
+
+    // A store with no serving ledger proves nothing about delivery.
+    let unwitnessed = ProviderSurfaceStore::new();
+    unwitnessed.record(mapped_api_record(api_a));
+    assert!(matches!(
+        classify(&unwitnessed.capture_current_carrier_api_set()),
+        ApiSurfaceResolution::VirtualDrop
+    ));
 }

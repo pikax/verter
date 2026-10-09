@@ -29,7 +29,9 @@ use verter_type_expr::locators::{
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 use verter_type_expr::PrimitiveName;
 
-use crate::decl_body_memo::{lowered_value_decl_for_synthesised_default, LoweredValueDecl};
+use verter_semantic_source::decl_body_memo::{
+    lowered_value_decl_for_synthesised_default, LoweredValueDecl,
+};
 
 use super::vue_default_synth::VUE_INSTANCE_PROPS_MEMBER;
 
@@ -181,7 +183,7 @@ mod tests {
     use verter_semantic::analysis::framework_facts::svelte::{
         SvelteInstanceExport, SvelteLegacyProp, SveltePropsCandidate,
     };
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
+    use verter_session_query::declarations::ValueDeclKind;
     use verter_type_expr::locators::{MacroPayloadLocator, MacroPayloadPosition};
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 

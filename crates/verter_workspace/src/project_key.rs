@@ -10,7 +10,7 @@
 
 use crate::canonical_path::CanonicalPath;
 use crate::workspace_snapshot::{OwnershipProject, ProjectPayload};
-use verter_semantic::resolver_core::ProjectStableKey;
+use verter_session_query::resolution::ProjectStableKey;
 
 /// Stable identity for a project across snapshot rebuilds.
 ///
@@ -36,7 +36,7 @@ pub fn project_stable_key_from_project(
             input.push(0u8);
             input.extend_from_slice(b"CONFIGURED");
             ProjectStableKey::Configured(
-                verter_semantic::resolver_core::project_stable_key::compute_hash16(&input),
+                verter_session_query::resolution::project_stable_key::compute_hash16(&input),
             )
         }
         ProjectPayload::Fallback { .. } => {
@@ -44,7 +44,7 @@ pub fn project_stable_key_from_project(
             input.push(0u8);
             input.extend_from_slice(b"FALLBACK");
             ProjectStableKey::Fallback(
-                verter_semantic::resolver_core::project_stable_key::compute_hash16(&input),
+                verter_session_query::resolution::project_stable_key::compute_hash16(&input),
             )
         }
     }
@@ -56,8 +56,8 @@ mod tests {
 
     use super::*;
     use crate::membership::FallbackMembership;
-    use crate::workspace_snapshot::ProjectId;
-    use verter_semantic::resolver_core::{
+    use verter_session_query::resolution::ProjectId;
+    use verter_session_query::resolution::{
         ConfiguredMembership, IdeProjectCompilerOptions, StaticMembershipSpec,
     };
 

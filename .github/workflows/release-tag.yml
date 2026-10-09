@@ -18,8 +18,8 @@ name: release-tag
 #
 # This job is a deliberate no-op (clean exit, no tag) for:
 #   - ordinary commits — the subject is not a release subject;
-#   - release.yml's own CHANGELOG commit — its subject matches, but the tag
-#     already exists by then, so the idempotency check exits before tagging.
+#   - a re-run on a release commit whose tag already exists — the
+#     idempotency check exits before tagging.
 #
 # It FAILS, rather than doing nothing, on a release commit naming a lane that
 # does not exist: a typo'd scope is a release nobody is going to notice never
@@ -97,8 +97,8 @@ jobs:
             exit 1
           fi
 
-          # Idempotency: never re-tag (covers re-runs and release.yml's
-          # CHANGELOG commit, which lands after the tag already exists).
+          # Idempotency: never re-tag (covers re-runs of an already-tagged
+          # release commit).
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
             echo "Tag $tag already exists — nothing to do."
             exit 0

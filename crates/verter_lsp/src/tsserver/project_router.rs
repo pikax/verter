@@ -20,9 +20,8 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::outbound::Outbound;
 use dashmap::DashMap;
-use tokio::sync::OnceCell;
-use tower_lsp_server::Client;
 use verter_session::external_ts::{
     BoundProject, CarrierOwnershipResolution, EngineBackend, ProjectBinding,
 };
@@ -32,8 +31,8 @@ use verter_type_runtime::discovery::{
     tsserver_serving_tier, ResolvedTsserver, TsserverSource,
 };
 use verter_type_runtime::provider_hub::{
-    AdmissionRefusal, AdmittedRequest, DroppedAdmittedState, OverlayFileKind, OverlayMutation,
-    OverlayPriority, ProjectWitness,
+    AdmissionRefusal, AdmittedRequest, DroppedAdmittedCarrier, DroppedAdmittedState,
+    OverlayFileKind, OverlayMutation, OverlayPriority, ProjectWitness,
 };
 use verter_workspace::{decide_generated_unit_admission_with_basis, CanonicalPath};
 
@@ -113,6 +112,17 @@ struct RequestRoute {
 /// basis drifts under it.
 const BASIS_DRIFT_REISSUES: usize = 2;
 
+/// Backed-off retries for carrier writes still refused on a drifted basis
+/// after their immediate [`BASIS_DRIFT_REISSUES`] (see
+/// [`settle_under_fresh_admission`] and
+/// [`ProjectTsserverProvider::rearm_admitted_state`]): long enough in total to
+/// outlast an edit burst.
+const SETTLEMENT_DRIFT_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(250),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(4),
+];
+
 /// Run one read-only query through its request route, settling it only under
 /// a CURRENT admission.
 ///
@@ -186,6 +196,91 @@ impl RequestRoute {
     }
 }
 
+/// Why one admitted carrier write did not complete.
+enum WriteFailure {
+    /// No fresh admission could be minted for it.
+    Admission(TypeProviderError),
+    /// The serving hub refused one of its settlements.
+    Refused {
+        stage: &'static str,
+        reason: AdmissionRefusal,
+    },
+}
+
+impl WriteFailure {
+    /// The settlement refusal of the `stage` write, as `map_err` takes it.
+    fn refused(stage: &'static str) -> impl FnOnce(AdmissionRefusal) -> Self {
+        move |reason| Self::Refused { stage, reason }
+    }
+
+    /// Refused because the basis moved while the engine applied it — the
+    /// refusal a fresh admission answers.
+    fn basis_drifted(&self) -> bool {
+        matches!(
+            self,
+            Self::Refused {
+                reason: AdmissionRefusal::StaleBasis,
+                ..
+            }
+        )
+    }
+}
+
+impl std::fmt::Display for WriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(error) => write!(f, "{error}"),
+            Self::Refused { stage, reason } => write!(f, "{stage} refused: {reason:?}"),
+        }
+    }
+}
+
+impl From<WriteFailure> for TypeProviderError {
+    fn from(failure: WriteFailure) -> Self {
+        match failure {
+            WriteFailure::Admission(error) => error,
+            refused @ WriteFailure::Refused { .. } => TypeProviderError::new(refused.to_string()),
+        }
+    }
+}
+
+/// Run one admitted carrier write, re-issuing it under a fresh admission while
+/// the hub refuses its settlement on a drifted basis.
+///
+/// A content-only drift (another document's edit or open landed while the
+/// engine applied the write) refuses only the settlement: nothing is recorded
+/// as applied, and the hub leaves the re-application to its issuer. Surfacing
+/// that refusal instead would leave the carrier degraded with nothing to
+/// re-drive it — the LSP believes the write was attempted, so its open
+/// document never reaches the engine. Each `write` call mints its own
+/// admission, so a re-issue binds the live basis. The first re-issues are
+/// immediate, like every other basis-drift re-issue; a basis still drifting
+/// after them is waited out with [`SETTLEMENT_DRIFT_BACKOFF`] so an edit burst
+/// cannot spend the budget while it lasts. Any other refusal is returned as is.
+async fn settle_under_fresh_admission<T, Fut>(
+    mut write: impl FnMut() -> Fut,
+) -> Result<T, TypeProviderError>
+where
+    Fut: Future<Output = Result<T, WriteFailure>>,
+{
+    let mut reissues = BASIS_DRIFT_REISSUES;
+    let mut backoff = SETTLEMENT_DRIFT_BACKOFF.iter();
+    loop {
+        match write().await {
+            Err(failure) if failure.basis_drifted() => {
+                if reissues > 0 {
+                    reissues -= 1;
+                } else if let Some(delay) = backoff.next() {
+                    tokio::time::sleep(*delay).await;
+                } else {
+                    return Err(failure.into());
+                }
+            }
+            settled => return settled.map_err(Into::into),
+        }
+    }
+}
+
 /// A project-bound pool of hub-managed tsserver engines.
 ///
 /// Cold at construction: no tsserver starts until a project-bound lifecycle
@@ -195,7 +290,7 @@ pub struct ProjectTsserverProvider {
     tsdk: Option<String>,
     plugin_path: Option<String>,
     node_path: String,
-    client: Arc<OnceCell<Client>>,
+    client: Outbound,
     /// The witness backend the router mints each operation's [`BoundProject`]
     /// through. It is NOT the publish path's backend — `ensure_project` is a
     /// pure witness mint plus per-backend bookkeeping, and the router only needs
@@ -230,7 +325,7 @@ impl ProjectTsserverProvider {
         host: Arc<VerterHost>,
         tsdk: Option<String>,
         plugin_path: Option<String>,
-        client: Arc<OnceCell<Client>>,
+        client: Outbound,
     ) -> Result<Self, TypeProviderError> {
         let node_path = super::find_node().ok_or_else(|| {
             TypeProviderError::new("Node.js not found on PATH or standard locations")
@@ -264,67 +359,110 @@ impl ProjectTsserverProvider {
     /// through FRESH admission against the epoch that now serves. Each carrier
     /// re-registers its metadata and, when its last explicit activation was
     /// recorded, re-activates with that exact parsing mode — mirroring the
-    /// desired-state replay order for non-admitted carriers. A refusal (the
-    /// configuration changed, the project moved, the publication raced) skips
-    /// that carrier fail-closed: the ordinary carrier-sync path owns its
-    /// re-drive, exactly as before the crash.
+    /// desired-state replay order for non-admitted carriers.
+    ///
+    /// A settlement refused on a drifted BASIS (an unrelated document's edit
+    /// landed while the engine applied it) is re-issued under a fresh
+    /// admission: the hub leaves that re-application to its issuer, and nothing
+    /// else re-drives a carrier the LSP still believes the engine holds — its
+    /// open documents would wait on a provider that never received them. The
+    /// first re-issues are immediate, like every other basis-drift re-issue;
+    /// carriers still drifting after them are retried once the whole set has
+    /// been re-armed, backing off so a burst of edits cannot spend the budget
+    /// while it lasts (and one drifting carrier never delays the others). Any
+    /// other refusal (the configuration changed, the project moved, the engine
+    /// was replaced) skips that carrier fail-closed: the change that caused it
+    /// re-publishes the carrier through the ordinary sync path.
     pub async fn rearm_admitted_state(&self, dropped: &DroppedAdmittedState) {
+        let mut drifting = Vec::new();
         for carrier in &dropped.carriers {
-            let rearm = async {
-                let (hub, admitted) = self
-                    .admit_registered_unit(
-                        &carrier.source_path,
-                        &carrier.companion_path,
-                        &carrier.project_file_name,
-                    )
-                    .await?;
-                hub.apply_overlay(
-                    &admitted,
-                    OverlayMutation::RegisterCarrierMetadata {
-                        source_path: carrier.source_path.clone(),
-                        companion_path: carrier.companion_path.clone(),
-                        content: carrier.content.clone(),
-                        project_file_name: carrier.project_file_name.clone(),
-                    },
-                )
-                .await
-                .map_err(|reason| {
-                    TypeProviderError::new(format!(
-                        "recovery re-arm registration refused: {reason:?}"
-                    ))
-                })?;
-                if let Some(script_kind) = carrier.script_kind {
-                    hub.apply_overlay(
-                        &admitted,
-                        OverlayMutation::ActivateCarrier {
-                            source_path: carrier.source_path.clone(),
-                            companion_path: carrier.companion_path.clone(),
-                            project_file_name: carrier.project_file_name.clone(),
-                            script_kind,
-                        },
-                    )
-                    .await
-                    .map_err(|reason| {
-                        TypeProviderError::new(format!(
-                            "recovery re-arm activation refused: {reason:?}"
-                        ))
-                    })?;
+            let mut reissues = BASIS_DRIFT_REISSUES;
+            loop {
+                match self.rearm_admitted_carrier(carrier).await {
+                    Ok(()) => break,
+                    Err(error) if error.basis_drifted() && reissues > 0 => reissues -= 1,
+                    Err(error) if error.basis_drifted() => {
+                        drifting.push((carrier, error));
+                        break;
+                    }
+                    Err(error) => {
+                        Self::warn_rearm_skipped(carrier, &error);
+                        break;
+                    }
                 }
-                self.register_route(
-                    &carrier.source_path,
-                    &carrier.companion_path,
-                    &carrier.project_file_name,
-                );
-                Ok::<(), TypeProviderError>(())
-            };
-            if let Err(error) = rearm.await {
-                tracing::warn!(
-                    companion = %carrier.companion_path,
-                    "tsserver recovery re-arm skipped (fail-closed; the ordinary \
-                     carrier sync re-drives it): {error}"
-                );
             }
         }
+        for delay in SETTLEMENT_DRIFT_BACKOFF {
+            if drifting.is_empty() {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+            let mut still = Vec::new();
+            for (carrier, _) in drifting {
+                match self.rearm_admitted_carrier(carrier).await {
+                    Ok(()) => {}
+                    Err(error) if error.basis_drifted() => still.push((carrier, error)),
+                    Err(error) => Self::warn_rearm_skipped(carrier, &error),
+                }
+            }
+            drifting = still;
+        }
+        for (carrier, error) in &drifting {
+            Self::warn_rearm_skipped(carrier, error);
+        }
+    }
+
+    fn warn_rearm_skipped(carrier: &DroppedAdmittedCarrier, error: &WriteFailure) {
+        tracing::warn!(
+            companion = %carrier.companion_path,
+            "tsserver recovery re-arm skipped (fail-closed; the ordinary \
+             carrier sync re-drives it): {error}"
+        );
+    }
+
+    /// One carrier of [`Self::rearm_admitted_state`], under one fresh admission.
+    async fn rearm_admitted_carrier(
+        &self,
+        carrier: &DroppedAdmittedCarrier,
+    ) -> Result<(), WriteFailure> {
+        let (hub, admitted) = self
+            .admit_registered_unit(
+                &carrier.source_path,
+                &carrier.companion_path,
+                &carrier.project_file_name,
+            )
+            .await
+            .map_err(WriteFailure::Admission)?;
+        hub.apply_overlay(
+            &admitted,
+            OverlayMutation::RegisterCarrierMetadata {
+                source_path: carrier.source_path.clone(),
+                companion_path: carrier.companion_path.clone(),
+                content: carrier.content.clone(),
+                project_file_name: carrier.project_file_name.clone(),
+            },
+        )
+        .await
+        .map_err(WriteFailure::refused("recovery re-arm registration"))?;
+        if let Some(script_kind) = carrier.script_kind {
+            hub.apply_overlay(
+                &admitted,
+                OverlayMutation::ActivateCarrier {
+                    source_path: carrier.source_path.clone(),
+                    companion_path: carrier.companion_path.clone(),
+                    project_file_name: carrier.project_file_name.clone(),
+                    script_kind,
+                },
+            )
+            .await
+            .map_err(WriteFailure::refused("recovery re-arm activation"))?;
+        }
+        self.register_route(
+            &carrier.source_path,
+            &carrier.companion_path,
+            &carrier.project_file_name,
+        );
+        Ok(())
     }
 
     fn normalized(path: &str) -> String {
@@ -471,7 +609,7 @@ impl ProjectTsserverProvider {
                         spec.workspace_root.clone(),
                         self.plugin_path.clone(),
                     ),
-                    Arc::clone(&self.client),
+                    self.client.clone(),
                     3,
                     self.admitted_state_rearm.read().clone(),
                     Arc::clone(&self.restart_pulse),
@@ -589,6 +727,36 @@ impl ProjectTsserverProvider {
         .await
     }
 
+    /// Fresh admissions for one bulk-activation group, on the engine that
+    /// already serves it. A member whose binding now resolves to another engine
+    /// cannot join this group's single bulk call, so the group is refused as a
+    /// replaced provider rather than split across engines.
+    async fn readmit_carrier_group(
+        &self,
+        hub: &Arc<ProviderHub<dyn TypeProvider>>,
+        group: &[CarrierActivation],
+    ) -> Result<Vec<(AdmittedRequest, CarrierActivation)>, WriteFailure> {
+        let mut admitted = Vec::with_capacity(group.len());
+        for member in group {
+            let (owner, admission) = self
+                .admit_registered_unit(
+                    &member.source_path,
+                    &member.companion_path,
+                    &member.project_file_name,
+                )
+                .await
+                .map_err(WriteFailure::Admission)?;
+            if !Arc::ptr_eq(&owner, hub) {
+                return Err(WriteFailure::Refused {
+                    stage: "hub carrier batch",
+                    reason: AdmissionRefusal::StaleProvider,
+                });
+            }
+            admitted.push((admission, member.clone()));
+        }
+        Ok(admitted)
+    }
+
     async fn provider_for_path(
         &self,
         path: &str,
@@ -698,24 +866,27 @@ impl ProjectTsserverProvider {
             };
         }
         let (source, _) = self.source_for_path(path);
-        let (hub, admitted) = self
-            .admit_current_unit(&source, path, || {
-                self.binding_for_path_with_publication(path)
-            })
-            .await?;
-        hub.apply_overlay(
-            &admitted,
-            OverlayMutation::File {
-                path: path.to_string(),
-                content: content.to_string(),
-                kind,
-                priority,
-            },
-        )
-        .await
-        .map_err(|reason| {
-            TypeProviderError::new(format!("hub generated-unit write refused: {reason:?}"))
+        let source = source.as_str();
+        settle_under_fresh_admission(move || async move {
+            let (hub, admitted) = self
+                .admit_current_unit(source, path, || {
+                    self.binding_for_path_with_publication(path)
+                })
+                .await
+                .map_err(WriteFailure::Admission)?;
+            hub.apply_overlay(
+                &admitted,
+                OverlayMutation::File {
+                    path: path.to_string(),
+                    content: content.to_string(),
+                    kind,
+                    priority,
+                },
+            )
+            .await
+            .map_err(WriteFailure::refused("hub generated-unit write"))
         })
+        .await
     }
 
     fn register_route(&self, source: &str, companion: &str, project: &str) {
@@ -1002,6 +1173,56 @@ pub fn probe_source_label(source: TsserverSource) -> &'static str {
 }
 
 impl TypeProvider for ProjectTsserverProvider {
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, verter_type_runtime::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            if verter_session::framework::descriptor::classify_carrier_companion(path).is_none() {
+                return self
+                    .provider_for_path(path)
+                    .await?
+                    .load_file_with_disposition(path, content, priority)
+                    .await;
+            }
+            self.apply_file_write(path, content, OverlayFileKind::Load, priority)
+                .await?;
+            Ok(verter_type_runtime::traits::disposition_for_applied_bytes(
+                &self.applied_content(path),
+                content,
+            ))
+        })
+    }
+
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        use verter_type_runtime::traits::AppliedContent;
+        let normalized = Self::normalized(path);
+        let certify = |content: AppliedContent| match content {
+            AppliedContent::Uncertified => AppliedContent::NotApplied,
+            other => other,
+        };
+        if let Some(route) = self.routes.get(&normalized) {
+            for entry in &self.providers {
+                if Self::normalized(&entry.key().project) == route.project {
+                    return certify(entry.value().applied_content(path));
+                }
+            }
+            return AppliedContent::NotApplied;
+        }
+        let mut found = None;
+        for entry in self.providers.iter() {
+            if let AppliedContent::Applied(bytes) = entry.value().applied_content(path) {
+                if found.is_some() {
+                    return AppliedContent::NotApplied;
+                }
+                found = Some(AppliedContent::Applied(bytes));
+            }
+        }
+        found.unwrap_or(AppliedContent::NotApplied)
+    }
+
     fn provider_id(&self) -> &'static str {
         "tsserver"
     }
@@ -1321,22 +1542,26 @@ impl TypeProvider for ProjectTsserverProvider {
         let content = content.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            let (hub, admitted) = self
-                .admit_registered_unit(&source_path, &companion_path, &project_file_name)
-                .await?;
-            hub.apply_overlay(
-                &admitted,
-                OverlayMutation::RegisterCarrier {
-                    source_path: source_path.clone(),
-                    companion_path: companion_path.clone(),
-                    content,
-                    project_file_name: project_file_name.clone(),
-                },
-            )
-            .await
-            .map_err(|reason| {
-                TypeProviderError::new(format!("hub carrier registration refused: {reason:?}"))
-            })?;
+            let (source, companion, project) = (&source_path, &companion_path, &project_file_name);
+            let content = &content;
+            settle_under_fresh_admission(move || async move {
+                let (hub, admitted) = self
+                    .admit_registered_unit(source, companion, project)
+                    .await
+                    .map_err(WriteFailure::Admission)?;
+                hub.apply_overlay(
+                    &admitted,
+                    OverlayMutation::RegisterCarrier {
+                        source_path: source.clone(),
+                        companion_path: companion.clone(),
+                        content: content.clone(),
+                        project_file_name: project.clone(),
+                    },
+                )
+                .await
+                .map_err(WriteFailure::refused("hub carrier registration"))
+            })
+            .await?;
             self.register_route(&source_path, &companion_path, &project_file_name);
             Ok(())
         })
@@ -1350,22 +1575,24 @@ impl TypeProvider for ProjectTsserverProvider {
         project_file_name: &'a str,
     ) -> ProviderFuture<'a, ()> {
         Box::pin(async move {
-            let (hub, admitted) = self
-                .admit_registered_unit(source_path, companion_path, project_file_name)
-                .await?;
-            hub.apply_overlay(
-                &admitted,
-                OverlayMutation::RegisterCarrierMetadata {
-                    source_path: source_path.to_string(),
-                    companion_path: companion_path.to_string(),
-                    content: content.to_string(),
-                    project_file_name: project_file_name.to_string(),
-                },
-            )
-            .await
-            .map_err(|reason| {
-                TypeProviderError::new(format!("hub carrier metadata refused: {reason:?}"))
-            })?;
+            settle_under_fresh_admission(move || async move {
+                let (hub, admitted) = self
+                    .admit_registered_unit(source_path, companion_path, project_file_name)
+                    .await
+                    .map_err(WriteFailure::Admission)?;
+                hub.apply_overlay(
+                    &admitted,
+                    OverlayMutation::RegisterCarrierMetadata {
+                        source_path: source_path.to_string(),
+                        companion_path: companion_path.to_string(),
+                        content: content.to_string(),
+                        project_file_name: project_file_name.to_string(),
+                    },
+                )
+                .await
+                .map_err(WriteFailure::refused("hub carrier metadata"))
+            })
+            .await?;
             self.register_route(source_path, companion_path, project_file_name);
             Ok(())
         })
@@ -1382,22 +1609,25 @@ impl TypeProvider for ProjectTsserverProvider {
         let companion_path = companion_path.to_string();
         let project_file_name = project_file_name.to_string();
         Box::pin(async move {
-            let (hub, admitted) = self
-                .admit_registered_unit(&source_path, &companion_path, &project_file_name)
-                .await?;
-            hub.apply_overlay(
-                &admitted,
-                OverlayMutation::ActivateCarrier {
-                    source_path: source_path.clone(),
-                    companion_path: companion_path.clone(),
-                    project_file_name: project_file_name.clone(),
-                    script_kind,
-                },
-            )
-            .await
-            .map_err(|reason| {
-                TypeProviderError::new(format!("hub carrier activation refused: {reason:?}"))
-            })?;
+            let (source, companion, project) = (&source_path, &companion_path, &project_file_name);
+            settle_under_fresh_admission(move || async move {
+                let (hub, admitted) = self
+                    .admit_registered_unit(source, companion, project)
+                    .await
+                    .map_err(WriteFailure::Admission)?;
+                hub.apply_overlay(
+                    &admitted,
+                    OverlayMutation::ActivateCarrier {
+                        source_path: source.clone(),
+                        companion_path: companion.clone(),
+                        project_file_name: project.clone(),
+                        script_kind,
+                    },
+                )
+                .await
+                .map_err(WriteFailure::refused("hub carrier activation"))
+            })
+            .await?;
             self.register_route(&source_path, &companion_path, &project_file_name);
             Ok(())
         })
@@ -1428,23 +1658,41 @@ impl TypeProvider for ProjectTsserverProvider {
             }
             // Preserve each engine's input order and its single-refresh bulk
             // activation contract. Scalar editor opens keep their separate path.
-            for (hub, members) in batches {
-                let routes: Vec<_> = members
-                    .iter()
-                    .map(|(_, member)| {
-                        (
-                            member.source_path.clone(),
-                            member.companion_path.clone(),
-                            member.project_file_name.clone(),
-                        )
+            // A group refused on a drifted basis is re-admitted and re-issued
+            // whole on its own engine; the other groups are not re-applied.
+            let outcomes = futures_util::future::join_all(batches.into_iter().map(
+                |(hub, admitted)| async move {
+                    let group: Vec<CarrierActivation> =
+                        admitted.iter().map(|(_, member)| member.clone()).collect();
+                    let (hub_ref, group_ref) = (&hub, &group);
+                    let mut first = Some(admitted);
+                    settle_under_fresh_admission(move || {
+                        let admitted = first.take();
+                        async move {
+                            let admitted = match admitted {
+                                Some(admitted) => admitted,
+                                None => self.readmit_carrier_group(hub_ref, group_ref).await?,
+                            };
+                            hub_ref
+                                .apply_overlay_batch(admitted)
+                                .await
+                                .map_err(WriteFailure::refused("hub carrier batch"))
+                        }
                     })
-                    .collect();
-                hub.apply_overlay_batch(members).await.map_err(|reason| {
-                    TypeProviderError::new(format!("hub carrier batch refused: {reason:?}"))
-                })?;
-                for (source, companion, project) in routes {
-                    self.register_route(&source, &companion, &project);
-                }
+                    .await?;
+                    for member in &group {
+                        self.register_route(
+                            &member.source_path,
+                            &member.companion_path,
+                            &member.project_file_name,
+                        );
+                    }
+                    Ok::<(), TypeProviderError>(())
+                },
+            ))
+            .await;
+            for outcome in outcomes {
+                outcome?;
             }
             Ok(())
         })

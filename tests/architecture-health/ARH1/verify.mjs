@@ -1516,9 +1516,40 @@ function validateSurface(contracts, errors) {
         });
       }
     }
+    const methodOwners = surface.retainedFnOwners || {};
+    for (const [fn, owner] of Object.entries(methodOwners)) {
+      const childDir = hotspot.path.replace(/\.rs$/, "");
+      const moduleName = path.basename(owner?.path || "", ".rs");
+      if (
+        !(surface.retainedFns || []).includes(fn) ||
+        !(surface.retainedTypes || []).includes(owner?.type) ||
+        path.posix.dirname(owner?.path || "") !== childDir ||
+        !/^[a-z_][a-z_0-9]*$/.test(moduleName) ||
+        !existsRel(owner.path) ||
+        !new RegExp(`\\bmod\\s+${moduleName}\\s*;`).test(stripped)
+      ) {
+        errors.push({
+          caseId,
+          code: "surface-owner-invalid",
+          detail: `${hotspot.path}: fn ${fn} owner ${JSON.stringify(owner)}`,
+        });
+      }
+    }
     for (const fn of surface.retainedFns || []) {
-      if (!new RegExp(`(?:pub|pub\\(crate\\)) (?:const )?fn ${fn}\\s*[<(]`).test(text)) {
-        errors.push({ caseId, code: "surface-item-missing", detail: `${hotspot.path}: fn ${fn}` });
+      const owner = methodOwners[fn];
+      const declared = owner
+        ? typeof owner.path === "string" &&
+          existsRel(owner.path) &&
+          retainedTypeMembers(strippedFileText(owner.path), new Set([owner.type])).has(
+            `${owner.type}::${fn}`,
+          )
+        : new RegExp(`(?:pub|pub\\(crate\\)) (?:const )?fn ${fn}\\s*[<(]`).test(stripped);
+      if (!declared) {
+        errors.push({
+          caseId,
+          code: "surface-item-missing",
+          detail: `${owner?.path || hotspot.path}: fn ${fn}`,
+        });
       }
     }
     for (const type of surface.retainedTypes || []) {
@@ -1625,7 +1656,10 @@ function validateSurface(contracts, errors) {
           detail: `${hotspot.path}: fn ${row.item}`,
         });
       }
-      if (row.kind === "field" && !new RegExp(`pub ${row.item}\\s*:`).test(text)) {
+      // A field narrowed to pub(crate) is still the declared item: the
+      // pending `pub` form and the executed `pub(crate)` form both bind it.
+      const fieldVisibility = row.to === "pub(crate)" ? String.raw`pub(?:\(crate\))?` : "pub";
+      if (row.kind === "field" && !new RegExp(`${fieldVisibility} ${row.item}\\s*:`).test(text)) {
         errors.push({
           caseId,
           code: "surface-item-missing",

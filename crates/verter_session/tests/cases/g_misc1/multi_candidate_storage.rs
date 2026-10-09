@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use verter_session::resolver_core::{
-    FactVersionRef, StoreView, StoreViewCompatToken, ValidatedFactCache,
-};
+use verter_session::resolver_core::ValidatedFactCache;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 #[derive(Debug)]
 struct TestView {
@@ -238,7 +238,7 @@ fn r20_stress_n8_m8() {
 /// must be exactly `CANDIDATE_CAP`.
 #[test]
 fn r20_same_key_concurrent_admissions_preserve_cap() {
-    use verter_session::resolver_core::CANDIDATE_CAP;
+    use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
     let cache = Arc::new(ValidatedFactCache::<String, usize>::default());
     let n_threads = 16usize;

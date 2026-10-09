@@ -22,8 +22,9 @@
 //! - **Positional topology.** Materialized lanes are positional vectors
 //!   order-aligned with the analysis — never name-keyed maps (names repeat
 //!   across duplicate events, slots, fallthrough branches, registry rows).
+use verter_type_engine::project_semantic_dispatch::interior_source::InteriorSourceStep;
 
-use verter_semantic::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
+use verter_session_query::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
 use verter_type_expr::facts::{SemanticSourceFailure, SourcePosition};
 use verter_type_expr::{PublicationResult, TypeExpr};
 
@@ -49,7 +50,7 @@ use crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap;
 /// three named constructors below, so the claim a call site is making is
 /// spelled out at that call site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PublishedCompleteness(crate::semantic_query::ResultCompleteness);
+pub(crate) struct PublishedCompleteness(verter_type_engine::semantic_query::ResultCompleteness);
 
 impl PublishedCompleteness {
     /// A result with no partiality anywhere: hand-built parts, i.e. the
@@ -57,15 +58,16 @@ impl PublishedCompleteness {
     /// resolve or extract phase to merge. No production entry uses it — a
     /// production envelope's completeness is always MEASURED.
     #[cfg(test)]
-    pub(crate) const COMPLETE: Self = Self(crate::semantic_query::ResultCompleteness::Complete);
+    pub(crate) const COMPLETE: Self =
+        Self(verter_type_engine::semantic_query::ResultCompleteness::Complete);
 
     /// The COLD constructor: the resolve-phase term merged with the WHOLE
     /// extract scope, i.e. exactly the signal
     /// `component_meta_publish_decision*` gates admission on. Every cold
     /// output-bearing entry MUST build its envelope completeness here.
     pub(crate) fn merged(
-        resolve: crate::semantic_query::ResultCompleteness,
-        extract: crate::semantic_query::ResultCompleteness,
+        resolve: verter_type_engine::semantic_query::ResultCompleteness,
+        extract: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> Self {
         Self(resolve.merge(extract))
     }
@@ -77,13 +79,13 @@ impl PublishedCompleteness {
     /// arms re-publish it rather than recomputing a merge they have no extract
     /// phase for.
     pub(crate) fn from_admitted_cache_entry(
-        cached: crate::semantic_query::ResultCompleteness,
+        cached: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> Self {
         Self(cached)
     }
 
     /// The carried value, for the envelope field and the wire projection.
-    pub(crate) fn get(self) -> crate::semantic_query::ResultCompleteness {
+    pub(crate) fn get(self) -> verter_type_engine::semantic_query::ResultCompleteness {
         self.0
     }
 }
@@ -116,7 +118,7 @@ pub struct ComponentMetaOutput {
     /// result-cache publication gate (the no-poison invariant), and this
     /// field never changes that decision — it only stops the payload from
     /// LOOKING complete.
-    completeness: crate::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 
 impl ComponentMetaOutput {
@@ -124,12 +126,12 @@ impl ComponentMetaOutput {
     /// — only `meta_resolve::projectors::output_sink` can mint it, so only
     /// the sink can construct an envelope.
     pub(crate) fn from_parts(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         analysis: ComponentMetaAnalysis,
         resolution: Option<ComponentMetaResolutionOutput>,
         types: MaterializedComponentMetaTypes,
         contract: crate::framework::ComponentContractAvailability,
-        completeness: crate::semantic_query::ResultCompleteness,
+        completeness: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> Self {
         Self {
             analysis,
@@ -161,7 +163,7 @@ impl ComponentMetaOutput {
         Option<ComponentMetaResolutionOutput>,
         MaterializedComponentMetaTypes,
         crate::framework::ComponentContractAvailability,
-        crate::semantic_query::ResultCompleteness,
+        verter_type_engine::semantic_query::ResultCompleteness,
     ) {
         (
             self.analysis,
@@ -200,7 +202,7 @@ pub struct TerminalTypeDisplay {
 
 impl TerminalTypeDisplay {
     pub(crate) fn from_text(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         text: Option<String>,
     ) -> Self {
         Self { text }
@@ -229,7 +231,7 @@ pub struct MaterializedTypePublication {
 
 impl MaterializedTypePublication {
     pub(crate) fn from_parts(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         publication: PublicationResult,
         materialized_type: Option<TypeExpr>,
         terminal_display: TerminalTypeDisplay,
@@ -296,7 +298,7 @@ impl MaterializedComponentMetaTypes {
     /// Assemble all output lanes. Requires the terminal output sink's
     /// capability — only the sink materializes output lanes.
     pub(crate) fn from_lanes(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         lanes: MaterializedComponentMetaTypeLanes,
     ) -> Self {
         Self { lanes }
@@ -360,7 +362,7 @@ pub struct MaterializedComponentMetaTypeLanes {
 #[derive(Debug, Clone)]
 pub struct MaterializedEventOccurrence {
     /// Complete occurrence-derived semantic event row.
-    pub event: verter_semantic::analysis::component_meta::EventAnalysis,
+    pub event: verter_session_query::analysis::component_meta::EventAnalysis,
     /// Materialized payload publication owned by this occurrence.
     pub payload: MaterializedTypePublication,
     /// Materialized callable return, or implicit `void` for property/runtime
@@ -376,7 +378,7 @@ pub struct MaterializedEventOccurrence {
 #[derive(Debug, Clone)]
 pub struct ComponentMetaResolutionOutput {
     /// The projection mode the resolution ran under.
-    pub mode: crate::types::ProjectionMode,
+    pub mode: verter_type_engine::semantic_query::ProjectionMode,
     /// Resolved per-macro metadata (declaration identity, native-props
     /// visibility surface, JSDoc).
     pub resolved_macros: Vec<crate::meta_resolve::ResolvedMacroMeta>,
@@ -420,7 +422,7 @@ impl ComponentMetaResolutionSeed {
     /// Seed from a warm-cache resolution template (no rehydration — the
     /// template carries every sidecar field the output needs).
     pub(crate) fn from_template(
-        template: &crate::component_meta_result_db::ResolutionTemplate,
+        template: &crate::component_meta_cached_result::ResolutionTemplate,
     ) -> Self {
         Self {
             resolved_type_registry: template.resolved_type_registry.clone(),
@@ -486,74 +488,6 @@ impl ComponentMetaOutputLane {
             }
             ComponentMetaOutputLane::FallthroughEventPayload => {
                 "fallthroughSurface.branches[].events[].payload"
-            }
-        }
-    }
-}
-
-/// One step of the interior position path within a composed source shell —
-/// the typed breadcrumb a failed REQUIRED interior dereference carries so
-/// the output error names the exact nested position that failed. Produced
-/// by the strict raise entry
-/// (`ProjectSemanticDispatch::raise_semantic_type_source_to_hot_strict`);
-/// defined here (next to the public output error that transports it) so the
-/// public error surface stays fully nameable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InteriorSourceStep {
-    /// An exact authored object / surface / synthesized / leaf-object member
-    /// key.
-    Member(verter_type_expr::facts::FactAuthoredPropertyKey),
-    /// A function parameter position (source order).
-    Parameter { ordinal: u32 },
-    /// The function return-type position.
-    ReturnType,
-    /// A type-parameter constraint position (source order).
-    TypeParamConstraint { ordinal: u32 },
-    /// A type-parameter default position (source order).
-    TypeParamDefault { ordinal: u32 },
-    /// A tuple element position (source order).
-    TupleElement { ordinal: u32 },
-    /// A closed leaf-union arm (source order).
-    UnionArm { ordinal: u32 },
-    /// An index-signature KEY position (declaration order).
-    IndexSignatureKey { ordinal: u32 },
-    /// An index-signature VALUE position (declaration order).
-    IndexSignatureValue { ordinal: u32 },
-    /// The object position of a path-precise indexed access.
-    IndexedAccessObject,
-    /// A call-signature position (declaration order).
-    CallSignature { ordinal: u32 },
-    /// A construct-signature position (declaration order).
-    ConstructSignature { ordinal: u32 },
-}
-
-impl std::fmt::Display for InteriorSourceStep {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            InteriorSourceStep::Member(key) => {
-                let encoded = serde_json::to_string(key).map_err(|_| std::fmt::Error)?;
-                write!(f, ".member[{encoded}]")
-            }
-            InteriorSourceStep::Parameter { ordinal } => write!(f, ".param[{ordinal}]"),
-            InteriorSourceStep::ReturnType => write!(f, ".return"),
-            InteriorSourceStep::TypeParamConstraint { ordinal } => {
-                write!(f, ".typeParam[{ordinal}].constraint")
-            }
-            InteriorSourceStep::TypeParamDefault { ordinal } => {
-                write!(f, ".typeParam[{ordinal}].default")
-            }
-            InteriorSourceStep::TupleElement { ordinal } => write!(f, ".tuple[{ordinal}]"),
-            InteriorSourceStep::UnionArm { ordinal } => write!(f, ".unionArm[{ordinal}]"),
-            InteriorSourceStep::IndexSignatureKey { ordinal } => {
-                write!(f, ".indexSignature[{ordinal}].key")
-            }
-            InteriorSourceStep::IndexSignatureValue { ordinal } => {
-                write!(f, ".indexSignature[{ordinal}].value")
-            }
-            InteriorSourceStep::IndexedAccessObject => write!(f, ".indexedAccessObject"),
-            InteriorSourceStep::CallSignature { ordinal } => write!(f, ".callSignature[{ordinal}]"),
-            InteriorSourceStep::ConstructSignature { ordinal } => {
-                write!(f, ".constructSignature[{ordinal}]")
             }
         }
     }
@@ -641,7 +575,7 @@ pub enum ComponentMetaFailure {
     /// A present source the terminal sink could not materialize.
     Output(ComponentMetaOutputError),
     /// The computation was aborted.
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
 impl From<ComponentMetaOutputError> for ComponentMetaFailure {
@@ -650,8 +584,8 @@ impl From<ComponentMetaOutputError> for ComponentMetaFailure {
     }
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for ComponentMetaFailure {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for ComponentMetaFailure {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         Self::Aborted(abort)
     }
 }

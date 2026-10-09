@@ -437,9 +437,10 @@ impl<'a> Visit<'a> for PropsRuneCollector<'_> {
                 if let Some(targs) = &call.type_arguments {
                     if let Some(first) = targs.params.first() {
                         let span = first.span();
-                        if let Some(annotation) =
-                            props_annotation_from_span(self.source, span.into())
-                        {
+                        if let Some(annotation) = props_annotation_from_span(
+                            self.source,
+                            verter_span::Span::new(span.start, span.end),
+                        ) {
                             self.annotation = Some(annotation);
                             return;
                         }
@@ -449,7 +450,10 @@ impl<'a> Visit<'a> for PropsRuneCollector<'_> {
                 // type annotation is the contract type.
                 if let Some(ann) = &decl.type_annotation {
                     let span = ann.type_annotation.span();
-                    if let Some(annotation) = props_annotation_from_span(self.source, span.into()) {
+                    if let Some(annotation) = props_annotation_from_span(
+                        self.source,
+                        verter_span::Span::new(span.start, span.end),
+                    ) {
                         self.annotation = Some(annotation);
                         return;
                     }

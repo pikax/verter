@@ -80,7 +80,7 @@ export function renderMarkdown(run) {
     `- Source: \`${meta.tree.head.slice(0, 12)}\` on \`${meta.tree.branch}\`${meta.tree.dirty ? ` — **dirty** (${meta.tree.changedPaths} paths, diff sha256 \`${meta.tree.diffSha256.slice(0, 12)}\`)` : " (clean)"}`,
     `- Host: ${meta.host.platform}-${meta.host.arch}, ${meta.host.cpuModel} (${meta.host.logicalCpus} logical CPUs), ${(meta.host.totalMemoryBytes / 2 ** 30).toFixed(1)} GiB, node ${meta.host.node}`,
     `- tsc: ${meta.typescript.versionText}, ${meta.typescript.platformPackage} (exe sha256 \`${meta.typescript.exeSha256.slice(0, 12)}\`, passed to the API explicitly)`,
-    `- Verter probe: release (${meta.binaries.probe.identity?.targetArch}), sha256 \`${meta.binaries.probe.sha256.slice(0, 12)}\` (counted twin \`${meta.binaries.counted.sha256.slice(0, 12)}\`); ${(meta.build.rustc ?? "").split("\n")[0]}`,
+    `- Verter probe: release (${meta.binaries.probe.identity?.targetArch}), sha256 \`${meta.binaries.probe.sha256.slice(0, 12)}\` (counted twin \`${meta.binaries.counted.sha256.slice(0, 12)}\`${meta.binaries.observe ? `; observe build \`${meta.binaries.observe.sha256.slice(0, 12)}\`, semantic-observe compiled in` : ""}); ${(meta.build.rustc ?? "").split("\n")[0]}`,
     `- Engine memory budget ${o.memMb} MiB for both tools; each process tree is contained at ${o.memMb + o.infraMb} MiB (the budget plus ${o.infraMb} MiB for the tree's other members); per-invocation deadline ${o.timeoutMs} ms plus ${o.startupAllowanceMs ?? 0} ms for process start (a safety timeout: only a whole-program tsc -p run that ran the whole deadline counts as exhausting it; a probe's deadline kill is reported, unverified)`,
     `- Supervisor: \`${meta.binaries.supervisor.sha256.slice(0, 12)}\` (${meta.binaries.supervisor.origin}); containment ${containment}`,
     `- Invocations: ${run.invocations.length} (${run.invocations.filter((i) => i.skipped).length} skipped after a warmup killed at the memory cap)`,
@@ -226,18 +226,42 @@ export function renderMarkdown(run) {
     push("");
   }
 
+  if (o.arms.includes("verter-observe")) {
+    push(
+      "## Observe build (semantic-observe compiled in vs physically compiled out; not compared with tsc)",
+      "",
+      "Both builds run the production configuration. REQUIRED state compares the retained occupancy and charges (semantic nodes, memo entries, union views, shape-cache entries, retained and pinned bytes) of every completed measurement; histories and peaks are optional state and excluded.",
+      "",
+    );
+    push(
+      "| scenario | setting | production cold | observe build cold | cost | REQUIRED state | production peak MB | observe build peak MB |",
+      "|---|---|---:|---:|---|---|---:|---:|",
+    );
+    for (const c of cells) {
+      if (!c.observeBuild) continue;
+      const cost = c.observeBuild.coldMs;
+      const word =
+        cost?.verdict === "verter" ? "slower" : cost?.verdict === "tsc" ? "faster" : "overlap";
+      const state = c.observeBuild.requiredState;
+      push(
+        `| ${c.scenario} | ${c.setting} | ${fmtMs(c.arms.verter.metrics.coldMs)} | ${fmtMs(c.arms["verter-observe"].metrics.coldMs)} | ${cost?.ratio != null && cost.ratioMeaningful !== false ? `×${cost.ratio.toFixed(2)} (${word})` : word} | ${state.state}${state.fields ? ` (${state.fields.join(", ")})` : ""} | ${fmtMb(c.arms.verter.metrics.peakBytes)} | ${fmtMb(c.arms["verter-observe"].metrics.peakBytes)} |`,
+      );
+    }
+    push("");
+  }
+
   if (o.arms.includes("verter-counted")) {
     push("## Verter work and allocation counts (instrumented run; its times are not compared)", "");
     push(
-      "| scenario | setting | cold-request allocations | allocated MB | relation proofs | semantic nodes | memo entries | retention peak MB |",
-      "|---|---|---:|---:|---:|---:|---:|---:|",
+      "| scenario | setting | cold-request allocations | allocated MB | semantic nodes | memo entries | retention peak MB |",
+      "|---|---|---:|---:|---:|---:|---:|",
     );
     for (const c of cells) {
       const k = c.arms["verter-counted"];
       const r = c.arms.verter?.retention;
       if (!k) continue;
       push(
-        `| ${c.scenario} | ${c.setting} | ${k.coldAllocations?.median ?? "—"} | ${k.coldAllocatedBytes ? (k.coldAllocatedBytes.median / 1048576).toFixed(1) : "—"} | ${r?.relationProofs ?? "—"} | ${r?.semanticNodes ?? "—"} | ${r?.semanticMemoEntries ?? "—"} | ${r ? (r.peakTotalBytes / 1048576).toFixed(1) : "—"} |`,
+        `| ${c.scenario} | ${c.setting} | ${k.coldAllocations?.median ?? "—"} | ${k.coldAllocatedBytes ? (k.coldAllocatedBytes.median / 1048576).toFixed(1) : "—"} | ${r?.semanticNodes ?? "—"} | ${r?.semanticMemoEntries ?? "—"} | ${r ? (r.peakTotalBytes / 1048576).toFixed(1) : "—"} |`,
       );
     }
     push("");
@@ -256,12 +280,71 @@ export function renderMarkdown(run) {
     );
     const armCells = (s) =>
       s
-        ? `${s.status} | ${s.codes ? s.codes.map((x) => `TS${x}`).join(", ") || "none" : "—"} | ${s.wallMs ? fmtMs(s.wallMs) : s.terminationMs ? `killed at ${fmtMs(s.terminationMs)}` : "—"} | ${fmtMs(s.tscCheckMs)} | ${fmtMb(s.peakBytes)} | ${fmtMb(s.tscMemoryUsedBytes)}`
+        ? `${s.status} | ${s.codes ? s.codes.map((x) => `TS${x}`).join(", ") || "none" : "—"} | ${s.wallMs ? fmtMs(s.wallMs) : s.terminationMs ? `killed at ${fmtMs(s.terminationMs)}` : "—"} | ${fmtMs(s.tscCheckMs)} | ${s.memoryUnavailable ? "unavailable (unattributable accounting)" : fmtMb(s.peakBytes)} | ${fmtMb(s.tscMemoryUsedBytes)}`
         : "not run | — | — | — | — | —";
     for (const c of cli)
       push(
         `| ${c.scenario} | ${c.setting} | ${armCells(c.arms["tsc-cli"])} | ${armCells(c.arms["tsc-cli-1"])} |`,
       );
+    push("");
+  }
+
+  const sessions = summary.sessions?.cells ?? [];
+  if (sessions.length) {
+    push("## Session workloads (one live engine per invocation)", "");
+    push(
+      "Each invocation runs the whole script in one fresh process on its own copy of the project. Verter applies an edit by updating its workspace and host; tsc by writing the file and notifying `updateSnapshot` (`fileChanges`), which derives the next snapshot from the previous one (API program reuse). Times: Verter's own timers; tsc's server time for a sequential request or an edit, and the client round trip for a concurrent step (requests in flight together have no separable server time). A Vue component's metadata is Verter-only. A step is compared only when every answer in it matched (Verter) and reproduced the constructed answer (tsc).",
+      "",
+    );
+    push(
+      "| session | step | kind | demand | Verter | tsc | Verter ms | tsc ms | verdict |",
+      "|---|---:|---|---|---|---|---:|---:|---|",
+    );
+    for (const c of sessions) {
+      const v = c.arms.verter;
+      const t = c.arms["tsc-api"];
+      const steps = (v ?? t)?.metrics.steps ?? [];
+      for (const step of steps) {
+        const vd = (v?.demands ?? []).filter((d) => d.step === step.step);
+        const td = (t?.demands ?? []).filter((d) => d.step === step.step);
+        const names = [...new Set([...vd, ...td].map((d) => d.demand))].join(", ") || "—";
+        const cls = (ds) => [...new Set(ds.map((d) => d.class))].join(", ") || "—";
+        const cmp = c.comparison.find((x) => x.step === step.step);
+        push(
+          `| ${c.key} | ${step.step} | ${step.kind} | ${esc(names)} | ${step.kind === "edit" ? "—" : cls(vd)} | ${step.kind === "edit" ? "—" : step.kind === "meta" ? "n/a" : cls(td)} | ${fmtMs(v?.metrics.steps[step.step]?.ms)} | ${fmtMs(t?.metrics.steps[step.step]?.ms)} | ${cmp ? fmtRatio(cmp) : "—"} |`,
+        );
+      }
+      const findings = (v?.demands ?? []).filter((d) => d.class !== "matched");
+      for (const d of findings)
+        push(
+          `|  |  |  | ${esc(d.demand)} | **${d.class}** | | | | ${esc(d.detail).slice(0, 160)} |`,
+        );
+      if (c.requiredState)
+        push(`|  |  |  | REQUIRED state (observe build) | ${c.requiredState.state} | | | | |`);
+    }
+    push("");
+  }
+
+  const capacity = cells.filter((c) => c.capacity);
+  if (capacity.length) {
+    push(
+      "## Capacity (each tool at the engine budget; the memory cap stays the machine's protection)",
+      "",
+    );
+    push(
+      `Engine budget ${o.memMb} MiB. Completed: the arm's class or status, its engine peak and first type handle (whole-program arms: wall time). Killed: the supervisor's tree peak at the kill and the time to it, with how many kills are attributed to the engine (a tsc API tree's memory kill never is: its node client shares the tree). Peaks are absolute; a tree peak at a kill is containment telemetry, not engine memory.`,
+      "",
+    );
+    push(
+      "| scenario | setting | tsc limit codes | Verter | Verter peak MB | Verter ms | tsc API | tsc API peak MB | tsc API kills (attributed) | tsc API peak at kill MB | tsc API time to kill | tsc -p | tsc -p kills | tsc -p peak at kill MB | tsc -p time to kill |",
+      "|---|---|---|---|---:|---:|---|---:|---|---:|---:|---|---|---:|---:|",
+    );
+    for (const c of capacity) {
+      const { verter, tscApi, tscCli } = c.capacity;
+      push(
+        `| ${c.scenario} | ${c.setting} | ${c.capacity.tscLimitCodes.map((x) => `TS${x}`).join(", ") || "—"} | ${verter?.outcome ?? "not run"} | ${fmtMb(verter?.peakBytes)} | ${fmtMs(verter?.timeMs)} | ${tscApi?.outcome ?? "not run"} | ${fmtMb(tscApi?.peakBytes)} | ${tscApi ? `${tscApi.kills} (${tscApi.attributedKills})` : "—"} | ${fmtMb(tscApi?.peakAtKillBytes)} | ${fmtMs(tscApi?.timeToKillMs)} | ${tscCli?.outcome ?? "not run"} | ${tscCli ? `${tscCli.kills} (${tscCli.attributedKills})` : "—"} | ${fmtMb(tscCli?.peakAtKillBytes)} | ${fmtMs(tscCli?.timeToKillMs)} |`,
+      );
+    }
     push("");
   }
 

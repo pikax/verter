@@ -1,0 +1,1570 @@
+//! Stack-safe, alpha-normalised semantic fingerprint computation
+//! over `TypeExpr` bodies (R16, R27, R28).
+//!
+//! Walks a `TypeExpr` body with an explicit worklist + `VisitedSet`,
+//! emitting a `Hash16` `semantic_hash`. The walk is path-precise:
+//! references to other declarations are recorded as reference-shape
+//! edges (`Ref("Local", Type)`, `ImportRefRef("./spec", "binding",
+//! Type)`) WITHOUT inlining the referent's body (R14). Editing an
+//! unused local in the same file does NOT change consumers'
+//! `semantic_hash` over an export that does not reach it.
+//!
+//! ## Stack safety
+//!
+//! The walker carries an explicit `depth` counter and bails to
+//! `Opaque(BudgetExceeded)` when depth ≥ [`MAX_HASH_DEPTH`]. The
+//! call-stack recursion through nested `TypeExpr` arms is bounded by
+//! this depth budget, so a 10,000-arm union or a 200-deep nested
+//! conditional cannot overflow the OS thread stack.
+//!
+//! ## Cycle handling
+//!
+//! When the walk reaches a node it has previously placed on its
+//! visit path (via the `VisitedSet`), it emits a stable
+//! `CycleRef(visit_index)` placeholder rather than recursing. The
+//! `visit_index` is the lexicographic index of the cycle target
+//! in the canonical visit order. **Visit order is canonical:
+//! lexicographic by `(name, symbol_space)` at each unresolved-
+//! neighbor expansion; depth-budget tie-break by `(canonical, name,
+//! symbol_space)`.** `CycleRef` placeholder identity is therefore
+//! invariant under source-text reordering — the same cycle
+//! produces byte-identical fingerprints regardless of whether the
+//! declarations were rewritten in lexical reverse order.
+//!
+//! ## Depth budget (R27)
+//!
+//! `MAX_HASH_DEPTH = 64`. Over-budget paths emit
+//! `Opaque(BudgetExceeded)` and the cache entry is admitted as
+//! `NonCacheable`. The walker carries an explicit `BudgetExceeded`
+//! flag that producers check after [`compute_semantic_hash`].
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar};
+use verter_type_expr::{
+    AuthoredPropertyKey, FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier,
+    MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TupleElement,
+    TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicateSubject, ValueRef,
+};
+
+use crate::analysis::types::hash_16;
+use crate::declarations::{EnumMemberValue, FunctionSignature, ValueDeclKind};
+use crate::facts::registry::{FactHash, MemberKind, SymbolSpace};
+
+/// Depth budget per R27. A walk that hits this depth emits
+/// `Opaque(BudgetExceeded)` and the cache entry is admitted as
+/// `NonCacheable`.
+pub const MAX_HASH_DEPTH: usize = 64;
+
+/// Inert cycle-detection identity for the value-body encoder's synthetic enum
+/// object root. The enum body is always the walk root (entered against an empty
+/// `visited` map) and its only descendants are leaf literals, so this key can
+/// never collide with a real node identity (those begin with a `0xA0`–`0xBF`
+/// variant tag). It exists solely to keep the root frame's `visited` / `depth`
+/// bookkeeping identical to the legacy `walk_node(Object)` root.
+const SYNTHETIC_ENUM_OBJECT_IDENTITY: &[u8] = b"verter:synthetic-enum-object-root";
+
+/// Identity of a cross-decl reference appearing inside a fact body.
+///
+/// A `TypeExpr::Ref { name, .. }` resolves to one of these variants
+/// before the body fingerprint is hashed. The mapping is provided by
+/// the caller (the shallow walk knows which `name` is a same-file
+/// local vs an imported binding); the hashing routine never resolves
+/// names on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CrossDeclRef {
+    /// `Ref("Local", space)` — same-file declaration.
+    LocalDecl { name: Arc<str>, space: SymbolSpace },
+    /// `ImportRefRef("./spec", "binding", space)` — imported binding.
+    /// No `resolved_canonical` (R12).
+    ImportRef {
+        specifier: Arc<str>,
+        binding: Arc<str>,
+        space: SymbolSpace,
+    },
+    /// A `TypeExpr::TypeOf(value_name)` reference. Routed through
+    /// the typeof channel because the binding is in value-space.
+    TypeOfRef { name: Arc<str> },
+    /// The reference could not be resolved by the producer (unknown
+    /// origin, e.g. global ambient lib). Emit as `Unresolved(name)`.
+    Unresolved { name: Arc<str>, space: SymbolSpace },
+}
+
+impl CrossDeclRef {
+    /// Stable byte serialisation used inside the structural hash.
+    fn extend_hash_buf(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::LocalDecl { name, space } => {
+                buf.push(0xC0);
+                buf.push(space.tag());
+                buf.extend_from_slice(name.as_bytes());
+                buf.push(0xFF);
+            }
+            Self::ImportRef {
+                specifier,
+                binding,
+                space,
+            } => {
+                buf.push(0xC1);
+                buf.push(space.tag());
+                buf.extend_from_slice(specifier.as_bytes());
+                buf.push(0xFE);
+                buf.extend_from_slice(binding.as_bytes());
+                buf.push(0xFF);
+            }
+            Self::TypeOfRef { name } => {
+                buf.push(0xC2);
+                buf.extend_from_slice(name.as_bytes());
+                buf.push(0xFF);
+            }
+            Self::Unresolved { name, space } => {
+                buf.push(0xC3);
+                buf.push(space.tag());
+                buf.extend_from_slice(name.as_bytes());
+                buf.push(0xFF);
+            }
+        }
+    }
+
+    /// The canonical sort key for visit-order canonicalisation: the
+    /// reference's `(name, space)` pair. Used by callers that need to
+    /// order references lexicographically (R27 canonical visit
+    /// order).
+    #[must_use]
+    pub fn canonical_sort_key(&self) -> (&str, u8) {
+        match self {
+            Self::LocalDecl { name, space } => (name.as_ref(), space.tag()),
+            Self::ImportRef { binding, space, .. } => (binding.as_ref(), space.tag()),
+            Self::TypeOfRef { name } => (name.as_ref(), SymbolSpace::Value.tag()),
+            Self::Unresolved { name, space } => (name.as_ref(), space.tag()),
+        }
+    }
+}
+
+/// Resolver lens that the caller supplies — maps a `TypeExpr::Ref`'s
+/// name + space pair to its cross-decl reference identity, OR `None`
+/// if the name is a free type parameter (`T`, `U`) in the current
+/// generic frame.
+pub trait CrossDeclLens {
+    /// Resolve a `TypeExpr::Ref { name, type_arguments }` site to its
+    /// cross-decl reference identity. Return `None` if the name is a
+    /// free type parameter — the hasher emits a `TypeParam(<index>)`
+    /// alpha-normalised placeholder in that case.
+    fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef>;
+}
+
+/// No-op lens — every reference becomes `Unresolved(name, space)`.
+///
+/// Used by tests that don't care about cross-decl edges, and by SYNTAX-ONLY
+/// producers that are FORBIDDEN from resolving imports (the framework
+/// script-fact capture half): there the fingerprint is a content
+/// DISCRIMINATOR for a content-addressed candidate slot, so hashing every
+/// reference as an unresolved reference-shape edge (name + space) is exactly
+/// the discrimination needed — resolved reference identity stays the fact
+/// rail's job. A production caller that HAS resolution information MUST
+/// supply a real lens (the shallow walk has all the information needed).
+#[derive(Debug, Default)]
+pub struct UnresolvedLens;
+
+impl CrossDeclLens for UnresolvedLens {
+    fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef> {
+        Some(CrossDeclRef::Unresolved {
+            name: Arc::from(name),
+            space,
+        })
+    }
+}
+
+/// Outcome of a hashing call.
+#[derive(Debug, Clone, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
+pub struct HashOutcome {
+    /// The structural fingerprint.
+    pub hash: FactHash,
+    /// `true` if the walk exceeded `MAX_HASH_DEPTH`. The producer
+    /// MUST admit the cache entry as `NonCacheable` when this is
+    /// `true` (R27).
+    pub budget_exceeded: bool,
+    /// Stable count of visited unique nodes — used by parse-time
+    /// producers + cycle tests to verify visit-order stability
+    /// under reordering.
+    pub visited_nodes: usize,
+}
+
+/// Compute the alpha-normalised structural fingerprint of a single
+/// `TypeExpr` body. The body is hashed in isolation; cross-decl
+/// references resolve through `lens` and emit reference-shape edges
+/// (R14).
+///
+/// The default `space` parameter is the symbol space of the
+/// declaration the body belongs to. Used to disambiguate type-vs-
+/// value references the producer hasn't already tagged.
+pub fn compute_semantic_hash(
+    body: &TypeExpr,
+    space: SymbolSpace,
+    lens: &dyn CrossDeclLens,
+) -> HashOutcome {
+    let mut walker = Walker::new(lens, space);
+    walker.walk(body);
+    walker.finish()
+}
+
+/// The borrowed TRANSIENT view of one TYPE declaration group's body at the
+/// moment the fingerprint is produced — the input to [`type_body_fingerprint`].
+///
+/// This is a fingerprint-input carrier (analogous to
+/// [`ValueBodyFingerprintInput`]), NOT a second body representation: the caller
+/// borrows the transient lowered contributor bodies it is already holding
+/// (before they are narrowed away to locators) and never persists an assembled
+/// `TypeExpr` view.
+pub enum TransientTypeBody<'a> {
+    /// A single declaration's transient lowered body, hashed as-is.
+    Single(&'a TypeExpr),
+    /// Ordered same-name contributor bodies of a merged declaration
+    /// (source/binder order). The fingerprint folds every contributor's DIRECT
+    /// object members into one object view — the shallow-index fold, never the
+    /// semantic merge.
+    Merged(&'a [TypeExpr]),
+    /// The enum TYPE-space union arms: every member's projected scalar,
+    /// already deduplicated by the caller (the
+    /// `ValueDeclGroup::enum_type_union` arm set).
+    EnumUnion(&'a [EnumScalar]),
+}
+
+/// Compute the body fingerprint of one TYPE declaration group from its borrowed
+/// [`TransientTypeBody`] view — the producer entry point for the TYPE-space
+/// body fact, run at lazy decl-body lowering time while the transient lowered
+/// bodies are still in hand.
+///
+/// The folded view is derived and hashed HERE via the unchanged
+/// [`compute_semantic_hash`] grammar, byte-identical to the legacy folded-body
+/// read: `Single` hashes the body directly; `Merged` unions every contributor's
+/// direct object members into one object view; `EnumUnion` builds the projected
+/// scalar union (folded literals plus degraded primitive-domain arms). Every
+/// internally assembled `TypeExpr` view is a fact-production intermediate,
+/// immediately dropped — never a returned/persisted body.
+pub fn type_body_fingerprint(
+    body: TransientTypeBody<'_>,
+    space: SymbolSpace,
+    lens: &dyn CrossDeclLens,
+) -> HashOutcome {
+    match body {
+        TransientTypeBody::Single(body) => compute_semantic_hash(body, space, lens),
+        TransientTypeBody::Merged(contributors) => {
+            let mut properties = Vec::new();
+            for contributor in contributors {
+                collect_direct_object_members(contributor, &mut properties);
+            }
+            let folded = TypeExpr::Object(Arc::new(ObjectExpr { properties }));
+            compute_semantic_hash(&folded, space, lens)
+        }
+        TransientTypeBody::EnumUnion(scalars) => {
+            let arms: Vec<TypeExpr> = scalars.iter().map(scalar_to_type_expr).collect();
+            let union = TypeExpr::union(arms);
+            compute_semantic_hash(&union, space, lens)
+        }
+    }
+}
+
+/// Collect the DIRECT object members of `body` into `out`, descending
+/// `Intersection`/`Parenthesized` arms. Object arms contribute their members;
+/// every other arm (notably a heritage `Ref` from `extends`/`implements`)
+/// carries no direct member and is skipped — inherited members surface only
+/// through the semantic reducer, never this shallow fold.
+fn collect_direct_object_members(body: &TypeExpr, out: &mut Vec<ObjectMember>) {
+    match body {
+        TypeExpr::Object(object) => out.extend(object.properties.iter().cloned()),
+        TypeExpr::Intersection(parts) => {
+            for part in parts.iter() {
+                collect_direct_object_members(part, out);
+            }
+        }
+        TypeExpr::Parenthesized(inner) => collect_direct_object_members(inner, out),
+        _ => {}
+    }
+}
+
+/// The SINGLE scalar → projected-`TypeExpr` mapping, shared by the enum
+/// TYPE-space union ([`TransientTypeBody::EnumUnion`]) and the enum VALUE-space
+/// folded object ([`Walker::emit_folded_enum_object`]) so the two spaces can
+/// never diverge on a member's projected type.
+///
+/// A folded numeric scalar stores the EXACT canonical `f64` display string, so
+/// parsing it back recovers the exact bits — the number-literal fact bytes are
+/// `f64::to_bits().to_le_bytes()`, and a raw string-byte emission would change
+/// the fingerprint of every numeric enum member. A deferred member's primitive
+/// DOMAIN maps to its degraded sound arm (`number` / `string` /
+/// `number | string` / `unknown`).
+fn scalar_to_type_expr(scalar: &EnumScalar) -> TypeExpr {
+    match scalar {
+        EnumScalar::String(s) => TypeExpr::string_literal(s.as_str()),
+        EnumScalar::Number(s) => TypeExpr::number_literal(
+            s.parse::<f64>()
+                .expect("EnumScalar::Number stores the canonical f64 display string"),
+        ),
+        EnumScalar::Primitive(domain) => match domain {
+            EnumPrimitiveDomain::Number => TypeExpr::Primitive(PrimitiveName::Number),
+            EnumPrimitiveDomain::String => TypeExpr::Primitive(PrimitiveName::String),
+            EnumPrimitiveDomain::NumberOrString => TypeExpr::union(vec![
+                TypeExpr::Primitive(PrimitiveName::Number),
+                TypeExpr::Primitive(PrimitiveName::String),
+            ]),
+            EnumPrimitiveDomain::Unknown => TypeExpr::Primitive(PrimitiveName::Unknown),
+        },
+    }
+}
+
+/// The closed input to [`value_body_fingerprint`] — the pieces of a lowered
+/// VALUE declaration group a body fingerprint reads, borrowed in place. Replaces
+/// the session assembling a `TypeExpr` value body: the caller passes the decl's
+/// annotation / signatures / kind / object shape / folded enum members and never
+/// holds an assembled `TypeExpr`.
+///
+/// The borrowed `&TypeExpr` / `&ObjectExpr` components are PRIVATE: they are read
+/// transiently during fingerprint production (through [`ValueBodyFingerprintInput::new`]
+/// at the prep/fact boundary) and are never exposed as public fields or handed
+/// back out, so the carrier owns no public `TypeExpr` contract.
+pub struct ValueBodyFingerprintInput<'a> {
+    /// The declaration's explicit type annotation, if any.
+    type_annotation: Option<&'a TypeExpr>,
+    /// The merged overload signature set, in source order.
+    signatures: &'a [FunctionSignature],
+    /// The value declaration kind.
+    kind: ValueDeclKind,
+    /// The declaration's object literal shape, if any.
+    object_shape: Option<&'a ObjectExpr>,
+    /// The ordered enum member inventory (`Some` exactly for an enum).
+    enum_members: Option<&'a [(String, EnumMemberValue)]>,
+}
+
+impl<'a> ValueBodyFingerprintInput<'a> {
+    /// Construct the closed value-body fingerprint input at the prep/fact
+    /// boundary. Borrowing `&TypeExpr` / `&ObjectExpr` INTO the carrier is a
+    /// transient read used only by [`value_body_fingerprint`]; the components
+    /// are never re-exposed as public fields or returned.
+    #[must_use]
+    pub fn new(
+        type_annotation: Option<&'a TypeExpr>,
+        signatures: &'a [FunctionSignature],
+        kind: ValueDeclKind,
+        object_shape: Option<&'a ObjectExpr>,
+        enum_members: Option<&'a [(String, EnumMemberValue)]>,
+    ) -> Self {
+        Self {
+            type_annotation,
+            signatures,
+            kind,
+            object_shape,
+            enum_members,
+        }
+    }
+}
+
+/// Compute the body fingerprint of one VALUE declaration group from its closed
+/// [`ValueBodyFingerprintInput`] — the no-`TypeExpr` producer entry point for the
+/// VALUE-space body fact.
+///
+/// The fingerprint bytes are emitted DIRECTLY from the borrowed value-decl
+/// components through the shared byte-emission helpers — no synthetic `TypeExpr`
+/// body is ever constructed. The stream is byte-identical to the legacy
+/// `value_body_for_hash` + [`compute_semantic_hash`] read: an enum with foldable
+/// members folds to the object member stream; else a present annotation is walked
+/// in place; else a signature-bearing decl (and the final kind/object-shape
+/// fallback) degrade to the same `Unknown` carrier bytes.
+pub fn value_body_fingerprint(
+    input: &ValueBodyFingerprintInput<'_>,
+    space: SymbolSpace,
+    lens: &dyn CrossDeclLens,
+) -> HashOutcome {
+    let mut walker = Walker::new(lens, space);
+    walker.emit_value_body(input);
+    walker.finish()
+}
+
+/// Compute the alpha-normalised structural fingerprint over a member
+/// header `(name, kind, exporter_salt)` per R28's `MemberPresence`
+/// fact.
+///
+/// Header only — NO body fingerprint. Adding sibling `b` does not
+/// force re-walking member `a`'s body (the path-precision
+/// invariant).
+#[must_use]
+pub fn compute_member_presence_hash(
+    exporter: &str,
+    name: &verter_type_expr::facts::FactPropertyKey,
+    kind: MemberKind,
+    space: SymbolSpace,
+) -> FactHash {
+    let mut buf: Vec<u8> = Vec::with_capacity(64);
+    buf.extend_from_slice(b"member-presence:");
+    buf.push(space.tag());
+    write_fact_property_key(&mut buf, name);
+    buf.push(0xFF);
+    buf.extend_from_slice(&kind.tag());
+    buf.extend_from_slice(&exporter_qualifier_salt(exporter));
+    hash_16(&buf)
+}
+
+/// Compute the whole-surface fingerprint over an exporter's full
+/// member name + kind list (R28 `MemberShape`).
+///
+/// Sorted by name, order-insensitive at top level. Member-body
+/// fingerprints live in separate `Member` facts (lazy).
+#[must_use]
+pub fn compute_member_shape_hash(
+    exporter: &str,
+    members: &[(verter_type_expr::facts::FactPropertyKey, MemberKind)],
+    space: SymbolSpace,
+) -> FactHash {
+    let mut sorted: Vec<&(verter_type_expr::facts::FactPropertyKey, MemberKind)> =
+        members.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut buf: Vec<u8> = Vec::with_capacity(64 + 16 * sorted.len());
+    buf.extend_from_slice(b"member-shape:");
+    buf.push(space.tag());
+    buf.extend_from_slice(exporter.as_bytes());
+    buf.push(0xFE);
+    for (name, kind) in &sorted {
+        write_fact_property_key(&mut buf, name);
+        buf.push(0xFD);
+        buf.extend_from_slice(&kind.tag());
+        buf.push(0xFC);
+    }
+    hash_16(&buf)
+}
+
+fn write_fact_property_key(buf: &mut Vec<u8>, key: &verter_type_expr::facts::FactPropertyKey) {
+    use verter_type_expr::PropertyKey;
+    match key {
+        PropertyKey::String(value) => {
+            buf.push(0);
+            buf.extend_from_slice(value.as_bytes());
+            buf.push(0xFB);
+        }
+        PropertyKey::Number(value) => {
+            buf.push(1);
+            buf.extend_from_slice(&value.get().to_le_bytes());
+        }
+        PropertyKey::UniqueSymbol(identity) => {
+            buf.push(2);
+            buf.extend_from_slice(identity.canonical_id.as_bytes());
+            buf.push(0xFA);
+            buf.push(match identity.owner.kind() {
+                verter_type_expr::TopLevelOwnerKind::Module => 0,
+                verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+            });
+            buf.extend_from_slice(&identity.owner.ordinal().to_le_bytes());
+            buf.extend_from_slice(identity.symbol.as_bytes());
+            buf.push(0xF9);
+            for segment in identity.member_path.iter() {
+                buf.extend_from_slice(segment.as_bytes());
+                buf.push(0xF8);
+            }
+        }
+    }
+}
+
+/// Stable per-exporter salt for `MemberPresence.semantic_hash`. Keeps
+/// the `(name, kind)` pair distinct across multiple exporters in the
+/// same file.
+#[must_use]
+pub fn exporter_qualifier_salt(exporter: &str) -> FactHash {
+    let mut buf: Vec<u8> = Vec::with_capacity(32);
+    buf.extend_from_slice(b"presence-salt:");
+    buf.extend_from_slice(exporter.as_bytes());
+    hash_16(&buf)
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Internal walker
+// ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+thread_local! {
+    /// How many object members this thread encoded; test-only.
+    static MEMBER_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The member sort keys of one fingerprint computation, by member address
+/// (see [`Walker::member_sort_key`]).
+type MemberSortKeys = std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<usize, Arc<[u8]>>>>;
+
+/// Inner traversal state.
+struct Walker<'a> {
+    buf: Vec<u8>,
+    visited: BTreeMap<Vec<u8>, usize>,
+    visit_counter: usize,
+    depth: usize,
+    budget_exceeded: bool,
+    lens: &'a dyn CrossDeclLens,
+    default_space: SymbolSpace,
+    type_param_frame: Vec<Vec<Arc<str>>>,
+    /// Owned by the computation's root walker and shared with every
+    /// scratch walker it spawns; dropped when the computation returns.
+    member_sort_keys: MemberSortKeys,
+}
+
+impl<'a> Walker<'a> {
+    fn new(lens: &'a dyn CrossDeclLens, default_space: SymbolSpace) -> Self {
+        Self::with_member_sort_keys(lens, default_space, MemberSortKeys::default())
+    }
+
+    fn with_member_sort_keys(
+        lens: &'a dyn CrossDeclLens,
+        default_space: SymbolSpace,
+        member_sort_keys: MemberSortKeys,
+    ) -> Self {
+        Self {
+            buf: Vec::with_capacity(256),
+            visited: BTreeMap::new(),
+            visit_counter: 0,
+            depth: 0,
+            budget_exceeded: false,
+            lens,
+            default_space,
+            type_param_frame: Vec::new(),
+            member_sort_keys,
+        }
+    }
+
+    /// The bytes `member` encodes to in a fresh walker — the key an object's
+    /// members are sorted by. A fresh walker starts at depth zero with no
+    /// visited node and no type-parameter frame, so the key is a function of
+    /// the member alone, and it is computed once per member for the whole
+    /// computation. Encoding it afresh at every enclosing object re-walked
+    /// each member's subtree once per level above it: a chain of nested
+    /// object types cost `2^n` walks.
+    ///
+    /// Keyed by the member's address, which is stable and unique while the
+    /// computation runs: every object this walker sorts is borrowed from the
+    /// hashed body (or the merged fold the entry point holds for the whole
+    /// computation).
+    fn member_sort_key(&self, member: &ObjectMember) -> Arc<[u8]> {
+        let address = std::ptr::from_ref(member) as usize;
+        if let Some(key) = self.member_sort_keys.borrow().get(&address) {
+            return Arc::clone(key);
+        }
+        let mut scratch = Self::with_member_sort_keys(
+            self.lens,
+            self.default_space,
+            std::rc::Rc::clone(&self.member_sort_keys),
+        );
+        scratch.write_object_member(member);
+        let key: Arc<[u8]> = Arc::from(std::mem::take(&mut scratch.buf).into_boxed_slice());
+        self.member_sort_keys
+            .borrow_mut()
+            .insert(address, Arc::clone(&key));
+        key
+    }
+
+    fn walk(&mut self, root: &TypeExpr) {
+        self.walk_node(root);
+    }
+
+    fn finish(self) -> HashOutcome {
+        HashOutcome {
+            hash: hash_16(&self.buf),
+            budget_exceeded: self.budget_exceeded,
+            visited_nodes: self.visit_counter,
+        }
+    }
+
+    fn walk_node(&mut self, node: &TypeExpr) {
+        // Cycle detection: a node's *identity* (variant tag + Arc
+        // pointer addresses of any owned sub-nodes) is recorded once
+        // per visit through the shared frame prologue. A re-entry through
+        // the same node emits a `CycleRef(visit_index)` placeholder rather
+        // than recursing.
+        let identity_key = self.node_identity_key(node);
+        if !self.enter_frame(identity_key) {
+            return;
+        }
+
+        match node {
+            TypeExpr::Primitive(p) => self.write_primitive(*p),
+            TypeExpr::Literal(lit) => self.write_literal(lit),
+            TypeExpr::Union(arms) => {
+                self.buf.push(0x20);
+                self.buf
+                    .extend_from_slice(&(arms.len() as u32).to_le_bytes());
+                for arm in arms.iter() {
+                    self.walk_node(arm);
+                    self.buf.push(0xFE);
+                }
+            }
+            TypeExpr::Intersection(arms) => {
+                self.buf.push(0x21);
+                self.buf
+                    .extend_from_slice(&(arms.len() as u32).to_le_bytes());
+                for arm in arms.iter() {
+                    self.walk_node(arm);
+                    self.buf.push(0xFE);
+                }
+            }
+            TypeExpr::Array { element, readonly } => {
+                self.buf.push(0x22);
+                self.buf.push(u8::from(*readonly));
+                self.walk_node(element);
+            }
+            TypeExpr::Tuple { elements, readonly } => {
+                self.buf.push(0x23);
+                self.buf.push(u8::from(*readonly));
+                self.buf
+                    .extend_from_slice(&(elements.len() as u32).to_le_bytes());
+                for tuple_elem in elements.iter() {
+                    self.write_tuple_element(tuple_elem);
+                }
+            }
+            TypeExpr::Object(obj) => self.walk_object(obj),
+            TypeExpr::Function(func) => self.walk_function(func),
+            // A constructor type `new (...) => R` is a DISTINCT type from the
+            // function type `(...) => R` — they must not collide in a
+            // content-addressed cache key. Emit a distinct discriminator
+            // (`0x73`) before reusing the identical `walk_function` body
+            // encoding, so the carried signature still hashes alpha-stably while
+            // the constructor-ness is part of the hash.
+            // An ABSTRACT constructor type is distinct again (`0x74`): an
+            // abstract signature refuses assignment to a non-abstract one.
+            TypeExpr::ConstructorType(func) => {
+                self.buf.push(if func.is_abstract { 0x74 } else { 0x73 });
+                self.walk_function(func);
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => self.walk_ref(name.as_ref(), type_arguments),
+            TypeExpr::TypeParameter(param) => self.walk_type_param(param),
+            // A compiler intrinsic contributes its FROZEN op tag, never the
+            // derived enum discriminant: declaration order must not be able to
+            // move a content-addressed facts key.
+            TypeExpr::IntrinsicApplication { op, arguments } => {
+                self.buf.push(0x3B);
+                self.buf.push(op.stable_hash_tag());
+                self.buf
+                    .extend_from_slice(&(arguments.len() as u32).to_le_bytes());
+                for argument in arguments.iter() {
+                    self.walk_node(argument);
+                    self.buf.push(0xFE);
+                }
+            }
+            TypeExpr::KeyOf(inner) => {
+                self.buf.push(0x30);
+                self.walk_node(inner);
+            }
+            TypeExpr::TypeOf(value_ref) => self.walk_typeof(value_ref),
+            TypeExpr::IndexedAccess { object, index } => {
+                self.buf.push(0x32);
+                self.walk_node(object);
+                self.buf.push(0xFD);
+                self.walk_node(index);
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                self.buf.push(0x33);
+                self.walk_node(check);
+                self.buf.push(0xFD);
+                self.walk_node(extends);
+                self.buf.push(0xFC);
+                self.walk_node(true_type);
+                self.buf.push(0xFB);
+                self.walk_node(false_type);
+            }
+            TypeExpr::Mapped {
+                parameter,
+                source,
+                value,
+                optional,
+                readonly,
+                name_type,
+            } => {
+                self.buf.push(0x34);
+                // Mapped type's `[K in Source]: Value` declares a
+                // single type parameter `K`. Alpha-normalise by
+                // pushing a one-name frame.
+                self.type_param_frame
+                    .push(vec![Arc::from(parameter.as_str())]);
+                self.buf.extend_from_slice(b"alpha:K");
+                self.walk_node(source);
+                self.buf.push(0xFD);
+                self.walk_node(value);
+                self.buf.push(0xFC);
+                self.write_mapped_modifier(*optional);
+                self.buf.push(0xFB);
+                self.write_mapped_modifier(*readonly);
+                self.buf.push(0xFA);
+                if let Some(nt) = name_type {
+                    self.walk_node(nt);
+                }
+                self.type_param_frame.pop();
+            }
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => {
+                self.buf.push(0x35);
+                self.buf
+                    .extend_from_slice(&(quasis.len() as u32).to_le_bytes());
+                for q in quasis {
+                    self.buf.extend_from_slice(q.as_bytes());
+                    self.buf.push(0xFF);
+                }
+                self.buf
+                    .extend_from_slice(&(expressions.len() as u32).to_le_bytes());
+                for e in expressions.iter() {
+                    self.walk_node(e);
+                    self.buf.push(0xFE);
+                }
+            }
+            TypeExpr::Infer { name, constraint } => {
+                self.buf.push(0x36);
+                self.buf.extend_from_slice(name.as_bytes());
+                self.buf.push(0xFF);
+                if let Some(constraint) = constraint {
+                    self.buf.push(0x01);
+                    self.walk_node(constraint);
+                }
+            }
+            TypeExpr::Rest(inner) => {
+                self.buf.push(0x37);
+                self.walk_node(inner);
+            }
+            TypeExpr::Parenthesized(inner) => {
+                // Parenthesisation is transparent to alpha-
+                // normalised structure (R16).
+                self.walk_node(inner);
+            }
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => {
+                // Legacy producers may still hand us this node on
+                // detected recursion; the worklist hasher emits
+                // `CycleRef` instead under R27. We hash this legacy
+                // shape alpha-stably so producers that emit it do
+                // not change `semantic_hash` non-cosmetically.
+                self.buf.push(0x38);
+                self.buf.extend_from_slice(name.as_bytes());
+                self.buf.push(0xFF);
+                self.buf
+                    .extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+                for ta in type_arguments.iter() {
+                    self.walk_node(ta);
+                    self.buf.push(0xFE);
+                }
+                self.buf
+                    .extend_from_slice(&(conditional_context.len() as u32).to_le_bytes());
+            }
+            TypeExpr::SyntheticSlotBinding(key) => {
+                // Distinct discriminator from `Ref` (which routes through
+                // `walk_ref` and emits 0x40+ on type-param hit, or the
+                // ref-name body otherwise). The carrier is NEVER resolved
+                // as a type alias via the type registry — its identity is
+                // intrinsic: (scope_canonical_id, surface_kind, slot_name,
+                // binding_name, value_node).
+                //
+                // value_node discriminates two same-named carriers in
+                // different slots of the same component, so two carriers
+                // with the same binding_name but different value_node
+                // hash differently.
+                self.buf.push(0x39);
+                self.buf
+                    .extend_from_slice(key.scope_canonical_id.as_bytes());
+                self.buf.push(0xFF);
+                self.buf.push(match key.surface_kind {
+                    verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding => 0,
+                    verter_type_expr::SyntheticCarrierSurfaceKind::Binding => 1,
+                });
+                match &key.slot_name {
+                    Some(name) => {
+                        self.buf.push(1);
+                        self.buf.extend_from_slice(name.as_bytes());
+                        self.buf.push(0xFF);
+                    }
+                    None => self.buf.push(0),
+                }
+                self.buf.extend_from_slice(key.binding_name.as_bytes());
+                self.buf.push(0xFF);
+                self.buf.extend_from_slice(&key.value_node.to_le_bytes());
+            }
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => {
+                // Distinct tag (0x3A) so an import-type node hashes apart from
+                // every other variant. The specifier + ordered qualifier
+                // segments + typeof flag + instantiation arguments fully
+                // discriminate two import-types (a content edit to the
+                // module specifier or member path changes the fact stream).
+                self.buf.push(0x3A);
+                self.buf.extend_from_slice(specifier.as_bytes());
+                self.buf.push(0xFF);
+                self.buf
+                    .extend_from_slice(&(qualifier.len() as u32).to_le_bytes());
+                for seg in qualifier.iter() {
+                    self.buf.extend_from_slice(seg.as_bytes());
+                    self.buf.push(0xFF);
+                }
+                self.buf.push(u8::from(*typeof_query));
+                self.buf
+                    .extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+                for ta in type_arguments.iter() {
+                    self.walk_node(ta);
+                    self.buf.push(0xFE);
+                }
+            }
+            TypeExpr::Unknown(value) => {
+                self.buf.push(0x3F);
+                self.buf.extend_from_slice(value.raw().as_bytes());
+                self.buf.push(0xFF);
+            }
+        }
+
+        self.exit_frame();
+    }
+
+    /// Shared per-node ENTER bookkeeping: budget guard, depth accounting, and
+    /// cycle registration under `identity`. Returns `false` (having emitted the
+    /// budget / cycle-ref bytes and unwound the depth) when the caller must emit
+    /// no body; `true` to proceed and emit the node body followed by
+    /// [`Self::exit_frame`]. Both the real `TypeExpr` walk and the value-body
+    /// encoder's synthetic root frames enter through this ONE path, so there is a
+    /// single hash grammar and byte stream.
+    fn enter_frame(&mut self, identity: Vec<u8>) -> bool {
+        if self.budget_exceeded {
+            return false;
+        }
+        self.depth += 1;
+        if self.depth > MAX_HASH_DEPTH {
+            self.budget_exceeded = true;
+            self.buf.extend_from_slice(b"BUDGET_EXCEEDED");
+            self.depth -= 1;
+            return false;
+        }
+        if let Some(&first_index) = self.visited.get(&identity) {
+            self.buf.push(0xCC); // CycleRef tag
+            self.buf
+                .extend_from_slice(&(first_index as u32).to_le_bytes());
+            self.buf.push(0xFF);
+            self.depth -= 1;
+            return false;
+        }
+        self.visit_counter += 1;
+        let my_index = self.visit_counter;
+        self.visited.insert(identity, my_index);
+        true
+    }
+
+    /// Shared per-node EXIT bookkeeping, paired with a successful
+    /// [`Self::enter_frame`].
+    fn exit_frame(&mut self) {
+        self.depth -= 1;
+    }
+
+    /// Emit the value-body fingerprint bytes DIRECTLY from the borrowed value
+    /// decl components — no synthetic `TypeExpr` body is constructed. The byte
+    /// stream is identical to the folded value-body view fed to
+    /// [`compute_semantic_hash`]:
+    /// - an enum with foldable members folds to the object member stream;
+    /// - else a present annotation is walked in place (borrowed);
+    /// - else a signature-bearing decl degrades to the legacy `Unknown` debug
+    ///   carrier bytes, and the final fallback degrades to the kind/object-shape
+    ///   `Unknown` carrier bytes.
+    fn emit_value_body(&mut self, input: &ValueBodyFingerprintInput<'_>) {
+        if input.kind == ValueDeclKind::Enum {
+            if let Some(members) = input.enum_members {
+                self.emit_folded_enum_object(members);
+                return;
+            }
+        }
+        if let Some(annotation) = input.type_annotation {
+            self.walk_node(annotation);
+            return;
+        }
+        if !input.signatures.is_empty() {
+            self.emit_unknown_raw(&format!("{:?}", input.signatures));
+            return;
+        }
+        self.emit_unknown_raw(&format!("{:?}::{:?}", input.kind, input.object_shape));
+    }
+
+    /// Reproduce `walk_node(TypeExpr::Object(<folded enum members>))`
+    /// byte-for-byte WITHOUT allocating the object / its properties: enter a
+    /// synthetic object frame, emit the sorted foldable member stream (member
+    /// NAME → folded literal; readonly + non-optional + public), then exit.
+    /// Foldable members only ([`EnumMemberValue::folded_literal`]); deferred
+    /// members are projected out (their name/count change rides the presence
+    /// rail). Each member's literal node is minted transiently from its stored
+    /// scalar through the ONE shared [`scalar_to_type_expr`] mapping (the same
+    /// mapping the enum TYPE-space union uses) and dropped immediately — a
+    /// fact-production intermediate, never a persisted body. The numeric
+    /// parse-back recovers the exact `f64` bits the fact grammar emits
+    /// (`to_bits().to_le_bytes()`).
+    fn emit_folded_enum_object(&mut self, members: &[(String, EnumMemberValue)]) {
+        if !self.enter_frame(SYNTHETIC_ENUM_OBJECT_IDENTITY.to_vec()) {
+            return;
+        }
+        // Foldable members only, in `walk_object`'s member-sort order. An
+        // all-string-key object sorts by its canonical key bytes
+        // (`0x00 + name`), which is byte-identical to sorting by name, so
+        // sorting the borrowed `(name, scalar)` pairs by name reproduces the
+        // exact order.
+        let mut folded: Vec<(&str, &EnumScalar)> = members
+            .iter()
+            .filter_map(|(name, value)| value.folded_literal().map(|lit| (name.as_str(), lit)))
+            .collect();
+        folded.sort_by(|a, b| a.0.cmp(b.0));
+        self.buf.push(0x50);
+        self.buf
+            .extend_from_slice(&(folded.len() as u32).to_le_bytes());
+        for (name, scalar) in folded {
+            self.emit_property(
+                name,
+                false,
+                true,
+                verter_type_expr::MemberVisibility::Public,
+                &scalar_to_type_expr(scalar),
+            );
+        }
+        self.exit_frame();
+    }
+
+    /// Reproduce `walk_node(TypeExpr::Unknown(value))` byte-for-byte WITHOUT
+    /// allocating the node: enter a synthetic frame keyed by the same identity
+    /// the legacy `Unknown` node carries (`0xBF` + raw), emit the `Unknown` body
+    /// bytes, then exit.
+    fn emit_unknown_raw(&mut self, raw: &str) {
+        let mut identity = Vec::with_capacity(1 + raw.len());
+        identity.push(0xBF);
+        identity.extend_from_slice(raw.as_bytes());
+        if !self.enter_frame(identity) {
+            return;
+        }
+        self.buf.push(0x3F);
+        self.buf.extend_from_slice(raw.as_bytes());
+        self.buf.push(0xFF);
+        self.exit_frame();
+    }
+
+    fn walk_ref(&mut self, name: &str, type_arguments: &[TypeExpr]) {
+        // First: is this name a free type parameter in the active
+        // generic frame? If yes, alpha-normalise to a binder-relative
+        // index.
+        if let Some(idx) = self.find_type_param(name) {
+            self.buf.push(0x40);
+            self.buf.extend_from_slice(&(idx as u32).to_le_bytes());
+            self.buf.push(0xFF);
+            for ta in type_arguments {
+                self.walk_node(ta);
+                self.buf.push(0xFE);
+            }
+            return;
+        }
+
+        // Otherwise: resolve through the lens. The producer knows
+        // whether `name` is a same-file local, an imported binding,
+        // or unresolved.
+        let cross_decl = self.lens.resolve(name, self.default_space);
+        self.buf.push(0x41);
+        if let Some(cdr) = cross_decl {
+            cdr.extend_hash_buf(&mut self.buf);
+        } else {
+            self.buf.extend_from_slice(b"none");
+            self.buf.push(0xFF);
+        }
+        self.buf
+            .extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+        for ta in type_arguments {
+            self.walk_node(ta);
+            self.buf.push(0xFE);
+        }
+    }
+
+    fn walk_type_param(&mut self, param: &TypeParam) {
+        // First-class TypeParam reference. Alpha-normalise to
+        // binder-relative index when possible; otherwise emit by name.
+        if let Some(idx) = self.find_type_param(&param.name) {
+            self.buf.push(0x40);
+            self.buf.extend_from_slice(&(idx as u32).to_le_bytes());
+            self.buf.push(0xFF);
+        } else {
+            self.buf.push(0x42);
+            self.buf.extend_from_slice(param.name.as_bytes());
+            self.buf.push(0xFF);
+        }
+    }
+
+    fn walk_object(&mut self, obj: &ObjectExpr) {
+        self.buf.push(0x50);
+        // A spread-bearing object literal is ORDER-SENSITIVE: the fold's
+        // member surface depends on where each spread sits between the direct
+        // members (`{ a, ...s }` != `{ ...s, a }`), so alpha-normalising the
+        // order would collide semantically-distinct literals onto one fact
+        // identity. Hash spread-bearing objects in declaration order.
+        if obj
+            .properties
+            .iter()
+            .any(|m| matches!(m, ObjectMember::Spread(_)))
+        {
+            self.buf
+                .extend_from_slice(&(obj.properties.len() as u32).to_le_bytes());
+            for member in &obj.properties {
+                self.write_object_member(member);
+            }
+            return;
+        }
+        self.buf
+            .extend_from_slice(&(obj.properties.len() as u32).to_le_bytes());
+        // Alpha-normalisation (R16 — declaration order does not affect the
+        // hash) under typed keys: sort members by their canonical fact-byte
+        // encoding, which totally orders string, numeric, unique-symbol, and
+        // computed keys without stringifying any of them.
+        // A lone member needs no key.
+        if let [member] = obj.properties.as_slice() {
+            self.write_object_member(member);
+            return;
+        }
+        let mut encoded: Vec<(Arc<[u8]>, &ObjectMember)> = obj
+            .properties
+            .iter()
+            .map(|member| (self.member_sort_key(member), member))
+            .collect();
+        encoded.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, member) in encoded {
+            self.write_object_member(member);
+        }
+    }
+
+    fn write_object_member(&mut self, member: &ObjectMember) {
+        #[cfg(test)]
+        MEMBER_WRITES.with(|count| count.set(count.get() + 1));
+        match member {
+            ObjectMember::Property(prop) => self.write_property(prop),
+            ObjectMember::Method(method) => self.write_method(method),
+            ObjectMember::IndexSignature(sig) => self.write_index_signature(sig),
+            ObjectMember::CallSignature(func) => {
+                self.buf.push(0x63);
+                self.walk_function(func);
+                self.buf.push(0xFD);
+            }
+            ObjectMember::ConstructSignature(func) => {
+                self.buf.push(0x64);
+                self.walk_function(func);
+                self.buf.push(0xFD);
+            }
+            ObjectMember::Spread(spread) => {
+                self.buf.push(0x66);
+                self.walk_node(&spread.ty);
+                self.buf.push(0xFD);
+            }
+        }
+    }
+
+    // RECORDED asymmetry: `excess_origin` is NOT folded here (nor in
+    // `write_method`), while the `TypeExpr` interning identity hash DOES
+    // carry it (marker-only-for-non-`NonLiteral`, pinned by
+    // `hash_byte_stream_contract`). Two bodies differing only in member
+    // origin therefore share a FACT hash. Graph interning identity is the
+    // excess-checking authority, so no false-accept path exists through
+    // this. A visibility-style marker was deliberately NOT added: literal-
+    // initialized value-decl object shapes carry `FreshOwn` members into
+    // this hasher, so the marker would re-key existing fact signatures —
+    // adopt it only with a deliberate fact-identity migration.
+    fn write_property(&mut self, prop: &ObjectProperty) {
+        self.buf.push(0x60);
+        self.write_authored_property_key(&prop.key);
+        self.buf.push(u8::from(prop.optional));
+        self.buf.push(u8::from(prop.readonly));
+        self.write_member_visibility(prop.visibility);
+        self.walk_node(&prop.ty);
+        self.buf.push(0xFD);
+    }
+
+    /// Emit one object-property's fact bytes. Shared by the object-member walk
+    /// ([`Self::write_property`]) and the value-body enum-fold encoder
+    /// ([`Self::emit_folded_enum_object`]), which never allocates an
+    /// `ObjectProperty`.
+    fn emit_property(
+        &mut self,
+        name: &str,
+        optional: bool,
+        readonly: bool,
+        visibility: verter_type_expr::MemberVisibility,
+        ty: &TypeExpr,
+    ) {
+        self.buf.push(0x60);
+        self.write_authored_property_key(&AuthoredPropertyKey::String(Arc::from(name)));
+        self.buf.push(u8::from(optional));
+        self.buf.push(u8::from(readonly));
+        self.write_member_visibility(visibility);
+        self.walk_node(ty);
+        self.buf.push(0xFD);
+    }
+
+    fn write_method(&mut self, method: &MethodSignature) {
+        self.buf.push(0x61);
+        self.write_authored_property_key(&method.key);
+        self.buf.push(u8::from(method.optional));
+        self.buf.push(match method.method_kind {
+            verter_type_expr::ObjectMethodKind::Method => 0,
+            verter_type_expr::ObjectMethodKind::Get => 1,
+            verter_type_expr::ObjectMethodKind::Set => 2,
+        });
+        self.buf.push(u8::from(method.has_implementation_body));
+        self.write_member_visibility(method.visibility);
+        self.walk_function(&method.function);
+        self.buf.push(0xFD);
+    }
+
+    fn write_authored_property_key(&mut self, key: &TypeAuthoredPropertyKey) {
+        match key {
+            AuthoredPropertyKey::String(value) => {
+                self.buf.push(0);
+                self.buf.extend_from_slice(value.as_bytes());
+                self.buf.push(0xFF);
+            }
+            AuthoredPropertyKey::Number(value) => {
+                self.buf.push(1);
+                self.buf.extend_from_slice(&value.get().to_le_bytes());
+            }
+            AuthoredPropertyKey::UniqueSymbol(identity) => {
+                self.buf.push(2);
+                self.buf.extend_from_slice(identity.canonical_id.as_bytes());
+                self.buf.push(0xFF);
+                self.buf.push(match identity.owner.kind() {
+                    verter_type_expr::TopLevelOwnerKind::Module => 0,
+                    verter_type_expr::TopLevelOwnerKind::Instance => 1,
+                    verter_type_expr::TopLevelOwnerKind::Frontmatter => 2,
+                });
+                self.buf
+                    .extend_from_slice(&identity.owner.ordinal().to_le_bytes());
+                self.buf.extend_from_slice(identity.symbol.as_bytes());
+                self.buf.push(0xFF);
+                self.buf
+                    .extend_from_slice(&(identity.member_path.len() as u32).to_le_bytes());
+                for segment in identity.member_path.iter() {
+                    self.buf.extend_from_slice(segment.as_bytes());
+                    self.buf.push(0xFF);
+                }
+            }
+            AuthoredPropertyKey::Computed(expression) => {
+                self.buf.push(3);
+                self.walk_node(expression);
+            }
+        }
+    }
+
+    /// Fold a member-visibility marker into the fact byte stream, emitting bytes
+    /// ONLY for a non-public member (`Protected` / `Private`). A `Public` member
+    /// emits NOTHING, so an all-public surface's fact identity is byte-identical
+    /// to the pre-visibility stream (zero churn) — the SAME marker-only-for-non-
+    /// public scheme the `TypeExpr` `Hash` byte stream uses. Without this,
+    /// public/protected/private members of the same name+type would COLLIDE in
+    /// fact/cache identity even though `TypeExpr` node identity distinguishes
+    /// them (a cache-correctness gap).
+    fn write_member_visibility(&mut self, visibility: verter_type_expr::MemberVisibility) {
+        use verter_type_expr::MemberVisibility;
+        match visibility {
+            MemberVisibility::Public => {}
+            MemberVisibility::Protected => {
+                self.buf.push(0x65);
+                self.buf.push(1);
+            }
+            MemberVisibility::Private => {
+                self.buf.push(0x65);
+                self.buf.push(2);
+            }
+        }
+    }
+
+    fn write_index_signature(&mut self, sig: &IndexSignature) {
+        self.buf.push(0x62);
+        self.buf.push(u8::from(sig.readonly));
+        // `key_name` is display-only (`[k: string]` vs `[x: string]`
+        // is the same type). Hash only the structural pieces.
+        self.walk_node(&sig.key_type);
+        self.buf.push(0xFE);
+        self.walk_node(&sig.value_type);
+        self.buf.push(0xFD);
+    }
+
+    fn walk_function(&mut self, func: &FunctionExpr) {
+        self.buf.push(0x70);
+        // Push a fresh type-param frame if the function declares its
+        // own generics (alpha-normalised by binder-relative index).
+        let frame_names: Vec<Arc<str>> = func
+            .type_parameters
+            .iter()
+            .map(|p| Arc::from(p.name.as_str()))
+            .collect();
+        self.type_param_frame.push(frame_names);
+        self.buf
+            .extend_from_slice(&(func.type_parameters.len() as u32).to_le_bytes());
+        for param in &func.type_parameters {
+            self.write_type_param_decl(param);
+        }
+        self.buf
+            .extend_from_slice(&(func.parameters.len() as u32).to_le_bytes());
+        for p in &func.parameters {
+            self.write_parameter(p);
+        }
+        if let Some(ret) = &func.return_type {
+            self.buf.push(1);
+            self.walk_node(ret);
+        } else {
+            self.buf.push(0);
+        }
+        // Trailing, present only on a predicate signature, so every
+        // predicate-less function keeps its bytes. The subject is its
+        // parameter SLOT, never the parameter's spelling (parameter
+        // renames stay cosmetic).
+        if let Some(predicate) = func.predicate.as_deref() {
+            self.buf.push(0x72);
+            match &predicate.subject {
+                TypePredicateSubject::This => self.buf.push(0),
+                TypePredicateSubject::Parameter(name) => {
+                    self.buf.push(1);
+                    let slot = func
+                        .parameters
+                        .iter()
+                        .position(|param| param.name.as_deref() == Some(name.as_ref()))
+                        .map_or(u32::MAX, |slot| slot as u32);
+                    self.buf.extend_from_slice(&slot.to_le_bytes());
+                }
+            }
+            self.buf.push(u8::from(predicate.asserts));
+            if let Some(target) = predicate.ty.as_deref() {
+                self.buf.push(1);
+                self.walk_node(target);
+            } else {
+                self.buf.push(0);
+            }
+        }
+        self.type_param_frame.pop();
+    }
+
+    fn write_parameter(&mut self, p: &FunctionParam) {
+        // Parameter names are display-only; alpha-normalise to slot
+        // index, NOT to the source identifier (R16 cosmetic-
+        // invariance for parameter rename).
+        self.buf.push(0x71);
+        self.buf.push(u8::from(p.optional));
+        self.buf.push(u8::from(p.rest));
+        self.walk_node(&p.ty);
+        self.buf.push(0xFD);
+    }
+
+    fn write_type_param_decl(&mut self, p: &TypeParam) {
+        // Lock in the constraint / default shape but rename the
+        // parameter to its binder-relative slot.
+        self.buf.push(0x72);
+        if let Some(c) = &p.constraint {
+            self.buf.push(1);
+            self.walk_node(c);
+        } else {
+            self.buf.push(0);
+        }
+        if let Some(d) = &p.default {
+            self.buf.push(1);
+            self.walk_node(d);
+        } else {
+            self.buf.push(0);
+        }
+    }
+
+    fn write_tuple_element(&mut self, tuple_elem: &TupleElement) {
+        self.buf.push(0x80);
+        self.buf.push(u8::from(tuple_elem.optional));
+        self.buf.push(u8::from(tuple_elem.rest));
+        // Label is display-only.
+        self.walk_node(&tuple_elem.ty);
+        self.buf.push(0xFD);
+    }
+
+    fn write_primitive(&mut self, p: PrimitiveName) {
+        self.buf.push(0x90);
+        self.buf.push(p as u8);
+        self.buf.push(0xFF);
+    }
+
+    fn write_literal(&mut self, lit: &LiteralValue) {
+        self.buf.push(0x10);
+        match lit {
+            LiteralValue::String(s) => {
+                self.buf.push(0);
+                self.buf.extend_from_slice(s.as_bytes());
+                self.buf.push(0xFF);
+            }
+            LiteralValue::Number(n) => {
+                self.buf.push(1);
+                self.buf.extend_from_slice(&n.to_bits().to_le_bytes());
+            }
+            LiteralValue::Boolean(b) => {
+                self.buf.push(2);
+                self.buf.push(u8::from(*b));
+            }
+            LiteralValue::BigInt(s) => {
+                self.buf.push(3);
+                self.buf.extend_from_slice(s.as_bytes());
+                self.buf.push(0xFF);
+            }
+        }
+    }
+
+    fn write_mapped_modifier(&mut self, m: MappedModifier) {
+        self.buf.push(match m {
+            MappedModifier::None => 0,
+            MappedModifier::Add => 1,
+            MappedModifier::Remove => 2,
+        });
+    }
+
+    fn walk_typeof(&mut self, value_ref: &ValueRef) {
+        self.buf.push(0x31);
+        // `typeof a.b.c` — record the path stably; the producer
+        // resolves the head ident through the lens later (we don't
+        // have a typeof-channel for free here, but the structural
+        // shape is invariant).
+        self.buf
+            .extend_from_slice(&(value_ref.path.len() as u32).to_le_bytes());
+        for seg in &value_ref.path {
+            self.buf.extend_from_slice(seg.as_bytes());
+            self.buf.push(0xFE);
+        }
+        // Instantiation-expression args (`typeof C.make<string>`) are
+        // semantic meaning: length-prefixed so `typeof f` and
+        // `typeof f<string>` never collide in the fingerprint.
+        self.buf
+            .extend_from_slice(&(value_ref.type_args.len() as u32).to_le_bytes());
+        for arg in &value_ref.type_args {
+            self.walk_node(arg);
+        }
+    }
+
+    fn find_type_param(&self, name: &str) -> Option<usize> {
+        // Search the active stack of generic frames from innermost
+        // outward; return a flat binder-relative index. Outer frames
+        // don't see inner-frame names — TypeScript's lexical scoping
+        // for generics matches our nested-frame model.
+        for frame in self.type_param_frame.iter().rev() {
+            if let Some(pos) = frame.iter().position(|n| n.as_ref() == name) {
+                return Some(pos);
+            }
+        }
+        None
+    }
+
+    fn node_identity_key(&self, node: &TypeExpr) -> Vec<u8> {
+        // The cycle-detection identity key fingerprints the node's
+        // *variant + leaf data only* — it MUST NOT recurse, because
+        // doing so reintroduces stack recursion. For compound nodes,
+        // the key folds in the `Arc` pointer addresses of any owned
+        // sub-nodes: two physically identical `Arc`s ARE the same
+        // node and MUST re-enter as `CycleRef`. Different `Arc`s
+        // carrying structurally identical content are distinct nodes
+        // (no false-positive cycle).
+        let mut key = Vec::with_capacity(32);
+        match node {
+            TypeExpr::Primitive(p) => {
+                key.push(0xA0);
+                key.push(*p as u8);
+            }
+            TypeExpr::Literal(lit) => {
+                key.push(0xA1);
+                match lit {
+                    LiteralValue::String(s) => {
+                        key.push(0);
+                        key.extend_from_slice(s.as_bytes());
+                    }
+                    LiteralValue::Number(n) => {
+                        key.push(1);
+                        key.extend_from_slice(&n.to_bits().to_le_bytes());
+                    }
+                    LiteralValue::Boolean(b) => {
+                        key.push(2);
+                        key.push(u8::from(*b));
+                    }
+                    LiteralValue::BigInt(s) => {
+                        key.push(3);
+                        key.extend_from_slice(s.as_bytes());
+                    }
+                }
+            }
+            TypeExpr::Union(arms) => {
+                key.push(0xA2);
+                key.extend_from_slice(&(arms.as_ptr() as usize).to_le_bytes());
+                key.extend_from_slice(&(arms.len() as u32).to_le_bytes());
+            }
+            TypeExpr::Intersection(arms) => {
+                key.push(0xA3);
+                key.extend_from_slice(&(arms.as_ptr() as usize).to_le_bytes());
+                key.extend_from_slice(&(arms.len() as u32).to_le_bytes());
+            }
+            TypeExpr::Array { element, readonly } => {
+                key.push(0xA4);
+                key.push(u8::from(*readonly));
+                key.extend_from_slice(&(Arc::as_ptr(element) as usize).to_le_bytes());
+            }
+            TypeExpr::Tuple { elements, readonly } => {
+                key.push(0xA5);
+                key.push(u8::from(*readonly));
+                key.extend_from_slice(&(elements.as_ptr() as usize).to_le_bytes());
+                key.extend_from_slice(&(elements.len() as u32).to_le_bytes());
+            }
+            TypeExpr::Object(obj) => {
+                key.push(0xA6);
+                key.extend_from_slice(&(Arc::as_ptr(obj) as usize).to_le_bytes());
+            }
+            TypeExpr::Function(func) => {
+                key.push(0xA7);
+                key.extend_from_slice(&(Arc::as_ptr(func) as usize).to_le_bytes());
+            }
+            TypeExpr::ConstructorType(func) => {
+                // Distinct identity tag from `Function` (`0xA7`) so a
+                // constructor type and a function type that happen to share an
+                // `Arc<FunctionExpr>` pointer (they never do, but the tag keeps
+                // the discrimination structural) cannot alias as a cycle.
+                key.push(0xB5);
+                key.extend_from_slice(&(Arc::as_ptr(func) as usize).to_le_bytes());
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                key.push(0xA8);
+                key.extend_from_slice(name.as_bytes());
+                key.push(0xFF);
+                key.extend_from_slice(&(type_arguments.as_ptr() as usize).to_le_bytes());
+                key.extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+            }
+            // Mirrors the `Ref` shape: tag, leaf identity, then the owned
+            // slice pointer + length. MUST NOT recurse (see the doc above).
+            TypeExpr::IntrinsicApplication { op, arguments } => {
+                key.push(0xB7);
+                key.push(op.stable_hash_tag());
+                key.push(0xFF);
+                key.extend_from_slice(&(arguments.as_ptr() as usize).to_le_bytes());
+                key.extend_from_slice(&(arguments.len() as u32).to_le_bytes());
+            }
+            TypeExpr::TypeParameter(p) => {
+                key.push(0xA9);
+                key.extend_from_slice(p.name.as_bytes());
+            }
+            TypeExpr::KeyOf(inner) => {
+                key.push(0xAA);
+                key.extend_from_slice(&(Arc::as_ptr(inner) as usize).to_le_bytes());
+            }
+            TypeExpr::TypeOf(value_ref) => {
+                key.push(0xAB);
+                for seg in &value_ref.path {
+                    key.extend_from_slice(seg.as_bytes());
+                    key.push(0xFE);
+                }
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                key.push(0xAC);
+                key.extend_from_slice(&(Arc::as_ptr(object) as usize).to_le_bytes());
+                key.extend_from_slice(&(Arc::as_ptr(index) as usize).to_le_bytes());
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                key.push(0xAD);
+                key.extend_from_slice(&(Arc::as_ptr(check) as usize).to_le_bytes());
+                key.extend_from_slice(&(Arc::as_ptr(extends) as usize).to_le_bytes());
+                key.extend_from_slice(&(Arc::as_ptr(true_type) as usize).to_le_bytes());
+                key.extend_from_slice(&(Arc::as_ptr(false_type) as usize).to_le_bytes());
+            }
+            TypeExpr::Mapped {
+                parameter, source, ..
+            } => {
+                key.push(0xAE);
+                key.extend_from_slice(parameter.as_bytes());
+                key.extend_from_slice(&(Arc::as_ptr(source) as usize).to_le_bytes());
+            }
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => {
+                key.push(0xAF);
+                key.extend_from_slice(&(quasis.as_ptr() as usize).to_le_bytes());
+                key.extend_from_slice(&(expressions.as_ptr() as usize).to_le_bytes());
+            }
+            TypeExpr::Infer { name, constraint } => {
+                key.push(0xB0);
+                key.extend_from_slice(name.as_bytes());
+                if let Some(constraint) = constraint {
+                    key.push(0xFF);
+                    key.extend_from_slice(&(Arc::as_ptr(constraint) as usize).to_le_bytes());
+                }
+            }
+            TypeExpr::Rest(inner) => {
+                key.push(0xB1);
+                key.extend_from_slice(&(Arc::as_ptr(inner) as usize).to_le_bytes());
+            }
+            TypeExpr::Parenthesized(inner) => {
+                key.push(0xB2);
+                key.extend_from_slice(&(Arc::as_ptr(inner) as usize).to_le_bytes());
+            }
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                ..
+            } => {
+                key.push(0xB3);
+                key.extend_from_slice(name.as_bytes());
+                key.push(0xFF);
+                key.extend_from_slice(&(type_arguments.as_ptr() as usize).to_le_bytes());
+            }
+            TypeExpr::SyntheticSlotBinding(arc_key) => {
+                // The carrier identity is the full (scope, surface_kind,
+                // slot_name, binding_name, value_node) tuple. Use the
+                // `Arc<SyntheticCarrierKey>` pointer for cheap identity
+                // discrimination — physically distinct Arcs are distinct
+                // carriers (the cycle-detection key never recurses).
+                key.push(0xB4);
+                key.extend_from_slice(&(Arc::as_ptr(arc_key) as usize).to_le_bytes());
+            }
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => {
+                // Non-recursive identity: leaf data (specifier + typeof flag)
+                // plus the `Arc` pointers + lengths of the qualifier and
+                // type-argument slices — two physically identical slices ARE
+                // the same node and re-enter as `CycleRef`.
+                key.push(0xB6);
+                key.extend_from_slice(specifier.as_bytes());
+                key.push(0xFF);
+                key.push(u8::from(*typeof_query));
+                key.extend_from_slice(&(qualifier.as_ptr() as *const () as usize).to_le_bytes());
+                key.extend_from_slice(&(qualifier.len() as u32).to_le_bytes());
+                key.extend_from_slice(
+                    &(type_arguments.as_ptr() as *const () as usize).to_le_bytes(),
+                );
+                key.extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
+            }
+            TypeExpr::Unknown(value) => {
+                key.push(0xBF);
+                key.extend_from_slice(value.raw().as_bytes());
+            }
+        }
+        key
+    }
+}
+
+#[cfg(test)]
+#[path = "hashing_tests.rs"]
+mod tests;

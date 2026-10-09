@@ -89,9 +89,10 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -121,9 +122,10 @@ mod tests {
             offset: 2,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -146,6 +148,7 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
@@ -160,7 +163,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -182,6 +185,7 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![crate::utils::oxc::Binding {
@@ -196,7 +200,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 
@@ -218,9 +222,10 @@ mod tests {
             offset: 3,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None, // No bindings extracted
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Static,
         };
 
@@ -245,9 +250,10 @@ mod tests {
             offset: 13,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
 

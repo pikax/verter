@@ -19,93 +19,50 @@
 //! `src/cache_runtime/world_snapshot.rs`, which can struct-init the
 //! type directly without a parallel constructor.
 
-pub use crate::capture_token::{
-    assert_no_stack_overflow, with_active_capture, with_active_capture_returning, CacheId,
-    CacheKeyFilter, CacheProvenance, CanonicalId, CaptureGuard, CaptureSnapshot, CaptureToken,
-    DispatchEntry, EdgeIdentity, InternedId, KeyFamily, SignatureHash, StackOverflow,
+use verter_type_engine::cache_runtime::flow_slice_node::PlannedFlowSlice;
+use verter_type_engine::project_semantic_dispatch::flow_products::{
+    FlowProductExecution, FlowProductInputs, FlowProductKey, FlowProductKeyError,
 };
-/// Tier 1B: re-export the cooperative-batch primitive so the
-/// selective component-meta integration tests can probe its
-/// existence. Internal callers continue to reach
-/// `crate::semantic_query_memo::SemanticGraphStore` directly.
-pub use crate::semantic_query_memo::{BatchExpandError, SemanticGraphStore};
-
-/// Re-export the family-domain mapping probe so the `g_block` guards can
-/// assert `Relate` maps to a DEDICATED `FamilyKey::Relate` (never aliasing
-/// `IndexedAccess`) without exposing the `pub(super)` `FamilyKey` taxonomy.
-pub use crate::semantic_query_memo::family_variant_label_for_tests;
-
-/// Re-export the `FamilyKey` size probe so the `g_block` guards can pin
-/// the keyspace size discipline (the `Relate` payload must stay boxed, never
-/// embedded by value) without exposing the `pub(super)` taxonomy.
-pub use crate::semantic_query_memo::family_key_size_for_tests;
-pub use crate::semantic_query_memo::memo_entry_size_for_tests;
-pub use crate::signature_kernel::test_support::{
-    duplicate_publisher_one_sets, opposite_order_one_call_binder_tokens, warm_positional_read,
-    warm_positional_read_many, WarmPositionalLockProbe, WarmPositionalStore,
+use verter_type_engine::project_semantic_dispatch::flow_solve::{
+    FlowDemandPlan, FlowDemandPlanError, FlowDemandRequest, FlowDomain, FlowExecutionSelection,
+    FlowRequirement,
 };
-
-/// Re-export the canonical display projection so the `g_block` integration
-/// guards can call it. `display` is `pub` (forced by E0364: it lives in a
-/// `pub mod display`, so it cannot be more private than its enclosing module);
-/// the integration suite reaches it through this surface, mirroring the
-/// `SemanticGraphStore` re-export above.
-pub use crate::semantic_query::display::{display, DisplayString};
-
-/// Re-export the validate-running probe surface so the
-/// `family_warm_read_releases_mutex_before_validate.rs`
-/// concurrency-fitness discriminator can arm + assert the post-fix
-/// snapshot+outside-lock-validate invariant.
-pub use crate::semantic_query_memo::{ValidateRunningProbeGuard, VALIDATE_RUNNING_PROBE_TEST_LOCK};
-
-/// Integration tests that drive the counter-helper dual-target
-/// write (`record_inflight_aborted_retry` /
-/// `record_cold_abort_swept`) need a `DepSignature` constructor
-/// to feed `execute_cooperative` and a guard struct to force the
-/// cold-abort branch. Both surfaces are `#[doc(hidden)]` and
-/// gated through this `for_tests` module so production callers
-/// never reach them.
-pub use crate::semantic_query_memo::{
-    empty_signature_for_tests, test_trigger_inflight_abort, TestForceColdAbortGuard,
-};
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 /// Carrier type for cache-entry dependency signatures. Integration
 /// tests construct `ReadSetSignature` directly when seeding
 /// fixtures into `ComponentMetaResultEntry` / `OwnerImportSurface` /
 /// `MemoEntry`.
-pub use crate::fact_signature_helpers::ReadSetSignature;
-
-/// Re-export the cooperative-admission outcome enum so integration
-/// tests in `crates/verter_session/tests/*.rs` can name the type
-/// (`cache_runtime` is `pub(crate)`, so the canonical path is not
-/// reachable from outside the crate). Internal production callers
-/// reach `crate::cache_runtime::singleflight::ComputeAdmission`
-/// directly.
-pub use crate::cache_runtime::singleflight::ComputeAdmission;
+pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Fan `sig` into every active tracer on the current thread's TLS
 /// stack. Integration tests use this to verify that the multi-level
 /// fan-out delivers observations into all nested tracer scopes without
 /// going through `FactReadSetCell::observe` directly (which only writes
 /// to the cell it's called on, not the full stack).
-pub fn observe_fan_out_borrowed_for_tests(sig: &[crate::resolver_core::FactVersionRef]) {
-    crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
+pub fn observe_fan_out_borrowed_for_tests(
+    sig: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) {
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
 }
 
 /// Bracket one cold-compute closure with a push-style fact tracer.
 ///
-/// Thin re-export of [`crate::fact_signature_helpers::install_fact_tracer`]
+/// Thin re-export of [`verter_type_engine::fact_signature_helpers::install_fact_tracer`]
 /// for integration tests that need to verify tracer finalisation,
 /// overflow telemetry, and the returned `FactReadSetFinalise` variant.
 pub fn install_fact_tracer_for_tests<F, R>(
     host: &crate::VerterHost,
     f: F,
-) -> (R, crate::resolver_core::FactReadSetFinalise)
+) -> (
+    R,
+    verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+)
 where
     F: FnOnce() -> R,
 {
-    crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+    verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
         f,
     )
 }
@@ -114,7 +71,7 @@ where
 /// `CacheabilityProbe` — the same primitive every production producer uses.
 ///
 /// The shared-cache funnels REQUIRE a probe, and a probe can be minted only by
-/// [`crate::fact_signature_helpers::with_cacheability_scope`]. An integration
+/// [`verter_type_engine::fact_signature_helpers::with_cacheability_scope`]. An integration
 /// test that drives a funnel directly (`RouteDb`, `ImportedRootDb`) therefore
 /// needs a scope of its own. This is NOT an escape hatch around the admission
 /// contract — it IS the contract: a test whose closure consumes a non-cacheable
@@ -124,10 +81,15 @@ where
 /// pops.
 pub fn with_cacheability_scope_for_tests<F, R>(host: &crate::VerterHost, f: F) -> (R, bool)
 where
-    F: for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
+    F: for<'t> FnOnce(
+        &verter_type_engine::fact_signature_helpers::CacheabilityProbe<
+            't,
+            verter_type_engine::fact_signature_helpers::UnboundClocks,
+        >,
+    ) -> R,
 {
-    crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+    verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
         f,
     )
 }
@@ -137,9 +99,9 @@ where
 ///
 /// Re-export for integration tests verifying the bridge conversion.
 pub fn dep_signature_to_fact_signature_for_tests(
-    sig: &crate::semantic_query::DepSignature,
-) -> Vec<crate::resolver_core::FactVersionRef> {
-    crate::fact_signature_helpers::dep_signature_to_fact_signature(sig)
+    sig: &verter_type_engine::semantic_query::DepSignature,
+) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+    verter_type_engine::fact_signature_helpers::dep_signature_to_fact_signature(sig)
 }
 
 /// Read `host`'s per-host overflow-at-install counter value.
@@ -149,7 +111,8 @@ pub fn dep_signature_to_fact_signature_for_tests(
 /// an overflow forced on one host never bumps the counter another host's
 /// delta assertion reads.
 pub fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
-    crate::fact_signature_helpers::read_signature_overflow_at_install(host)
+    host.signature_overflow_at_install
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Arm the per-host relation-memo fact-injection knob and return an RAII
@@ -310,37 +273,40 @@ pub fn workspace_semantic_transitive_deps_for_tests(
 /// discriminate the cold-publish → warm-hit path-precise survival
 /// contract.
 pub fn dispatch_inject_parse_fact_for_tests(
-    fact: crate::resolver_core::FactVersionRef,
-) -> crate::project_semantic_dispatch::DispatchInjectParseFactGuard {
-    crate::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
+    fact: verter_session_query::facts::fact_cache::FactVersionRef,
+) -> verter_type_engine::project_semantic_dispatch::DispatchInjectParseFactGuard {
+    verter_type_engine::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
 }
 
 /// Test-visibility shim exposing the canonical
-/// [`execute_type_node`](crate::semantic_query::SemanticQueryApi::execute_type_node)
+/// [`execute_type_node`](verter_type_engine::semantic_query::SemanticQueryApi::execute_type_node)
 /// to integration-test crates (dispatch is `pub(crate)`); it returns the typed
-/// [`SemanticQueryOutput<SemanticNodeId>`](crate::semantic_query::SemanticQueryOutput)
+/// [`SemanticQueryOutput<SemanticNodeId>`](verter_type_engine::semantic_query::SemanticQueryOutput)
 /// verbatim — NOT a stripped node API and NOT a second resolver/admission path.
 /// `ProjectSemanticDispatch` is `pub(crate)`, so test crates in
 /// `crates/verter_session/tests/**` cannot construct it directly; this forwards
 /// to the one canonical dispatch and hands back its result unchanged.
 pub fn dispatch_execute_type_node_for_tests(
     host: &crate::VerterHost,
-    key: crate::semantic_query::SemanticQueryKey,
-) -> crate::semantic_query::QueryResult<
-    crate::semantic_query::SemanticQueryOutput<crate::semantic_query::SemanticNodeId>,
+    key: verter_type_engine::semantic_query::SemanticQueryKey,
+) -> verter_type_engine::semantic_query::QueryResult<
+    verter_type_engine::semantic_query::SemanticQueryOutput<
+        verter_type_engine::semantic_query::SemanticNodeId,
+    >,
 > {
-    use crate::semantic_query::SemanticQueryApi;
-    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host).execute_type_node(key)
+    use verter_type_engine::semantic_query::SemanticQueryApi;
+    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+        .execute_type_node(key)
 }
 
 /// Production-shaped, NON-DECONSTRUCTABLE builder of a sealed
-/// [`SemanticQueryKey::Instantiate`](crate::semantic_query::SemanticQueryKey)
+/// [`SemanticQueryKey::Instantiate`](verter_type_engine::semantic_query::SemanticQueryKey)
 /// key for integration tests.
 ///
 /// The `Instantiate` payload is the opaque
-/// [`InstantiateKey`](crate::semantic_query::InstantiateKey) (private
-/// fields) whose [`InstantiateContext`](crate::semantic_query::InstantiateContext)
-/// carries the sealed, `pub(crate)` [`InstantiateBodySource`](crate::semantic_query::InstantiateBodySource)
+/// [`InstantiateKey`](verter_type_engine::semantic_query::InstantiateKey) (private
+/// fields) whose [`InstantiateContext`](verter_type_engine::semantic_query::InstantiateContext)
+/// carries the sealed [`InstantiateBodySource`](verter_type_engine::semantic_query::InstantiateBodySource)
 /// source-kind axis — none of which an external crate can construct.
 /// This helper is the ONLY way `tests/cases/**` can mint the key, and it
 /// hands back the OPAQUE `SemanticQueryKey` — never a raw
@@ -364,14 +330,15 @@ pub fn dispatch_execute_type_node_for_tests(
 #[cfg(any(test, feature = "test-support"))]
 pub fn instantiate_key_for_tests(
     host: &crate::VerterHost,
-    base: crate::semantic_query::ResolvedDeclSlotIdentity,
-    args: std::sync::Arc<[crate::semantic_query::SemanticNodeId]>,
-    prc: crate::semantic_query::ProjectionReductionContext,
-) -> crate::semantic_query::SemanticQueryKey {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    base: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity,
+    args: std::sync::Arc<[verter_type_engine::semantic_query::SemanticNodeId]>,
+    prc: verter_type_engine::semantic_query::ProjectionReductionContext,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let context = dispatch.instantiate_context_for(base.defining_canonical.as_ref(), prc);
-    crate::semantic_query::SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(base, args, context),
+    verter_type_engine::semantic_query::SemanticQueryKey::Instantiate(
+        verter_type_engine::semantic_query::InstantiateKey::new(base, args, context),
     )
 }
 
@@ -381,10 +348,13 @@ pub fn instantiate_key_for_tests(
 /// projection renders byte-identically to this canonical reduced surface — the
 /// two paths share one peer-merge engine, so any divergence is a regression.
 pub fn reduce_merged_decl_to_graph_node(
-    store: &crate::semantic_query_memo::SemanticGraphStore,
-    contributors: &[crate::semantic_query::SemanticNodeId],
-) -> crate::semantic_query::SemanticNodeId {
-    crate::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(store, contributors)
+    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    contributors: &[verter_type_engine::semantic_query::SemanticNodeId],
+) -> verter_type_engine::semantic_query::SemanticNodeId {
+    verter_type_engine::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(
+        store,
+        contributors,
+    )
 }
 
 /// Drive `ProjectSemanticDispatch::lower_type_expr_in_scope_with_context`
@@ -394,9 +364,9 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
     host: &crate::VerterHost,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
-    context: crate::semantic_query::ProjectionReductionContext,
-) -> Option<crate::semantic_query::SemanticNodeId> {
-    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+    context: verter_type_engine::semantic_query::ProjectionReductionContext,
+) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
+    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
         .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
 }
 
@@ -411,12 +381,13 @@ pub fn relate_named_types_for_tests(
     target: &str,
     construction_byte_limit: Option<usize>,
 ) -> (bool, usize, usize) {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     if let Some(limit) = construction_byte_limit {
         dispatch.set_construction_byte_limit_for_tests(limit);
     }
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        crate::semantic_query::ProjectionMode::Expanded,
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
     );
     let lower = |name: &str| {
         let expr = verter_type_expr::TypeExpr::Ref {
@@ -433,7 +404,7 @@ pub fn relate_named_types_for_tests(
     (
         matches!(
             step,
-            crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
+            verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
         ),
         usage.work,
         usage.bytes,
@@ -449,12 +420,13 @@ pub fn reduce_named_template_for_tests(
     name: &str,
     construction_byte_limit: Option<usize>,
 ) -> (bool, usize) {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     if let Some(limit) = construction_byte_limit {
         dispatch.set_construction_byte_limit_for_tests(limit);
     }
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        crate::semantic_query::ProjectionMode::Expanded,
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
     );
     let expr = verter_type_expr::TypeExpr::Ref {
         name: std::sync::Arc::from(name),
@@ -468,7 +440,7 @@ pub fn reduce_named_template_for_tests(
     (
         matches!(
             completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         dispatch.connected_demand_usage().bytes,
     )
@@ -481,11 +453,12 @@ pub fn reduce_named_template_for_tests(
 /// pipeline.
 pub fn dispatch_substitute_for_tests(
     host: &crate::VerterHost,
-    node: crate::semantic_query::SemanticNodeId,
-    parameter_node: crate::semantic_query::SemanticNodeId,
-    arg: crate::semantic_query::SemanticNodeId,
-) -> crate::semantic_query::SemanticNodeId {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+    parameter_node: verter_type_engine::semantic_query::SemanticNodeId,
+    arg: verter_type_engine::semantic_query::SemanticNodeId,
+) -> verter_type_engine::semantic_query::SemanticNodeId {
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg)
 }
 
@@ -510,24 +483,42 @@ pub fn dispatch_substitute_for_tests(
 #[cfg(any(test, feature = "test-support"))]
 pub fn dispatch_evaluate_deferred_for_tests(
     host: &crate::VerterHost,
-    node: crate::semantic_query::SemanticNodeId,
-    context: crate::semantic_query::ProjectionReductionContext,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+    context: verter_type_engine::semantic_query::ProjectionReductionContext,
 ) -> (
-    crate::semantic_query::SemanticNodeId,
-    crate::semantic_query::ResultCompleteness,
+    verter_type_engine::semantic_query::SemanticNodeId,
+    verter_type_engine::semantic_query::ResultCompleteness,
 ) {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context)
 }
 
-/// Returns `true` iff `host.active_session_view()` returns `None`.
-///
-/// This shim is needed because `ResolverContext` is sealed — integration
-/// tests cannot call the trait method directly. The shim calls through the
-/// sealed trait on the concrete `VerterHost` impl.
+/// Observe whether a base request's private lifecycle carries a session view.
+/// The lifecycle stays behind the request ports even in integration tests.
 pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
-    use crate::resolver_core::ResolverContext;
-    host.active_session_view().is_none()
+    let view = host.resolver_store_view().into_owned_view();
+    let ctx = crate::resolver_core::HostResolverContext::new(
+        host,
+        &view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    !ctx.has_session_view_for_tests()
+}
+
+/// Run `f` against a base request context bound to the host's current view,
+/// so an integration test can drive the request ports themselves.
+pub fn with_host_resolver_context_for_tests<R>(
+    host: &crate::VerterHost,
+    f: impl FnOnce(&crate::resolver_core::HostResolverContext<'_>) -> R,
+) -> R {
+    let view = host.resolver_store_view().into_owned_view();
+    let ctx = crate::resolver_core::HostResolverContext::new(
+        host,
+        &view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    f(&ctx)
 }
 
 /// Drive the AppConfigNoOverrideProofDb production producer
@@ -539,7 +530,12 @@ pub fn app_config_no_override_proof_get_or_compute_for_tests(
     host: &crate::VerterHost,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
 ) -> Option<std::sync::Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
-    crate::component_meta_caches::app_config_no_override_proof_get_or_compute(host, key)
+    crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
+        host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
+        key,
+    )
 }
 
 /// Drive the family-A `BinderIdentityFacts` production producer
@@ -552,7 +548,11 @@ pub fn binder_identity_facts_get_or_compute_for_tests(
     host: &crate::VerterHost,
     canonical: &str,
 ) -> Option<std::sync::Arc<crate::binder_identity_facts::BinderIdentityFactsEntry>> {
-    crate::binder_identity_facts::produce_binder_identity_facts(host, canonical)
+    crate::binder_identity_facts::produce_binder_identity_facts(
+        host,
+        host.project_type_store().binder_identity_facts_store(),
+        canonical,
+    )
 }
 
 /// Return the published `ComponentMetaResultEntry`'s
@@ -571,7 +571,7 @@ pub fn binder_identity_facts_get_or_compute_for_tests(
 pub fn component_meta_result_signature_for_owner(
     host: &crate::VerterHost,
     owner_canonical: &str,
-) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
     let whole_hash = host
         .ensure_indexed_ready(owner_canonical)
         .map(|ir| ir.whole_hash)?;
@@ -601,14 +601,15 @@ pub fn component_meta_result_signature_for_owner(
 pub fn component_meta_cold_traced_read_set_for_tests(
     host: &crate::VerterHost,
     owner_canonical: &str,
-) -> Option<crate::resolver_core::FactReadSetFinalise> {
+) -> Option<verter_session_query::facts::fact_read_set::FactReadSetFinalise> {
     let canonical = host.resolve_alias_or_canonical(owner_canonical);
-    let (resolved_opt, read_set) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let (resolved_opt, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
                 host.resolve_component_meta(
                     canonical.as_str(),
-                    crate::types::ProjectionMode::Expanded,
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 )
                 .map(|resolved| {
                     let _ = crate::host_manage::extract_component_meta_from_resolved(
@@ -617,10 +618,12 @@ pub fn component_meta_cold_traced_read_set_for_tests(
                         &resolved,
                         true,
                         ctx,
+                        &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
                     );
                 })
             })
-        });
+        },
+    );
     resolved_opt?;
     Some(read_set.finalise())
 }
@@ -652,7 +655,7 @@ pub fn compile_scheduler_artifact_present_for_tests(
 /// invariant from the generation-coherence filter on
 /// [`try_get_artifact`](verter_scheduler::scheduler::Scheduler::try_get_artifact):
 /// a stale artifact left in the map (because the refusal arm did not
-/// call `remove_artifact_if_not_newer_than`) is invisible to
+/// call `remove_artifact_not_newer_than`) is invisible to
 /// `try_get_artifact` after a generation bump, but visible here via
 /// `last_known_good_artifact`. After an overflowed compile that
 /// follows a successful one this MUST return `false`.
@@ -675,9 +678,87 @@ pub fn compile_scheduler_last_known_good_artifact_present_for_tests(
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod projection_bench_support {
-    pub use crate::project_semantic_dispatch::locator_view::{
-        ProjectionBenchCase, ProjectionBenchHarness,
+    use verter_type_engine::project_semantic_dispatch::locator_view;
+    use verter_type_engine::project_semantic_dispatch::locator_view::ProjectionBenchCase;
+    use verter_type_engine::semantic_query::{
+        ProjectionReductionContext, ResultCompleteness, SemanticNodeId,
     };
+
+    /// The projection benchmark harness bound to a host as its resolver
+    /// context. Every operation delegates to the engine's generic harness.
+    pub struct ProjectionBenchHarness<'a>(
+        locator_view::ProjectionBenchHarness<'a, crate::resolver_core::HostCapabilities>,
+    );
+
+    impl ProjectionBenchHarness<'_> {
+        /// See the engine harness's `prepare_decl`.
+        #[must_use]
+        pub fn prepare_decl(
+            &self,
+            canonical_id: &str,
+            symbol: &str,
+        ) -> Option<ProjectionBenchCase> {
+            self.0.prepare_decl(canonical_id, symbol)
+        }
+
+        /// See the engine harness's `prepare_decl_with_resolved_names`.
+        #[must_use]
+        pub fn prepare_decl_with_resolved_names(
+            &self,
+            canonical_id: &str,
+            symbol: &str,
+            resolved_names: &[(&str, &str, &str)],
+        ) -> Option<ProjectionBenchCase> {
+            self.0
+                .prepare_decl_with_resolved_names(canonical_id, symbol, resolved_names)
+        }
+
+        /// See the engine harness's `project_fresh`.
+        pub fn project_fresh(
+            &mut self,
+            case: &ProjectionBenchCase,
+            context: ProjectionReductionContext,
+        ) -> (SemanticNodeId, ResultCompleteness) {
+            self.0.project_fresh(case, context)
+        }
+
+        /// See the engine harness's `project_cold`.
+        pub fn project_cold(
+            &mut self,
+            case: &ProjectionBenchCase,
+            context: ProjectionReductionContext,
+        ) -> (SemanticNodeId, ResultCompleteness) {
+            self.0.project_cold(case, context)
+        }
+
+        /// See the engine harness's `project_warm`.
+        pub fn project_warm(
+            &mut self,
+            case: &ProjectionBenchCase,
+            context: ProjectionReductionContext,
+        ) -> (SemanticNodeId, ResultCompleteness) {
+            self.0.project_warm(case, context)
+        }
+    }
+
+    /// A projection harness bound to `host` as its resolver context.
+    #[must_use]
+    pub fn harness_for_host(host: &crate::VerterHost) -> ProjectionBenchHarness<'_> {
+        ProjectionBenchHarness(locator_view::ProjectionBenchHarness::new(host))
+    }
+}
+
+/// Drive the semantic graph store's warm-read path (snapshot under lock +
+/// validate outside lock + brief LRU reacquire) end-to-end with a concrete
+/// `&VerterHost` as the resolver context. Returns `true` on a warm hit,
+/// `false` on a miss / stale candidate.
+#[doc(hidden)]
+pub fn get_validated_with_host(
+    graph: &SemanticGraphStore,
+    key: &verter_type_engine::semantic_query::SemanticQueryKey,
+    host: &crate::VerterHost,
+) -> bool {
+    graph.get_validated(key, host).is_some()
 }
 
 /// The signature-kernel contention probe's isolation variants
@@ -693,8 +774,10 @@ pub mod signature_kernel_bench_support {
     use verter_type_expr::facts::FlowFunctionReturnIdentity;
 
     use crate::host_flow_return_audit::FlowReturnError;
-    use crate::semantic_query::{FlowReturnFailure, FlowReturnStep, ReturnProjectionDemand};
     use crate::VerterHost;
+    use verter_type_engine::semantic_query::{
+        FlowReturnFailure, FlowReturnStep, ReturnProjectionDemand,
+    };
 
     /// The public audited whole-return query of `function`, as a
     /// fingerprint of its answer on this host: the returned node, its
@@ -790,214 +873,38 @@ pub mod signature_kernel_bench_support {
         });
         assert!(outcome.as_result().is_ok(), "the request completes");
     }
-
-    /// Where a cancellation met the request's work, recorded on the
-    /// request's own thread while [`cancel_trace::traced`] runs: which
-    /// semantic query family was innermost at every instant, and the first
-    /// poll that observed the cancellation. The signature-kernel
-    /// cancellation probe reads it to split a stop into the delay before a
-    /// poll saw the cancellation and the unwind after it.
-    ///
-    /// Owner: the one `traced` call that installs it on its thread.
-    /// Lifetime: that call. Release: the call's guard takes it back out of
-    /// the thread-local, on return and on unwind; nothing is recorded on a
-    /// thread with no trace installed.
-    pub mod cancel_trace {
-        use std::cell::RefCell;
-        use std::panic::Location;
-        use std::time::Instant;
-
-        use crate::semantic_query::SemanticQueryKeyTag;
-
-        /// What one traced request recorded.
-        #[derive(Debug, Default, Clone)]
-        pub struct CancelTrace {
-            /// Every change of the innermost active query family: from
-            /// when, and which family (`None`: no family open).
-            pub transitions: Vec<(Instant, Option<SemanticQueryKeyTag>)>,
-            /// The first poll that observed the cancellation, and when.
-            pub first_observed: Option<(&'static Location<'static>, Instant)>,
-            /// Named points of the request's own lifecycle, each at its
-            /// first occurrence: `evaluated` (the dispatch step returned)
-            /// and `released` (the dispatch and its transaction dropped).
-            pub marks: Vec<(&'static str, Instant)>,
-        }
-
-        impl CancelTrace {
-            /// The innermost query family open at `at`.
-            #[must_use]
-            pub fn active_at(&self, at: Instant) -> Option<SemanticQueryKeyTag> {
-                let index = self.transitions.partition_point(|(from, _)| *from <= at);
-                index.checked_sub(1).and_then(|i| self.transitions[i].1)
-            }
-        }
-
-        struct State {
-            trace: CancelTrace,
-            open: Vec<SemanticQueryKeyTag>,
-        }
-
-        thread_local! {
-            static ACTIVE: RefCell<Option<State>> = const { RefCell::new(None) };
-        }
-
-        /// Run `work` with a trace installed on this thread and return
-        /// what it recorded.
-        pub fn traced<R>(work: impl FnOnce() -> R) -> (R, CancelTrace) {
-            struct Installed;
-            impl Drop for Installed {
-                fn drop(&mut self) {
-                    ACTIVE.with(|cell| cell.borrow_mut().take());
-                }
-            }
-            ACTIVE.with(|cell| {
-                *cell.borrow_mut() = Some(State {
-                    trace: CancelTrace::default(),
-                    open: Vec::new(),
-                });
-            });
-            let installed = Installed;
-            let result = work();
-            let trace = ACTIVE
-                .with(|cell| cell.borrow_mut().take())
-                .map(|state| state.trace)
-                .unwrap_or_default();
-            drop(installed);
-            (result, trace)
-        }
-
-        thread_local! {
-            static CANCEL_AT_FAMILY: RefCell<Option<(verter_scheduler::cancellation::CancellationToken, usize)>> =
-                const { RefCell::new(None) };
-        }
-
-        /// Cancel `token` as the `nth` query family (1-based) opens on this
-        /// thread, while the returned guard lives: the poll that follows the
-        /// family's opening — the connected demand's entry at that query
-        /// boundary — is the first to observe it. A test cancels a request at
-        /// a chosen point of its work this way, without a second thread.
-        pub fn cancel_at_family_entry(
-            token: verter_scheduler::cancellation::CancellationToken,
-            nth: usize,
-        ) -> impl Drop {
-            struct Disarm;
-            impl Drop for Disarm {
-                fn drop(&mut self) {
-                    CANCEL_AT_FAMILY.with(|cell| cell.borrow_mut().take());
-                }
-            }
-            CANCEL_AT_FAMILY.with(|cell| *cell.borrow_mut() = Some((token, nth.max(1))));
-            Disarm
-        }
-
-        /// An open query family; closing it restores the enclosing one.
-        pub(crate) struct FamilyFrame {
-            recorded: bool,
-        }
-
-        /// Open `family` as the innermost query family until the returned
-        /// frame drops.
-        pub(crate) fn enter_family(family: SemanticQueryKeyTag) -> FamilyFrame {
-            CANCEL_AT_FAMILY.with(|cell| {
-                let mut slot = cell.borrow_mut();
-                if let Some((token, remaining)) = slot.as_mut() {
-                    *remaining = remaining.saturating_sub(1);
-                    if *remaining == 0 {
-                        token.cancel();
-                        *slot = None;
-                    }
-                }
-            });
-            let recorded = ACTIVE.with(|cell| {
-                let mut slot = cell.borrow_mut();
-                let Some(state) = slot.as_mut() else {
-                    return false;
-                };
-                state.open.push(family);
-                state.trace.transitions.push((Instant::now(), Some(family)));
-                true
-            });
-            FamilyFrame { recorded }
-        }
-
-        impl Drop for FamilyFrame {
-            fn drop(&mut self) {
-                if !self.recorded {
-                    return;
-                }
-                ACTIVE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        state.open.pop();
-                        let enclosing = state.open.last().copied();
-                        state.trace.transitions.push((Instant::now(), enclosing));
-                    }
-                });
-            }
-        }
-
-        /// The request reached the lifecycle point `label`.
-        pub(crate) fn mark(label: &'static str) {
-            ACTIVE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    if !state.trace.marks.iter().any(|(seen, _)| *seen == label) {
-                        state.trace.marks.push((label, Instant::now()));
-                    }
-                }
-            });
-        }
-
-        /// A poll at `site` observed the cancellation.
-        pub(crate) fn observed(site: &'static Location<'static>) {
-            ACTIVE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().as_mut() {
-                    state
-                        .trace
-                        .first_observed
-                        .get_or_insert_with(|| (site, Instant::now()));
-                }
-            });
-        }
-    }
 }
 
 // ── Private flow-solve completeness-proof surface (hermetic) ────────────
 // The fixtures' content keys stay `pub(crate)`; construction/planning go
 // through the wrapper below.
-/// The store-retained structural plan carrier the demand planner consumes:
-/// the slice identity minted over the bound graph plus the selection it
-/// covers. Tests pass it around as an opaque provenance token.
-pub use crate::cache_runtime::flow_slice_node::PlannedFlowSlice;
-pub use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::*;
-pub use crate::project_semantic_dispatch::dispatch_txn::ObligationRuntime;
-pub use crate::project_semantic_dispatch::flow_products::*;
-pub use crate::project_semantic_dispatch::flow_solve::*;
 
 /// One hermetic flow-solve fixture: `source`'s first function declaration,
 /// parsed and indexed ONCE — the store-minted bound graph (skeleton +
 /// graph sealed to the content key by `FunctionFlowGraphStore`) plus the
 /// frame's real binding inventory from the `FunctionProgramIndex`.
 pub struct FlowGraphFixtureForTests {
-    bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+    bound: verter_session_query::flow::bundle::BoundFlowGraph,
 }
 
 #[rustfmt::skip]
 impl FlowGraphFixtureForTests {
-    pub fn program_key(&self) -> &verter_semantic::analysis::function_program::FunctionProgramKey { &self.bound.key().function }
+    pub fn program_key(&self) -> &verter_session_query::function_program::FunctionProgramKey { &self.bound.key().function }
     /// The ONE structural plan the production hash node would retain for
     /// this demand over this fixture's bound graph: planned once by graph
     /// reachability and sealed with the slice identity minted over the
     /// SAME graph — the exact `PlannedFlowSlice` shape the production
     /// hash node's compute retains on its published outcome.
     pub fn retained_plan(&self, request: &FlowDemandRequest) -> Result<PlannedFlowSlice, FlowDemandPlanError> {
-        use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
-        use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
-        let subject = crate::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
+        use verter_session_query::flow::hashing::compute_flow_slice_hash;
+        use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
+        let subject = verter_type_engine::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
         let bundle = self.bound.bundle();
-        let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
-        let selection = ReturnPathPeeker::new(&bundle.graph)
+        let demand = SliceDemand::for_return_projection(bundle.skeleton(), &subject.projection_path);
+        let selection = ReturnPathPeeker::new(bundle.graph())
             .plan(&demand, &request.resources.slice_budget)
             .map_err(FlowDemandPlanError::SliceBudget)?;
-        let hash = compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton);
+        let hash = compute_flow_slice_hash(&selection, bundle.graph(), bundle.skeleton());
         Ok(PlannedFlowSlice::for_test(hash, selection))
     }
 
@@ -1018,15 +925,15 @@ impl FlowGraphFixtureForTests {
     /// for another graph or another demand must be a typed planning
     /// error, never a proof plan.
     pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained)
+        verter_type_engine::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained)
     }
 
     pub fn prepare_execution_with_retained(&self, request: &FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<std::sync::Arc<FlowExecutionSelection>, FlowDemandPlanError> {
-        crate::project_semantic_dispatch::flow_solve::prepare_flow_execution(request, &self.bound, retained)
+        verter_type_engine::project_semantic_dispatch::flow_solve::prepare_flow_execution(request, &self.bound, retained)
     }
 
     pub fn build_plan_from_execution(&self, execution: std::sync::Arc<FlowExecutionSelection>, additional: std::sync::Arc<[FlowRequirement]>) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan_from_execution(execution, &self.bound, additional)
+        verter_type_engine::project_semantic_dispatch::flow_solve::build_flow_demand_plan_from_execution(execution, &self.bound, additional)
     }
 
     /// The product-lattice inputs over this fixture's store-bound graph:
@@ -1038,7 +945,7 @@ impl FlowGraphFixtureForTests {
 
     /// Exercise the interpreter-only numeric attachment against the actual
     /// pinned fixture owner. Returned handles still carry execution scope.
-    pub fn product_content_key_for_tests(&self, execution: &FlowProductExecution, node: verter_semantic::analysis::flow::flow_graph::FlowNodeId, binding: Option<&verter_semantic::analysis::flow::FlowBindingRef>) -> Result<FlowProductKey, FlowProductKeyError> {
+    pub fn product_content_key_for_tests(&self, execution: &FlowProductExecution, node: verter_session_query::flow::flow_graph::FlowNodeId, binding: Option<&verter_session_query::flow::binding::FlowBindingRef>) -> Result<FlowProductKey, FlowProductKeyError> {
         let content = execution.attach_content(&self.bound)?;
         let site = content.site(node)?;
         let key = content.key(FlowDomain::ReachingType, node)?;
@@ -1047,7 +954,7 @@ impl FlowGraphFixtureForTests {
         Ok(key)
     }
 
-    pub fn selected_capture_identities_for_tests(&self, plan: &FlowDemandPlan) -> Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+    pub fn selected_capture_identities_for_tests(&self, plan: &FlowDemandPlan) -> Vec<verter_session_query::function_program::FlowBindingIdentity> {
         self.product_inputs().selected_captures(plan.structural_selection()).map(|(identity, _)| identity.clone()).collect()
     }
 }
@@ -1080,7 +987,7 @@ pub fn flow_graph_fixture_for_tests_nested(source: &str, body_hash_tag: u8, nest
 fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage, nested: Option<&str>) -> FlowGraphFixtureForTests {
     use verter_semantic::analysis::flow::{FunctionBodySource, build_indexed_function_body_skeleton};
     use verter_semantic::analysis::function_program::{build_function_program_index_with_nodes, FunctionNode};
-    use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     let oxc_source_type = match &file_language {
         verter_language::FileLanguage::Script { source_type, .. } => match source_type {
             verter_language::ScriptSourceType::Ts => oxc_span::SourceType::ts(),
@@ -1104,7 +1011,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let (index, nodes) = build_function_program_index_with_nodes(&parsed.program, source, &owners, canonical_id.clone(), &Default::default());
     let entry = if let Some(nested_name) = nested {
         let mut matching = index.matches_named(name).filter(|candidate| {
-            candidate.entry().lexical_parent.is_some() && nodes.get(&candidate.entry().key).is_some_and(|resolved| {
+            candidate.entry().lexical_parent().is_some() && nodes.get(candidate.entry().key()).is_some_and(|resolved| {
                 matches!(resolved.node, FunctionNode::Function(func) if func.id.as_ref().is_some_and(|id| id.name.as_str() == nested_name))
             })
         });
@@ -1114,7 +1021,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     } else {
         index.value_function(verter_type_expr::TopLevelOwnerId::ordinary_file(), name, &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, 0).expect("the fixture function is indexed").entry()
     };
-    let resolved = nodes.get(&entry.key).expect("exact indexed fixture function address");
+    let resolved = nodes.get(entry.key()).expect("exact indexed fixture function address");
     let body = match resolved.node {
         FunctionNode::Function(func) if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression => FunctionBodySource::from_function_expression(func).expect("bodied expression"),
         FunctionNode::Function(func) => FunctionBodySource::from_function(func).expect("bodied declaration"),
@@ -1122,14 +1029,14 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         FunctionNode::Initializer(expression) => FunctionBodySource::from_initializer(expression),
     };
     let prepared = build_indexed_function_body_skeleton(&body, source, entry).expect("indexed fixture structure");
-    let function = entry.key.clone();
-    let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+    let function = entry.key().clone();
+    let key = verter_session_query::flow::bundle::FlowSliceFunctionKey {
         canonical_id, function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
         parse_key, file_language,
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
     };
-    let store = crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();
+    let store = verter_type_engine::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();
     let bound = store.mint_bound_flow_graph(key, prepared);
     FlowGraphFixtureForTests { bound }
 }
@@ -1138,24 +1045,24 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
 /// lowered a body, so the value it stands for does not complete normally.
 /// It is minted through the completion-carrier inventory like every other
 /// completion fact — a fixture is a carrier too.
-fn hermetic_completion() -> crate::flow_completion_inventory::NormalCompletion {
-    crate::flow_completion_inventory::NormalCompletion::minted(
+fn hermetic_completion() -> verter_session_query::flow::completion::NormalCompletion {
+    verter_session_query::flow::completion::NormalCompletion::minted(
         false,
-        crate::flow_completion_inventory::CompletionConstruction::HermeticFixture,
+        verter_session_query::flow::completion::CompletionConstruction::HermeticFixture,
     )
 }
 
 /// Mint the hermetic value payload: a clean flow-return result over `return_type`.
 #[rustfmt::skip]
-pub fn flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
-    crate::semantic_query::FlowReturnResult::new(graph, return_type, hermetic_completion(), None)
+pub fn flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: verter_type_engine::semantic_query::SemanticNodeId) -> verter_type_engine::semantic_query::FlowReturnResult {
+    verter_type_engine::semantic_query::FlowReturnResult::new(graph, return_type, hermetic_completion(), None)
 }
 
 /// Mint a DEGRADED hermetic value payload over `return_type` — the
 /// completion seal must refuse it.
 #[rustfmt::skip]
-pub fn degraded_flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
-    crate::semantic_query::FlowReturnResult::new(graph, return_type, hermetic_completion(), Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding))
+pub fn degraded_flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: verter_type_engine::semantic_query::SemanticNodeId) -> verter_type_engine::semantic_query::FlowReturnResult {
+    verter_type_engine::semantic_query::FlowReturnResult::new(graph, return_type, hermetic_completion(), Some(verter_type_engine::semantic_query::FlowReturnDegradation::NonCallableBinding))
 }
 
 /// Probe the no-flow allocation contract through the REAL production
@@ -1169,10 +1076,10 @@ pub fn degraded_flow_return_result_for_tests(graph: &SemanticGraphStore, return_
 #[rustfmt::skip]
 pub fn dispatch_flow_demand_footprint_for_tests(
     host: &crate::VerterHost,
-    key: crate::semantic_query::SemanticQueryKey,
+    key: verter_type_engine::semantic_query::SemanticQueryKey,
 ) -> (usize, usize) {
-    use crate::semantic_query::SemanticQueryApi;
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    use verter_type_engine::semantic_query::SemanticQueryApi;
+    let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let _ = dispatch.execute(key);
     dispatch.flow_demand_footprint_for_tests()
 }
@@ -1186,8 +1093,8 @@ pub fn dispatch_flow_demand_footprint_for_tests(
 /// category variant, so the production mint surface stays unforgeable
 /// from outside the crate.
 #[rustfmt::skip]
-pub fn composite_fixture_for_tests<K: crate::semantic_query::composite::CompositeKind>(members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]>) -> crate::semantic_query::composite::CompositeList<K> {
-    crate::semantic_query::composite::CompositeList::test_fixture(members)
+pub fn composite_fixture_for_tests<K: verter_type_engine::semantic_query::composite::CompositeKind>(members: std::sync::Arc<[verter_type_engine::semantic_query::SemanticNodeId]>) -> verter_type_engine::semantic_query::composite::CompositeList<K> {
+    verter_type_engine::semantic_query::composite::CompositeList::test_fixture(members)
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1219,21 +1126,22 @@ pub enum RelateVerdictForTests {
 #[cfg(any(test, feature = "test-support"))]
 pub fn dispatch_execute_relate_verdict_for_tests(
     host: &crate::VerterHost,
-    source: crate::semantic_query::SemanticNodeId,
-    target: crate::semantic_query::SemanticNodeId,
-    relation: crate::semantic_query::RelationKind,
+    source: verter_type_engine::semantic_query::SemanticNodeId,
+    target: verter_type_engine::semantic_query::SemanticNodeId,
+    relation: verter_type_engine::semantic_query::RelationKind,
 ) -> RelateVerdictForTests {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     match dispatch.execute_relate_pair_kind(source, target, relation) {
-        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. } => {
+        verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. } => {
             RelateVerdictForTests::Holds
         }
-        crate::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable => {
+        verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep::NotAssignable => {
             RelateVerdictForTests::DoesNotHold
         }
-        crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
-        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::BudgetExceeded(_)
-        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assumed(_) => {
+        verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
+        | verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep::BudgetExceeded(_)
+        | verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep::Assumed(_) => {
             RelateVerdictForTests::Undecided
         }
     }
@@ -1247,11 +1155,12 @@ pub fn dispatch_execute_relate_verdict_for_tests(
 #[cfg(any(test, feature = "test-support"))]
 pub fn dispatch_relation_nominal_identity_for_tests(
     host: &crate::VerterHost,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
-    use crate::project_semantic_dispatch::relation::IdentityCarrierUnwrap;
+    use verter_type_engine::project_semantic_dispatch::relation::IdentityCarrierUnwrap;
 
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     match dispatch.unwrap_identity_carrier_for_relation(node) {
         IdentityCarrierUnwrap::Concrete(unwrapped) => dispatch.relation_nominal_identity(unwrapped),
         IdentityCarrierUnwrap::Unresolvable => None,
@@ -1267,15 +1176,16 @@ pub fn dispatch_resolve_type_decl_for_tests(
     host: &crate::VerterHost,
     canonical: &str,
     name: &str,
-) -> crate::semantic_query::SemanticNodeId {
+) -> verter_type_engine::semantic_query::SemanticNodeId {
     use std::sync::Arc;
 
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
 
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
@@ -1298,11 +1208,11 @@ pub fn dispatch_resolve_type_decl_for_tests(
 #[cfg(any(test, feature = "test-support"))]
 pub fn relate_query_key_for_tests(
     host: &crate::VerterHost,
-    source: crate::semantic_query::SemanticNodeId,
-    target: crate::semantic_query::SemanticNodeId,
-    relation: crate::semantic_query::RelationKind,
-) -> crate::semantic_query::SemanticQueryKey {
-    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+    source: verter_type_engine::semantic_query::SemanticNodeId,
+    target: verter_type_engine::semantic_query::SemanticNodeId,
+    relation: verter_type_engine::semantic_query::RelationKind,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
         .relate_key_for_kind(source, target, relation)
         .to_query_key()
 }
@@ -1322,9 +1232,9 @@ pub fn relate_query_key_for_tests(
 #[cfg(any(test, feature = "test-support"))]
 pub fn dispatch_vue_publication_keyof_partial_reasons_for_tests(
     host: &crate::VerterHost,
-    subject: crate::semantic_query::SemanticNodeId,
-) -> crate::semantic_query::PartialReasonSet {
-    use crate::semantic_query::{
+    subject: verter_type_engine::semantic_query::SemanticNodeId,
+) -> verter_type_engine::semantic_query::PartialReasonSet {
+    use verter_type_engine::semantic_query::{
         ProjectionMode, ProjectionReductionContext, SemanticQueryKey, SurfaceProvenanceContext,
     };
 
@@ -1332,9 +1242,66 @@ pub fn dispatch_vue_publication_keyof_partial_reasons_for_tests(
         ProjectionMode::Shallow,
         SurfaceProvenanceContext::Structural,
     );
-    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
         .normalized_carrier_partial_reasons_for_tests(SemanticQueryKey::KeyOf {
             base: subject,
             context,
         })
+}
+
+pub use crate::resolver_core::host_resolver_context::HostResolverContext;
+
+/// A REAL resolve-domain resolution witness fact, minted by driving one
+/// genuine Engine resolution of an unresolvable specifier.
+///
+/// Test fixtures that need "a fact of the import-route rooting kind" use
+/// this rather than constructing one: [`ResolutionFactRef`]'s fields are
+/// crate-private to `verter_workspace` precisely so no consumer can forge
+/// a witness the sealed transaction never admitted. Minting a real one
+/// keeps the fixture honest — the fact carries a live fact key and the
+/// version the world actually published.
+///
+/// Panics if the resolution refuses or carries no resolution fact: either
+/// would make every downstream assertion vacuous.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn resolution_witness_fact_for_tests(
+) -> verter_session_query::facts::fact_cache::FactVersionRef {
+    use crate::types::FileLanguage;
+    use crate::{HostConfig, UpsertRequest, VerterHost};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/witness_fixture/main.ts".to_string(),
+            source: std::sync::Arc::from("import { x } from './absent'\nexport { x }\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("witness fixture upsert must succeed");
+
+    let publication = host.resolve_for_persistent_state(
+        "/witness_fixture/main.ts",
+        "./absent",
+        verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
+        },
+    );
+    let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else {
+        panic!("witness fixture resolution must be admitted");
+    };
+    admitted
+        .signature()
+        .facts
+        .iter()
+        .find(|fact| {
+            matches!(
+                fact,
+                verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner) if inner.resolution_fact().is_some()
+            )
+        })
+        .expect("an admitted resolution must carry at least one resolution-currency fact")
+        .clone()
 }

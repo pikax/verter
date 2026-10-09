@@ -120,7 +120,7 @@ use std::path::{Path, PathBuf};
 /// literal `value_node` needle strings for its own structural assertions.
 /// (This guard file is auto-excluded by `is_test_file` — it lives under a
 /// `tests/` segment — so it never needs an explicit name entry.)
-const SELF_EXCLUDED_FILE_NAMES: &[&str] = &["architecture_guards.rs"];
+const SELF_EXCLUDED_FILE_NAMES: &[&str] = &[];
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -646,7 +646,7 @@ fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
     // collected set. If the traversal returned empty/partial, this fails
     // loudly instead of passing silently.
     let sentinel = std::path::Path::new("crates")
-        .join("verter_session")
+        .join("verter_type_engine")
         .join("src")
         .join("component_meta_caches.rs");
     assert!(

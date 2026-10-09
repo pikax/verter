@@ -15,9 +15,11 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_semantic::facts::registry::{InternedName, SymbolSpace};
-use verter_semantic::facts::{FactKey, FactLane};
-use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
+use verter_session::resolver_core::PermissiveStoreView;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+use verter_session_query::facts::registry::{InternedName, SymbolSpace};
+use verter_session_query::facts::store_view::StoreView;
+use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -36,7 +38,9 @@ fn compile_tier_signature_carries_member_presence() {
     // regression.
     let src = read_session_src("types.rs");
     assert!(
-        src.contains("fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature"),
+        src.contains(
+            "fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature"
+        ),
         "compile_tier matrix slice: `CompileSlot` MUST carry \
          `fact_dep_signature: ReadSetSignature`. A regression that swaps \
          the field for `Vec<FactVersionRef>` would silently bypass \

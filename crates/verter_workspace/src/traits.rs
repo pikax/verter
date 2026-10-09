@@ -15,10 +15,10 @@ use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject};
 use crate::exact_resolution::DependencySnapshotView;
 use crate::published_state::ProjectEnvHashArray;
 use crate::types::{ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge};
-use crate::workspace_snapshot::ProjectId;
 use verter_language::FileLanguage;
-use verter_semantic::resolver_core::ProjectStableKey;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::ProjectId;
+use verter_session_query::resolution::ProjectStableKey;
+use verter_session_query::resolution::{
     AmbientSymbolHit, ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,
     ResolveResult,
 };
@@ -44,6 +44,44 @@ pub struct WorkspaceResourceSnapshot {
     /// Cold resolutions currently in flight (request-scoped: each lives
     /// from its claim to its producer's settlement).
     pub resolution_flights: usize,
+    /// Content-transition history occupancy: retained exact and subtree
+    /// evidence, the evidence readers own, and the backing capacity.
+    pub freshness_history: crate::freshness::FreshnessResidency,
+    /// Workspace-lane resolution ownership and decision-graph occupancy.
+    pub resolution: ResolutionResidency,
+}
+
+/// Current occupancy of the workspace's resident resolution state: the
+/// workspace lane's slots and the decision graphs of every live resolution
+/// root. Read from current collection sizes, never from an event history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResolutionResidency {
+    /// Workspace-lane slots (one per importer, specifier, phase, kind and
+    /// population).
+    pub slots: usize,
+    /// Candidates retained across those slots, each holding its retention
+    /// charge.
+    pub candidates: usize,
+    /// Distinct importers owning at least one slot.
+    pub owners: usize,
+    /// Entries in the lane's admission queue, including stale entries of
+    /// slots already retired (compacted once they dominate).
+    pub slot_queue_entries: usize,
+    /// Slots the lane's slot table holds storage for: allocated capacity,
+    /// distinct from [`Self::slots`] occupancy.
+    pub slot_capacity: usize,
+    /// Entries the lane's admission queue holds storage for.
+    pub slot_queue_capacity: usize,
+    /// Live derived nodes (decisions and owner sets) across the base and
+    /// session roots.
+    pub derived_nodes: usize,
+    /// Direct edges those nodes record.
+    pub decision_edges: usize,
+    /// Dependencies some live node records an edge to.
+    pub dependency_buckets: usize,
+    /// Removed derived nodes whose tombstone is still stored, awaiting
+    /// retirement into the derived floor.
+    pub retired_decisions: usize,
 }
 
 /// Read-only view of the workspace authority.
@@ -92,8 +130,8 @@ pub trait WorkspaceRead: Send + Sync {
     /// The ONLY path-classification seam resolution may use: no
     /// resolver-side code path may reach [`Self::file_exists`], because
     /// that boolean folds
-    /// [`PathProbe::Inaccessible`](verter_semantic::resolver_core::PathProbe::Inaccessible)
-    /// and [`PathProbe::Unknown`](verter_semantic::resolver_core::PathProbe::Unknown)
+    /// [`PathProbe::Inaccessible`](verter_session_query::resolution::PathProbe::Inaccessible)
+    /// and [`PathProbe::Unknown`](verter_session_query::resolution::PathProbe::Unknown)
     /// into `false` — laundering an I/O error into a witnessable
     /// `Absent`, the one outcome a resolution witness may never cache.
     ///
@@ -104,13 +142,13 @@ pub trait WorkspaceRead: Send + Sync {
     /// for error-channel-free adapters (in-memory and fixture readers),
     /// where "not present" is total information and no laundering is
     /// possible.
-    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_session_query::resolution::PathProbe {
         if self.file_exists(canonical_id) {
-            verter_semantic::resolver_core::PathProbe::File
+            verter_session_query::resolution::PathProbe::File
         } else if self.is_dir(canonical_id) {
-            verter_semantic::resolver_core::PathProbe::Directory
+            verter_session_query::resolution::PathProbe::Directory
         } else {
-            verter_semantic::resolver_core::PathProbe::Absent
+            verter_session_query::resolution::PathProbe::Absent
         }
     }
 
@@ -136,7 +174,7 @@ pub trait WorkspaceRead: Send + Sync {
     /// coarse hook.
     fn note_input_resolution_budget_exhausted(
         &self,
-        _event: verter_semantic::resolver_core::InputResolutionBudgetExhaustion,
+        _event: verter_session_query::resolution::InputResolutionBudgetExhaustion,
     ) {
         self.note_resolution_budget_exhausted();
     }
@@ -154,11 +192,11 @@ pub trait WorkspaceRead: Send + Sync {
     /// readers never fall back to the legacy unrestricted read methods.
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        _basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        _basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         if let Some(failure) = keys
             .iter()
@@ -167,9 +205,9 @@ pub trait WorkspaceRead: Send + Sync {
             return Err(failure);
         }
         Err(
-            verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+            verter_session_query::resolution::AttemptFailure::InputLoadUnavailable {
                 key: Box::new(keys.first().cloned().unwrap_or_else(|| {
-                    verter_semantic::resolver_core::InputKey::PathProbe {
+                    verter_session_query::resolution::InputKey::PathProbe {
                         path: Arc::from("<empty-bounded-preflight>"),
                     }
                 })),
@@ -185,12 +223,12 @@ pub trait WorkspaceRead: Send + Sync {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         Err(
-            verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+            verter_session_query::resolution::AttemptFailure::InputLoadUnavailable {
                 key: Box::new(reservation.keys().first().cloned().unwrap_or_else(|| {
-                    verter_semantic::resolver_core::InputKey::PathProbe {
+                    verter_session_query::resolution::InputKey::PathProbe {
                         path: Arc::from("<empty-bounded-load>"),
                     }
                 })),
@@ -240,8 +278,8 @@ pub trait WorkspaceRead: Send + Sync {
     /// Standalone readers observe the base population. Engine-backed editor
     /// workspaces override this with their independently fenced overlay
     /// session.
-    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
-        verter_semantic::resolver_core::ResolutionPopulation::Base
+    fn resolution_population(&self) -> verter_session_query::resolution::ResolutionPopulation {
+        verter_session_query::resolution::ResolutionPopulation::Base
     }
 
     /// Capture this reader's immutable resolution world for the population
@@ -500,17 +538,25 @@ pub trait WorkspaceRead: Send + Sync {
         0
     }
 
-    /// Record a content transition for `canonical_id` at the current generation
-    /// WITHOUT a byte change — the explicit marker for consumers that detect a
+    /// Record a content transition for `canonical_id` WITHOUT a byte
+    /// change — the explicit marker for consumers that detect a
     /// content-derived artifact went stale while the source bytes were not
     /// re-upserted through a mutating chokepoint (e.g. the carrier-sync
     /// admission gate's equal-key differing-artifact refusal: the conflict
-    /// itself proves the artifact rail under-counted). Records at
-    /// `current + 1` exactly like the engine's invalidation-time record, so a
-    /// later read of `last_content_transition_generation` is strictly newer
-    /// than the refused key. Default no-op (reader-only impls never transition
+    /// itself proves the artifact rail under-counted). The transition takes
+    /// a content generation of its own, so a later read of
+    /// `last_content_transition_generation` is strictly newer than the
+    /// refused key. Default no-op (reader-only impls never transition
     /// content).
     fn record_content_transition(&self, _canonical_id: &str) {}
+
+    /// Handle through which a retained artifact or view owns the
+    /// [`Self::last_content_transition_generation`] evidence it reads, so
+    /// retiring history never makes that reader falsely stale. `None` for
+    /// reader-only impls that never transition content.
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        None
+    }
 
     /// Point-in-time VFS provenance counters for observability and benchmarks.
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
@@ -735,13 +781,17 @@ pub trait WorkspaceAccess: WorkspaceRead {
 
     fn end_strict_self_root_transition(&self) {}
 
-    /// Install the host's aggregate retention account, which the resident
-    /// request-overlay resolution state (the overlay lane and the overlay
-    /// value table) charges its entries to. Adapter workspaces with no
-    /// Engine retain no such state and ignore it.
+    /// Replace the retention account the resident resolution state charges
+    /// its entries to. Test-support only: an Engine-backed workspace charges
+    /// the process-local aggregate account from construction, so production
+    /// has nothing to install. Adapter workspaces with no Engine retain no
+    /// such state and ignore it.
+    #[cfg(any(test, feature = "test-support"))]
     fn install_resolution_retention(
         &self,
-        _account: std::sync::Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+        _account: std::sync::Arc<
+            dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount,
+        >,
     ) {
     }
 
@@ -863,7 +913,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
     fn publish_owner_resolution_set(
         &self,
         _owner_canonical: &str,
-    ) -> Option<crate::fact_cache::FactVersionRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
         None
     }
 
@@ -894,7 +944,10 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Configure semantic module resolution from a list of project configs.
     /// Called by the host when `configure_projects()` is used.
     /// Default: no-op. Concrete workspaces override to rebuild the semantic core.
-    fn configure_resolver(&self, _projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        _projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
     }
 
     // ── Directory and mutation operations ──
@@ -973,7 +1026,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
             // resolver's manifest lane, so an `Inaccessible` / `Unknown`
             // manifest entry must reach the transaction as itself rather
             // than as a witnessable absence.
-            if self.probe_path(&candidate) != verter_semantic::resolver_core::PathProbe::File {
+            if self.probe_path(&candidate) != verter_session_query::resolution::PathProbe::File {
                 return None;
             }
             Some(self.realpath(&candidate).unwrap_or(candidate))
@@ -1091,7 +1144,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
     fn semantic_compiler_options_for_project(
         &self,
         _project_id: ProjectId,
-    ) -> Option<verter_semantic::resolver_core::SemanticCompilerOptions> {
+    ) -> Option<verter_session_query::resolution::SemanticCompilerOptions> {
         None
     }
 
@@ -1141,11 +1194,11 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// lifecycle is honored. The trait method itself is purely a
     /// producer: it does not enter the active-request registry.
     /// Per-request id is read from
-    /// [`verter_scheduler::request_context::current_request_id`]
+    /// [`verter_execution::request_context::current_request_id`]
     /// so a registration installed by the host will already be
     /// visible when the trait method runs.
     fn audit_op(&self, op: WorkspaceOp) -> RequestAuditRecord {
-        let request_id = verter_scheduler::request_context::current_request_id().unwrap_or(0);
+        let request_id = verter_execution::request_context::current_request_id().unwrap_or(0);
         let (canonical_id, target_identity) = match &op {
             WorkspaceOp::AuditResolve { from, .. } => (
                 from.clone(),
@@ -1406,7 +1459,7 @@ mod ambient_default_tests {
     use super::{DependencySnapshotView, WorkspaceAccess, WorkspaceRead};
     use crate::ambient_lib::{AmbientLibError, AmbientLibSpec};
     use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
-    use verter_semantic::resolver_core::ProjectStableKey;
+    use verter_session_query::resolution::ProjectStableKey;
 
     /// Minimal backend that opts out of ambient lib support — exercises the
     /// trait defaults.
@@ -1531,13 +1584,13 @@ mod ambient_default_tests {
         fn file_exists(&self, id: &str) -> bool {
             id == TYPED_PROBE_TYPES_CANDIDATE
         }
-        fn probe_path(&self, id: &str) -> verter_semantic::resolver_core::PathProbe {
+        fn probe_path(&self, id: &str) -> verter_session_query::resolution::PathProbe {
             if id == TYPED_PROBE_TYPES_CANDIDATE {
                 // The one divergence: occupancy says "there", typed
                 // classification says "the answer is unknowable".
-                verter_semantic::resolver_core::PathProbe::Inaccessible
+                verter_session_query::resolution::PathProbe::Inaccessible
             } else {
-                verter_semantic::resolver_core::PathProbe::Absent
+                verter_session_query::resolution::PathProbe::Absent
             }
         }
         fn is_package_backed(&self, _id: &str) -> bool {

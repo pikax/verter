@@ -1,15 +1,16 @@
-use super::type_eval::*;
 use super::type_eval_build::{parse_and_build_env, parse_and_lower_parts};
 use crate::analysis::type_eval_build::{
     expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, LoweredFileParts,
-    MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_WORK,
+    MacroExpansionScope,
 };
-use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
-use crate::analysis::types::{
+use std::sync::Arc;
+use verter_session_query::analysis::field_path::PathSegment;
+use verter_session_query::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
+use verter_session_query::analysis::types::{
     AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, TypeResolutionSource,
 };
-use std::sync::Arc;
+use verter_session_query::declarations::*;
 use verter_type_expr::facts::{
     AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, ClosedTypeFact, EnumPrimitiveDomain,
     EnumScalar, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
@@ -47,10 +48,10 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
 
 #[test]
 fn owner_aware_eval_env_keeps_setup_and_module_locators_distinct() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -108,10 +109,10 @@ namespace Ns { export class C { value!: string } }
 #[test]
 fn jsdoc_typedef_bodies_lower_by_exact_owner_qualified_comment() {
     use crate::analysis::decl_headers::build_decl_header_index_with_owners;
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -1187,7 +1188,9 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
 /// private `index_for` in `decl_headers_tests`), so a body-builder test can
 /// assert header↔body parity on the VALUE-augmentation table without reaching
 /// into a sibling test module.
-fn header_index_for(source: &str) -> crate::analysis::decl_headers::DeclHeaderIndex {
+fn header_index_for(
+    source: &str,
+) -> verter_session_query::declarations::header_index::DeclHeaderIndex {
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
@@ -1649,10 +1652,9 @@ fn nested_arrow_expression(depth: usize) -> String {
     expression
 }
 
-/// Initializers nested a thousand levels deep, which the inference visits
-/// within its work budget and which a native level per nesting level would
+/// Initializers nested a thousand levels deep, which a native level per nesting level would
 /// overflow a 1 MiB thread at: the shallow inference infers every nest from
-/// its explicit stacks, bounded only by its work. TypeScript 7.0.2 infers
+/// its explicit stacks. TypeScript 7.0.2 infers
 /// the same module-level nests (72 levels of objects, arrays and arrows, and
 /// a 70-term `&&` chain) in all four strictNullChecks × noImplicitAny
 /// settings.
@@ -1770,19 +1772,25 @@ fn semantic_inference_deep_return_expression_stays_a_served_position() {
     assert_eq!(signature.return_type, None);
 }
 
+/// A finite literal is inferred whole however wide it is: there is no work
+/// cap that turns a 5,000-element array into unfinished inference.
 #[test]
-fn semantic_inference_budget_rejects_excessive_work() {
-    let expression = std::iter::repeat_n("0", MAX_SEMANTIC_INFERENCE_WORK + 8)
-        .collect::<Vec<_>>()
-        .join(",");
+fn semantic_inference_infers_a_wide_literal_whole() {
+    let expression = vec!["0"; 5_000].join(",");
     let source = format!("const wide = [{expression}];");
     let parts = lowered(&source);
     let declaration = parts.value_decl("wide").expect("lowered wide value");
-    assert_eq!(declaration.type_annotation, None);
-    assert_eq!(
-        declaration.inference_unavailable,
-        Some(InferenceUnavailableReason::WorkBudgetExceeded)
-    );
+    assert_eq!(declaration.inference_unavailable, None);
+    let number = TypeExpr::Primitive(PrimitiveName::Number);
+    let Some(TypeExpr::Array { element, .. }) = &declaration.type_annotation else {
+        panic!("a wide array literal lowers to an array type");
+    };
+    let elements = match element.as_ref() {
+        TypeExpr::Union(arms) => arms.to_vec(),
+        other => vec![other.clone()],
+    };
+    assert_eq!(elements.len(), 5_000, "every element is inferred");
+    assert!(elements.iter().all(|arm| *arm == number));
 }
 
 #[test]
@@ -2954,7 +2962,7 @@ fn indexed_call_with_observed_roots(
     IndexedValueCall,
     Vec<(
         super::type_eval_build::IndexedCallReadSite,
-        super::type_eval_build::IndexedValueReadRoot,
+        verter_session_query::analysis::indexed_value::IndexedValueReadRoot,
     )>,
 ) {
     use super::type_eval_build::{
@@ -2985,7 +2993,8 @@ fn indexed_call_with_observed_roots(
 
 #[test]
 fn indexed_call_read_roots_follow_the_actual_value_inference_branch() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     for source in [
         "accept(x)",
         "accept(((x)))",
@@ -3062,7 +3071,8 @@ fn indexed_call_read_roots_follow_the_actual_value_inference_branch() {
 
 #[test]
 fn indexed_call_source_type_query_is_distinct_from_the_operand() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     for source in [
         "accept(other as typeof queried)",
         "accept(((other as typeof queried)))",
@@ -3133,7 +3143,8 @@ fn indexed_call_source_type_query_is_distinct_from_the_operand() {
 
 #[test]
 fn indexed_call_read_roots_preserve_each_occurrence_and_spread_ordinal() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     let source = "accept(x, (x satisfies unknown), undefined, ...x)";
     let (call, roots) = indexed_call_with_observed_roots(source);
     let spans: Vec<_> = source
@@ -3166,7 +3177,8 @@ fn indexed_call_read_roots_preserve_each_occurrence_and_spread_ordinal() {
 
 #[test]
 fn indexed_call_read_roots_observe_the_actual_member_receiver_once() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     for source in [
         "(x satisfies unknown).method(other(x))",
         "(<const>x)[key](other(x))",

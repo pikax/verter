@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::type_expand::{
     ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
     ExpandedProperty,
 };
@@ -33,10 +33,10 @@ use verter_type_expr::locators::{
 use verter_type_expr::TypeExpr;
 
 use super::ComponentMetaQueryEngine;
-use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
-use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{
+use verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext;
+use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
     SurfaceProvenanceContext, SurfaceView,
 };
@@ -81,12 +81,13 @@ impl ComponentMetaQueryEngine<'_> {
         let named = TypeExpr::named(type_name);
         let node = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
             ctx,
+            self.dispatch,
             Some(self),
             scope_canonical_id,
             scope_owner,
             &named,
         )?;
-        let view = ctx.dispatch().resolve_typeinfo_surface_view(
+        let view = self.dispatch.resolve_typeinfo_surface_view(
             node.node(),
             ProjectionReductionContext::macro_object_surface(
                 ProjectionMode::Shallow,
@@ -94,7 +95,7 @@ impl ComponentMetaQueryEngine<'_> {
             ),
         )?;
         Some(expanded_shape_from_surface_view(
-            ctx,
+            self.dispatch,
             &view,
             parent.as_ref(),
         ))
@@ -119,8 +120,7 @@ impl ComponentMetaQueryEngine<'_> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         tag_source: &SemanticTypeSource,
     ) -> Option<ExpandedObjectShape> {
-        let ctx = self.ctx;
-        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let dispatch = self.dispatch;
         let raised = dispatch
             .raise_semantic_type_source_to_hot(
                 tag_source,
@@ -142,7 +142,7 @@ impl ComponentMetaQueryEngine<'_> {
             ),
         )?;
         Some(expanded_shape_from_surface_view(
-            ctx,
+            self.dispatch,
             &view,
             Some(tag_source),
         ))
@@ -166,14 +166,14 @@ impl ComponentMetaQueryEngine<'_> {
         let (_surface, node) =
             self.dispatch_projected_surface_with_node(scope_canonical_id, scope_owner, type_name)?;
         let parent = self.intrinsic_root_parent_source(scope_canonical_id, scope_owner, type_name);
-        let ctx = self.ctx;
-        let dispatch = ProjectSemanticDispatch::new(ctx);
+
+        let dispatch = self.dispatch;
         let view = dispatch.resolve_typeinfo_surface_view(
             node,
             ProjectionReductionContext::published(ProjectionMode::Shallow),
         )?;
         Some(expanded_shape_from_surface_view(
-            ctx,
+            self.dispatch,
             &view,
             parent.as_ref(),
         ))
@@ -241,11 +241,13 @@ impl ComponentMetaQueryEngine<'_> {
 /// object-shape extraction convention), declared index signatures, and the
 /// synthetic open placeholder for a GENUINELY OPEN surface.
 fn expanded_shape_from_surface_view(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     surface: &SurfaceView,
     parent: Option<&SemanticTypeSource>,
 ) -> ExpandedObjectShape {
-    let dispatch = ProjectSemanticDispatch::new(ctx);
     let properties = surface
         .positive_members()
         .iter()
@@ -257,7 +259,7 @@ fn expanded_shape_from_surface_view(
                 // degraded Unknown leaf here is an intentionally-open position
                 // (`Present(Closed(Leaf(unknown)))`), never a failure state.
                 ty: verter_type_expr::facts::SourcePosition::Present(member_value_source(
-                    &dispatch,
+                    dispatch,
                     member.value,
                     name.as_ref(),
                     parent,
@@ -280,7 +282,7 @@ fn expanded_shape_from_surface_view(
         .call_signatures
         .iter()
         .chain(surface.construct_signatures.iter())
-        .filter_map(|signature| expanded_call_signature_from_node(&dispatch, *signature))
+        .filter_map(|signature| expanded_call_signature_from_node(dispatch, *signature))
         .collect::<Vec<_>>();
 
     // Intrinsic index-signature positions are open-position SUCCESSES like
@@ -293,10 +295,10 @@ fn expanded_shape_from_surface_view(
             .iter()
             .map(|signature| ExpandedIndexSignature {
                 key_type: verter_type_expr::facts::SourcePosition::Present(
-                    leaf_or_degraded_source(&dispatch, signature.key_type),
+                    leaf_or_degraded_source(dispatch, signature.key_type),
                 ),
                 value_type: verter_type_expr::facts::SourcePosition::Present(
-                    leaf_or_degraded_source(&dispatch, signature.value_type),
+                    leaf_or_degraded_source(dispatch, signature.value_type),
                 ),
                 readonly: signature.readonly,
             })
@@ -332,7 +334,7 @@ fn expanded_shape_from_surface_view(
 /// `strictNullChecks` an indexed access of an optional member reads its type
 /// plus `undefined`, and a further hop through it would read off that union.
 fn member_value_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value: SemanticNodeId,
     name: &str,
     parent: Option<&SemanticTypeSource>,
@@ -371,10 +373,10 @@ fn member_value_source(
 /// `None`, matching the [`NarrowTypeParam`] producer contract). `None` for a
 /// non-`Function` signature node.
 fn expanded_call_signature_from_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<ExpandedCallSignature> {
-    let data = node_data_for(dispatch.ctx, node)?;
+    let data = node_data_for(dispatch.graph(), node)?;
     let SemanticNodeData::Signature {
         params,
         return_type,
@@ -421,7 +423,7 @@ fn expanded_call_signature_from_node(
 /// closed LEAF fact when the node is one, else the typed Unknown-leaf
 /// degradation.
 fn leaf_or_degraded_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> SemanticTypeSource {
     dispatch

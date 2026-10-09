@@ -7,7 +7,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_semantic::analysis::types::VueApiClassification;
+use verter_session_query::analysis::types::VueApiClassification;
 
 pub struct PreferScriptAttrs;
 
@@ -81,7 +81,8 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
+    use verter_session_query::analysis::types::VueApiCallSite;
     use verter_span::Span;
 
     fn run_rule(

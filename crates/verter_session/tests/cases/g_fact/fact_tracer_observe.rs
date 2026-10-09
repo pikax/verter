@@ -15,10 +15,11 @@
 
 use std::sync::Arc;
 
-use verter_session::resolver_core::{
-    FactReadSet, FactReadSetCell, FactReadSetFinalise, FactVersionRef,
-};
 use verter_session::{CompileErrorPolicy, HostConfig, VerterHost};
+use verter_session_query::facts::{
+    fact_cache::FactVersionRef,
+    fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise},
+};
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig {
@@ -51,14 +52,17 @@ fn fact(canonical: &str, lo_byte: u8) -> FactVersionRef {
 fn cold_compute_observes_each_dep() {
     let host = make_host();
 
-    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-        let cell = host
-            .current_fact_tracer()
-            .expect("tracer must be active inside scope");
-        cell.observe(fact("/a.ts", 1));
-        cell.observe(fact("/b.ts", 2));
-        cell.observe(fact("/c.ts", 3));
-    });
+    let ((), set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let cell = host
+                .current_fact_tracer()
+                .expect("tracer must be active inside scope");
+            cell.observe(fact("/a.ts", 1));
+            cell.observe(fact("/b.ts", 2));
+            cell.observe(fact("/c.ts", 3));
+        },
+    );
 
     assert_eq!(
         set.len(),
@@ -122,12 +126,15 @@ fn observe_borrowed_signature_appends() {
 
     let borrowed = vec![fact("/x.ts", 10), fact("/y.ts", 11), fact("/z.ts", 12)];
 
-    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-        let cell = host
-            .current_fact_tracer()
-            .expect("tracer must be active inside scope");
-        cell.observe_borrowed_signature(&borrowed);
-    });
+    let ((), set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let cell = host
+                .current_fact_tracer()
+                .expect("tracer must be active inside scope");
+            cell.observe_borrowed_signature(&borrowed);
+        },
+    );
 
     assert_eq!(
         set.len(),
@@ -170,17 +177,20 @@ fn signature_cap_overflow_returns_overflow() {
     // 1025 > 1024 → overflow.
     const N_OVERFLOW: usize = 1025;
 
-    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-        let cell = host
-            .current_fact_tracer()
-            .expect("tracer must be active inside scope");
-        for i in 0..N_OVERFLOW {
-            // Use the index as part of the canonical to guarantee
-            // each fact is distinct (so dedup does not collapse them).
-            let canonical = format!("/m_{i}.ts");
-            cell.observe(fact(&canonical, (i & 0xFF) as u8));
-        }
-    });
+    let ((), set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let cell = host
+                .current_fact_tracer()
+                .expect("tracer must be active inside scope");
+            for i in 0..N_OVERFLOW {
+                // Use the index as part of the canonical to guarantee
+                // each fact is distinct (so dedup does not collapse them).
+                let canonical = format!("/m_{i}.ts");
+                cell.observe(fact(&canonical, (i & 0xFF) as u8));
+            }
+        },
+    );
 
     assert_eq!(
         set.len(),
@@ -213,14 +223,17 @@ fn finalise_sorts_and_dedups() {
     let f1 = fact("/aaa.ts", 1);
     let f2 = fact("/bbb.ts", 2);
 
-    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-        let cell = host.current_fact_tracer().unwrap();
-        cell.observe(f1.clone());
-        cell.observe(f1.clone());
-        cell.observe(f2.clone());
-        cell.observe(f1.clone());
-        cell.observe(f2.clone());
-    });
+    let ((), set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let cell = host.current_fact_tracer().unwrap();
+            cell.observe(f1.clone());
+            cell.observe(f1.clone());
+            cell.observe(f2.clone());
+            cell.observe(f1.clone());
+            cell.observe(f2.clone());
+        },
+    );
 
     // Raw observation count includes all 5 pushes — but adjacent
     // duplicates are pre-collapsed inline (`f1, f1` → `f1`;
@@ -278,8 +291,9 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
     let inner_fact = fact("/inner.ts", 2);
 
     // inner_read is returned from the outer scope's closure.
-    let (inner_read, outer_set) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let (inner_read, outer_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             // Observe into the outer scope via fan-out (writes to all
             // active cells — just the outer cell at this point).
             verter_session::for_tests::observe_fan_out_borrowed_for_tests(std::slice::from_ref(
@@ -287,16 +301,19 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
             ));
 
             // Inner scope pushes a second cell onto the stack.
-            let ((), inner_set) =
-                host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            let ((), inner_set) = host.with_fact_tracer(
+                verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                || {
                     // Fan-out from inside the inner scope delivers the observation
                     // to BOTH the inner cell and the outer cell.
                     verter_session::for_tests::observe_fan_out_borrowed_for_tests(
                         std::slice::from_ref(&inner_fact),
                     );
-                });
+                },
+            );
             inner_set
-        });
+        },
+    );
 
     // Inner set must contain the inner-scope observation.
     assert_eq!(inner_read.len(), 1, "inner set must have 1 fact");
@@ -338,13 +355,15 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
     }
 
     // After both scopes complete, a subsequent scope must work cleanly.
-    let ((), post_set) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let ((), post_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             let cell = host
                 .current_fact_tracer()
                 .expect("subsequent scope must install cleanly after nesting");
             cell.observe(fact("/post-nesting.ts", 99));
-        });
+        },
+    );
     assert_eq!(post_set.len(), 1, "tracer must work normally after nesting");
 }
 

@@ -12,13 +12,16 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::cache_runtime::{CacheAdmission, NonAdmissionReason, SignatureAdmission};
-use crate::fact_signature_helpers::ReadSetSignature;
 use crate::resolved_import_facts::{ResolvedImportFacts, ResolvedImportFactsKey};
-use crate::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, ResolveImportsFactRef, ValidatedFactCache,
-    FACT_SIGNATURE_CAP,
+use crate::resolver_core::ValidatedFactCache;
+use verter_audit::NonAdmissionReason;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::{
+    fact_cache::{FactVersionRef, ResolveImportsFactRef},
+    fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
 };
+use verter_type_engine::cache_runtime::CacheAdmission;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct CanonicalId(&'static str);
@@ -612,14 +615,14 @@ fn existing_resolution_fact_rail_is_fact_version_ref_resolve_imports() {
 
     let fact = ResolveImportsFactRef::Semantic {
         canonical_id: "/p/main.ts".to_string(),
-        key: verter_semantic::facts::FactKey::ResolvedImportClause {
-            specifier: verter_semantic::facts::registry::InternedSpecifier::from("./dep"),
-            binding: verter_semantic::facts::registry::InternedName::from("Dep"),
-            space: verter_semantic::facts::SymbolSpace::Type,
+        key: verter_session_query::facts::FactKey::ResolvedImportClause {
+            specifier: verter_session_query::facts::registry::InternedSpecifier::from("./dep"),
+            binding: verter_session_query::facts::registry::InternedName::from("Dep"),
+            space: verter_session_query::facts::SymbolSpace::Type,
             resolved_canonical: Arc::from("/p/dep.ts"),
-            resolved_source_name: verter_semantic::facts::registry::InternedName::from("Dep"),
+            resolved_source_name: verter_session_query::facts::registry::InternedName::from("Dep"),
         },
-        lane: verter_semantic::facts::FactLane::Semantic,
+        lane: verter_session_query::facts::FactLane::Semantic,
         expected_hash: [0; 16],
     };
     assert_eq!(

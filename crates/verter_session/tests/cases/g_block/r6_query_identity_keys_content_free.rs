@@ -20,8 +20,8 @@
 //!    either the variant or to the slot itself.
 //!
 //! 2. **Source-AST scan** — walk
-//!    `crates/verter_session/src/semantic_query.rs` and
-//!    `crates/verter_session/src/semantic_query_memo/family.rs`
+//!    `crates/verter_type_engine/src/semantic_query.rs` and
+//!    `crates/verter_type_engine/src/semantic_query_memo/family.rs`
 //!    and assert that the `Instantiate` and `ResolveMacroPayload`
 //!    variant bodies (in both `SemanticQueryKey` and `FamilyKey`)
 //!    contain NO of the forbidden field names and NO embedded
@@ -35,7 +35,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeId, SemanticQueryKey,
 };
 
@@ -61,7 +61,7 @@ fn read_file(rel: &str) -> String {
 /// hashes, so R6 still holds.
 #[test]
 fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
-    use verter_session::semantic_query::ResolvedDeclSlotIdentity;
+    use verter_type_engine::semantic_query::ResolvedDeclSlotIdentity;
     // The `Instantiate` payload is the SEALED, non-deconstructable
     // `InstantiateKey` (private fields), so an external crate cannot build it
     // directly; the production-shaped helper is the only way in. It routes the
@@ -103,7 +103,7 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
                 env: _,
             } = k.base();
             let _ = k.projection_reduction();
-            let _: verter_session::semantic_query::HashValue = k.resolve_env_hash();
+            let _: verter_type_engine::semantic_query::HashValue = k.resolve_env_hash();
             assert_eq!(defining_canonical.as_ref(), "/r6_check.ts");
             assert_eq!(merged_symbol_name.as_ref(), "Foo");
         }
@@ -116,7 +116,7 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
 /// `DeclIdentity` and carrying no content/version hash.
 #[test]
 fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() {
-    use verter_session::semantic_query::{MacroPayloadContext, ResolvedDeclSlotIdentity};
+    use verter_type_engine::semantic_query::{MacroPayloadContext, ResolvedDeclSlotIdentity};
     let owner = ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from("/r6_check.vue"),
         verter_type_expr::TopLevelOwnerId::instance(0),
@@ -125,7 +125,7 @@ fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() 
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner: owner.clone(),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         context: MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };
@@ -163,7 +163,7 @@ fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() 
 /// `DeclIdentity` type.
 #[test]
 fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
-    let source = read_file("crates/verter_session/src/semantic_query.rs");
+    let source = read_file("crates/verter_type_engine/src/semantic_query.rs");
 
     // Forbidden field names that, if added to the variant body,
     // would re-introduce a content/version hash into a query-identity
@@ -243,7 +243,7 @@ fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
 /// no-content-hash invariant as their `SemanticQueryKey` siblings.
 #[test]
 fn r6_family_key_variants_carry_no_version_hash_in_source() {
-    let source = read_file("crates/verter_session/src/semantic_query_memo/family.rs");
+    let source = read_file("crates/verter_type_engine/src/semantic_query_memo/family.rs");
 
     const FORBIDDEN_FIELDS: &[&str] = &[
         "whole_hash:",
@@ -314,7 +314,7 @@ fn r6_family_key_variants_carry_no_version_hash_in_source() {
 /// reintroduced in ANY declaration form.
 #[test]
 fn r6_decl_slot_struct_is_content_free_in_source() {
-    let source = read_file("crates/verter_session/src/semantic_query.rs");
+    let source = read_file("crates/verter_type_engine/src/semantic_query.rs");
     let body = extract_brace_block(&source, "pub struct ResolvedDeclSlotIdentity {")
         .expect(
             "R6 GUARD: could not locate `pub struct ResolvedDeclSlotIdentity` body in semantic_query.rs",

@@ -18,9 +18,7 @@
 //! has no return-type slot, so "observe the deferred return as a failed
 //! one" is unrepresentable rather than merely unreachable.
 
-use verter_session::semantic_query::deferred_callable::{
-    DeferredCallable, DeferredCallableConsumer, ResolveCallConsumer, ResolveOverloadSetConsumer,
-};
+use verter_type_engine::semantic_query::deferred_callable::{DeferredCallable, DeferredCallableConsumer, ResolveCallConsumer, ResolveOverloadSetConsumer};
 
 struct ForeignConsumer;
 

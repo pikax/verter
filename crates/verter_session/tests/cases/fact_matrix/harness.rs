@@ -38,6 +38,7 @@ pub fn read_app_config_proof_installs(host: &VerterHost) -> u64 {
 
 pub fn read_memo_entry_installs(host: &VerterHost) -> u64 {
     host.provenance()
+        .engine
         .memo_entry_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed)
 }

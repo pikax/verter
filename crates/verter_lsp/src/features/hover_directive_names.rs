@@ -10,7 +10,7 @@
 //! hover and Ctrl+click navigation. Unknown directives stay silent.
 
 use tower_lsp_server::ls_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::features::hover::{hover_for_word, VerterHoverResult};
 
@@ -92,7 +92,7 @@ pub(crate) fn is_known_builtin_directive_pub(name: &str) -> bool {
 /// positions have their own resolution (child props/events/slots), never a
 /// directive-name hover.
 fn directive_name_region(
-    dir: &verter_semantic::analysis::template::TemplateDirective,
+    dir: &verter_session_query::analysis::template::TemplateDirective,
 ) -> (u32, u32) {
     let end = dir
         .arg_span

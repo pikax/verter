@@ -2,12 +2,15 @@
 //! skeleton-only construction, value-provider vs effect edge families,
 //! value-dead siblings keeping their evaluation-effect edges, region
 //! membership / nesting, arena-freedom, and determinism.
+use std::sync::Arc;
+use verter_session_query::flow::skeleton::SkeletonExprSiteId;
 
-use super::build_function_flow_graph_for_test as build_function_flow_graph;
-use super::*;
-use crate::analysis::flow::{
-    FunctionBodyKind, FunctionBodySkeleton, FunctionBodySource, SkeletonBindingId,
-    SkeletonPathSegment, SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
+use crate::analysis::flow::FunctionBodySource;
+use verter_session_query::flow::flow_graph::build_function_flow_graph_for_test as build_function_flow_graph;
+use verter_session_query::flow::flow_graph::*;
+use verter_session_query::flow::skeleton::{
+    FunctionBodyKind, FunctionBodySkeleton, SkeletonBindingId, SkeletonPathSegment,
+    SkeletonRegionKind, SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
 fn return_site_id(skeleton: &FunctionBodySkeleton, ordinal: usize) -> SkeletonReturnSiteId {
@@ -68,7 +71,7 @@ fn skeleton_of(source: &str) -> FunctionBodySkeleton {
 
 #[test]
 fn write_only_closure_capture_selects_an_effect_subject_without_a_value_read() {
-    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     let skeleton = indexed_returned_arrow(
         "function root(value) { return () => () => { value = 1; return 0; }; }",
     );
@@ -97,7 +100,7 @@ fn write_only_closure_capture_selects_an_effect_subject_without_a_value_read() {
 
 #[test]
 fn source_type_query_child_identity_does_not_mint_runtime_capture_receipts() {
-    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     let source = "function root(value) { return () => accept(0 as typeof value); }";
     let parent = skeleton_of(source);
     assert!(
@@ -115,7 +118,7 @@ fn source_type_query_child_identity_does_not_mint_runtime_capture_receipts() {
         .enumerate()
         .find(|(_, site)| !site.source_type_queries.is_empty())
         .unwrap();
-    let Some(crate::analysis::flow::FlowBindingRef::Captured(identity)) =
+    let Some(verter_session_query::flow::binding::FlowBindingRef::Captured(identity)) =
         &site.source_type_queries[0].binding
     else {
         panic!("exact outer query identity");
@@ -149,8 +152,8 @@ fn source_type_query_child_identity_does_not_mint_runtime_capture_receipts() {
 
 #[test]
 fn captured_reads_select_own_frame_writes_and_their_control_inputs() {
-    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
-    use crate::analysis::flow::FlowBindingRef;
+    use verter_session_query::flow::binding::FlowBindingRef;
+    use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     let source = "function root(value, flag) { return () => { if (flag) value = 'b'; { let value = 0; value = 2; } return value; }; }";
     let skeleton = indexed_returned_arrow(source);
     let graph = build_function_flow_graph(&skeleton);
@@ -202,7 +205,7 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
     use crate::analysis::function_program::{
         build_function_program_index, resolve_function_node, FunctionNode,
     };
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     let allocator = oxc_allocator::Allocator::default();
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
@@ -213,7 +216,7 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
     let root = index.matches_named("root").next().unwrap().entry();
     let child = index
         .nested_at(
-            &root.key,
+            root.key(),
             verter_span::Span::new(
                 source.find("() =>").unwrap() as u32,
                 (source.rfind("; }").unwrap()) as u32,
@@ -221,7 +224,7 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
         )
         .unwrap()
         .entry();
-    let FunctionNode::Arrow(arrow) = resolve_function_node(&parsed.program, &child.locator)
+    let FunctionNode::Arrow(arrow) = resolve_function_node(&parsed.program, child.locator())
         .unwrap()
         .node
     else {
@@ -230,12 +233,12 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
     let prepared =
         build_indexed_function_body_skeleton(&FunctionBodySource::from_arrow(arrow), source, child)
             .unwrap();
-    prepared.skeleton
+    prepared.into_parts().0
 }
 
 #[test]
 fn captured_computation_inputs_do_not_grow_result_projection_cycles() {
-    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     let skeleton = indexed_returned_arrow(
         "function root(value) { return () => { value=value.trim(); return value; }; }",
     );
@@ -255,8 +258,8 @@ fn captured_computation_inputs_do_not_grow_result_projection_cycles() {
 
 #[test]
 fn captured_member_reads_compose_projection_before_selecting_write_members() {
-    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
-    use crate::analysis::flow::{FlowBindingRef, FrameSpan};
+    use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::{binding::FlowBindingRef, frame_span::FrameSpan};
     let source = "function root() { let x = {a: {b: 'old'}, b: 'other'}; return () => { x = {a: {b: 'wanted'}, b: 'sibling'}; return x.a; }; }";
     let skeleton = indexed_returned_arrow(source);
     let graph = build_function_flow_graph(&skeleton);
@@ -295,7 +298,7 @@ fn captured_member_reads_compose_projection_before_selecting_write_members() {
 
 #[test]
 fn hoisted_runtime_aliases_keep_access_edges_linear() {
-    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     let edges_for = |count| {
         let mut source = String::from("function f(value) {");
         for _ in 0..count {
@@ -715,7 +718,7 @@ fn flow_graph_fallback_binds_hoisting_kinds_only() {
     let q_binding = skeleton.bindings_named(q_name).next().expect("q binds");
     assert_eq!(
         skeleton.binding(q_binding).kind,
-        crate::analysis::flow::SkeletonBindingKind::Let
+        verter_session_query::flow::skeleton::SkeletonBindingKind::Let
     );
     let read_site = skeleton.return_sites[0].argument.expect("argument");
     assert!(
@@ -744,7 +747,7 @@ fn flow_graph_root_read_unions_parameter_with_hoisted_var_redeclaration() {
     let bindings: Vec<SkeletonBindingId> = skeleton.bindings_named(x_name).collect();
     assert_eq!(bindings.len(), 2, "the parameter and the `var` both bind x");
     let read_site = skeleton.return_sites[0].argument.expect("argument");
-    use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
     let plan = ReturnPathPeeker::new(&graph)
         .plan(
             &SliceDemand::for_return_projection(&skeleton, &[]),
@@ -781,13 +784,15 @@ fn flow_graph_root_read_unions_parameter_with_hoisted_var_redeclaration() {
     let inner = shadowed
         .bindings_named(y_name)
         .find(|binding| {
-            shadowed.binding(*binding).kind == crate::analysis::flow::SkeletonBindingKind::Const
+            shadowed.binding(*binding).kind
+                == verter_session_query::flow::skeleton::SkeletonBindingKind::Const
         })
         .expect("the inner const binds");
     let param = shadowed
         .bindings_named(y_name)
         .find(|binding| {
-            shadowed.binding(*binding).kind == crate::analysis::flow::SkeletonBindingKind::Param
+            shadowed.binding(*binding).kind
+                == verter_session_query::flow::skeleton::SkeletonBindingKind::Param
         })
         .expect("the parameter binds");
     let inner_read = shadowed.return_sites[0].argument.expect("argument");
@@ -873,6 +878,8 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
         yield_sites: Arc::from([]),
         writes: Arc::from([]),
         closure_assignments: Arc::from([]),
+        span_index: Default::default(),
+        name_index: Default::default(),
     };
     let captured = indexed_returned_arrow("function root() { const x = 1; return () => x; }");
     for (skeleton, captures) in [(populated, 0), (empty, 0), (captured, 1)] {

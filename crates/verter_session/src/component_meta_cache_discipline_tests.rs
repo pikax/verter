@@ -14,14 +14,14 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::host_test_audit::DispatchCounter;
-use crate::semantic_query::{
-    ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-};
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+};
 
 /// Hermetic host for the cache-discipline probes. No upserts —
 /// the dispatcher executes against an empty graph and produces
@@ -40,14 +40,16 @@ fn build_test_host() -> Arc<VerterHost> {
 fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
     host.project_type_store()
         .semantic_graph()
-        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }))
+        .intern_node(SemanticNodeData::Object(
+            verter_type_engine::test_surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ))
 }
 
 /// Upsert a minimal `defineProps` SFC at `canonical` and build the
@@ -64,7 +66,7 @@ fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
 fn tracked_macro_owner(
     host: &VerterHost,
     canonical: &str,
-) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+) -> verter_type_engine::semantic_query::ResolvedDeclSlotIdentity {
     use crate::UpsertRequest;
     let _ = host
         .upsert(UpsertRequest {
@@ -82,7 +84,7 @@ fn tracked_macro_owner(
     let _ = host
         .ensure_indexed_ready(canonical)
         .expect("owner SFC IndexedReady materialises");
-    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical),
         verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
@@ -111,7 +113,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -144,10 +146,10 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
         host.project_type_store()
             .semantic_graph()
             .intern_node(SemanticNodeData::Primitive(
-                crate::semantic_query::PrimitiveKind::String,
+                verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
     let unrelated_key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        owner: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("<synthetic>"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("OtherOwner"),
@@ -155,7 +157,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
         macro_index: 1,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![unrelated_arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -190,14 +192,15 @@ fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
     let key_set = host
         .semantic_dispatch()
         .intern_string_literal_union(&members);
-    let probe_key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        host.semantic_dispatch().builtin_type_slot("Pick"),
-        Arc::from(vec![base, key_set].into_boxed_slice()),
-        host.semantic_dispatch().instantiate_context_for(
-            "__builtin__",
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        ),
-    ));
+    let probe_key =
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            host.semantic_dispatch().builtin_type_slot("Pick"),
+            Arc::from(vec![base, key_set].into_boxed_slice()),
+            host.semantic_dispatch().instantiate_context_for(
+                "__builtin__",
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
+            ),
+        ));
 
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&probe_key);
@@ -228,12 +231,12 @@ fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
         .semantic_dispatch()
         .intern_string_literal_union(&unrelated_members);
     let unrelated_probe =
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             host.semantic_dispatch().builtin_type_slot("Pick"),
             Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
             host.semantic_dispatch().instantiate_context_for(
                 "__builtin__",
-                crate::semantic_query::ProjectionReductionContext::published(mode),
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
             ),
         ));
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
@@ -257,14 +260,15 @@ fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
     let key_set = host
         .semantic_dispatch()
         .intern_string_literal_union(&members);
-    let probe_key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        host.semantic_dispatch().builtin_type_slot("Omit"),
-        Arc::from(vec![base, key_set].into_boxed_slice()),
-        host.semantic_dispatch().instantiate_context_for(
-            "__builtin__",
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        ),
-    ));
+    let probe_key =
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            host.semantic_dispatch().builtin_type_slot("Omit"),
+            Arc::from(vec![base, key_set].into_boxed_slice()),
+            host.semantic_dispatch().instantiate_context_for(
+                "__builtin__",
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
+            ),
+        ));
 
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&probe_key);
@@ -294,12 +298,12 @@ fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
         .semantic_dispatch()
         .intern_string_literal_union(&unrelated_members);
     let unrelated_probe =
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             host.semantic_dispatch().builtin_type_slot("Omit"),
             Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
             host.semantic_dispatch().instantiate_context_for(
                 "__builtin__",
-                crate::semantic_query::ProjectionReductionContext::published(mode),
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
             ),
         ));
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
@@ -396,8 +400,10 @@ fn upsert_tracked(host: &VerterHost, canonical: &str, source: &str) {
 /// every owner really did project the shared declaration.
 #[test]
 fn cross_owner_shared_declaration_resolves_once_across_owners() {
-    use crate::semantic_query::{DeclIdentity, InstantiateKey, ProjectionReductionContext};
     use crate::types::DependencyResolution;
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, InstantiateKey, ProjectionReductionContext,
+    };
 
     let host = build_test_host();
     let shared = "/cross_owner/shared.ts";

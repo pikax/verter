@@ -20,13 +20,13 @@
 
 #![cfg(test)]
 
-use verter_semantic::facts::registry::{InternedName, SymbolSpace};
-use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::for_tests::{
     dep_signature_to_fact_signature_for_tests, install_fact_tracer_for_tests,
 };
-use verter_session::resolver_core::FactReadSetFinalise;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+use verter_session_query::facts::registry::{InternedName, SymbolSpace};
+use verter_session_query::facts::{FactKey, FactLane};
 
 #[test]
 fn slot_binding_graph_fact_tracer_carries_member_presence() {
@@ -40,8 +40,8 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
     // every fact-kind that carries a parse-domain `MemberPresence`
     // entry must therefore round-trip through the tracer when
     // emitted from an active tracer scope.
-    let presence_fact = verter_session::resolver_core::FactVersionRef::Parse(
-        verter_session::resolver_core::ParseFactRef {
+    let presence_fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+        verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: "/src/slots.ts".to_owned(),
             key: FactKey::MemberPresence {
                 exporter: InternedName::from("Slots"),
@@ -82,11 +82,11 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
     // discriminates a regression that removed
     // `dep_signature_to_fact_signature` from the public for_tests
     // surface.
-    let bridged_empty: Vec<verter_session::resolver_core::FactVersionRef> =
+    let bridged_empty: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
         dep_signature_to_fact_signature_for_tests(&std::sync::Arc::from(
             Vec::<(
                 std::sync::Arc<str>,
-                verter_session::semantic_query::DepVersion,
+                verter_type_engine::semantic_query::DepVersion,
             )>::new()
             .into_boxed_slice(),
         ));

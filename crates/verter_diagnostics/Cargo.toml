@@ -12,6 +12,7 @@ description = "Vue SFC diagnostic engine — lint rules and DiagnosticSet"
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
+verter_session_query = { workspace = true }
 verter_span = { path = "../verter_span" }
 hotpath = { version = "0.23", optional = true }
 verter_semantic = { path = "../verter_semantic" }

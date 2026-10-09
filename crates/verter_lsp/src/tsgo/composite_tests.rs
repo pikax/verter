@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, GeneratedUnitAdmissionFact,
 };
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::ProjectId;
 use verter_type_runtime::protocol::*;
 use verter_type_runtime::provider_hub::{
     HubPolicy, ProviderEstablisher, ProviderHub, TracingNotifier,
@@ -29,12 +30,12 @@ use verter_workspace::snapshot_builder::{
 };
 use verter_workspace::traits::WorkspaceRead;
 use verter_workspace::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess};
 
-use crate::tsgo::overlay_core::{HubAdmittedTransport, ServingTransport};
 use crate::tsgo::shared::EstablishSharedParams;
+use verter_type_runtime::provider_hub::overlay::{HubAdmittedTransport, ServingTransport};
 
 use super::{
     carrier_source_of, compose_establishment_discriminant, effective_javascript_check_policy,
@@ -73,6 +74,7 @@ fn authored_file_check_directive_overrides_the_configured_check_js_policy() {
 /// models a request in flight while its serving incarnation is replaced.
 struct RecordingAttach {
     ops: parking_lot::Mutex<Vec<String>>,
+    applied: parking_lot::Mutex<std::collections::HashMap<String, Arc<str>>>,
     hover_reached: tokio::sync::Notify,
     hover_release: tokio::sync::Notify,
     hover_gated: std::sync::atomic::AtomicBool,
@@ -82,6 +84,7 @@ impl RecordingAttach {
     fn new() -> Self {
         Self {
             ops: parking_lot::Mutex::new(Vec::new()),
+            applied: parking_lot::Mutex::default(),
             hover_reached: tokio::sync::Notify::new(),
             hover_release: tokio::sync::Notify::new(),
             hover_gated: std::sync::atomic::AtomicBool::new(false),
@@ -124,9 +127,23 @@ impl TypeProvider for RecordingAttach {
         "tsgo"
     }
 
-    fn open_file(&self, path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+    fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+        self.applied
+            .lock()
+            .get(path)
+            .cloned()
+            .map(verter_type_runtime::traits::AppliedContent::Applied)
+            .unwrap_or(verter_type_runtime::traits::AppliedContent::NotApplied)
+    }
+
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         self.ops.lock().push(format!("write:{path}"));
-        Box::pin(async { Ok(()) })
+        let path = path.to_string();
+        let content = Arc::from(content);
+        Box::pin(async move {
+            self.applied.lock().insert(path, content);
+            Ok(())
+        })
     }
 
     fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -139,7 +156,11 @@ impl TypeProvider for RecordingAttach {
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
         self.ops.lock().push(format!("retract:{path}"));
-        Box::pin(async { Ok(()) })
+        let path = path.to_string();
+        Box::pin(async move {
+            self.applied.lock().remove(&path);
+            Ok(())
+        })
     }
 
     fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
@@ -492,11 +513,11 @@ async fn serve_recording(
         .await
         .expect("the test attach establishes");
     let (provider, epoch) = overlay.inner.hub.serving().expect("serving");
-    overlay.inner.core.observe_serving_epoch(epoch);
     ServingTransport {
         transport: Arc::new(HubAdmittedTransport::new(
             provider,
             Arc::clone(&overlay.inner.hub),
+            epoch,
         )),
         epoch,
     }
@@ -835,6 +856,111 @@ async fn engage_transport_failure_preserves_source_project_and_generation() {
 const COMPANION_EXCLUDING_TSCONFIG: &str =
     r#"{ "include": ["src"], "exclude": ["src/**/*.vue.tsx"] }"#;
 
+#[tokio::test]
+async fn managed_generated_write_requires_membership_before_activation() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, _) = overlay_over(
+        &[(source, "<template/>")],
+        fixture_snapshot(COMPANION_EXCLUDING_TSCONFIG),
+    );
+    let engine = Arc::new(RecordingAttach::new());
+    let managed = Arc::new(crate::type_provider::lazy_managed::new_lazy_managed({
+        let engine = Arc::clone(&engine);
+        move || {
+            let engine = Arc::clone(&engine);
+            async move { Ok(engine as Arc<dyn TypeProvider>) }
+        }
+    }));
+    let composite = super::TsgoCompositeProvider::new(
+        Arc::clone(&managed),
+        Arc::clone(&overlay.inner.host),
+        None,
+    );
+    let result = composite
+        .open_file(companion, "export const value = 1")
+        .await;
+    let refusal = result.expect_err("an excluded generated unit must be refused");
+    assert_eq!(
+        refusal.admission_refusal,
+        Some(verter_type_runtime::provider_hub::AdmissionRefusal::GeneratedUnitExcluded)
+    );
+    assert!(
+        !managed.is_serving(),
+        "a refused write cannot activate fallback"
+    );
+    assert!(
+        engine.ops().is_empty(),
+        "refusal must perform zero provider work"
+    );
+    managed.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_cold_replay_rechecks_membership_and_preserves_open_overlay() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, workspace) = overlay_over(
+        &[(source, "<template/>")],
+        fixture_snapshot(r#"{"include":["src"]}"#),
+    );
+    let engine = Arc::new(RecordingAttach::new());
+    let managed = Arc::new(crate::type_provider::lazy_managed::new_lazy_managed({
+        let engine = Arc::clone(&engine);
+        move || {
+            let engine = Arc::clone(&engine);
+            async move { Ok(engine as Arc<dyn TypeProvider>) }
+        }
+    }));
+    let composite = super::TsgoCompositeProvider::new(
+        Arc::clone(&managed),
+        Arc::clone(&overlay.inner.host),
+        None,
+    );
+    let wrong_project = composite
+        .register_carrier_metadata(source, companion, "wrong", "d:/other/tsconfig.json")
+        .await
+        .expect_err("cold registration requires the exact configured owner");
+    assert_eq!(
+        wrong_project.admission_refusal,
+        Some(verter_type_runtime::provider_hub::AdmissionRefusal::WrongProject)
+    );
+    composite
+        .open_file(companion, "export const unsaved = 2")
+        .await
+        .unwrap();
+    composite
+        .load_file_background(companion, "export const disk = 1")
+        .await
+        .unwrap();
+    assert!(!managed.is_serving());
+    workspace.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
+        COMPANION_EXCLUDING_TSCONFIG,
+    ))));
+    managed.establish().await.unwrap();
+    assert_eq!(
+        engine.count("write:"),
+        0,
+        "cold proof cannot authorize changed membership"
+    );
+    managed.shutdown().await.unwrap();
+    workspace.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(fixture_snapshot(
+        r#"{"include":["src"]}"#,
+    ))));
+    managed.establish().await.unwrap();
+    assert_eq!(
+        engine.count("write:"),
+        1,
+        "fresh admission replays one live overlay"
+    );
+    assert!(matches!(
+        managed.applied_content(companion),
+        verter_type_runtime::traits::AppliedContent::Applied(bytes)
+            if bytes.as_ref() == "export const unsaved = 2"
+    ));
+    managed.shutdown().await.unwrap();
+}
+
 /// A carrier whose project owns the source but CONFIGURATION-EXCLUDES its
 /// generated units is refused with the typed reason BEFORE the transport is
 /// established — so nothing can have been written — and the refusal is
@@ -940,14 +1066,15 @@ async fn sweep_writes_only_carriers_whose_generated_units_are_admitted() {
     ] {
         overlay
             .inner
-            .core
+            .hub
+            .overlay_state()
             .record_content_at_priority(unit, "export {}", OverlayPriority::Normal);
     }
     let serving = serve_recording(&overlay).await;
 
     overlay
         .inject_editor_demand(
-            &overlay.inner.core,
+            overlay.inner.hub.overlay_state(),
             &serving,
             "d:/ws/src/admitted/Ok.vue.tsx",
             overlay.sweep_generation(),
@@ -976,8 +1103,8 @@ async fn a_new_publication_re_evaluates_generated_unit_admission() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(companion, "export {}");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(companion, "export {}", OverlayPriority::Interactive);
     let serving = serve_recording(&overlay).await;
     let sweep = || async {
         overlay
@@ -1027,15 +1154,34 @@ async fn feature_invocation_revalidates_epoch_after_selection() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(path, "export const value = 1;");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(
+        path,
+        "export const value = 1;",
+        OverlayPriority::Interactive,
+    );
     let serving = serve_recording(&overlay).await;
     // Sync the carrier through the REAL write gate (a hub-issued admission).
     let permit = overlay
         .generated_unit_write_permit(core, path)
         .expect("the carrier's generated units are admitted");
-    core.inject_permitted(&serving, path, overlay.sweep_generation(), permit)
-        .await;
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == path,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
     assert!(core.sync_state_for_epoch(path, serving.epoch).is_synced());
 
     // The serving incarnation is retired AFTER selection but BEFORE the
@@ -1086,14 +1232,33 @@ async fn feature_invocation_discards_stale_error_after_inflight_reconnect() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(path, "export const value = 1;");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(
+        path,
+        "export const value = 1;",
+        OverlayPriority::Interactive,
+    );
     let serving = serve_recording(&overlay).await;
     let permit = overlay
         .generated_unit_write_permit(core, path)
         .expect("the carrier's generated units are admitted");
-    core.inject_permitted(&serving, path, overlay.sweep_generation(), permit)
-        .await;
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == path,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
     assert!(core.sync_state_for_epoch(path, serving.epoch).is_synced());
 
     // The shared hover blocks mid-flight; the retirement lands UNDERNEATH it.
@@ -1363,7 +1528,7 @@ async fn hub_binding_warmth_reuses_the_same_witness_within_one_publication() {
     assert!(overlay
         .inner
         .hub
-        .bound_project(&verter_semantic::resolver_core::normalize_canonical_id(
+        .bound_project(&verter_session_query::resolution::normalize_canonical_id(
             source
         ))
         .is_some_and(|warm| warm.same_binding(&first)));
@@ -1387,8 +1552,8 @@ async fn republished_generation_scalar_never_reuses_a_prior_epoch_binding() {
         fixture_snapshot(r#"{ "include": ["src"] }"#),
     )
     .await;
-    let core = &overlay.inner.core;
-    core.record_content(companion, "export {}");
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(companion, "export {}", OverlayPriority::Interactive);
     let serving = serve_recording(&overlay).await;
 
     // Epoch A: the owning snapshot binds the carrier and its write set admits.
@@ -1398,8 +1563,23 @@ async fn republished_generation_scalar_never_reuses_a_prior_epoch_binding() {
     let permit_a = overlay
         .generated_unit_write_permit(core, companion)
         .expect("epoch A: the write set is admitted");
-    core.inject_permitted(&serving, companion, overlay.sweep_generation(), permit_a)
-        .await;
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == companion,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit_a.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(attach.ops(), vec![format!("write:{companion}")]);
     attach.clear_ops();
 
@@ -1438,7 +1618,7 @@ async fn republished_generation_scalar_never_reuses_a_prior_epoch_binding() {
         !overlay
             .inner
             .hub
-            .bound_project(&verter_semantic::resolver_core::normalize_canonical_id(
+            .bound_project(&verter_session_query::resolution::normalize_canonical_id(
                 source
             ))
             .is_some_and(|warm| warm.same_binding(&witness_a)),

@@ -160,7 +160,7 @@ impl VerterLanguageServer {
     /// the generation — the sole producer returns early on every later enqueue,
     /// and a parent importing this carrier never sees the edited surface.
     fn own_carrier_contract_current(&self, canonical_id: &str) -> bool {
-        !verter_semantic::resolver_core::path_is_carrier(canonical_id)
+        !verter_session_query::resolution::path_is_carrier(canonical_id)
             || self.child_public_contract_is_settled(canonical_id)
     }
 
@@ -296,7 +296,7 @@ impl VerterLanguageServer {
         // committed contract on the first `<Child ` completion. Previously only
         // an already-authored importer could start this projection, which made
         // cold progressive editing miss until typing stopped.
-        if verter_semantic::resolver_core::path_is_carrier(canonical_id) {
+        if verter_session_query::resolution::path_is_carrier(canonical_id) {
             outcome = outcome.and(self.publish_loaded_child_contract(canonical_id));
         }
 
@@ -313,6 +313,9 @@ impl VerterLanguageServer {
                     key,
                     rootless,
                 );
+                // A publication the workspace scan held back for want of this
+                // receipt is owed now, not when the whole scan ends.
+                self.sync_coordinator.dependencies_settled();
             }
         }
     }
@@ -344,17 +347,10 @@ impl VerterLanguageServer {
         DependencyReadiness::NotReady
     }
 
-    /// The workspace `(content_generation, resolver_snapshot_generation)` pair
-    /// that keys the DependencyReady receipt. `None` when no published resolver
-    /// exists yet (bootstrap) — publication then delivers without minting.
+    /// The key the DependencyReady receipt is minted and read under; see
+    /// [`super::dependency_freshness_key`].
     pub(crate) fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
-        let content_generation = self.documents.host().workspace_read().content_generation();
-        let snapshot_generation = {
-            let ws = self.vfs_workspace.read();
-            let ws = ws.as_ref()?;
-            ws.load_published()?.snapshot.generation.0
-        };
-        Some((content_generation, snapshot_generation))
+        super::dependency_freshness_key(&self.documents, &self.vfs_workspace)
     }
 
     /// Run the full publication pass INLINE and await it — TEST-ONLY setup
@@ -391,6 +387,7 @@ impl VerterLanguageServer {
 
         let mut import_ids =
             match collect_imported_carrier_priority_ids_from_imports_for_publication(
+                self.documents.language_classifier(),
                 &ingress.imports,
                 Some(&canonical_id),
                 |parent, specifier| {
@@ -525,7 +522,7 @@ impl VerterLanguageServer {
         // choose independently.
         let tsserver_uses_authored_specifiers =
             matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver)
-                && verter_semantic::resolver_core::path_is_carrier(&canonical_id)
+                && verter_session_query::resolution::path_is_carrier(&canonical_id)
                 && self
                     .vfs_workspace
                     .read()
@@ -572,7 +569,7 @@ impl VerterLanguageServer {
                     return ImportSyncOutcome::Retry;
                 }
             };
-            if verter_semantic::resolver_core::path_is_carrier(&resolved) {
+            if verter_session_query::resolution::path_is_carrier(&resolved) {
                 continue;
             }
             if seen_barrels.insert(resolved.clone()) {
@@ -623,7 +620,7 @@ impl VerterLanguageServer {
                 };
                 for module_ref in barrel_analysis.module_references.iter() {
                     if module_ref.syntax
-                        != verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom
+                        != verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom
                     {
                         continue;
                     }
@@ -642,7 +639,7 @@ impl VerterLanguageServer {
                                 return ImportSyncOutcome::Retry;
                             }
                         };
-                    if verter_semantic::resolver_core::path_is_carrier(&target) {
+                    if verter_session_query::resolution::path_is_carrier(&target) {
                         if seen_barrel_carrier.insert(target.clone()) {
                             barrel_carrier_deps.push(target);
                         }
@@ -686,7 +683,7 @@ impl VerterLanguageServer {
             else {
                 continue;
             };
-            if !verter_semantic::resolver_core::path_is_carrier(&terminal_id) {
+            if !verter_session_query::resolution::path_is_carrier(&terminal_id) {
                 continue;
             }
             outcome = outcome.and(self.publish_barrel_component_route(
@@ -744,12 +741,14 @@ impl VerterLanguageServer {
                 .module_references
                 .iter()
                 .filter(|reference| {
-                    reference.syntax == verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom
+                    reference.syntax
+                        == verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom
                 })
                 .map(verter_session::ScriptModuleReference::from)
                 .collect();
             let reader = LspProjectResolverReader::new(&self.documents);
             let Some(prepared) = prepare_non_carrier_provider_sync(
+                self.documents.language_classifier(),
                 Some(&snapshot),
                 &reader,
                 barrel_id,

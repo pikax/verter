@@ -415,13 +415,24 @@ function sleepSync(ms) {
 /**
  * Cross-process mutual exclusion for one framework's realize-then-swap.
  * Non-recursive `mkdirSync` is an atomic test-and-set on POSIX and Windows:
- * one contender succeeds, the rest see EEXIST. Wait-and-retry with a
- * bounded timeout (not fail-closed: two live contenders must converge on
- * one validated tree; failing closed would make concurrent runs flaky). A
- * crashed holder surfaces as the timeout error naming the stale lock.
+ * one contender succeeds, the rest see EEXIST. Windows can report EPERM
+ * instead when the lock directory already exists; that is contention, not
+ * a permission failure. EPERM with no directory is a real permission error
+ * and is rethrown. Wait-and-retry with a bounded timeout (not fail-closed:
+ * two live contenders must converge on one validated tree; failing closed
+ * would make concurrent runs flaky). A crashed holder surfaces as the
+ * timeout error naming the stale lock.
  *
  * @returns {string} the held lock path (remove in a `finally`)
  */
+function lockDirectoryHeld(lockPath) {
+  try {
+    return statSync(lockPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function acquireRealizeLock(framework) {
   mkdirSync(ORACLE_INSTALLS_ROOT, { recursive: true });
   const lockPath = path.join(ORACLE_INSTALLS_ROOT, `${framework}.lock`);
@@ -431,7 +442,9 @@ function acquireRealizeLock(framework) {
       mkdirSync(lockPath); // not recursive: EEXIST is the exclusion signal
       return lockPath;
     } catch (error) {
-      if (error.code !== "EEXIST") throw error;
+      const contended =
+        error.code === "EEXIST" || (error.code === "EPERM" && lockDirectoryHeld(lockPath));
+      if (!contended) throw error;
       if (Date.now() >= deadline) {
         throw new Error(
           `timed out after ${REALIZE_LOCK_TIMEOUT_MS}ms waiting for the oracle realization ` +

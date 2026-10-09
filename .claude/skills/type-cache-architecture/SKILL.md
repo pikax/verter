@@ -103,7 +103,7 @@ the cache-runtime overhaul and any feature admitting cache entries.
 
 ## Aggregate retention account
 
-`crates/verter_session/src/semantic_retention_account.rs` owns
+`crates/verter_session_query/src/retention/mod.rs` owns
 `SemanticRetentionAccount` — the single process-local byte account every
 host-owned semantic store charges. One account per PROCESS (not per
 project): `ProjectTypeStore::retention_account()` hands back
@@ -201,7 +201,7 @@ private byte quota beside the aggregate ceiling this contract forbids, and
 would let N stores admit against N ceilings. `SemanticGraphStore` and
 `ComponentMetaResultDb` therefore charge the one account through EVERY
 reachable constructor, including `new()` / `Default`; `reserve_memo_candidate`,
-`reserve_scc_batch` and `ComponentMetaResultDb::insert_owned` have no
+`reserve_scc_batch` and `ComponentMetaResultDb::publish_core` have no
 uncharged arm. A test that needs deterministic pressure binds a private
 account explicitly (`with_account`, `with_account_for_test`,
 `ProjectTypeStore::with_retention_account`).
@@ -228,11 +228,19 @@ block before the corresponding rule becomes executable policy.
 
 ### Flow graph binding authority
 
-`FlowGraphBundle` owns the immutable skeleton, dependence graph, and
-`Arc<FlowBindingMap>` for one `FlowSliceFunctionKey` content version. The retained
-snapshot source checks the indexed entry's body hashes and the served parse and
-language identity before building the exact binding map from that entry's full
-declaration inventory. The graph store publishes the complete bundle once; every
+`FlowGraphBundle` owns its content key and the immutable skeleton, dependence graph,
+and `Arc<FlowBindingMap>` for one `FlowSliceFunctionKey` content version; all fields
+are private and `FlowGraphBundle::build` derives the graph and binding map from one
+`KeyedFunctionStructure`. The key is a request, not a certificate:
+`KeyedFunctionStructure::bind` admits EVERY key axis against `FlowSourceIdentity`, and
+a mismatch is a typed miss that publishes nothing. Function, both body hashes, parse
+environment, exact parse identity and language row are compared against the serving
+artifact; canonical (the id the artifact was served under) and toolchain (this
+process's own fingerprint) are request-side axes that refuse a key minted for another
+file or build. The graph store refuses to publish a bundle under any key but its
+own, and `BoundFlowGraph` is a handle on the keyed bundle with no constructor taking a
+separate key. Because the key is admitted on every axis, the content-addressed
+artifacts keep their empty fact signatures. The graph store publishes the complete bundle once; every
 demand and selected-content lowering shares those artifacts. Caller-provided
 inventories must never initialize a cached map. A correspondence error remains a
 typed source/store error, publishes nothing, and follows failed non-admission at
@@ -462,8 +470,13 @@ never in the key. The rail per layer:
   (`BoundedCandidateMap<…, Hash16, …>`) + `ReadSetSignature.facts` +
   `validated_at_generation`; the owner `FileWholeHash` stays in the value facts.
 
-`ComponentMetaResultDb` and its resolved-meta sidecar take those facts from the
-finalized request fact tracer. Dispatch paths without their own cache boundary
+The selected engine `MemoPublish` for `ComponentMetaResultDb` and its resolved-meta
+sidecar takes those facts from the finalized request fact tracer. Storage accepts
+owned entries; `MemoRead` owns generation/fact validation and accounting through
+the request-bound `FactValidation` port. Candidate stores clone ordered `Arc`
+snapshots under their existing guards; the engine tests them only after those
+guards drop. Shape lifecycle validation deliberately keeps the original entry
+guards while testing node liveness, then removes collected keys in order. Dispatch paths without their own cache boundary
 fan dependency signatures into that tracer; they must not maintain a parallel
 TLS accumulator or reconstruct a curated signature after the compute. A
 non-cacheable or overflowing tracer still returns the best computed value to the
@@ -515,7 +528,7 @@ derived-`Hash` query-identity key (the retired content-free `DeclKey`
 query-key struct must NOT be reintroduced). The cold-build path
 (`build_instantiate`, `build_resolve_macro_payload`) re-sources the live file
 content version from
-`ResolverContext::ensure_indexed_ready_serve(base.defining_canonical)`'s serve carrier `indexed.whole_hash` at
+`IndexedInputs::ensure_indexed_ready_serve(base.defining_canonical)`'s serve carrier `indexed.whole_hash` at
 value-compute time and rolls it into the published `MemoEntry`'s
 `ReadSetSignature.facts` + `self_root_canonicals` rails. The slot is U2-DERIVED
 at query-key construction via `ProjectSemanticDispatch::type_slot_for` (reads
@@ -720,8 +733,10 @@ accessor that scans `artifacts` is forbidden by the
 The only intentional content-agnostic escapes are `get_any` /
 `get_artifacts_any`, each guarded at every call site.
 
-**R18.** `SessionView` is passed explicitly through `ResolverContext`.
-Thread-local "current view" globals remain forbidden.
+**R18.** The private request adapter captures `SessionView` and its completion
+overlay at entry. Engine consumers use the five request-bound ports and owned
+observations; `ResolverContext` returns no view or overlay borrow. Thread-local
+"current view" globals remain forbidden.
 
 **R19.** Fact validation is the **cache-correctness oracle**.
 `StoreViewCompatToken` is the **concurrency oracle**: singleflight lane
@@ -770,7 +785,7 @@ folded into the family substrate) + named-type index
 `SemanticGraphStore` derivation/origin store (`DerivationStore` — `edges` keyed by
 `(SemanticNodeId, OriginEdgeKind)`, plus its `signature_pool` fence interner;
 content-addressed graph-instance state, NOT a query-identity slot) — are all
-bounded by the shared `verter_session::bounded_query_retention` substrate. Each
+bounded by the shared `verter_type_engine::bounded_query_retention` substrate. Each
 distinct content edit appends a fresh CANDIDATE (or, for the content-addressed
 `DerivationStore`, a fresh edge bucket); the substrate is the routine
 memory-reclamation path (the eager own-canonical drain that formerly reclaimed
@@ -925,7 +940,7 @@ Bounded signature size: a `fact_dep_signature` is capped at 1024 entries
 (`FACT_SIGNATURE_CAP`). Beyond that the producer consumes a hierarchical fact
 (downstream materialisation `semantic_hash`) instead of flattening transitive
 facts. The path-precise tracer carries the overflow as a structural bit on the
-[`ReadSetSignature`](../../crates/verter_session/src/fact_signature_helpers.rs)
+[`ReadSetSignature`](../../crates/verter_type_engine/src/fact_signature_helpers.rs)
 carrier: `ReadSetSignature { facts: Arc<[FactVersionRef]>, overflowed: bool }`,
 with `is_cacheable()` returning `!overflowed` (emptiness is NOT a non-cacheable
 condition — only overflow is). Empty and overflow are structurally
@@ -933,12 +948,35 @@ distinguishable at the carrier type; the warm-hit oracle cannot conflate them.
 Overflow produces `FactSignatureOverflow` audit event + candidate is admitted
 as `NonCacheable`.
 
+### Non-cacheability marking and source evidence
+
+The reuse vocabulary (`NonCacheableReadReason`, `ReuseClass`,
+`classify_reuse`, `dominant_refusal`, the pure `ReuseClass::refusal_replay`
+description) is pure data in `verter_session_query::facts::reuse`. APPLYING a
+refusal belongs to the one tracing runtime, `verter_type_engine::fact_tracing`: the
+tracer/recorder stacks (`tracing.rs`), the typed refusal-observation scopes
+(`refusal_scope.rs`, `replay_reuse_refusal`), and the direct-call fan-out
+`note_non_cacheable_read_fan_out` / `note_non_cacheable_propagation`. There is
+no process-global receiver or callback: a mark reaches the running thread's
+tracers only by a direct call into that module, which depends on nothing but
+`verter_session_query`, the audit leaf and std.
+
+Source-side code (the decl-body memo, decl lowering, flow-slice content, the
+parsed eval program) never calls the tracer. A collapsing body accessor returns
+`SourceRead<T> { value, refusal }` (`DemandOutcome::into_source_read`: a
+`LeaseMiss` is `None` + `Some(LeaseMiss)`, a `Ready(None)` absence carries no
+refusal and stays cacheable). Composition keeps every consulted read's evidence
+(`SourceRead::or_else` keeps the refused read's reason even when a fallback
+answers). The FIRST engine consumer calls `fact_tracing::consume_source_read`
+before any early return, admission decision or memo insertion. Typed
+`DemandOutcome` consumers keep their own matches and marks.
+
 ### Completed results and their receipts
 
 Completion and retention are separate verdicts. A flow evaluation that
 completes as its own component's root lands in the dispatch transaction's
 demand-keyed result table (`FlowResultTable` in `dispatch_txn.rs`), classified
-on the shared reuse rail (`resolver_core/reuse.rs`): `Shared` (complete and
+on the shared reuse rail (`verter_session_query::facts::reuse`): `Shared` (complete and
 retained), `RequestOnly` (complete, persistent admission refused for a
 deterministic reason, whose refusal replays into every consumer) or never kept
 (incomplete, transient or unattributed refusal). The table is separate from
@@ -968,7 +1006,7 @@ sealed component receipt.
 ## Typed SignatureAdmission gate (CRITICAL)
 
 Producers convert their finalised fact tracer into a typed admission verdict via
-[`SignatureAdmission::from_finalise(FactReadSetFinalise)`](../../crates/verter_session/src/cache_runtime/admission.rs).
+[`SignatureAdmission::from_finalise(FactReadSetFinalise)`](../../crates/verter_type_engine/src/cache_runtime/admission.rs).
 Two arms:
 
 - `SignatureAdmission::Cacheable(ReadSetSignature)` — the tracer finalised with
@@ -1069,9 +1107,9 @@ closed, fact-rooted contract (`.claude/skills/type-resolution/SKILL.md`
 §18.2–18.3, §22). Three invariants:
 
 1. **Admission keys on the rooting FACT, not the taint enum class (§18.2).**
-   [`admit_decision(taint, sig)`](../../crates/verter_session/src/semantic_query/admit.rs)
+   [`admit_decision(taint, sig)`](../../crates/verter_type_engine/src/semantic_query/admit.rs)
    maps a result's [`ResultTaint`] + its sound
-   [`ReadSetSignature`](../../crates/verter_session/src/fact_signature_helpers.rs)
+   [`ReadSetSignature`](../../crates/verter_type_engine/src/fact_signature_helpers.rs)
    to `Admission::{Warm, ReturnOnly}`. `Clean` ⇒ `Warm`.
    `Partial(MissingDependency)` ⇒ `Warm` **iff**
    `sig.records_missing_dependency_fact()` (a `ResolveImports` fact carrying a
@@ -1091,14 +1129,14 @@ closed, fact-rooted contract (`.claude/skills/type-resolution/SKILL.md`
    by the `admit_decision` unit tests.
 
 2. **Taint join is monotone over `Clean ⊑ Partial ⊑ Broken` (§18.3).**
-   [`ResultTaint::join`](../../crates/verter_session/src/semantic_query.rs)
+   [`ResultTaint::join`](../../crates/verter_type_engine/src/semantic_query.rs)
    propagates the MAX level; within a level it keeps the more-severe
    `BrokenInputClass` (severity order `MissingDependency < UnresolvedReference <
    IncompleteDeclaration < SyntaxError < TornRead`). Finite + monotone — taint
    only moves up, so propagation terminates.
 
 3. **§22 absorption is the reducers' FIRST fast-reject, as separable helpers.**
-   [`absorb_*`](../../crates/verter_session/src/project_semantic_dispatch/absorb.rs)
+   [`absorb_*`](../../crates/verter_type_engine/src/project_semantic_dispatch/absorb.rs)
    (`absorb_union`/`absorb_intersection`/`absorb_key_of`/`absorb_indexed_access`/`absorb_mapped`/`absorb_conditional`)
    are isolated entry hooks each reducer calls with ONE
    `if let Some(out) = self.absorb_*(...) { return out; }` line BEFORE its
@@ -1165,7 +1203,7 @@ key only when the cached value depends on lib data:
 
 A single bundled `project_config_hash` is forbidden.
 
-The five hash functions live on `verter_semantic::resolver_core::IdeProjectConfig` (the `verter_workspace::env_hash` trait impls)
+The five hash functions live on `verter_session_query::resolution::IdeProjectConfig` (the `verter_workspace::env_hash` trait impls)
 + per-call inputs surfaced through `EnvHashInputs<'_>`:
 
 ```rust
@@ -1258,9 +1296,11 @@ stale / admit-refused paths or when an observer is explicitly sampling.
 Warm-hit validation must stay under 50µs p99 and must not allocate (asserted
 via test-allocator counter).
 
-**R25.** The fact read tracer (`FactReadSet` in `ResolverContext`) is active on
-cold-compute and write-admission paths only. Warm hits validate stored
-signatures directly without instantiating a tracer.
+**R25.** The driver-scoped fact read tracer uses the selected `FactValidation`
+clock authority and is active on cold-compute and write-admission paths only.
+Its concrete reader preserves live clock sampling without per-frame port
+dispatch. Warm hits validate stored signatures directly without instantiating a
+tracer.
 
 ### Cache substrate
 
@@ -1275,7 +1315,7 @@ on any cache layer violates R21 (the five env-hash dimensions must remain split
 Fields:
 
 - `compat_token: StoreViewCompatToken` — singleflight lane identity (epoch +
-  optional session); read through `ctx.store_view().compat_token()`.
+  optional session); read through `FactValidation::compat_token(ctx)`.
 - `project_identity, parse_env_hash, resolve_env_hash, type_env_hash,
   lib_env_hash: Hash16` — the five env-hash dimensions.
 - `source_map_policy_hash, public_api_mode_hash: Hash16` — typed policy
@@ -1289,7 +1329,7 @@ Fields:
   (stamped onto `CacheEntry.validated_at_generation` at admission).
 
 `WorldSnapshot` lives at
-`crates/verter_session/src/cache_runtime/world_snapshot.rs`. The struct is
+`crates/verter_type_engine/src/cache_runtime/world_snapshot.rs`. The struct is
 `pub(crate)`; it is exercised internally by `#[cfg(test)] mod tests` in the
 owning module — there is no `for_tests` re-export and no parallel
 `for_tests_from_raw` constructor on the production type. Construction-discriminator
@@ -1828,21 +1868,23 @@ The discrimination matrix:
 
 - `crates/verter_workspace/src/env_hash.rs` — five env-hash functions on
   `IdeProjectConfig` + `EnvHashInputs<'_>`.
-- `crates/verter_semantic/src/facts/registry.rs` — the fact-schema owner:
+- `crates/verter_session_query/src/facts/registry.rs` — the fact-schema owner:
   `FactKey`, `Fact`, `FactDomain`, `FactRegistry`, `SymbolSpace`, `MemberKind`,
   `FactLane`, `ObservedFact`, `MacroKind`, `MacroTargetKey`, `InternedSpecifier`,
   `InternedName`, `InternedGlobPattern`, `AugmentationTargetKindTag`, plus the
   semantic `MacroKind` conversion. `verter_workspace` consumes it; there is no
   workspace-side registry module.
-- `crates/verter_semantic/src/facts/hashing.rs` — `compute_semantic_hash`,
+- `crates/verter_session_query/src/facts/hashing.rs` — `compute_semantic_hash`,
   `compute_member_presence_hash`, `compute_member_shape_hash`, `CrossDeclLens`,
   `CrossDeclRef`, `HashOutcome`, `MAX_HASH_DEPTH = 64`.
 - `crates/verter_session/src/file_artifact_store.rs` — `FileArtifactStore`,
   `FileArtifactKey`, `FileArtifacts`, `FileFacts` (registry-backed); re-exports
   `Interned{Specifier,Name,GlobPattern}` + `SymbolSpace` from
   `verter_semantic::facts::registry`; `AugmentationTargetKey`,
-  `AugmentationTargetKind`, `AugmenterSet`, `AugmenterEntry`, `ParsedEdges`,
-  `ModuleAugmentationFact`, `ProjectIdentity`.
+  `AugmentationTargetKind`, `ParsedEdges`, `ModuleAugmentationFact`,
+  `ProjectIdentity`. The owned augmenter-set answer (`AugmenterSet`,
+  `AugmenterEntry`) lives in `verter_session_query::resolution` beside
+  `AugmentationTargetKey`.
 - `crates/verter_session/src/fact_emission.rs` —
   `emit_parse_facts(&IndexedReady) -> ParseFactsEmission`,
   `GLOBAL_AUGMENTATION_TAG`, and typed augmentation-header fact emission.
@@ -1856,11 +1898,11 @@ The discrimination matrix:
   `compute_parse_stable_hash(&IndexedReady) -> Hash16`. `parse_stable_hash` is
   a structural hash over the post-shallow-analysis decl skeleton, invariant
   under cosmetic edits.
-- `crates/verter_semantic/src/facts/version.rs` — the immutable fact-version
+- `crates/verter_session_query/src/facts/version.rs` — the immutable fact-version
   value graph: `FactVersionRef`, `ParseFactRef`, `ResolveImportsFactRef`,
   `RouteSurfaceFactRef`, `ProgramAnalysisFactRef`, their hashes/stamps,
   populations, attribution, and compaction-domain values.
-- `crates/verter_semantic/src/facts/resolution.rs` — the immutable resolution
+- `crates/verter_session_query/src/facts/resolution.rs` — the immutable resolution
   identity/value graph: canonical/specifier/context/query identities plus
   `ResolutionFactVersion`, `ResolutionFactKey`, and `ResolutionFactRef`.
 - `crates/verter_workspace/src/{fact_cache,resolution_currency}.rs` — cache
@@ -1870,7 +1912,7 @@ The discrimination matrix:
 - `crates/verter_session/src/resolver_core/mod.rs` — `ValidatedFactCache`,
   re-exported semantic fact values, `StoreView` (per-domain validator methods),
   and `StoreViewCompatToken`.
-- `crates/verter_session/src/semantic_query.rs` — `DeclIdentity` (the live
+- `crates/verter_type_engine/src/semantic_query.rs` — `DeclIdentity` (the live
   value-side versioned identity) and `ResolvedDeclSlotIdentity` (the env-bearing
   content-free query-identity slot used as `Instantiate.base` /
   `ResolveMacroPayload.owner`; the migration to it has LANDED — the former
@@ -1905,10 +1947,10 @@ The discrimination matrix:
   provenance, `binder_scope_id` query identity, negative lookup `ReturnOnly`).
 - `crates/verter_session/tests/cases/g_file/file_artifact_store_smoke.rs` — consumer-side
   smoke tests.
-- `crates/verter_semantic/src/facts/registry.rs` (`registry_tests` inline
+- `crates/verter_session_query/src/facts/registry.rs` (`registry_tests` inline
   module) — `FactKey::domain()` routing per R12 / R26, `SymbolSpace` tag
   stability per R11.
-- `crates/verter_semantic/src/facts/hashing.rs` (inline `tests` module) —
+- `crates/verter_session_query/src/facts/hashing.rs` (inline `tests` module) —
   alpha-normalisation under object member reorder (R16), stack-safety on
   200-deep nesting (R27), `MemberPresence`/`MemberShape` discrimination (R28).
 - `crates/verter_session/src/fact_emission.rs` (inline `tests` module) —
@@ -2027,7 +2069,7 @@ is permitted.
   `decl_self_type_or_lib_env_change_produces_distinct_instantiate_key`,
   `resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit`,
   and `resolved_named_type_key_identity_is_env_scoped` — lives in
-  `crates/verter_session/src/semantic_query_memo/tests.rs`. The design-gate
+  `crates/verter_type_engine/src/semantic_query_memo/tests.rs`. The design-gate
   guards `no_envless_semantic_query_env_key_envelope` and
   `u2_value_domain_design_doc_locks_invariants` live in
   `crates/verter_session/tests/cases/g_block/u2_value_domain_design_guards.rs`.
@@ -2040,7 +2082,7 @@ The `TypeExpr`→handle migration carries graph handles on the hot path but keep
 - **`SyntheticBindingId`** is the content-free successor to `SyntheticCarrierKey.value_node: u64` — `(scope_canonical_id, surface_kind, slot_name, binding_name)` with NO arena ordinal. It is the identity a future synthetic-deepening key roots on; the `value_node` ordinal is demoted to value-side provenance on the `SemanticNodeData::SyntheticBinding` carrier (re-attached only at the compat materialisation boundary).
 - **`CarrierResolverContext`** is value-side runtime resolution state, never hashed into a `SemanticQueryKey`.
 
-Guard: `synthetic_binding_identity_is_content_free`. See `/type-resolution` for the full carrier set + the SEALED `OutputProjector` output-materialization capability fence (block 8-A3): the two boundary methods (`OutputProjector::materialize_output_type_expr` plain SHELL raise / `materialize_reduced_output_type_expr` REDUCE-then-raise) hand back the sealed carriers `OutputTypeExpr` / `MaterializedOutputTypeExpr` whose inner `TypeExpr` lives in a deeply-private nested `carrier::payload` vault (no readable `TypeExpr` field outside it; capability-gated unwrap), the capability is registered (explicit `impl OutputProjector` pairs in the private `projector` module) only for the SIX true-output-SINK caps (one PER-SINK, NOT per-subtree; `new()` is `pub(in <sink-module>)` — the projectors cap is DEFINED + minted in the dedicated TERMINAL sink submodule `meta_resolve::projectors::output_sink`, re-exported at `meta_resolve::projectors::MetaResolveProjectorsOutputCap`, so the parent `projectors`' non-sink helpers cannot mint), and the raw `raise_node_to_type_expr` primitive stays module-private (`raise_and_reduce_with_context` stays `pub(super)`; the shell seam `output_shell_raise_sealed` returns a SEALED `Option<OutputTypeExpr>`, never a bare `TypeExpr`). The PRIMARY barriers are COMPILER-ENFORCED — in safe production Rust OUTSIDE the payload vault: a hot / session / Kind-B mint is `E0624`/`E0451`, a hot unwrap is `E0277` (the trait is sealed) AND the inner `TypeExpr` is not even a readable field, and a hot `.type_expr_for_test()` is `E0599` (the carrier `_for_test` accessors are `#[cfg(any(test, feature = "test-support"))]` — production-unreachable, not `debug_assertions`-present in debug builds); the residual trusted surface is the inline vault + registration source (and the by-name identity of which owner types are sinks; the claim excludes guard deletion, edits inside the vault, and unsafe unless the crate forbids it globally). `pub(in P)` grants the mint to `P` AND every module at-or-under it, so the mint scope is a TERMINAL output sink whose entire reachable production module tree is itself output-only — that (not "per-leaf") is what fences a non-sink sibling (`meta_resolve::dispatch_helpers`, `host_manage::eval_env`) or a non-sink helper sibling: neither is reachable from any sink's mint scope ⇒ planted `*OutputCap::new` is `E0624`. The FFI boundary is the session-owned bytes facade `project_node_to_type_expr_json_bytes` (the old `project_node_to_type_expr` + `MaterializedTypeExpr` are DELETED). Over the BOUNDED trusted surface the residual `syn` scanners (`output_projector_residual_guards.rs` and the named inventories they hosted) are retired. Post-SIMP5 remaining enforcement is the accidental-regression `assert_not_impl_any!` carrier-escape CANARY in `crates/verter_session/src/project_semantic_dispatch/output_materialization_guards.rs`, compile-time witnesses in `crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs`, and the trybuild fixtures (`no_typeexpr_*`, `output_projector_not_impl_outside_crate`) run by `scripts/compile-contracts.mjs`. Historical (retired) syn-allowlist shape, not live enforcement: the EXACT owner-file module topology (inline `projector` / `projector::sealed` / `carrier` / `carrier::payload` only, with item/impl/trait-position macro invocations, `include!`, unknown attributes, a `sealed::Sealed` alias `use`, and any owner `TypeExpr` alias BANNED) + the sanctioned sink set (explicit `impl OutputProjector` / `impl sealed::Sealed` self-types by FULL self-type path as a MULTISET) by `output_projector_owner_registration_inventory`; a closed item/signature allowlist over the carrier/payload vault (every fn returning `TypeExpr` cap-gated or exactly test-gated) by `output_carriers_have_no_inherent_typeexpr_escape_method`; every carrier/payload field private regardless of spelled type by `output_carrier_payload_fields_are_private`; an accidental-regression CANARY (NOT proof-complete; completeness is the vault) for the common `Deref`/`AsRef`/`Borrow` trait escapes in `output_materialization_guards.rs`; the out-of-crate boundary by `output_projector_non_owner_impl_is_compiler_sealed`; the mintable `TestOutputCap` `#[cfg(test)]`-gate by `test_output_cap_not_visible_or_mintable_in_non_test_builds`; the terminal-sink mint scope by `output_cap_mint_scope_is_per_leaf_not_subtree` (a Rust-VISIBILITY reachable-module-tree model that default-DENIES any reachable non-sink module under a `mint: pub(in P)`, `#[cfg(test)]` modules excluded); the carrier `_for_test` test-support gate by `carrier_for_test_accessors_are_test_support_gated_not_debug_assertions`; the sealed raise seam by `raise_output_seam_returns_sealed_carrier_not_bare_type_expr` (which now pins that NO public/restricted raise.rs fn returns a bare `TypeExpr` — the retired Kind-B bridge leaves no sanctioned exception); the `#[cfg(test)]`-only `materialize_type_expr(HotTypeRef)` harness (the syn guard `materialize_type_expr_is_not_production_visible` is retired with SIMP5).
+Guard: `synthetic_binding_identity_is_content_free`. See `/type-resolution` for the full carrier set + the SEALED `OutputProjector` output-materialization capability fence (block 8-A3): the two boundary methods (`OutputProjector::materialize_output_type_expr` plain SHELL raise / `materialize_reduced_output_type_expr` REDUCE-then-raise) hand back the sealed carriers `OutputTypeExpr` / `MaterializedOutputTypeExpr` whose inner `TypeExpr` lives in a deeply-private nested `carrier::payload` vault (no readable `TypeExpr` field outside it; authority-gated unwrap: the engine-owned `OutputAuthority`, minted once per engine by `EngineStores::create` and lent by the host to its sinks through an inert `OutputLease` that only `output_sinks` opens), the session-owned sealed `OutputProjector` (`crate::output_sinks`) is implemented only for the SIX true-output-SINK caps (one PER-SINK, NOT per-subtree; `new()` is `pub(in <sink-module>)` — the projectors cap is DEFINED + minted in the dedicated TERMINAL sink submodule `meta_resolve::projectors::output_sink`, re-exported at `meta_resolve::projectors::MetaResolveProjectorsOutputCap`, so the parent `projectors`' non-sink helpers cannot mint), and the raw `raise_node_to_type_expr` primitive stays module-private (`raise_and_reduce_with_context` stays `pub(super)`; the shell seam `output_shell_raise_sealed` returns a SEALED `Option<OutputTypeExpr>`, never a bare `TypeExpr`). The PRIMARY barriers are COMPILER-ENFORCED — in safe production Rust OUTSIDE the payload vault: a hot / session / Kind-B mint is `E0624`/`E0451`, a hot unwrap has no `OutputAuthority` to pass AND the inner `TypeExpr` is not even a readable field, and a hot `.type_expr_for_test()` is `E0599` (the carrier `_for_test` accessors are `#[cfg(any(test, feature = "test-support"))]` — non-default: omitted from per-package artifact builds (LSP/napi/wasm) but compiled into whole-workspace builds through the compile-contract variant crate's normal dependency; not `debug_assertions`-present in debug builds); the residual trusted surface is the inline vault + the host composition code that stores the authority + the `output_sinks` registration (and the by-name identity of which owner types are sinks; the claim excludes guard deletion, edits inside the vault, and unsafe unless the crate forbids it globally). `pub(in P)` grants the mint to `P` AND every module at-or-under it, so the mint scope is a TERMINAL output sink whose entire reachable production module tree is itself output-only — that (not "per-leaf") is what fences a non-sink sibling (`meta_resolve::dispatch_helpers`, `host_manage::eval_env`) or a non-sink helper sibling: neither is reachable from any sink's mint scope ⇒ planted `*OutputCap::new` is `E0624`. The FFI boundary is the session-owned bytes facade `project_node_to_type_expr_json_bytes` (the old `project_node_to_type_expr` + `MaterializedTypeExpr` are DELETED). Over the BOUNDED trusted surface the residual `syn` scanners (`output_projector_residual_guards.rs` and the named inventories they hosted) are retired. Post-SIMP5 remaining enforcement is the accidental-regression `assert_not_impl_any!` carrier-escape CANARY in `crates/verter_type_engine/src/project_semantic_dispatch/output_materialization_guards.rs`, compile-time witnesses in `crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs`, and the trybuild fixtures (`no_typeexpr_*`, `output_authority_not_forgeable`, `output_authority_not_duplicable`, `output_authority_not_recoverable_from_query_access`, `output_authority_not_reminted_from_live_stores`) run by `scripts/compile-contracts.mjs`. Historical (retired) syn-allowlist shape, not live enforcement: the EXACT owner-file module topology (inline `projector` / `projector::sealed` / `carrier` / `carrier::payload` only, with item/impl/trait-position macro invocations, `include!`, unknown attributes, a `sealed::Sealed` alias `use`, and any owner `TypeExpr` alias BANNED) + the sanctioned sink set (explicit `impl OutputProjector` / `impl sealed::Sealed` self-types by FULL self-type path as a MULTISET) by `output_projector_owner_registration_inventory`; a closed item/signature allowlist over the carrier/payload vault (every fn returning `TypeExpr` cap-gated or exactly test-gated) by `output_carriers_have_no_inherent_typeexpr_escape_method`; every carrier/payload field private regardless of spelled type by `output_carrier_payload_fields_are_private`; an accidental-regression CANARY (NOT proof-complete; completeness is the vault) for the common `Deref`/`AsRef`/`Borrow` trait escapes in `output_materialization_guards.rs`; the out-of-crate boundary by `output_projector_non_owner_impl_is_compiler_sealed`; the mintable `TestOutputCap` `#[cfg(test)]`-gate by `test_output_cap_not_visible_or_mintable_in_non_test_builds`; the terminal-sink mint scope by `output_cap_mint_scope_is_per_leaf_not_subtree` (a Rust-VISIBILITY reachable-module-tree model that default-DENIES any reachable non-sink module under a `mint: pub(in P)`, `#[cfg(test)]` modules excluded); the carrier `_for_test` test-support gate by `carrier_for_test_accessors_are_test_support_gated_not_debug_assertions`; the sealed raise seam by `raise_output_seam_returns_sealed_carrier_not_bare_type_expr` (which now pins that NO public/restricted raise.rs fn returns a bare `TypeExpr` — the retired Kind-B bridge leaves no sanctioned exception); the `#[cfg(test)]`-only `materialize_type_expr(HotTypeRef)` harness (the syn guard `materialize_type_expr_is_not_production_visible` is retired with SIMP5).
 
 ## whole_env() consumer graph-native readers (Stage 6-prep readiness)
 

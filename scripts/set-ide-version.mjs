@@ -18,7 +18,7 @@
  *   - extensions/zed/extension.toml
  *   - extensions/lapce/volt.toml
  *
- * The monorepo's own version line (crates.io + npm, `pnpm bump` /
+ * The monorepo's own version line (npm, `pnpm bump` /
  * scripts/set-version.mjs) is separate and untouched: the extension is
  * `private: true`, so the npm publish set never contains it, and the editor
  * packages are not npm packages at all.

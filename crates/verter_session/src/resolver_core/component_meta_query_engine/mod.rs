@@ -17,16 +17,16 @@
 //!
 //! ### Authoritative host-owned caches (durable, dep-validated, reused across queries)
 //!
-//! - [`MaterializeMemoDb`](crate::component_meta_caches::MaterializeMemoDb)
+//! - [`MaterializeMemoDb`](verter_type_engine::component_meta_caches::MaterializeMemoDb)
 //!   — interned semantic instantiations keyed by
 //!   `(target_decl, mode, args)`. Final-result reuse across requests.
-//! - [`ComponentMetaResultDb`](crate::component_meta_caches::ComponentMetaResultDb)
+//! - [`ComponentMetaResultDb`](verter_type_engine::component_meta_caches::ComponentMetaResultDb)
 //!   — final `ComponentMetaAnalysis` payloads keyed by `(canonical, profile)`.
 //!   `get_component_meta` consults this first; the engine only runs on cold misses.
-//! - [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore)
+//! - [`SemanticGraphStore`](verter_type_engine::semantic_query_memo::SemanticGraphStore)
 //!   — interned semantic-node arena.
 //!   Engine subqueries dispatch via
-//!   [`ProjectSemanticDispatch`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
+//!   [`ProjectSemanticDispatch`](verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch)
 //!   which deduplicates against this store.
 //! - `ClassifyMaterializationCycleGate`
 //!   (`project_semantic_dispatch::cycle_gate`) — the sealed
@@ -75,20 +75,20 @@
 //! `/type-resolution` skill for the cross-file resolver query modes.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::DeclarationId;
+use verter_session_query::declarations::DeclarationId;
 
-use super::declaration_metadata::{
-    DeclarationMetadataResolver, ResolvedDeclarationKind, ResolvedLocalTypeSymbolMetadata,
-    ResolvedTypeDeclaration,
-};
-use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
-use crate::resolver_core::scope_shadowing::ScopeShadowing;
-use crate::resolver_core::ResolverContext;
-use crate::resolver_core::{FuseBudgets, FuseState};
-use crate::semantic_query::SemanticNodeId;
+use super::declaration_metadata::DeclarationMetadataResolver;
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+use verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload;
+use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::resolver_core::{FuseBudgets, FuseState};
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 // The output-sink capabilities for this subtree are defined PER-SINK in the
 // exact output-SINK modules that project — NOT subtree-wide:
@@ -143,19 +143,6 @@ mod surface;
 pub(crate) use route_admission::AdmittedRouteProjectionNode;
 pub(crate) use surface::{
     lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
-    semantic_query_error_raw,
-};
-// `type_expr_contains_semantic_miss`, `type_expr_is_expanded_surface`, and
-// `type_expr_root_is_unmaterialized_sentinel` survive only as parity ORACLES the
-// raised-shape suite compares the bottom-up node-domain facts against —
-// production gates read the node-domain facts (`shape_engine`
-// `node_contains_semantic_miss_with_dispatch` / `expanded_surface` /
-// `node_root_is_unmaterialized_sentinel_with_dispatch`), so their re-exports are
-// test-only.
-#[cfg(test)]
-pub(crate) use surface::{
-    type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
-    type_expr_root_is_unmaterialized_sentinel,
 };
 // Re-export ONLY the per-sink output capability TYPES so the
 // `output_materialization` owner module can name them for its explicit
@@ -170,15 +157,6 @@ pub(crate) use surface::MetaQuerySurfaceOutputCap;
 // `helpers` child module. All entries are `pub(super)` and used from
 // the engine impl in sibling modules plus the inline test module.
 
-// The spelling consts are OWNED by `semantic_query::compat_spelling` (the
-// single spelling family home); re-exported here for path stability (the
-// consumers are the sentinel/test modules).
-#[allow(unused_imports)]
-pub(crate) use crate::semantic_query::compat_spelling::{
-    BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
-    SEMANTIC_SURFACE_MEMBER,
-};
-
 /// Build an R28 signature for a cache whose validity depends on the
 /// IDENTITY of a top-level type at `(canonical, type_name)`. Observes
 /// `Export(name)`, `LocalDecl(name)`, and `MemberShape(exporter=name)`
@@ -191,20 +169,20 @@ pub(crate) use crate::semantic_query::compat_spelling::{
 /// against, captured once at the value source. The self-root
 /// `FileWholeHash` and all three parse facts are pinned to that
 /// observed version — the helper never re-reads current content.
-/// Returns [`crate::cache_runtime::SignatureAdmission::NonCacheable`]
+/// Returns [`verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable`]
 /// (refuse shared-cache admission) when the observed version's
 /// parse-fact registry cannot be recovered.
 pub(crate) fn engine_fact_signature_for_exported_type(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     type_name: &str,
-    observed_hash: crate::resolver_core::ResolverHash16,
-) -> crate::cache_runtime::SignatureAdmission {
-    crate::fact_signature_helpers::fact_signature_for_exported_type(
+    observed_hash: verter_session_query::facts::store_view::ResolverHash16,
+) -> verter_session_query::facts::fact_cache::SignatureAdmission {
+    verter_type_engine::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical_id,
         type_name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         observed_hash,
     )
 }
@@ -254,8 +232,7 @@ pub(crate) struct ObservedPreparedTypeDecl {
     /// absent from the keyed canonical — a genuine absence OR a broken-lease
     /// transient (see the type docs; the two are told apart by the
     /// cacheability rail, never by this field).
-    pub(crate) decl:
-        Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+    pub(crate) decl: Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
     /// The keyed canonical the prepared decl was resolved for.
     pub(crate) canonical_id: String,
     /// The defining-file content version the prepared-decl bundle was
@@ -265,181 +242,21 @@ pub(crate) struct ObservedPreparedTypeDecl {
     /// value and the fact signature root on this one version, and it
     /// is view-correct because the bundle is fetched through the
     /// view-aware `prepared_decl_bundle` accessor.
-    pub(crate) whole_hash: crate::resolver_core::ResolverHash16,
-}
-
-/// Build the fact signature for a `MaterializeMemoDb` entry.
-///
-/// A `MaterializeMemoDb` entry caches the materialised form of a type
-/// expression in a `scope` canonical. The builder is **provenance-pure**:
-/// it never consults the authoritative current-content oracle and
-/// never calls a helper that can re-read current content. Every file
-/// identity it emits is supplied by the caller as an *observed*
-/// value — the content version the materialiser actually worked
-/// against.
-///
-/// The scope's content identity arrives as ONE
-/// [`crate::resolver_core::MaterializeScopeObservation`] — a single
-/// `Arc<IndexedReady>`. The keyed-scope `whole_hash` and the keyed-scope
-/// `SyntacticExportSet` parse fact therefore both descend from the same
-/// observation: the builder physically cannot be handed a raw hash
-/// from one source and a parse fact from another. The publish site
-/// builds the value's `NodeScopeId::File` from the same observation's
-/// `whole_hash`, so the memo value and its fact signature root on the
-/// identical scope hash — no torn read.
-///
-/// Parameters:
-///
-/// - `observed_scope` — the single tear-free scope observation. Its
-///   [`crate::resolver_core::MaterializeScopeObservation::whole_hash`]
-///   is the keyed-scope self-root hash AND the hash baked into the
-///   value's `NodeScopeId::File`.
-/// - `observed_scope_syntactic_export_set` — the scope's
-///   `SyntacticExportSet` parse fact, pinned to the observation's
-///   `whole_hash` (the publish closure unwraps it from
-///   `observed_scope.syntactic_export_set` — passing it explicitly
-///   keeps the `None`-refuses-admission control flow at the call
-///   site). A `debug_assert` confirms it agrees with the observation.
-/// - `materialized_dep_signature` — every canonical the materialisation
-///   walk observed, each tagged with the
-///   [`crate::semantic_query::DepVersion`] the materialiser recorded.
-///
-/// The keyed scope is self-rooted by an observed-hash `FileWholeHash`
-/// plus the observed-version `Parse` fact. Re-reading the scope's
-/// *current* hash would be wrong: an edit landing in the race window
-/// between materialisation and this signature write-through would
-/// otherwise publish the stale `MaterializedOutputTypeExpr` rooted by a
-/// fresh-looking current hash, which then validates on warm reads
-/// instead of missing.
-///
-/// Returns `None` when the signature cannot be built strictly enough
-/// to admit the entry to the shared memo. A `None` result refuses
-/// cache admission only — the caller still returns the
-/// freshly-computed `MaterializedOutputTypeExpr`. `None` is returned when:
-///
-/// - `observed_scope_syntactic_export_set` is a `Parse` fact for a
-///   canonical other than the observed scope (caller-supplied
-///   observation does not describe the keyed scope), or
-/// - an observed dependency names the scope canonical with a
-///   `WholeHash` that disagrees with the observation's `whole_hash` (a
-///   torn / mixed observation of the scope), or
-/// - an observed dependency carries a `RouteGeneration` version (see
-///   below).
-///
-/// Per-`DepVersion` rooting:
-///
-/// - `DepVersion::WholeHash(observed)` — the materialiser observed
-///   that file's content version. The OBSERVED hash is preserved
-///   verbatim in the emitted `FileWholeHash`. A dependency entry that
-///   names the scope itself is collapsed onto the scope self-root: it
-///   must agree with the observation's `whole_hash` or admission is
-///   refused.
-/// - `DepVersion::ProjectGeneration(observed)` — the materialiser
-///   observed the project-wide resolver/config/lib generation, not
-///   that file's content. It is rooted by a
-///   [`crate::resolver_core::FactVersionRef::ProjectGeneration`]
-///   carrying the OBSERVED generation: a project-shape change bumps
-///   the counter and rejects the memo. A pure file-content edit does
-///   not bump the generation, so this fact does not over-invalidate.
-/// - `DepVersion::RouteGeneration(_)` — route generation is not a
-///   real validating fact: there is no authoritative route-generation
-///   counter and no production emitter. The fact-rail validator
-///   rejects it fail-safe (the `RouteGeneration` arm returns `false`)
-///   so a stale entry rooted on it cannot survive. Rooting it would
-///   be unsound (it cannot detect a content edit to the observed
-///   file). The function therefore returns `None` so the entry is NOT
-///   admitted to the shared `MaterializeMemoDb`; no production path
-///   constructs the variant.
-pub(crate) fn engine_fact_signature_for_materialize_memo(
-    observed_scope: &crate::resolver_core::MaterializeScopeObservation,
-    observed_scope_syntactic_export_set: crate::resolver_core::ParseFactRef,
-    materialized_dep_signature: &crate::semantic_query::DepSignature,
-) -> crate::cache_runtime::SignatureAdmission {
-    use crate::cache_runtime::{NonAdmissionReason, SignatureAdmission};
-    use crate::resolver_core::FactVersionRef;
-    use crate::semantic_query::DepVersion;
-
-    let scope_canonical_id = observed_scope.canonical_id.as_ref();
-    let observed_scope_whole_hash = observed_scope.whole_hash();
-    // The observation carries one `Arc<IndexedReady>`; its top-level
-    // `whole_hash` and its `shallow_state.whole_hash` are the same
-    // parse by construction (`FileArtifactStore` is content-addressed).
-    verter_debug_assert_eq!(
-        observed_scope.indexed.shallow_state.whole_hash,
-        observed_scope_whole_hash,
-        "MaterializeScopeObservation must carry one internally-consistent IndexedReady",
-    );
-
-    if observed_scope_syntactic_export_set.canonical_id.as_str() != scope_canonical_id {
-        // The supplied parse fact resolves to a DIFFERENT canonical
-        // than the keyed scope — provenance is resolved (we have a
-        // parse fact), just attributed to the wrong file. This is a
-        // self-root / canonical conflict, not unresolved provenance:
-        // the fact is fully attributed, only its self-root identity
-        // disagrees with the keyed scope. Audit telemetry tracks the
-        // two failure modes distinctly.
-        return SignatureAdmission::NonCacheable(NonAdmissionReason::SelfRootConflict);
-    }
-
-    let mut entries = Vec::with_capacity(2 + materialized_dep_signature.len());
-
-    entries.push(FactVersionRef::FileWholeHash {
-        canonical_id: scope_canonical_id.to_string(),
-        hash: observed_scope_whole_hash,
-    });
-    entries.push(FactVersionRef::Parse(observed_scope_syntactic_export_set));
-
-    for (observed_canonical, dep_version) in materialized_dep_signature.iter() {
-        match dep_version {
-            DepVersion::WholeHash(observed_hash) => {
-                if observed_canonical.as_ref() == scope_canonical_id {
-                    // The keyed scope is already self-rooted above by
-                    // the observed-hash `FileWholeHash`. A dependency
-                    // entry for the scope itself must agree with that
-                    // single observation; a disagreement is a torn
-                    // read and refuses shared admission.
-                    if *observed_hash != observed_scope_whole_hash {
-                        return SignatureAdmission::NonCacheable(
-                            NonAdmissionReason::SelfRootConflict,
-                        );
-                    }
-                    continue;
-                }
-                entries.push(FactVersionRef::FileWholeHash {
-                    canonical_id: observed_canonical.as_ref().to_string(),
-                    hash: *observed_hash,
-                });
-            }
-            DepVersion::ProjectGeneration(observed_generation) => {
-                entries.push(FactVersionRef::ProjectGeneration {
-                    generation: *observed_generation,
-                });
-            }
-            DepVersion::RouteGeneration(_) => {
-                // Route generation has no real validating source —
-                // refuse shared memo admission rather than rooting
-                // the entry with a fact that cannot catch a content
-                // edit to the observed canonical.
-                return SignatureAdmission::NonCacheable(
-                    NonAdmissionReason::RouteGenerationDependency,
-                );
-            }
-        }
-    }
-    SignatureAdmission::Cacheable(crate::fact_signature_helpers::ReadSetSignature::new(
-        std::sync::Arc::from(entries),
-    ))
+    pub(crate) whole_hash: verter_session_query::facts::store_view::ResolverHash16,
 }
 
 /// Build a two-canonical `DepSignature` (used for DB caches whose
 /// validity depends on both an active scope and a declaration source).
 #[allow(dead_code)]
 pub(crate) fn engine_dep_signature_for_two_canonicals(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_a: &str,
     canonical_b: &str,
-) -> crate::semantic_query::DepSignature {
-    let mut entries: Vec<(std::sync::Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+) -> verter_type_engine::semantic_query::DepSignature {
+    let mut entries: Vec<(
+        std::sync::Arc<str>,
+        verter_type_engine::semantic_query::DepVersion,
+    )> = Vec::new();
     let push = |entries: &mut Vec<_>, c: &str| {
         let whole_hash = ctx
             .shallow_file_state(c)
@@ -447,7 +264,7 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
             .unwrap_or_default();
         entries.push((
             std::sync::Arc::<str>::from(c),
-            crate::semantic_query::DepVersion::WholeHash(whole_hash),
+            verter_type_engine::semantic_query::DepVersion::WholeHash(whole_hash),
         ));
     };
     push(&mut entries, canonical_a);
@@ -461,20 +278,6 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
 
 #[cfg(test)]
 use std::cell::Cell;
-
-#[derive(Debug, Clone)]
-pub struct ResolvedImportedRegistrySymbol {
-    pub canonical_id: String,
-    pub owner: verter_type_expr::TopLevelOwnerId,
-    pub exported_name: String,
-    /// The resolved declaration's narrowed body FACTS: classification plus the
-    /// content-free authored body-slot locator (never an embedded body).
-    /// Consumers lower the slot through the one shared dispatch on demand and
-    /// classify node-domain; the carrier itself stays `Send + Sync`
-    /// cache-safe (`ImportedRegistryDb` stores it cross-request).
-    pub body: verter_type_expr::facts::PreparedTypeBodyFacts,
-    pub canonical_dependencies: BTreeSet<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FastShallowFieldExprExactness {
@@ -490,7 +293,7 @@ pub(crate) enum FastShallowFieldExprExactness {
 /// exactness discriminant.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FastShallowFieldExpr {
-    pub hot: crate::semantic_query::HotTypeRef,
+    pub hot: verter_type_engine::semantic_query::HotTypeRef,
     pub semantic_source: verter_type_expr::facts::SemanticTypeSource,
     pub exactness: FastShallowFieldExprExactness,
 }
@@ -533,9 +336,13 @@ pub(crate) struct FastShallowFieldExpr {
 /// layer whose consolidation onto the ctx-owned cache substrate is the
 /// tracked debt noted above.
 pub struct ComponentMetaQueryEngine<'a> {
-    pub(crate) ctx: &'a dyn ResolverContext,
+    pub(crate) ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    pub(crate) dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        'a,
+        crate::resolver_core::HostCapabilities,
+    >,
     // The caches below are read-through views over the host-owned
-    // typed DBs on `ProjectTypeStore` (see `crate::component_meta_caches`).
+    // typed DBs on `ProjectTypeStore` (see `verter_type_engine::component_meta_caches`).
     // Each engine field is a per-request **non-authoritative read-through
     // view** that mirrors the ctx DB result for repeated lookups within
     // one request. `RefCell` provides interior mutability so `&self`
@@ -589,7 +396,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, verter_type_expr::TopLevelOwnerId, String),
-        Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+        Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
@@ -913,16 +720,23 @@ pub(crate) fn await_imported_registry_winner_park_for_tests(canonical_id: &str) 
 }
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn new(
+        ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            'a,
+            crate::resolver_core::HostCapabilities,
+        >,
+    ) -> Self {
         // Bump `bare_engine_constructions` whenever the engine is
         // bound to a non-request-bound ctx. Final-state invariant:
         // `0` — every production engine binds to a request-bound
         // ctx (`HostResolverContext` / `SessionResolverContext`).
         if !ctx.is_request_bound() {
-            crate::request_context::bump_bare_engine_construction();
+            verter_type_engine::request_context::bump_bare_engine_construction();
         }
         Self {
             ctx,
+            dispatch,
             imported_registry_symbols: RefCell::new(FxHashMap::default()),
             declarations: RefCell::new(FxHashMap::default()),
             resolvable: RefCell::new(FxHashMap::default()),
@@ -1005,7 +819,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 }
 
 fn local_type_symbol_metadata_for_known_source(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_source: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
@@ -1013,19 +827,19 @@ fn local_type_symbol_metadata_for_known_source(
     let state = ctx.shallow_file_state(canonical_source)?;
     let (symbol_kind, span) = state.type_symbol_metadata_in(owner, resolved_name)?;
     let kind = match symbol_kind {
-        verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
+        verter_session_query::declarations::TypeDeclKind::Alias => {
             ResolvedDeclarationKind::TypeAlias
         }
-        verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
+        verter_session_query::declarations::TypeDeclKind::Interface => {
             ResolvedDeclarationKind::Interface
         }
-        verter_semantic::analysis::type_eval::TypeDeclKind::Class => ResolvedDeclarationKind::Class,
+        verter_session_query::declarations::TypeDeclKind::Class => ResolvedDeclarationKind::Class,
     };
     Some(ResolvedLocalTypeSymbolMetadata { kind, span })
 }
 
 struct DirectPreparedDeclarationResolver<'a> {
-    ctx: &'a dyn ResolverContext,
+    ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
 }
 
 impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
@@ -1034,7 +848,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         _dep_canonical: &str,
         _dep_owner: verter_type_expr::TopLevelOwnerId,
         _requested_name: &str,
-    ) -> Option<super::declaration_metadata::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         None
     }
 
@@ -1073,7 +887,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<super::declaration_metadata::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata> {
         local_type_symbol_metadata_for_known_source(
             self.ctx,
             canonical_source,

@@ -46,8 +46,8 @@ use verter_audit::{
     RequestStoreAudit, RequestTimingAudit,
 };
 use verter_session::host_audit_runtime::AuditRequestRegistration;
-use verter_session::request_context::{RequestContext, RequestContextGuard};
 use verter_session::{HostConfig, VerterHost};
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 #[test]
 fn active_request_registration_survives_worker_tls_install_drop_churn() {

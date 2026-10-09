@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use verter_language::CapabilityId;
 
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// Immutable snapshot of the project's DERIVED capability bits.
 ///
@@ -53,7 +53,7 @@ impl ProjectCapabilitySnapshot {
             buf.extend_from_slice(capability.as_str().as_bytes());
             buf.push(0);
         }
-        crate::hash::hash_16(&buf)
+        verter_semantic_source::source_hash::hash_16(&buf)
     }
 }
 

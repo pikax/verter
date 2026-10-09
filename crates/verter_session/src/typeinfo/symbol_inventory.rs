@@ -12,15 +12,15 @@
 //! The host method is the substrate that the
 //! `@verter/typeinfo` package's `listFileSymbols(file)` call lowers
 //! to. Spans come from the file's
-//! [`verter_semantic::analysis::types::ScriptAnalysisSnapshot::declaration_entries`]
+//! [`verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::declaration_entries`]
 //! when present; ambient declarations without analysis-snapshot spans
 //! surface with `span: None`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
-use verter_semantic::analysis::types::{LocalDeclarationEntry, LocalDeclarationKind};
+use verter_session_query::analysis::types::{LocalDeclarationEntry, LocalDeclarationKind};
+use verter_session_query::declarations::{TypeDeclKind, ValueDeclKind};
 
 use super::types::{SymbolEntry, SymbolKind};
 use crate::VerterHost;
@@ -171,7 +171,7 @@ fn is_exported_local(
     shallow: &crate::resolver_core::shallow_file_state::ShallowFileState,
     name: &str,
 ) -> bool {
-    use crate::resolver_core::shallow_file_state::ExportTarget;
+    use verter_session_query::inputs::shallow::ExportTarget;
     shallow.exports.iter().any(|(_exported, target)| {
         matches!(target, ExportTarget::Local { symbol_name, .. } if symbol_name == name)
     })

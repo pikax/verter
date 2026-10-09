@@ -57,7 +57,7 @@
 //!   [`FallthroughSurface::None`].
 //! * a branch the resolver could not resolve at all, INCLUDING a root cycle
 //!   (which the resolver reports as
-//!   [`UnresolvedBranchReason::Cycle`](verter_semantic::analysis::component_meta::UnresolvedBranchReason::Cycle))
+//!   [`UnresolvedBranchReason::Cycle`](verter_session_query::analysis::component_meta::UnresolvedBranchReason::Cycle))
 //!   — one such branch zeroes the WHOLE projection, not just its own arm.
 //! * a root component the owner has no importable reference for: without one
 //!   the carrier cannot NAME the child, so the WHOLE ARM contributes nothing —
@@ -73,7 +73,7 @@
 //! own props type is what gets widened in — so those branches project normally.
 
 use verter_compiler::tsc::{FallthroughArm, FallthroughPropsProjection, InheritedComponentProps};
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     BranchStatus, FallthroughBranch, FallthroughSurface, InheritedSource, ResolvedRootStep,
 };
 

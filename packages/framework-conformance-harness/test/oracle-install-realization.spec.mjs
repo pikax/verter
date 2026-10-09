@@ -34,6 +34,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   compareRealizedToLock,
@@ -60,7 +61,7 @@ afterAll(() => {
 /** Child script: realize one domain and print its realized closure digest. */
 const REALIZE_SCRIPT = `
   const { ensureOracleDomain } = await import(${JSON.stringify(
-    path.join(HARNESS_ROOT, "src/oracle-install.mjs"),
+    pathToFileURL(path.join(HARNESS_ROOT, "src/oracle-install.mjs")).href,
   )});
   const result = ensureOracleDomain(process.argv[1]);
   console.log("REALIZED_DIGEST", result.realizedClosureSha256);
@@ -111,6 +112,95 @@ describe("offline fail-closed realization (no provisioned cache)", () => {
     // The refusal fired BEFORE any lock or stage work: nothing was created
     // under the installs root, proving npm was never even attempted.
     expect(readdirSync(installsRoot)).toEqual([]);
+  });
+});
+
+describe("realization lock EPERM", () => {
+  const storePath = path.join(HARNESS_ROOT, "src/oracle-install.mjs");
+  const epermScript = `
+    import { registerHooks } from "node:module";
+    import { pathToFileURL } from "node:url";
+    const storeUrl = pathToFileURL(${JSON.stringify(storePath)}).href;
+    const anchor = "mkdirSync(lockPath); // not recursive: EEXIST is the exclusion signal";
+    registerHooks({
+      load(url, context, nextLoad) {
+        const result = nextLoad(url, context);
+        if (!String(url).includes("/src/oracle-install.mjs")) return result;
+        const source = String(result.source);
+        const index = source.indexOf(anchor);
+        if (index < 0) throw new Error("anchor missing");
+        const replacement = 'throw Object.assign(new Error("windows lock eperm"), { code: "EPERM" });';
+        const next = source.slice(0, index) + replacement + source.slice(index + anchor.length);
+        return { ...result, source: next + "\\nexport { acquireRealizeLock };\\n" };
+      },
+    });
+    const { acquireRealizeLock } = await import(storeUrl);
+    console.log("STARTING");
+    acquireRealizeLock("vue");
+    console.log("ACQUIRED");
+  `;
+
+  function spawnAcquire(installsRoot) {
+    return spawn(process.execPath, ["--input-type=module", "-e", epermScript], {
+      cwd: HARNESS_ROOT,
+      env: { ...process.env, BF2_ORACLE_INSTALLS: installsRoot },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+
+  function collect(child) {
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const done = new Promise((resolvePromise) => {
+      child.on("close", (code) => resolvePromise(code));
+    });
+    return { stdout: () => stdout, stderr: () => stderr, done };
+  }
+
+  it("EPERM while the lock directory exists is contention, so acquire waits", async () => {
+    const installsRoot = scratchDir("bf2-installs-eperm-held-");
+    mkdirSync(path.join(installsRoot, "vue.lock"));
+    const child = spawnAcquire(installsRoot);
+    const output = collect(child);
+    const started = await new Promise((resolvePromise) => {
+      const timer = setTimeout(() => resolvePromise(false), 10_000);
+      const check = () => {
+        if (!output.stdout().includes("STARTING")) return;
+        clearTimeout(timer);
+        resolvePromise(true);
+      };
+      child.stdout.on("data", check);
+      check();
+    });
+    expect(started).toBe(true);
+    const code = await Promise.race([
+      output.done,
+      new Promise((resolvePromise) => setTimeout(() => resolvePromise("waiting"), 400)),
+    ]);
+    expect(code).toBe("waiting");
+    expect(output.stdout()).not.toContain("ACQUIRED");
+    child.kill();
+    await output.done;
+  });
+
+  it("EPERM when no lock directory exists is a permission error", () => {
+    const installsRoot = scratchDir("bf2-installs-eperm-absent-");
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", epermScript], {
+      cwd: HARNESS_ROOT,
+      env: { ...process.env, BF2_ORACLE_INSTALLS: installsRoot },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("STARTING");
+    expect(result.stdout).not.toContain("ACQUIRED");
+    expect(result.stderr).toContain("windows lock eperm");
   });
 });
 

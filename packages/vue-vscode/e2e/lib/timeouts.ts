@@ -203,15 +203,25 @@ export const POLL_BUDGETS = {
       "passed explicitly by the same root `beforeAll`: the provider handshake is a suite-level " +
       "precondition, not work done inside any one test, and no ordinary caller can evaluate it",
   },
-  restartTypeProviderSync: {
+  restartEntryDiagnostics: {
     budgetMs: 30_000,
     parentTimeoutMs: 60_000,
     reason:
-      "passed explicitly by `restartParityReady`: an explicit language-server restart repeats the " +
-      "SAME provider handshake `rootTypeProviderSync` budgets at 30s (process start, workspace " +
-      "scan, cold provider project), so it takes the same budget. Every caller restarts under a " +
-      "hook or test that declares at least 60s. It used to take the ordinary 12s default only " +
-      "because the wait was vacuous: the previous server's log lines satisfied it instantly",
+      "passed explicitly by `restartParityReady`: a language-server restart, the new server's " +
+      "level-1 announcement, and the entry document's own merged diagnostics under its sync and " +
+      "import closure. It takes the cold root handshake's 30s and nothing wider: the restarted " +
+      "server certifies the entry while its workspace scan is still running, so neither the scan " +
+      "nor the replay of every held document is on this path",
+  },
+  restartTypeProviderSync: {
+    budgetMs: 45_000,
+    parentTimeoutMs: 90_000,
+    reason:
+      "passed explicitly by `restartParityReady` for a suite that asserts workspace-wide state: " +
+      "level 2 is sent only after the restarted server's whole workspace scan, which runs " +
+      "concurrently with the replay of every document VS Code still holds. CI restarts take " +
+      "15-18s on a healthy runner and 19-36s on a loaded one, so it must not share the cold " +
+      "root handshake's 30s",
   },
   waitForExtensionReady: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
   waitForTypeProviderSync: { budgetMs: DEFAULT_POLL_BUDGET_MS, parentTimeoutMs: SUITE_TIMEOUT_MS },
@@ -357,25 +367,34 @@ export const POLL_SEQUENCES = {
       "ensureTypeProviderSynced (provider sync), then openReadyCached (file ready) — in series, " +
       "under ONE deadline. At 60s the second and third could be killed before reaching their own.",
   },
-  restartedSuiteSetup: {
-    members: ["restartTypeProviderSync", "waitForFileReady"],
-    parentTimeoutMs: 60_000,
+  restartedWorkspaceSuiteSetup: {
+    members: ["restartEntryDiagnostics", "restartTypeProviderSync"],
+    parentTimeoutMs: 90_000,
     reason:
-      "a state-sensitive suite's suiteSetup restarts the language server, waits for the NEW " +
-      "server's provider sync, and may then wait for its entry document — in series under the " +
-      "hook's declared 60s deadline",
+      "a suite that asserts workspace-wide state restarts the language server, waits for the NEW " +
+      "server to certify its entry document, then for its level-2 announcement — in series " +
+      "under the hook's declared 90s deadline",
+  },
+  restartedWorkspaceReferences: {
+    members: ["restartTypeProviderSync"],
+    parentTimeoutMs: 90_000,
+    reason:
+      "a workspace-wide references test that follows an in-test server restart awaits the new " +
+      "server's level-2 announcement before counting; the count then polls under the rest of the " +
+      "test's own 90s",
   },
   restartedProviderOwnedWitnesses: {
     members: [
-      "restartTypeProviderSync",
+      "restartEntryDiagnostics",
       "waitForFileReady",
-      "restartTypeProviderSync",
+      "restartEntryDiagnostics",
       "waitForFileReady",
     ],
     parentTimeoutMs: 90_000,
     reason:
       "the Svelte provider-owned unused-snippet test gives each of its two witness files a fresh " +
-      "server epoch: restart, provider sync, file ready — twice, in series, under its own 90s",
+      "server epoch: restart and entry diagnostics, then file ready — twice, in series, under its " +
+      "own 90s",
   },
   importedPropsHoverThenCompletion: {
     members: ["waitForHoverMatching", "waitForCompletionsMatching"],

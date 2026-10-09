@@ -22,4 +22,18 @@ fn main() {
     tests.compile_fail(fixture_root.join("instantiate_key_context_not_extractable.rs"));
     // The raw compiler entry must be absent without verter_compiler/test-support.
     tests.compile_fail(fixture_root.join("scanners_replacement_raw_parser_public.rs"));
+    // These contracts exercise the actual five request ports and their owned outputs.
+    tests.pass(fixture_root.join("engine_ports_actual_host_positive.rs"));
+    tests.compile_fail(fixture_root.join("engine_ports_indexed_input_no_worker.rs"));
+    tests.compile_fail(fixture_root.join("engine_ports_owned_lowering_no_memo.rs"));
+    tests.compile_fail(fixture_root.join("engine_ports_route_no_worker.rs"));
+    tests.compile_fail(fixture_root.join("engine_ports_fact_validation_no_workspace.rs"));
+    tests.compile_fail(fixture_root.join("engine_ports_cancellation_no_host.rs"));
+    tests.compile_fail(fixture_root.join("engine_ports_execution_no_graph.rs"));
+    // The engine output authority: no forgery or duplication, no recovery from
+    // query access, and no remint from a live engine's recovered stores.
+    tests.compile_fail(fixture_root.join("output_authority_not_forgeable.rs"));
+    tests.compile_fail(fixture_root.join("output_authority_not_duplicable.rs"));
+    tests.compile_fail(fixture_root.join("output_authority_not_recoverable_from_query_access.rs"));
+    tests.compile_fail(fixture_root.join("output_authority_not_reminted_from_live_stores.rs"));
 }

@@ -10,6 +10,7 @@ description = "Async file scheduler for Verter — driver-owned DAG with typed i
 publish = false
 
 [features]
+semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
 # `hotpath/parking_lot` turns on hotpath's drop-in instrumented wrapper for
 # `parking_lot::Mutex`, used for the scheduler's central DAG lock
 # (`new_dag_mutex` in scheduler.rs — every admission, dispatch, and
@@ -40,9 +41,10 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/parking_lot"]
 # need it for their own tests add `features = ["test-support"]` only in
 # `[dev-dependencies]`, which Cargo unifies into their test/bench/example
 # targets and not into a production build.
-test-support = []
+test-support = ["verter_execution/test-support"]
 
 [dependencies]
+verter_execution = { path = "../verter_execution" }
 verter_debug_assert = { workspace = true }
 arc-swap = "1.9"
 hotpath = { version = "0.23", optional = true }
@@ -62,3 +64,6 @@ rayon = "1"
 web-time = "1.1"
 
 [dev-dependencies]
+verter_execution = { path = "../verter_execution", features = ["test-support"] }
+# Shard-level capacity reads for the node table's drain witness.
+dashmap = { version = "6.2", features = ["raw-api"] }

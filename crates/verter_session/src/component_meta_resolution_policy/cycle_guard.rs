@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use smallvec::SmallVec;
 use verter_type_expr::LiteralValue;
 
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, IndexKey, SemanticNodeData, SemanticNodeId,
 };
 
@@ -215,13 +215,12 @@ fn normalize_one_node(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> Norm
 /// never poisons a cross-request cache), matching the ephemeral-guard
 /// contract documented on this module.
 fn hash_arg_nodes(args: &[SemanticNodeId], ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
-    let resolver = ctx.resolver_ctx();
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
     let mut bridge = LiteralHashBridge(&mut hasher);
     let mut seen: rustc_hash::FxHashMap<SemanticNodeId, u64> = rustc_hash::FxHashMap::default();
     bridge.write_u64(args.len() as u64);
     for arg in args {
-        hash_node_rec(resolver, *arg, &mut bridge, &mut seen, 0);
+        hash_node_rec(ctx.engine.dispatch, *arg, &mut bridge, &mut seen, 0);
     }
     hasher.digest()
 }
@@ -232,7 +231,7 @@ fn hash_arg_nodes(args: &[SemanticNodeId], ctx: &PolicyCtx<'_, '_>) -> ShapeHash
 fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
     let mut bridge = LiteralHashBridge(&mut hasher);
-    hash_semantic_node_structurally(ctx.resolver_ctx(), node, &mut bridge);
+    hash_semantic_node_structurally(ctx.engine.dispatch, node, &mut bridge);
     hasher.digest()
 }
 
@@ -251,7 +250,10 @@ fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
 /// literal values, and composite structural shape stay distinct). It is an
 /// ephemeral recursion-guard identity only — never a cache key.
 pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     root: SemanticNodeId,
     hasher: &mut H,
 ) {
@@ -260,11 +262,14 @@ pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
     // Pre-order ordinals for back-reference encoding on shared / cyclic
     // child edges.
     let mut seen: FxHashMap<SemanticNodeId, u64> = FxHashMap::default();
-    hash_node_rec(ctx, root, hasher, &mut seen, 0);
+    hash_node_rec(dispatch, root, hasher, &mut seen, 0);
 }
 
 fn hash_node_rec<H: std::hash::Hasher>(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     hasher: &mut H,
     seen: &mut rustc_hash::FxHashMap<SemanticNodeId, u64>,
@@ -284,7 +289,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
     let ordinal = seen.len() as u64;
     seen.insert(node, ordinal);
 
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+    let Some(data) =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+    else {
         hasher.write_u8(0xFD);
         return;
     };
@@ -301,7 +308,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
         let args = data.carrier_type_args();
         hasher.write_u64(args.len() as u64);
         for arg in args {
-            hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
         }
         return;
     }
@@ -315,14 +322,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(op.stable_hash_tag());
             hasher.write_u64(args.len() as u64);
             for arg in args.iter() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::InstantiationRef { base, args } => {
             base.hash(hasher);
             hasher.write_u64(args.len() as u64);
             for arg in args.iter() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::ClassExpressionInstance {
@@ -333,9 +340,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
             identity.hash(hasher);
             hasher.write_u64(type_arguments.len() as u64);
             for argument in type_arguments.iter() {
-                hash_node_rec(ctx, *argument, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *argument, hasher, seen, depth + 1);
             }
-            hash_node_rec(ctx, *surface, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *surface, hasher, seen, depth + 1);
         }
         SemanticNodeData::Literal(value) => {
             value.hash(hasher);
@@ -348,7 +355,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
             kind.hash(hasher);
         }
         SemanticNodeData::Alias(target) => {
-            hash_node_rec(ctx, *target, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *target, hasher, seen, depth + 1);
         }
         SemanticNodeData::Object(surface) => {
             hasher.write_u64(surface.positive_members().len() as u64);
@@ -368,49 +375,49 @@ fn hash_node_rec<H: std::hash::Hasher>(
                     }
                     AuthoredPropertyKey::Computed(node) => {
                         hasher.write_u8(3);
-                        hash_node_rec(ctx, *node, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, *node, hasher, seen, depth + 1);
                     }
                 }
                 hasher.write_u8(u8::from(member.optional));
                 hasher.write_u8(u8::from(member.readonly));
                 member.method_kind.hash(hasher);
-                hash_node_rec(ctx, member.value, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, member.value, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.call_signatures.len() as u64);
             for signature in surface.call_signatures.iter() {
-                hash_node_rec(ctx, *signature, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.construct_signatures.len() as u64);
             for signature in surface.construct_signatures.iter() {
-                hash_node_rec(ctx, *signature, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
             hasher.write_u64(surface.index_signatures.len() as u64);
             for signature in surface.index_signatures.iter() {
-                hash_node_rec(ctx, signature.key_type, hasher, seen, depth + 1);
-                hash_node_rec(ctx, signature.value_type, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, signature.key_type, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, signature.value_type, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::ObjectSpreadProgram(program) => {
             program.hash(hasher);
             for child in program.child_nodes() {
-                hash_node_rec(ctx, child, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, child, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Union(arms) => {
             hasher.write_u64(arms.len() as u64);
             for arm in arms.iter() {
-                hash_node_rec(ctx, *arm, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arm, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Intersection(arms) => {
             hasher.write_u64(arms.len() as u64);
             for arm in arms.iter() {
-                hash_node_rec(ctx, *arm, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arm, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Array { element, readonly } => {
             hasher.write_u8(u8::from(*readonly));
-            hash_node_rec(ctx, *element, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *element, hasher, seen, depth + 1);
         }
         SemanticNodeData::Tuple { elements, readonly } => {
             hasher.write_u8(u8::from(*readonly));
@@ -424,7 +431,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
                 hasher.write_u8(u8::from(element.optional));
                 hasher.write_u8(u8::from(element.rest));
-                hash_node_rec(ctx, element.value, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, element.value, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::TemplateLiteral {
@@ -437,14 +444,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
             }
             hasher.write_u64(expressions.len() as u64);
             for expr in expressions.iter() {
-                hash_node_rec(ctx, *expr, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *expr, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::KeyOf { base } => {
-            hash_node_rec(ctx, *base, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *base, hasher, seen, depth + 1);
         }
         SemanticNodeData::IndexedAccess { object, index } => {
-            hash_node_rec(ctx, *object, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *object, hasher, seen, depth + 1);
             match index {
                 IndexKey::String(key) => {
                     hasher.write_u8(1);
@@ -460,12 +467,12 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
                 IndexKey::Computed(index_node) => {
                     hasher.write_u8(4);
-                    hash_node_rec(ctx, *index_node, hasher, seen, depth + 1);
+                    hash_node_rec(dispatch, *index_node, hasher, seen, depth + 1);
                 }
             }
         }
         SemanticNodeData::Mapped { source, mapper } => {
-            hash_node_rec(ctx, *source, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *source, hasher, seen, depth + 1);
             mapper.hash(hasher);
         }
         SemanticNodeData::TypeOf(_) => {
@@ -477,7 +484,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
             }
             for arg in data.carrier_type_args() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         // The nominal terminal hashes its DECLARING IDENTITY: the identity
@@ -515,7 +522,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write(name.as_bytes());
             binder.write_stable_fingerprint(hasher);
             if let Some(constraint) = constraint {
-                hash_node_rec(ctx, *constraint, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *constraint, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::InferRef { name, binder } => {
@@ -531,24 +538,24 @@ fn hash_node_rec<H: std::hash::Hasher>(
             pending,
         } => {
             hasher.write_u8(u8::from(*distributive));
-            hash_node_rec(ctx, *check, hasher, seen, depth + 1);
-            hash_node_rec(ctx, *extends, hasher, seen, depth + 1);
-            hash_node_rec(ctx, *true_branch_ref, hasher, seen, depth + 1);
-            hash_node_rec(ctx, *false_branch_ref, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *check, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *extends, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *true_branch_ref, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *false_branch_ref, hasher, seen, depth + 1);
             match pending {
                 None => hasher.write_u8(0),
                 Some(frame) => {
                     hasher.write_u8(1);
                     hasher.write_usize(frame.true_branch().pairs().len());
                     for &(param, arg) in frame.true_branch().pairs() {
-                        hash_node_rec(ctx, param, hasher, seen, depth + 1);
-                        hash_node_rec(ctx, arg, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, param, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, arg, hasher, seen, depth + 1);
                     }
                     hasher.write_u8(2);
                     hasher.write_usize(frame.false_branch().pairs().len());
                     for &(param, arg) in frame.false_branch().pairs() {
-                        hash_node_rec(ctx, param, hasher, seen, depth + 1);
-                        hash_node_rec(ctx, arg, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, param, hasher, seen, depth + 1);
+                        hash_node_rec(dispatch, arg, hasher, seen, depth + 1);
                     }
                 }
             }
@@ -564,8 +571,8 @@ fn hash_node_rec<H: std::hash::Hasher>(
             // The kind is semantic identity: `() => R` and `new () => R`
             // must never fingerprint-collide.
             hasher.write_u8(match kind {
-                crate::semantic_query::SignatureKind::Call => 0,
-                crate::semantic_query::SignatureKind::Construct => 1,
+                verter_type_engine::semantic_query::SignatureKind::Call => 0,
+                verter_type_engine::semantic_query::SignatureKind::Construct => 1,
             });
             hasher.write_u64(params.len() as u64);
             for param in params.iter() {
@@ -577,9 +584,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 }
                 hasher.write_u8(u8::from(param.optional));
                 hasher.write_u8(u8::from(param.rest));
-                hash_node_rec(ctx, param.ty, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, param.ty, hasher, seen, depth + 1);
             }
-            hash_node_rec(ctx, *return_type, hasher, seen, depth + 1);
+            hash_node_rec(dispatch, *return_type, hasher, seen, depth + 1);
             hasher.write_u64(type_parameters.len() as u64);
             for param in type_parameters.iter() {
                 hasher.write(param.name.as_bytes());
@@ -590,14 +597,14 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 predicate.subject.hash(hasher);
                 hasher.write_u8(u8::from(predicate.asserts));
                 if let Some(target) = predicate.ty {
-                    hash_node_rec(ctx, target, hasher, seen, depth + 1);
+                    hash_node_rec(dispatch, target, hasher, seen, depth + 1);
                 }
             }
         }
         SemanticNodeData::MergedDecl { contributors } => {
             hasher.write_u64(contributors.len() as u64);
             for contributor in contributors.iter() {
-                hash_node_rec(ctx, *contributor, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *contributor, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::Opaque(error) => {
@@ -616,7 +623,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 hasher.write_u8(u8::from(typeof_query));
             }
             for arg in data.carrier_type_args() {
-                hash_node_rec(ctx, *arg, hasher, seen, depth + 1);
+                hash_node_rec(dispatch, *arg, hasher, seen, depth + 1);
             }
         }
         SemanticNodeData::SyntheticBinding { id, .. } => {
@@ -660,9 +667,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::semantic_query::NodeScopeId;
     use crate::types::HostConfig;
     use crate::VerterHost;
+    use verter_type_engine::semantic_query::NodeScopeId;
 
     fn scope() -> NodeScopeId {
         NodeScopeId::File {
@@ -673,11 +680,14 @@ mod tests {
         }
     }
 
-    fn digest(host: &VerterHost, node: crate::semantic_query::SemanticNodeId) -> u64 {
+    fn digest(host: &VerterHost, node: verter_type_engine::semantic_query::SemanticNodeId) -> u64 {
         let mut hasher = xxhash_rust::xxh3::Xxh3::new();
         let mut bridge = LiteralHashBridge(&mut hasher);
         crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-            hash_semantic_node_structurally(ctx, node, &mut bridge);
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+            hash_semantic_node_structurally(dispatch, node, &mut bridge);
         });
         hasher.digest()
     }
@@ -693,7 +703,7 @@ mod tests {
     /// (deterministic structural identity, not allocation identity).
     #[test]
     fn node_structural_hash_discriminates_structure_not_interning() {
-        use crate::semantic_query::SemanticNodeData;
+        use verter_type_engine::semantic_query::SemanticNodeData;
         use verter_type_expr::LiteralValue;
 
         let host = VerterHost::new_standalone(HostConfig::default());
@@ -722,7 +732,7 @@ mod tests {
 
     #[test]
     fn node_structural_hash_discriminates_exact_infer_binder_identity() {
-        use crate::semantic_query::SemanticNodeData;
+        use verter_type_engine::semantic_query::SemanticNodeData;
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
@@ -761,7 +771,7 @@ mod tests {
     /// a union is distinct from its own single arm (complete).
     #[test]
     fn node_structural_hash_is_ordered_and_complete() {
-        use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+        use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
@@ -771,19 +781,17 @@ mod tests {
             .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::Number), scope());
         let union_ab = graph.intern_node_with_scope(
             SemanticNodeData::Union(
-                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
-                    string_node,
-                    number_node,
-                ])),
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from([string_node, number_node]),
+                ),
             ),
             scope(),
         );
         let union_ba = graph.intern_node_with_scope(
             SemanticNodeData::Union(
-                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
-                    number_node,
-                    string_node,
-                ])),
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from([number_node, string_node]),
+                ),
             ),
             scope(),
         );
@@ -801,24 +809,24 @@ mod tests {
 
     #[test]
     fn node_structural_hash_discriminates_spread_operand_identity() {
-        use crate::semantic_query::{
+        use verter_type_engine::semantic_query::{
             MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
         };
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
         let value = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let operand = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
             param_index: 0,
             constraint: None,
             default: None,
             display_name: Arc::from("T"),
         });
         let member = SurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
             value,
             optional: true,
             readonly: false,
@@ -832,7 +840,7 @@ mod tests {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
         };
         let other_operand = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("U"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("U"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -840,10 +848,10 @@ mod tests {
         });
         let object = |operand| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-                crate::semantic_query::ObjectSpreadProgram {
+                verter_type_engine::semantic_query::ObjectSpreadProgram {
                     effects: Arc::from([
-                        crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                            crate::semantic_query::AuthoredPropertyEffect {
+                        verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                            verter_type_engine::semantic_query::AuthoredPropertyEffect {
                                 key: member.key.clone(),
                                 value: member.value,
                                 optional: member.optional,
@@ -856,7 +864,7 @@ mod tests {
                                 excess_origin: member.excess_origin,
                             },
                         ),
-                        crate::semantic_query::ObjectConstructionEffect::Spread(operand),
+                        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(operand),
                     ]),
                 },
             ))
@@ -873,7 +881,7 @@ mod tests {
     /// the digest is stable across walks.
     #[test]
     fn node_structural_hash_terminates_on_cyclic_graph() {
-        use crate::semantic_query::{
+        use verter_type_engine::semantic_query::{
             MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
         };
 
@@ -885,12 +893,12 @@ mod tests {
         // in-arena id cycles cannot be built through interning, but a
         // DIAMOND of shared children walks the same code path).
         let leaf = graph.intern_node_with_scope(
-            SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+            SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::String),
             scope(),
         );
         let member = |name: &str| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
             value: leaf,
             optional: false,
             readonly: false,
@@ -903,7 +911,7 @@ mod tests {
             merge_role: MergeRoleStamp::NEUTRAL,
         };
         let object = graph.intern_node_with_scope(
-            SemanticNodeData::Object(crate::test_surface_view! {
+            SemanticNodeData::Object(verter_type_engine::test_surface_view! {
                 members: Arc::from([member("a"), member("b")]),
                 call_signatures: Arc::from([]),
                 construct_signatures: Arc::from([]),
@@ -939,17 +947,17 @@ mod tests {
     #[test]
     fn normalize_nodes_discriminates_resolved_nested_generic_args() {
         use rustc_hash::FxHashSet;
-        use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
-        use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+        use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
+        use verter_session_query::type_solver::host::ResolvedRootIdentity;
         use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
         use verter_type_expr::LiteralValue;
 
         use super::super::core::{PolicyCtx, PolicyRegistry};
         use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-        use crate::resolver_core::{
-            ComponentMetaQueryEngine, ResolvedDeclarationKind, ResolvedTypeDeclaration,
-        };
-        use crate::semantic_query::{DeclIdentity, SemanticNodeData};
+        use crate::resolver_core::ComponentMetaQueryEngine;
+        use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+        use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+        use verter_type_engine::semantic_query::{DeclIdentity, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
@@ -1012,7 +1020,10 @@ mod tests {
         let empty_idents: FxHashSet<ResolvedRootIdentity> = FxHashSet::default();
 
         crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-            let mut engine = ComponentMetaQueryEngine::new(ctx);
+            let fixture_dispatch_0 =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
+            let mut engine = ComponentMetaQueryEngine::new(ctx, &fixture_dispatch_0);
             let mut pctx = PolicyCtx {
                 registry: &policy_registry,
                 engine: &mut engine,

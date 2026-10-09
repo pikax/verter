@@ -22,10 +22,13 @@
 
 use std::sync::OnceLock;
 use verter_session::file_artifact_store::{
-    AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, ProjectIdentity,
+    AugmentationTargetKey, AugmentationTargetKind, ProjectIdentity,
 };
+use verter_session_query::source::artifact_key::FileArtifactKey;
 
-use verter_semantic::resolver_core::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
+use verter_session_query::resolution::{
+    IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias,
+};
 use verter_workspace::env_hash::EnvHashInputs;
 use verter_workspace::env_hash::IdeProjectConfigEnvHash;
 use verter_workspace::module_resolution::{ConditionSet, ModuleResolutionMode};

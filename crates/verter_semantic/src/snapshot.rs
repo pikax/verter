@@ -6,12 +6,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::facts::binding::BindingDeclaration;
-use crate::facts::boundary::ComponentInstanceEdge;
-use crate::facts::component::ComponentSurface;
-use crate::facts::reactivity::ReactivityFact;
-use crate::facts::symbol::FileImportGraph;
 use crate::revision::RevisionMarker;
+use verter_session_query::facts::binding::BindingDeclaration;
+use verter_session_query::facts::boundary::ComponentInstanceEdge;
+use verter_session_query::facts::component::ComponentSurface;
+use verter_session_query::facts::reactivity::ReactivityFact;
+use verter_session_query::facts::symbol::FileImportGraph;
 
 /// Aggregated semantic facts for a single file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,8 +64,8 @@ mod tests {
 
     #[test]
     fn find_binding_by_name() {
-        use crate::facts::binding::{BindingDeclaration, BindingKind};
-        use crate::facts::reactivity::ReactivityFact;
+        use verter_session_query::facts::binding::{BindingDeclaration, BindingKind};
+        use verter_session_query::facts::reactivity::ReactivityFact;
 
         let snap = FileSemanticSnapshot {
             file_id: "app.vue".into(),
@@ -103,9 +103,11 @@ mod tests {
 
     #[test]
     fn snapshot_with_surface_and_bindings() {
-        use crate::facts::binding::{BindingDeclaration, BindingKind};
-        use crate::facts::component::{ComponentSurface, PropFact};
-        use crate::facts::reactivity::{ReactivityFact, ReactivitySource, ReactivityStatus};
+        use verter_session_query::facts::binding::{BindingDeclaration, BindingKind};
+        use verter_session_query::facts::component::{ComponentSurface, PropFact};
+        use verter_session_query::facts::reactivity::{
+            ReactivityFact, ReactivitySource, ReactivityStatus,
+        };
 
         let mut surface = ComponentSurface::default();
         surface.declared.props.push(PropFact {
@@ -163,8 +165,8 @@ mod tests {
 
     #[test]
     fn find_binding_matches_exact_name() {
-        use crate::facts::binding::{BindingDeclaration, BindingKind};
-        use crate::facts::reactivity::ReactivityFact;
+        use verter_session_query::facts::binding::{BindingDeclaration, BindingKind};
+        use verter_session_query::facts::reactivity::ReactivityFact;
 
         let snap = FileSemanticSnapshot {
             file_id: "x.vue".into(),

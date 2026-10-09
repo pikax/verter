@@ -4,15 +4,25 @@
 //! statements backfill, repeated demands re-lower nothing, distinct
 //! demands share ONE retained eval-program parse, and seeding from a
 //! built env matches the lazy fold.
+use verter_session_query::source::deref::DerefedBodyShape;
+use verter_session_query::source::deref::LocatorBodyDerefError;
 
 use std::sync::Arc;
+use verter_session_query::function_program::{FunctionProgramDiscovery, FunctionProgramIndex};
 
-use super::*;
+use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
+use verter_semantic_source::decl_body_memo::*;
+use verter_semantic_source::decl_lowering::DeclLoweringCounters;
+use verter_session_query::declarations::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
+use verter_session_query::source::demand::DemandOutcome;
+use verter_session_query::source::snapshot::SnapshotKey;
+use verter_type_expr::facts::ValueAnnotationClass;
 use verter_type_expr::locators::{
     AugmentationBodyLocator, AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator,
     LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
     TypeParamVisibility,
 };
+use verter_type_expr::TypeExpr;
 
 // The lazily lowered TYPE-declaration memo record is fact+locator content
 // free: authored bodies and header-parameter BOUNDS are re-borrowed
@@ -97,14 +107,14 @@ fn aug_type_locator(
 }
 
 /// The single derefed expression, or a panic naming the unexpected shape.
-fn single(body: &locator_deref::DerefedAuthoredBody) -> &TypeExpr {
+fn single(body: &verter_session_query::source::deref::DerefedAuthoredBody) -> &TypeExpr {
     match &body.shape {
         DerefedBodyShape::Single(expr) => expr,
         other => panic!("expected a single derefed body, got {other:?}"),
     }
 }
 
-fn memo_for(source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
+fn memo_for(source: &str) -> (Arc<DeclBodyMemo>, Arc<DeclLoweringCounters>) {
     memo_for_canonical(FIXTURE_CANONICAL, source)
 }
 
@@ -112,20 +122,26 @@ fn memo_for(source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
 /// out of a full [`ShallowFileState`] construction (which installs the ONE
 /// shared lens pair from the finished state), a live lowering service
 /// retains the parse, and nothing lowers until first demand.
-fn memo_for_canonical(canonical: &str, source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
+fn memo_for_canonical(
+    canonical: &str,
+    source: &str,
+) -> (Arc<DeclBodyMemo>, Arc<DeclLoweringCounters>) {
     let (state, provenance) =
         crate::resolver_core::ShallowFileState::service_backed_with_provenance_for_test(
             canonical, source,
         );
-    (Arc::clone(state.decl_bodies()), provenance)
+    (
+        Arc::clone(state.decl_bodies()),
+        Arc::clone(&provenance.decl_lowering),
+    )
 }
 
-fn bodies(p: &MetaProvenance) -> u64 {
+fn bodies(p: &DeclLoweringCounters) -> u64 {
     p.decl_bodies_lowered
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn parses(p: &MetaProvenance) -> u64 {
+fn parses(p: &DeclLoweringCounters) -> u64 {
     p.eval_program_parses
         .load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -146,6 +162,7 @@ fn demand_lowers_only_the_demanded_statement() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Unrelated",
         )
+        .value
         .expect("Unrelated exists");
     assert!(matches!(decl.kind, TypeDeclKind::Alias));
     assert_eq!(
@@ -160,6 +177,7 @@ fn demand_lowers_only_the_demanded_statement() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Unrelated",
         )
+        .value
         .expect("still exists");
     assert!(Arc::ptr_eq(&decl, &again), "the cached entry is returned");
     assert_eq!(bodies(&provenance), 1, "a warm demand lowers nothing");
@@ -171,6 +189,7 @@ fn distinct_demands_share_one_retained_parse() {
     for name in ["Unrelated", "Var0", "Var1"] {
         assert!(
             memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), name)
+                .value
                 .is_some(),
             "{name} must lower"
         );
@@ -190,6 +209,7 @@ fn merged_interface_demand_folds_all_contributors() {
     );
     let decl = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Merged")
+        .value
         .expect("Merged exists");
     assert!(
         decl.body.is_merged(),
@@ -207,6 +227,7 @@ fn merged_interface_demand_folds_all_contributors() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Unrelated"
         )
+        .value
         .is_some(),
         "the unrelated symbol still lowers on ITS OWN demand"
     );
@@ -223,6 +244,7 @@ fn demanded_type_decl_copies_exact_vue_ignored_heritage_facts_from_headers() {
     );
     let decl = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Props")
+        .value
         .expect("Props exists");
 
     assert_eq!(
@@ -246,13 +268,14 @@ fn class_statement_backfills_its_value_sibling() {
     let (memo, provenance) = memo_for("class K { a: number }\ntype Other = { o: 1 };\n");
     let type_side = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "K")
+        .value
         .expect("class type side");
     assert!(matches!(type_side.kind, TypeDeclKind::Class));
     // One class statement lowers BOTH its type and value declarations.
     assert_eq!(bodies(&provenance), 2);
 
     // The value side was backfilled from the same job — no re-lowering.
-    let value_side = memo.value_decl("K").expect("class value side");
+    let value_side = memo.value_decl("K").value.expect("class value side");
     assert!(matches!(value_side.kind, ValueDeclKind::Class));
     assert!(
         value_side.object_shape.is_some(),
@@ -275,6 +298,7 @@ fn dependency_paths_ride_on_the_lowered_entry() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "WithDeps",
         )
+        .value
         .expect("WithDeps exists");
     assert!(has_dependency(&decl, "Ext"));
     assert!(has_dependency(&decl, "Local"));
@@ -297,6 +321,7 @@ fn default_class_declared_name_and_alias_both_carry_heritage_dep() {
     );
     let declared = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Props")
+        .value
         .expect("declared-name type side");
     assert!(
         has_dependency(&declared, "Imported"),
@@ -308,6 +333,7 @@ fn default_class_declared_name_and_alias_both_carry_heritage_dep() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "default",
         )
+        .value
         .expect("default alias");
     assert!(
         has_dependency(&aliased, "Imported"),
@@ -328,6 +354,7 @@ fn namespaced_type_alias_carries_its_dep_under_qualified_name() {
     );
     let decl = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "N.T")
+        .value
         .expect("namespaced type symbol N.T");
     assert!(
         has_dependency(&decl, "Imported"),
@@ -348,6 +375,7 @@ fn nested_namespace_type_alias_carries_dep_under_double_qualified_name() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Outer.Inner.T",
         )
+        .value
         .expect("nested namespaced type symbol");
     assert!(
         has_dependency(&decl, "Imported"),
@@ -368,6 +396,7 @@ fn jsdoc_typedef_carries_its_dep() {
     );
     let decl = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Alias")
+        .value
         .expect("typedef must lower");
     assert!(
         has_dependency(&decl, "Imported"),
@@ -388,6 +417,7 @@ fn jsdoc_typedef_preserves_qualified_nullable_dependency_paths() {
     for name in ["Plain", "Nullable", "NonNullable"] {
         let declaration = memo
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), name)
+            .value
             .unwrap();
         assert!(
             has_dependency(&declaration, "NS.Value"),
@@ -412,6 +442,7 @@ fn concurrent_first_touch_lowers_once() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "Unrelated",
             )
+            .value
             .is_some()
         }));
     }
@@ -451,6 +482,7 @@ fn concurrent_broken_lease_demand_every_waiter_sees_lease_miss() {
         // snapshot out-of-band so every subsequent demand lease-misses.
         assert!(memo
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var0")
+            .value
             .is_some());
         memo.release_retained_snapshot_for_test();
 
@@ -524,6 +556,7 @@ fn jsdoc_typedef_lowers_on_demand() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "FromDoc",
         )
+        .value
         .expect("typedef must lower");
     assert!(matches!(decl.kind, TypeDeclKind::Alias));
     assert_eq!(
@@ -549,6 +582,7 @@ type FileScope = { f: 1 };
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "ComponentCustomProperties",
         )
+        .value
         .expect("augmentation entry exists");
     assert!(matches!(decl.kind, TypeDeclKind::Interface));
     // The block statement lowers both its inner declarations (type +
@@ -565,7 +599,9 @@ type FileScope = { f: 1 };
     // decl-body locator granularity item).
     assert_eq!(bodies(&provenance), 2);
     assert!(
-        memo.augmentation_value_decl(&scope, "injected").is_some(),
+        memo.augmentation_value_decl(&scope, "injected")
+            .value
+            .is_some(),
         "the value sibling was backfilled from the same block job"
     );
     assert_eq!(
@@ -583,14 +619,16 @@ fn unknown_names_are_none_without_lowering() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Missing"
         )
+        .value
         .is_none());
-    assert!(memo.value_decl("Missing").is_none());
+    assert!(memo.value_decl("Missing").value.is_none());
     assert!(memo
         .augmentation_type_decl_in(
             &AugmentationScopeKind::Global,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Missing",
         )
+        .value
         .is_none());
     assert_eq!(bodies(&provenance), 0, "a miss lowers nothing");
     assert_eq!(parses(&provenance), 0, "a miss parses nothing");
@@ -602,7 +640,7 @@ fn unknown_names_are_none_without_lowering() {
 /// `acquire_lease`'s worker-thread rendezvous.
 #[test]
 fn peek_never_triggers_lowering() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     let (memo, provenance) = memo_for(FIVE_DECLS);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
@@ -633,7 +671,7 @@ fn peek_never_triggers_lowering() {
 /// tell which space actually needed the reload.
 #[test]
 fn peek_need_inputs_carries_the_correct_declaration_space() {
-    use verter_semantic::resolver_core::{AttemptOutcome, DeclarationSpace, InputKey};
+    use verter_session_query::resolution::{AttemptOutcome, DeclarationSpace, InputKey};
 
     const BOTH_SPACES_SRC: &str = "export type Foo = string;\nexport const Foo = 1;\n";
     let (memo, _provenance) = memo_for(BOTH_SPACES_SRC);
@@ -672,12 +710,12 @@ fn peek_need_inputs_carries_the_correct_declaration_space() {
 
 #[test]
 fn peek_after_demand_serves_the_same_cached_entry() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     let (memo, provenance) = memo_for(FIVE_DECLS);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
 
-    let demanded = memo.type_decl_in(owner, "Var0").expect("Var0 exists");
+    let demanded = memo.type_decl_in(owner, "Var0").value.expect("Var0 exists");
     assert_eq!(
         bodies(&provenance),
         1,
@@ -704,7 +742,7 @@ fn peek_after_demand_serves_the_same_cached_entry() {
 
 #[test]
 fn peek_unknown_symbol_is_a_stable_complete_none() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     let (memo, provenance) = memo_for(FIVE_DECLS);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
@@ -728,7 +766,7 @@ fn peek_unknown_symbol_is_a_stable_complete_none() {
 
 #[test]
 fn peek_value_decl_after_demand_serves_the_same_cached_entry() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     const VALUE_SRC: &str = "export const answer = 42;\n";
     let (memo, provenance) = memo_for(VALUE_SRC);
@@ -740,7 +778,7 @@ fn peek_value_decl_after_demand_serves_the_same_cached_entry() {
         "inventoried but never demanded ⇒ NeedInputs"
     );
 
-    let demanded = memo.value_decl("answer").expect("answer exists");
+    let demanded = memo.value_decl("answer").value.expect("answer exists");
     match memo.peek_value_decl(FIXTURE_CANONICAL, owner, "answer") {
         AttemptOutcome::Complete(Some(decl)) => {
             assert!(Arc::ptr_eq(&decl, &demanded));
@@ -842,14 +880,18 @@ declare module "ext" {
     // matching accessor.
     for key in header_index.type_headers.keys() {
         assert!(
-            memo.type_decl_in(key.owner, key.name.as_ref()).is_some(),
+            memo.type_decl_in(key.owner, key.name.as_ref())
+                .value
+                .is_some(),
             "type header `{}` must demand-resolve through type_decl",
             key.name,
         );
     }
     for key in header_index.value_headers.keys() {
         assert!(
-            memo.value_decl_in(key.owner, key.name.as_ref()).is_some(),
+            memo.value_decl_in(key.owner, key.name.as_ref())
+                .value
+                .is_some(),
             "value header `{}` must demand-resolve through value_decl",
             key.name,
         );
@@ -858,6 +900,7 @@ declare module "ext" {
         for key in names.keys() {
             assert!(
                 memo.augmentation_type_decl_in(scope, key.owner, key.name.as_ref())
+                    .value
                     .is_some(),
                 "augmentation type header `{}` in {scope:?} must demand-resolve",
                 key.name,
@@ -868,6 +911,7 @@ declare module "ext" {
         for key in names.keys() {
             assert!(
                 memo.augmentation_value_decl_in(scope, key.owner, key.name.as_ref())
+                    .value
                     .is_some(),
                 "augmentation value header `{}` in {scope:?} must demand-resolve",
                 key.name,
@@ -895,7 +939,10 @@ fn merged_same_name_enum_resolves_all_members_in_both_spaces_through_the_memo() 
     let (memo, _) = memo_for(source);
 
     // Value space: merged member set in source order, through `value_decl`.
-    let value = memo.value_decl("E").expect("enum value body resolves");
+    let value = memo
+        .value_decl("E")
+        .value
+        .expect("enum value body resolves");
     let names: Vec<&str> = value
         .enum_members
         .as_ref()
@@ -916,6 +963,7 @@ fn merged_same_name_enum_resolves_all_members_in_both_spaces_through_the_memo() 
     // from the value-derived projected union).
     let ty = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "E")
+        .value
         .expect("enum type body resolves");
     assert_eq!(
         ty.body.contributors().len(),
@@ -997,16 +1045,18 @@ fn seeded_memo_matches_lazy_fold() {
 
     let seeded_decl = seeded
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "E")
+        .value
         .expect("seeded enum type entry");
     let lazy_decl = lazy
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "E")
+        .value
         .expect("lazy enum type entry");
     assert_eq!(
         seeded_decl.body_hash, lazy_decl.body_hash,
         "enum seed-time fingerprint (UnresolvedLens) must equal the lazy \
          fold's (ShallowLens) — the arms are lens-independent"
     );
-    let value = seeded.value_decl("v").expect("seeded value entry");
+    let value = seeded.value_decl("v").value.expect("seeded value entry");
     assert!(value.object_shape.is_some());
     assert!(seeded.whole_env_materialized(), "seeding pre-sets the env");
 }
@@ -1030,7 +1080,10 @@ fn lowered_value_decl_copies_narrowed_facts_and_fingerprints_at_lowering_time() 
     let source = "const base: { a: number } = { a: 1 };\nconst alias: typeof base = base;\n";
     let (memo, _) = memo_for(source);
 
-    let alias = memo.value_decl("alias").expect("alias value body resolves");
+    let alias = memo
+        .value_decl("alias")
+        .value
+        .expect("alias value body resolves");
     assert!(matches!(
         alias.type_annotation.classification,
         ValueAnnotationClass::TypeOfAlias
@@ -1042,7 +1095,10 @@ fn lowered_value_decl_copies_narrowed_facts_and_fingerprints_at_lowering_time() 
         .expect("single-hop non-self `typeof base` mints the peel-target fact");
     assert_eq!(target.symbol.as_ref(), "base");
 
-    let base = memo.value_decl("base").expect("base value body resolves");
+    let base = memo
+        .value_decl("base")
+        .value
+        .expect("base value body resolves");
     assert!(
         !alias.body_hash.budget_exceeded && !base.body_hash.budget_exceeded,
         "the lazy path fingerprints the TRANSIENT annotation — never the \
@@ -1071,19 +1127,22 @@ fn seeded_annotated_value_cell_degrades_its_fingerprint_honestly() {
     let source = "const c: { a: 1 } = { a: 1 };\nenum E { A = 1 }\n";
     let seeded = seeded_memo_for(source);
 
-    let annotated = seeded.value_decl("c").expect("seeded annotated value");
+    let annotated = seeded
+        .value_decl("c")
+        .value
+        .expect("seeded annotated value");
     assert!(
         annotated.body_hash.budget_exceeded,
         "a transient-less annotated value must degrade, not fabricate"
     );
-    let enum_value = seeded.value_decl("E").expect("seeded enum value");
+    let enum_value = seeded.value_decl("E").value.expect("seeded enum value");
     assert!(
         !enum_value.body_hash.budget_exceeded,
         "an enum fingerprints fully from its folded member facts"
     );
 
     let (lazy, _) = memo_for(source);
-    let lazy_enum = lazy.value_decl("E").expect("lazy enum value");
+    let lazy_enum = lazy.value_decl("E").value.expect("lazy enum value");
     assert_eq!(
         enum_value.body_hash, lazy_enum.body_hash,
         "the enum value-body fingerprint is fact-derived, so the seeded and \
@@ -1113,8 +1172,14 @@ fn degraded_seeded_value_fingerprint_is_deterministic_and_honest() {
     // same source mint the SAME degraded fingerprint, bit set.
     let seeded_a = seeded_memo_for(source);
     let seeded_b = seeded_memo_for(source);
-    let a = seeded_a.value_decl("c").expect("seeded annotated value");
-    let b = seeded_b.value_decl("c").expect("seeded annotated value");
+    let a = seeded_a
+        .value_decl("c")
+        .value
+        .expect("seeded annotated value");
+    let b = seeded_b
+        .value_decl("c")
+        .value
+        .expect("seeded annotated value");
     assert!(
         a.body_hash.budget_exceeded,
         "a transient-less annotated value fold degrades (bit stored honestly)"
@@ -1131,7 +1196,7 @@ fn degraded_seeded_value_fingerprint_is_deterministic_and_honest() {
     // transient-less one (so a degraded record standing in for the real one
     // would be observable).
     let (lazy, _) = memo_for(source);
-    let lowered = lazy.value_decl("c").expect("lazy annotated value");
+    let lowered = lazy.value_decl("c").value.expect("lazy annotated value");
     let rail = crate::fact_emission::compat_value_body_hash_input(&lowered);
     assert!(
         !rail.budget_exceeded,
@@ -1216,9 +1281,10 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
                 barrier.wait();
                 let ok = if type_side {
                     memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), &name)
+                        .value
                         .is_some()
                 } else {
-                    memo.value_decl(&name).is_some()
+                    memo.value_decl(&name).value.is_some()
                 };
                 let _ = tx.send(ok);
             }));
@@ -1268,6 +1334,7 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     // First demand pins the lease and lowers the demanded body.
     assert!(memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var0")
+        .value
         .is_some());
     assert_eq!(parses(&provenance), 1, "the lease acquisition parses once");
     let lowered_before = bodies(&provenance);
@@ -1277,15 +1344,15 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     // worker-side retained snapshot is released — every subsequent demand
     // lease-misses.
     let service = memo
-        .service
-        .as_ref()
+        .lowering_service_for_test()
         .expect("a production memo has a service");
-    service.release_retained_snapshot_for_test(&memo.key);
+    service.release_retained_snapshot_for_test(&memo.snapshot_identity());
 
     // 1. Per-symbol body demand (`lower_demanded`): ReturnOnly — a CLEAN None
     //    (no panic), and NO body-less warm entry is admitted for `Var1`.
     assert!(
         memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var1")
+            .value
             .is_none(),
         "a body demand with a broken lease must fail CLOSED to None via ReturnOnly \
          (never a panic, never a transient re-parse)"
@@ -1349,6 +1416,7 @@ fn broken_lease_locator_deref_returns_lease_miss_not_unknown_symbol() {
     // snapshot out-of-band so every subsequent demand lease-misses.
     assert!(memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var0")
+        .value
         .is_some());
     memo.release_retained_snapshot_for_test();
 
@@ -1384,7 +1452,7 @@ fn partial_contributor_batch_does_not_backfill_merged_sibling() {
         memo_for("export interface Foo { a: string }\nexport class Foo { b: number = 1 }\n");
 
     // Demand the VALUE side first: only the class statement lowers.
-    let value = memo.value_decl("Foo").expect("class value side");
+    let value = memo.value_decl("Foo").value.expect("class value side");
     assert!(matches!(value.kind, ValueDeclKind::Class));
 
     // The TYPE side has TWO contributors (interface + class). The
@@ -1392,6 +1460,7 @@ fn partial_contributor_batch_does_not_backfill_merged_sibling() {
     // demand must still fold the full Merged carrier.
     let ty = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Foo")
+        .value
         .expect("type side");
     assert!(
         ty.body.is_merged(),
@@ -1757,6 +1826,7 @@ fn wrong_memo_deref_returns_canonical_mismatch() {
     assert!(
         memo_a
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Shared",)
+            .value
             .is_some(),
         "memo A must declare the shared symbol"
     );
@@ -2174,7 +2244,8 @@ fn aug_value_overloads_in_one_block_are_read_once() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "gf",
         )
-        .into_option()
+        .into_source_read()
+        .value
         .expect("the global function's parts are ready");
     assert_eq!(parts.signatures.len(), 2, "one signature per overload");
 }
@@ -2232,6 +2303,7 @@ fn merged_interface_with_type_params_leading_bound() {
     // Control: `Bar` is a merged decl.
     let decl = memo
         .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Bar")
+        .value
         .expect("Bar exists");
     assert!(decl.body.is_merged(), "two same-name interfaces merge");
 
@@ -2289,7 +2361,7 @@ const FLOW_FIXTURE: &str = "export function alpha(n: number) {\n\
 #[test]
 fn function_program_index_builds_once_and_covers_every_function_position() {
     let (memo, _provenance) = memo_for(FLOW_FIXTURE);
-    let first = memo.function_program_index();
+    let first = memo.function_program_index().value;
     assert_eq!(first.len(), 3, "three function positions are served");
     for name in ["alpha", "beta", "Gamma"] {
         assert!(
@@ -2307,28 +2379,28 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
         )
         .expect("alpha is indexed")
         .entry();
-    assert_eq!(alpha.return_sites.len(), 2);
-    assert_eq!(alpha.direct_calls.len(), 1, "the self-call is exact");
+    assert_eq!(alpha.return_sites().len(), 2);
+    assert_eq!(alpha.direct_calls().len(), 1, "the self-call is exact");
     assert_eq!(
-        alpha.direct_calls[0].target.declaration.name.as_ref(),
+        alpha.direct_calls()[0].target.declaration.name.as_ref(),
         "alpha"
     );
 
     // One structural artifact for the file: a second demand — even a
     // demand targeting another function's facts — never rebuilds.
-    let second = memo.function_program_index();
+    let second = memo.function_program_index().value;
     assert!(
         Arc::ptr_eq(&first, &second),
         "the index builds once per file artifact"
     );
-    let owners = Arc::clone(&memo.owner_table);
-    let canonical = Arc::clone(&memo.key.canonical);
-    let parse_env_hash = memo.key.parse_env_hash;
+    let owners = Arc::clone(memo.owner_table());
+    let key = memo.snapshot_identity();
+    let canonical = Arc::clone(&key.canonical);
+    let parse_env_hash = key.parse_env_hash;
     let retained = memo
-        .service
-        .as_ref()
+        .lowering_service_for_test()
         .unwrap()
-        .run_leased(&memo.key, move |parsed| {
+        .run_leased(&key, move |parsed| {
             parsed
                 .unwrap()
                 .function_program_index(&owners, canonical, &parse_env_hash, &Default::default())
@@ -2344,8 +2416,8 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
 #[test]
 fn function_program_index_hash_folds_parse_env_identity() {
     let (memo, _provenance) = memo_for(FLOW_FIXTURE);
-    let index = memo.function_program_index();
-    let alpha_of = |index: &verter_semantic::analysis::function_program::FunctionProgramIndex| {
+    let index = memo.function_program_index().value;
+    let alpha_of = |index: &verter_session_query::function_program::FunctionProgramIndex| {
         index
             .value_function(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2355,12 +2427,12 @@ fn function_program_index_hash_folds_parse_env_identity() {
             )
             .expect("alpha is indexed")
             .entry()
-            .flow_body_stable_hash
+            .flow_body_stable_hash()
     };
     let memo_folded = alpha_of(&index);
 
-    let env_a = crate::hash::hash_16(b"env-a");
-    let env_b = crate::hash::hash_16(b"env-b");
+    let env_a = verter_semantic_source::source_hash::hash_16(b"env-a");
+    let env_b = verter_semantic_source::source_hash::hash_16(b"env-b");
     let refolded_a = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
     let refolded_a2 = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
     let refolded_b = fold_flow_body_env_identity(&index, &env_b, oxc_span::SourceType::ts());
@@ -2387,6 +2459,7 @@ fn function_program_index_hash_tracks_body_content_across_files() {
     let (memo_b, _) = memo_for_canonical("/ws/flow-b.ts", FLOW_FIXTURE);
     let hash_of = |memo: &Arc<DeclBodyMemo>| {
         memo.function_program_index()
+            .value
             .value_function(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "alpha",
@@ -2395,7 +2468,7 @@ fn function_program_index_hash_tracks_body_content_across_files() {
             )
             .expect("alpha is indexed")
             .entry()
-            .flow_body_stable_hash
+            .flow_body_stable_hash()
     };
     assert_eq!(
         hash_of(&memo_a),
@@ -2420,26 +2493,27 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
         .collect();
     let source = format!("function root() {{ {siblings} return () => 99; }}");
     let (memo, provenance) = memo_for(&source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let children: Vec<_> = index
         .matches_named("root")
-        .filter(|matched| matched.entry().lexical_parent.is_some())
+        .filter(|matched| matched.entry().lexical_parent().is_some())
         .map(|matched| matched.entry().clone())
         .collect();
     assert_eq!(children.len(), 65);
-    let service = memo.service.as_ref().unwrap();
+    let service = memo.lowering_service_for_test().unwrap();
+    let key = memo.snapshot_identity();
     service
-        .run_leased(&memo.key, |_| take_nested_callable_walk_visits_for_tests())
+        .run_leased(&key, |_| take_nested_callable_walk_visits_for_tests())
         .unwrap();
     let parse_count = parses(&provenance);
     for child in &children {
-        assert!(memo.function_flow_structure(child).unwrap().is_some());
-        for call in child.call_sites.iter() {
+        assert!(memo.function_flow_structure(child).value.unwrap().is_some());
+        for call in child.call_sites().iter() {
             assert!(memo.indexed_call_expression_at(call.span).is_some());
         }
     }
     let visits = service
-        .run_leased(&memo.key, |_| take_nested_callable_walk_visits_for_tests())
+        .run_leased(&key, |_| take_nested_callable_walk_visits_for_tests())
         .unwrap();
     assert_eq!(
         visits, 0,
@@ -2451,27 +2525,36 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
 #[test]
 fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
     let (memo, _) = memo_for("function f(x) { let value = x; return value; }");
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
-    let mut stale_span = entry.clone();
-    stale_span.span.start += 1;
-    let mut stale_body = entry.clone();
-    stale_body.body_span.end -= 1;
-    let mut stale_hash = entry.clone();
-    let mut hash = stale_hash.flow_body_exact_hash.unwrap();
-    hash[0] ^= 1;
-    stale_hash.flow_body_exact_hash = Some(hash);
+    // Each altered record is resealed into an index of its own: a served
+    // entry cannot be edited in place.
+    let reseal = |alter: &dyn Fn(&mut FunctionProgramDiscovery)| {
+        let mut discovery = entry.unsealed_for_test();
+        alter(&mut discovery);
+        FunctionProgramIndex::from_discovery(vec![discovery], Vec::new(), Vec::new())
+    };
+    let stale_span = reseal(&|discovery| discovery.span.start += 1);
+    let stale_body = reseal(&|discovery| discovery.body_span.end -= 1);
+    let stale_hash = reseal(&|discovery| {
+        let mut hash = discovery.flow_body_exact_hash.unwrap();
+        hash[0] ^= 1;
+        discovery.flow_body_exact_hash = Some(hash);
+    });
     for stale in [&stale_span, &stale_body, &stale_hash] {
+        let stale = stale.get(entry.key()).unwrap().entry();
         assert!(
-            memo.function_flow_structure(stale).unwrap().is_none(),
+            memo.function_flow_structure(stale).value.unwrap().is_none(),
             "stale address-bearing metadata must not reach the retained AST"
         );
     }
-    let mut modified_inventory = entry.clone();
-    modified_inventory.bindings = Arc::from([]);
-    modified_inventory.references = Arc::from([]);
+    let modified_inventory = reseal(&|discovery| {
+        discovery.bindings = Arc::from([]);
+        discovery.references = Arc::from([]);
+    });
     let prepared = memo
-        .function_flow_structure(&modified_inventory)
+        .function_flow_structure(modified_inventory.get(entry.key()).unwrap().entry())
+        .value
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -2491,16 +2574,16 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
 
 #[test]
 fn retained_call_arguments_carry_exact_identifier_occurrences() {
-    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
         Identifier, NonBinding,
     };
     let source = "function f(value, rest, receiver) { receiver.method((value), ...rest, value as string, 1); }";
     let (memo, provenance) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
     let parse_count = parses(&provenance);
     let call = memo
-        .indexed_call_expression_at(entry.call_sites[0].span)
+        .indexed_call_expression_at(entry.call_sites()[0].span)
         .unwrap();
     let span = |text: &str, prefix: usize, length: usize| {
         let start = source.find(text).unwrap() + prefix;
@@ -2529,16 +2612,16 @@ fn retained_call_arguments_carry_exact_identifier_occurrences() {
 
 #[test]
 fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
-    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
         Identifier, NonBinding,
     };
     let source="function f(receiver:{method():string}){((receiver as {method():string}) satisfies {method():string}).method();(receiver as {method():string}).method();}";
     let (memo, _) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
-    assert_eq!(entry.call_sites.len(), 2);
+    assert_eq!(entry.call_sites().len(), 2);
     let transparent = memo
-        .indexed_call_expression_at(entry.call_sites[0].span)
+        .indexed_call_expression_at(entry.call_sites()[0].span)
         .unwrap();
     let start = source.find("((receiver").unwrap() + 2;
     assert_eq!(
@@ -2550,7 +2633,7 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
         "a receiver lowered as a binding read retains that exact occurrence"
     );
     let authoritative = memo
-        .indexed_call_expression_at(entry.call_sites[1].span)
+        .indexed_call_expression_at(entry.call_sites()[1].span)
         .unwrap();
     assert_eq!(
         authoritative.receiver_root,
@@ -2561,17 +2644,17 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
 
 #[test]
 fn retained_call_type_query_keeps_its_distinct_source_origin() {
-    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
         Identifier, NonBinding, SourceTypeQuery,
     };
 
     let source = "function f(x,other){return id(x,other as typeof x,other as string);}";
     let (memo, provenance) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("f").next().unwrap().entry();
     let parse_count = parses(&provenance);
     let call = memo
-        .indexed_call_expression_at(entry.call_sites[0].span)
+        .indexed_call_expression_at(entry.call_sites()[0].span)
         .unwrap();
     let value_start = source.find("id(x").unwrap() as u32 + 3;
     let query_start = source.find("typeof x").unwrap() as u32 + 7;
@@ -2595,10 +2678,10 @@ fn a_frame_lowered_call_argument_keeps_no_indexed_record() {
     use verter_type_expr::IndexedValueExpression;
     let source = "function f<T>(v: T): T { return v; }\nfunction g() { return f(f(1), f(2)); }";
     let (memo, _) = memo_for(source);
-    let index = memo.function_program_index();
+    let index = memo.function_program_index().value;
     let entry = index.matches_named("g").next().unwrap().entry();
     let outer = entry
-        .call_sites
+        .call_sites()
         .iter()
         .max_by_key(|site| site.span.end - site.span.start)
         .unwrap()
@@ -2619,4 +2702,104 @@ fn a_frame_lowered_call_argument_keeps_no_indexed_record() {
         whole.call.args[0].expression,
         IndexedValueExpression::Call(_)
     ));
+}
+
+#[test]
+fn indexed_expression_endpoint_shares_lazy_snapshot_and_index() {
+    let (memo, provenance) = memo_for("function f(value:string){return target(value);} function target(value:string){return value;}");
+    let before = parses(&provenance);
+    let demand = memo.indexed_expression_demand();
+    assert_eq!(
+        parses(&provenance),
+        before,
+        "selecting a demand lowers nothing"
+    );
+    let index = demand.function_program_index().value;
+    assert!(
+        Arc::ptr_eq(&index, &memo.function_program_index().value),
+        "one source index backs both demands"
+    );
+    let entry = index.matches_named("f").next().expect("indexed f").entry();
+    let parse_count = parses(&provenance);
+    assert!(demand
+        .indexed_call_expression_over_frame_at(entry.call_sites()[0].span, Arc::from([]))
+        .value
+        .is_some());
+    assert_eq!(
+        parses(&provenance),
+        parse_count,
+        "expression demand reuses the same retained parse"
+    );
+}
+
+#[test]
+fn indexed_expression_endpoint_broken_pin_is_a_miss_without_reparse() {
+    let (memo, provenance) =
+        memo_for("function f(){return target();} function target(){return 1;}");
+    let demand = memo.indexed_expression_demand();
+    let index = demand.function_program_index().value;
+    let entry = index.matches_named("f").next().expect("indexed f").entry();
+    let parses_before = parses(&provenance);
+    memo.release_retained_snapshot_for_test();
+    assert!(demand
+        .indexed_call_expression_over_frame_at(entry.call_sites()[0].span, Arc::from([]))
+        .value
+        .is_none());
+    assert_eq!(
+        parses(&provenance),
+        parses_before,
+        "a broken pin cannot reparse"
+    );
+}
+
+#[test]
+fn indexed_expression_endpoint_seeded_source_keeps_absence() {
+    let memo = seeded_memo_for("function f(){return 1;}");
+    let demand = memo.indexed_expression_demand();
+    assert_eq!(demand.function_program_index().value.len(), 0);
+    assert!(demand
+        .indexed_call_expression_over_frame_at(verter_span::Span::new(0, 1), Arc::from([]))
+        .value
+        .is_none());
+}
+
+#[test]
+fn indexed_expression_endpoint_macro_and_capture_keep_seeded_absence() {
+    let memo = seeded_memo_for("function f(){return 1;}");
+    let demand = memo.indexed_expression_demand();
+    assert!(matches!(
+        demand.transient_macro_type_argument(verter_span::Span::new(0, 1)),
+        DemandOutcome::Ready(None)
+    ));
+    assert!(demand.flow_capture_authorities(&[]).value.is_none());
+}
+
+#[test]
+fn indexed_expression_endpoint_macro_reuses_parse_and_refuses_broken_pin() {
+    let source = "defineProps<{ value: string }>()";
+    let (memo, provenance) = memo_for(source);
+    let demand = memo.indexed_expression_demand();
+    let before = parses(&provenance);
+    let span = verter_span::Span::new(0, source.len() as u32);
+    let DemandOutcome::Ready(Some(argument)) = demand.transient_macro_type_argument(span) else {
+        panic!("live retained macro argument");
+    };
+    assert!(matches!(argument.as_ref(), TypeExpr::Object(_)));
+    let after = parses(&provenance);
+    assert_eq!(after, before + 1, "one lazy retained parse");
+    assert!(matches!(
+        demand.transient_macro_type_argument(span),
+        DemandOutcome::Ready(Some(_))
+    ));
+    assert_eq!(parses(&provenance), after, "same demand shares the parse");
+    memo.release_retained_snapshot_for_test();
+    assert!(matches!(
+        demand.transient_macro_type_argument(span),
+        DemandOutcome::LeaseMiss
+    ));
+    assert_eq!(
+        parses(&provenance),
+        after,
+        "broken lease cannot parse again"
+    );
 }

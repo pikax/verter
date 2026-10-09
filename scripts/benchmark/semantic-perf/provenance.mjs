@@ -28,6 +28,20 @@ export const FORBIDDEN_FEATURES = {
   verter_scheduler: ["test-support"],
 };
 
+/**
+ * The features the observe build enables: `semantic-observe` and what it
+ * implies. Only that build may carry them, and it must carry the gate.
+ */
+export const OBSERVE_FEATURES = {
+  verter_bench: ["semantic-observe", "attribution", "currency_probe", "hotpath"],
+  verter_audit: ["semantic-observe", "attribution"],
+  verter_session: ["semantic-observe", "attribution", "currency_probe", "hotpath"],
+  verter_workspace: ["semantic-observe", "currency_probe"],
+  verter_semantic: ["semantic-observe"],
+  verter_compiler: ["semantic-observe"],
+  verter_scheduler: ["semantic-observe"],
+};
+
 /** Packages whose build features and profile are recorded. */
 export const RECORDED_PACKAGES = [
   "verter_bench",
@@ -125,6 +139,7 @@ export function hostInfo() {
     logicalCpus: cpus.length,
     totalMemoryBytes: os.totalmem(),
     node: process.version,
+    nodeExe: process.execPath,
   };
 }
 
@@ -176,7 +191,13 @@ export function resolveTypeScript(fromDir) {
       `${exe} -v answered ${JSON.stringify(versionText)} (exit ${version.status}), not Version ${TYPESCRIPT_VERSION}`,
     );
   }
-  const apiFiles = ["dist/api/sync/api.js", "dist/api/sync/client.js", "dist/api/syncChannel.js"];
+  const apiFiles = [
+    "dist/api/sync/api.js",
+    "dist/api/sync/client.js",
+    "dist/api/syncChannel.js",
+    "dist/api/async/api.js",
+    "dist/api/async/client.js",
+  ];
   return {
     packageDir: tsPackageDir,
     version: tsPackage.version,
@@ -272,16 +293,29 @@ export function toolchainPin(root) {
   }
 }
 
-export function buildVerterProbes(root, { inherit = false } = {}) {
+/**
+ * With `observe`, build only the plain probe with `semantic-observe` (optional
+ * capture compiled in), in its own target directory so the production
+ * artifacts are never rebuilt with the gate unified into them.
+ */
+export function buildVerterProbes(root, { inherit = false, observe = false } = {}) {
+  const bins = observe
+    ? ["semantic_perf_probe"]
+    : ["semantic_perf_probe", "semantic_perf_probe_counted"];
   const args = [
     "build",
     "--release",
     "-p",
     "verter_bench",
-    "--bin",
-    "semantic_perf_probe",
-    "--bin",
-    "semantic_perf_probe_counted",
+    ...bins.flatMap((b) => ["--bin", b]),
+    ...(observe
+      ? [
+          "--features",
+          "semantic-observe",
+          "--target-dir",
+          join(root, "target", "semantic-perf-observe"),
+        ]
+      : []),
     "--message-format=json-render-diagnostics",
   ];
   // A controlled build environment: cargo is bound to the toolchain's own
@@ -337,7 +371,7 @@ export function buildVerterProbes(root, { inherit = false } = {}) {
       };
     }
   }
-  for (const name of ["semantic_perf_probe", "semantic_perf_probe_counted"]) {
+  for (const name of bins) {
     if (!executables[name]) throw new Error(`cargo reported no executable for ${name}`);
   }
   const tool = (cmd, toolArgs) => {
@@ -346,6 +380,7 @@ export function buildVerterProbes(root, { inherit = false } = {}) {
   };
   return {
     cargoArgs: args,
+    observe,
     executables,
     packages,
     env: controlled,
@@ -365,9 +400,19 @@ export function buildVerterProbes(root, { inherit = false } = {}) {
   };
 }
 
-/** Check a cargo build record against the production-library requirements; returns problems. */
+/**
+ * Check a cargo build record against the production-library requirements;
+ * returns problems. The observe build (`build.observe`) may carry only the
+ * features `semantic-observe` implies, and must carry the gate itself.
+ */
 export function buildProblems(build) {
   const problems = [];
+  const allowed = (name) => (build.observe ? (OBSERVE_FEATURES[name] ?? []) : []);
+  if (build.observe) {
+    for (const name of ["verter_bench", "verter_audit"])
+      if (!build.packages?.[name]?.features?.includes("semantic-observe"))
+        problems.push(`${name} of the observe build lacks semantic-observe`);
+  }
   for (const name of RECORDED_PACKAGES) {
     const pkg = build.packages[name];
     if (!pkg) {
@@ -378,8 +423,10 @@ export function buildProblems(build) {
       problems.push(`${name} built at opt-level ${pkg.profile?.opt_level}, not 3`);
     if (pkg.profile?.debug_assertions) problems.push(`${name} built with debug assertions`);
     if (pkg.profile?.test) problems.push(`${name} built as a test target`);
+    if (!build.observe && pkg.features.includes("semantic-observe"))
+      problems.push(`${name} built with optional semantic capture (semantic-observe)`);
     for (const feature of FORBIDDEN_FEATURES[name] ?? []) {
-      if (pkg.features.includes(feature))
+      if (pkg.features.includes(feature) && !allowed(name).includes(feature))
         problems.push(`${name} built with the non-production feature ${feature}`);
     }
   }

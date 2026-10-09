@@ -20,22 +20,22 @@
 //! host-constructed and injected; the scheduler owns no pool
 //! construction:
 //!
-//! - [`CpuPool`](pool::CpuPool) / [`SchedulerCpuPool`](pool::SchedulerCpuPool)
+//! - [`CpuPool`](execution::pool::CpuPool) / [`SchedulerCpuPool`](execution::pool::SchedulerCpuPool)
 //!   — executes `TaskKind::{Parse, Analysis, Artifact}` stage CPU work
-//!   via owner-affine [`OwnerCommand<Cpu>`](owner_command::OwnerCommand).
+//!   via owner-affine [`OwnerCommand<Cpu>`](execution::owner_command::OwnerCommand).
 //!   Fire-and-forget submit is bounded (CPU transport dominates the DAG
 //!   CPU budget). Its workers register as
 //!   [`CallerKind::CpuWorker`](caller_kind::CallerKind) so the
 //!   cooperative pump may inline-execute ready dependencies on the
 //!   same thread.
-//! - [`SchedulerIoPool`](pool::SchedulerIoPool) — executes
+//! - [`SchedulerIoPool`](execution::pool::SchedulerIoPool) — executes
 //!   `TaskKind::Load` (source-content load) work. Workers register as
 //!   [`CallerKind::IoWorker`](caller_kind::CallerKind). Separate from
 //!   the CPU pool so blocking disk reads cannot starve parse/analyze
 //!   work. Dispatch uses nonblocking
-//!   [`try_submit`](pool::SchedulerIoPool::try_submit) — the driver
+//!   [`try_submit`](execution::pool::SchedulerIoPool::try_submit) — the driver
 //!   never blocks on a full transport.
-//! - [`HostCpuPool`](host_cpu_pool::HostCpuPool) — owned by the external
+//! - [`HostCpuPool`](execution::host_cpu_pool::HostCpuPool) — owned by the external
 //!   host/runtime layer and shared by every host batch API's outer
 //!   coordinator (batch component-meta, batch SFC compile, and any
 //!   future host batch fan-out). Workers register as
@@ -45,9 +45,9 @@
 //!   scheduler CPU work — `dispatch_ready_job` excludes `External` from
 //!   its inline-eligible branch.
 //!
-//! The three pools — scheduler CPU ([`SchedulerCpuPool`](pool::SchedulerCpuPool)),
-//! scheduler IO ([`SchedulerIoPool`](pool::SchedulerIoPool)), and the host
-//! coordinator ([`HostCpuPool`](host_cpu_pool::HostCpuPool)) — never share
+//! The three pools — scheduler CPU ([`SchedulerCpuPool`](execution::pool::SchedulerCpuPool)),
+//! scheduler IO ([`SchedulerIoPool`](execution::pool::SchedulerIoPool)), and the host
+//! coordinator ([`HostCpuPool`](execution::host_cpu_pool::HostCpuPool)) — never share
 //! workers; the isolation eliminates the deadlock class where a saturated
 //! scheduler CPU pool could starve a batch coordinator that itself blocks
 //! on scheduler-queued parse work.
@@ -101,50 +101,37 @@ extern crate verter_debug_assert;
 pub mod audit_publish;
 pub mod cache_id;
 pub mod caller_kind;
-pub mod cancellation;
-// Blocking + native-only: `cpu_concurrency` is a `parking_lot::Condvar`
-// counting semaphore that caps SCHEDULER CPU-pool concurrency. On wasm the
-// scheduler runs inline / single-threaded with no CPU pools, so the cap has
-// no consumer there (and the blocking primitive does not belong on wasm).
-// Gated for parity with the other blocking native-only modules
-// (`audit_publish`, `host_cpu_pool`, `pool`).
-#[cfg(not(target_arch = "wasm32"))]
-pub mod cpu_concurrency;
 pub mod dag;
 pub mod dedupe_hook;
 pub mod driver;
 pub mod edges;
-pub mod executor;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod host_cpu_pool;
+pub mod execution;
 pub mod invalidation;
 pub mod job;
 pub mod node;
 pub mod overlay;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod owner_command;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod pool;
-pub mod request_context;
 pub mod scheduler;
 pub mod source_loader;
 pub mod source_root;
 pub mod stage;
-pub mod tasks;
 
 #[cfg(test)]
 #[path = "source_root_tests.rs"]
 mod source_root_tests;
 
+// The concrete execution adapters (stage executor, the two scheduler worker
+// pools, the owner-affine commands, the CPU transport bound and the host
+// coordinator pool) live under `execution/`; the items the rest of the crate
+// and its consumers use are re-exported here.
 #[cfg(not(target_arch = "wasm32"))]
-pub use host_cpu_pool::HostCpuPool;
+pub use execution::host_cpu_pool::HostCpuPool;
 
 /// Host-constructed scheduler worker pools (native-only). The host
 /// builds these and injects them into every `Scheduler` constructor.
 #[cfg(not(target_arch = "wasm32"))]
-pub use owner_command::{Cpu, Io, OwnerCommand, Provider};
+pub use execution::owner_command::{Cpu, Io, OwnerCommand, Provider};
 #[cfg(not(target_arch = "wasm32"))]
-pub use pool::{
+pub use execution::pool::{
     CpuPool, SchedulerCpuPool, SchedulerIoPool, SchedulerPoolSubmitError,
     SchedulerPoolSubmitResult, SchedulerPoolTask,
 };
@@ -156,9 +143,9 @@ pub use scheduler::Admission;
 /// `verter_scheduler = { features = ["test-support"] }` in
 /// `[dev-dependencies]`.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
-pub use host_cpu_pool::host_cpu_pool_token;
+pub use execution::host_cpu_pool::host_cpu_pool_token;
 
 /// Re-export of the test-only scheduler-pool identity-token readers.
 /// Gated behind the `test-support` feature like `host_cpu_pool_token`.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
-pub use pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};
+pub use execution::pool::{scheduler_cpu_pool_token, scheduler_io_pool_token};

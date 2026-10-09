@@ -501,7 +501,7 @@ fn assemble_main_module_template_only_sfc() {
     let compiler = VueCarrierCompiler;
     // Route the carrier parse through the counted chokepoint (the dedup
     // rail authority), not a raw `compiler.parse`.
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
     let result = compiler
         .compile_bundle(
@@ -567,7 +567,7 @@ fn assemble_main_module_inline_topology() {
     let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
     let alloc = Allocator::new();
     let compiler = VueCarrierCompiler;
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
     let result = compiler
         .compile_bundle(
@@ -650,7 +650,7 @@ fn assemble_passes_compiler_returned_bindings_verbatim() {
     let source = "<script setup>\nimport { ref } from 'vue'\nimport UnusedComp from './UnusedComp.vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
     let alloc = Allocator::new();
     let compiler = VueCarrierCompiler;
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
     let result = compiler
         .compile_bundle(

@@ -8,7 +8,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::Severity;
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{ReactivityKind, ScriptAnalysisSnapshot};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::ReactivityKind;
 
 /// Disallow using ref values as operands directly (without `.value`).
 pub struct NoRefAsOperand;

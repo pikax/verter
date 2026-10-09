@@ -31,8 +31,8 @@ pub(crate) fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr
 }
 
 fn merge_semantic_prop_definitions(
-    native: &mut Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
-    semantic: Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
+    native: &mut Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
+    semantic: Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
 ) {
     let mut semantic = semantic
         .into_iter()
@@ -64,7 +64,7 @@ fn merge_semantic_prop_definitions(
 pub(super) struct SemanticSnapshot {
     pub(super) document_revision: DocumentRevisionId,
     pub(super) semantic_generation: u64,
-    pub(super) analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    pub(super) analysis: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -167,12 +167,17 @@ impl DocumentRegistry {
         if let Some(host) = slot.as_ref() {
             return host.clone();
         }
+        // The enrichment host admits exactly the framework verticals the
+        // projection host was constructed with: it must never analyse a
+        // vertical the server's own admission excludes.
+        let framework = self.host().framework_options().clone();
         let host = super::SharedHost::new(Arc::new(VerterHost::new_standalone(
             verter_session::HostConfig {
                 analysis_scope: Some(verter_semantic::analysis::AnalysisScope::LSP),
                 // Isolation is also a fairness boundary: native enrichment cannot
                 // occupy the projection scheduler or saturate all host CPU workers.
                 host_cpu_threads: Some(1),
+                framework,
                 ..verter_session::HostConfig::default()
             },
         )));
@@ -210,8 +215,20 @@ impl DocumentRegistry {
         let source = Arc::clone(&document.source);
         let file_language = self.document_file_language(&document.language_id, &canonical_id);
         let is_framework_carrier = file_language.is_framework_carrier();
+        // The structure this revision was committed with, not the projection
+        // host's current registration. The host can re-register unchanged bytes
+        // under a new artifact after the commit (a closed file's scheduler
+        // reload landing after its reopen), and an enrichment built from that
+        // newer envelope fails the artifact check below and is dropped, which
+        // leaves the revision uncertified until its next edit.
         let registered_structure = is_framework_carrier
-            .then(|| self.host().registered_file_structure(&canonical_id))
+            .then(|| {
+                document
+                    .feature_snapshot
+                    .as_ref()
+                    .filter(|feature| feature.document_revision == document_revision)
+                    .map(|feature| feature.structure.clone())
+            })
             .flatten();
         if !self.semantic_generation_is_current(semantic_generation) {
             return None;
@@ -275,7 +292,7 @@ impl DocumentRegistry {
                                         .is_some_and(type_expr_contains_boolean);
                                     let type_annotation =
                                         publication.terminal_display().text().map(str::to_string);
-                                    verter_semantic::analysis::AnalyzedPropDefinition {
+                                    verter_session_query::analysis::template::AnalyzedPropDefinition {
                                         name: prop.name,
                                         callable_role: prop.callable_role,
                                         type_annotation,
@@ -309,7 +326,7 @@ impl DocumentRegistry {
                                     .iter()
                                     .map(|prop| {
                                         let materialized = prop.ty.publication.materialized_type();
-                                        verter_semantic::analysis::AnalyzedPropDefinition {
+                                        verter_session_query::analysis::template::AnalyzedPropDefinition {
                                             name: prop.name.to_string(),
                                             callable_role:
                                                 verter_type_expr::PropCallableRole::default(),
@@ -502,7 +519,10 @@ impl DocumentRegistry {
 
     /// Return optional full enrichment when current, otherwise the bounded BUILD
     /// snapshot that the IDE projection already paid to construct.
-    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_session::FileAnalysisSnapshot> {
+    pub fn get_analysis(
+        &self,
+        uri: &Uri,
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
         let semantic_generation = self.current_semantic_generation();
         if let Some(document) = self.documents.get(uri.as_str()) {
@@ -564,8 +584,11 @@ impl DocumentRegistry {
                 Some(feature.projection_host_revision)
             }
             Some(_) => return None,
-            None if crate::server::server_utils::carrier_language_for(&document.canonical_id)
-                .is_some() =>
+            None if crate::server::server_utils::carrier_language_for(
+                self.language_classifier(),
+                &document.canonical_id,
+            )
+            .is_some() =>
             {
                 return None;
             }
@@ -576,10 +599,15 @@ impl DocumentRegistry {
             revision: document.document_revision,
             source: Arc::clone(&document.source),
         };
+        let expected_source_hash = expected_host_revision.and_then(|_| {
+            self.host()
+                .registered_source_whole_hash(&document.canonical_id)
+        });
         Some(SourceFeatureDocumentCapture {
             document: document.clone(),
             identity,
             expected_host_revision,
+            expected_source_hash,
             semantic_generation: self.current_semantic_generation(),
         })
     }
@@ -605,6 +633,8 @@ impl DocumentRegistry {
     /// Final request-local admission: the document identity and semantic
     /// generation must remain live, and the host revision is rechecked while
     /// the document shard is held so an edit cannot enter a check/use gap.
+    /// A semantic generation that moved means the capture may read an
+    /// obsolete native publication, so it is captured again.
     pub(crate) fn source_feature_capture_is_current(
         &self,
         uri: &Uri,
@@ -634,10 +664,43 @@ impl DocumentRegistry {
                 .unwrap_or(false)
     }
 
+    /// Whether an answer already computed from `capture` still addresses the
+    /// document: its identity, and the host still holding the bytes the
+    /// capture was admitted against, rechecked under the document shard.
+    ///
+    /// Neither the semantic generation nor the host revision is consulted.
+    /// The generation rejects obsolete native publications before they are
+    /// read; the revision pairs a capture with its projection at admission.
+    /// Once an answer is computed, a cache eviction that re-commits the same
+    /// bytes changes nothing it addresses, and whether it stays deliverable
+    /// across an authority replacement is the request disposition's question.
+    pub(crate) fn source_feature_document_is_current(
+        &self,
+        uri: &Uri,
+        capture: &SourceFeatureDocumentCapture,
+    ) -> bool {
+        self.with_current_snapshot_identity(uri, &capture.identity, |document| {
+            document.source == capture.document.source
+                && match capture.expected_source_hash {
+                    Some(expected) => {
+                        self.host()
+                            .registered_source_whole_hash(&document.canonical_id)
+                            == Some(expected)
+                    }
+                    None if capture.expected_host_revision.is_some() => false,
+                    None => self
+                        .host()
+                        .get_source(&document.canonical_id)
+                        .is_some_and(|source| *source == *document.source),
+                }
+        })
+        .unwrap_or(false)
+    }
+
     fn current_analysis_for_source_feature_capture(
         &self,
         capture: &SourceFeatureDocumentCapture,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         if self.semantic_generation_is_current(capture.semantic_generation) {
             if let Some(analysis) = capture
                 .document
@@ -675,7 +738,7 @@ impl DocumentRegistry {
         current_svelte_evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
             verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
         >,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let current = self.current_analysis_for_source_feature_capture(capture);
         let current_source = Arc::clone(&capture.document.source);
         let Some(progressive) = capture.document.progressive_analysis.as_ref() else {
@@ -775,7 +838,7 @@ impl DocumentRegistry {
     pub(crate) fn source_feature_analysis(
         &self,
         uri: &Uri,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         for _ in 0..2 {
             let Some(capture) = self.capture_source_feature_document(uri) else {
                 continue;
@@ -802,7 +865,7 @@ impl DocumentRegistry {
     pub(crate) fn cached_semantic_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let generation = self.current_semantic_generation();
         let result = self
             .semantic_generation_is_current(generation)
@@ -869,7 +932,7 @@ fn convert_analysis_spans_with_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::AnalyzedPropDefinition;
+    use verter_session_query::analysis::template::AnalyzedPropDefinition;
 
     fn prop(name: &str, span: verter_span::Span) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
@@ -937,11 +1000,11 @@ mod tests {
         let source = "éééé{{ count === }}";
         let diag_start = source.find("count").unwrap() as u32;
         let diag_end = diag_start + "count ===".len() as u32;
-        let snapshot = verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+        let snapshot = verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             expression_diagnostics: vec![
-                verter_semantic::analysis::template::TemplateExpressionDiagnostic {
+                verter_session_query::analysis::template::TemplateExpressionDiagnostic {
                     severity:
-                        verter_semantic::analysis::template::TemplateDiagnosticSeverity::Error,
+                        verter_session_query::analysis::template::TemplateDiagnosticSeverity::Error,
                     code: "XInvalidExpression".to_string(),
                     message: "invalid expression".to_string(),
                     span: verter_span::Span::new(diag_start, diag_end),

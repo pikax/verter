@@ -6,12 +6,13 @@ use super::u6_flow_expect_tests::{
 };
 use super::upsert;
 use crate::host_flow_return_audit::FlowReturnError;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    FlowGap, FlowInputContext, FlowReturnDegradation, FlowReturnFailure, FlowReturnKey,
-    RelationKind, ReturnProjectionDemand, SemanticQueryKey,
-};
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::flow::policy::FlowGap;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    FlowInputContext, FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, RelationKind,
+    ReturnProjectionDemand, SemanticQueryKey,
+};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
@@ -63,7 +64,7 @@ fn candidate_count(host: &Arc<VerterHost>, canonical: &str, function: &str) -> u
         demand: ReturnProjectionDemand::whole_return(),
         input: FlowInputContext::empty(),
         result_contract:
-            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+            verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
     };
     dispatch
         .graph()

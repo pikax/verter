@@ -25,8 +25,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use verter_session::for_tests::CaptureToken;
 use verter_session::{HostConfig, VerterHost};
+use verter_type_engine::capture_token::CaptureToken;
 use verter_workspace::{
     FilesystemOptions, FilesystemWorkspace, IdeProjectCompilerOptions, ProjectRank,
     VfsProjectConfig, WorkspaceAccess,

@@ -1,10 +1,13 @@
 //! Structural directive → JSX constructs for TSX template codegen.
 //!
 //! Converts Vue structural directives to JSX-compatible constructs:
-//! - `v-if="cond"` → `{()=>{if(cond){...}}}` (IIFE for TypeScript control flow narrowing)
-//! - `v-else-if="cond"` → `}else if(cond){...}` (chained in same IIFE)
-//! - `v-else` → `}else{...}}}` (final branch + IIFE close)
-//! - `v-for="item in items"` → `{items.map((item) => (...))}`
+//! - `v-if="cond"` → `{(()=>{if(cond){...}})()}` (immediately invoked: one control flow)
+//! - `v-else-if="cond"` → `}else if(cond){...}` (chained in same block)
+//! - `v-else` → `}else{...}})()}` (final branch + block close)
+//! - `v-for="item in items"` →
+//!   `{(() => { const ___VERTER___v0 = (items); { const item = ___VERTER___flowEach1(___VERTER___v0); return (...); } })()}`
+//!
+//! See [`super::flow`] for why both blocks are immediately invoked.
 //! - `v-show="expr"` → `style={{display: expr ? undefined : 'none'}}`
 
 use oxc_allocator::Allocator;
@@ -20,211 +23,190 @@ use crate::template::code_gen::expression::{
     build_prefixed_expr_segments, resolve_simple_expr_segments,
 };
 use crate::template::code_gen::types::{CodeGenOutput, MappedGeneratedText};
-use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
 use crate::utils::oxc::{Binding, BindingExtractionResult, Dynamism};
 
-/// Emit the opening of a v-if/v-else-if/v-else IIFE block.
+/// Emit the opening of one branch of a chain's immediately invoked block.
 ///
-/// - `v-if="cond"` → `{()=>{if(cond){`
-/// - `v-else-if="cond"` → `}else if(cond){`
-/// - `v-else` → `}else{`
+/// - `v-if="cond"` → `{(()=>{if(cond){`
+/// - `v-else-if="cond"` → `else if(cond){` (the preceding branch emitted its `}`)
+/// - `v-else` → `else{`
 ///
-/// The IIFE pattern `{()=>{if(cond){...}}}` enables TypeScript control flow
-/// narrowing within the if-block, unlike ternaries which don't narrow.
+/// The block is immediately invoked, so TypeScript continues the enclosing
+/// control flow into it: a nested chain or callback inherits every enclosing
+/// positive and predecessor negation without re-emitting it. Each authored
+/// condition is emitted once, with per-identifier source mapping (hovering
+/// `__props.leftArrow` maps back to the authored `leftArrow`).
 ///
-/// The condition expression is emitted with per-identifier source mapping
-/// so that hovering over e.g. `__props.leftArrow` in the generated TSX maps
-/// back to the original `leftArrow` in the template source.
+/// Every piece goes through the ordered prepend channel so the branch's
+/// snapshot declarations (reserved right after it) land inside the block.
+/// Returns whether a branch was opened.
 pub fn emit_v_if_open<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
-    _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
-    parent_condition_scopes: &[crate::ide::condition::ConditionScope],
-) {
-    let condition = match &el.v_condition {
-        Some(c) => c,
-        None => return,
+) -> bool {
+    let Some(condition) = &el.v_condition else {
+        return false;
     };
-
-    match condition.kind {
-        ElementNodeConditionKind::If => {
-            // v-if="cond" → {()=>{if(cond){
-            if let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) {
-                // For nested v-if, emit block guard from parent scopes
-                let parent_guard =
-                    crate::ide::condition::generate_condition_text(parent_condition_scopes)
-                        .map(|text| crate::ide::condition::build_block_guard(&text))
-                        .unwrap_or_default();
-
-                let prefix = format!("{{()=>{{{}if(", parent_guard);
-                emit_mapped_condition_expr(
-                    out,
-                    el.tag_open.start,
-                    &prefix,
-                    "){\n",
-                    vs,
-                    ve,
-                    source,
-                    oxc_el,
-                    resolver,
-                );
-            }
-        }
-        ElementNodeConditionKind::ElseIf => {
-            // v-else-if="cond" → else if(cond){
-            // Note: the preceding if/else-if block's `}` is emitted by emit_v_if_close,
-            // so we do NOT prefix with `}` here (that would double-close).
-            if let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) {
-                emit_mapped_condition_expr(
-                    out,
-                    el.tag_open.start,
-                    "else if(",
-                    "){\n",
-                    vs,
-                    ve,
-                    source,
-                    oxc_el,
-                    resolver,
-                );
-            }
-        }
+    let prefix = match condition.kind {
+        ElementNodeConditionKind::If => "{(()=>{if(",
+        ElementNodeConditionKind::ElseIf => "else if(",
         ElementNodeConditionKind::Else => {
-            // v-else → else{
-            // Note: the preceding if/else-if block's `}` is emitted by emit_v_if_close.
-            out.prepend_alloc(el.tag_open.start, "else{\n");
+            out.prepend_ordered_unmapped(el.tag_open.start, "else{\n");
+            return true;
         }
-    }
+    };
+    let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) else {
+        return false;
+    };
+    emit_mapped_condition_expr(
+        out,
+        el.tag_open.start,
+        prefix,
+        "){\n",
+        vs,
+        ve,
+        source,
+        oxc_el,
+        resolver,
+    );
+    true
 }
 
-/// Emit the closing of a v-if/v-else-if/v-else IIFE block.
+/// Emit the closing of one branch.
 ///
-/// - v-if / v-else-if: close the if-block with `}`
-///   (the IIFE closure `}}` is handled by the parent walk loop)
-/// - v-else: close the else block + IIFE: `}}}`
-pub fn emit_v_if_close(el: &ElementNode, _source: &str, out: &mut CodeGenOutput<'_>) {
-    let condition = match &el.v_condition {
-        Some(c) => c,
-        None => return,
+/// - v-if / v-else-if: close the branch with `}` (the chain walk closes the
+///   block after the last branch)
+/// - v-else: close the branch and the block: `}})()}`
+pub fn emit_v_if_close(el: &ElementNode, out: &mut CodeGenOutput<'_>) {
+    let Some(condition) = &el.v_condition else {
+        return;
     };
-
     let el_end = el
         .tag_close
         .as_ref()
         .map(|tc| tc.end)
         .unwrap_or(el.tag_open.end);
-
     match condition.kind {
         ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => {
-            // Close the if/else-if block; parent loop handles IIFE closure
             out.prepend_alloc(el_end, "\n}");
         }
         ElementNodeConditionKind::Else => {
-            // Close else block + arrow body + JSX expression: }}}
-            out.prepend_alloc(el_end, "\n}}}");
+            out.prepend_alloc(el_end, "\n}})()}");
         }
     }
 }
 
-/// Emit the opening of a v-for map expression with source mapping.
+/// Emit the opening of a `v-for` frame with source mapping.
 ///
-/// `v-for="item in items"` → `{items.map((item) => (`
+/// `v-for="(item, index) in items"` →
+/// `{(() => { const ___VERTER___v0 = (items); { const [item, index] = ___VERTER___flowEach2(___VERTER___v0);`
 ///
-/// Uses mapped prepends so that TSGO can resolve types for:
-/// - The iterable expression (per-identifier mapping, like v-if)
-/// - The iteration parameter (mapped to its position in the v-for value)
+/// The frame is an immediately invoked block like the scoped-slot frame, so
+/// its body continues the enclosing control flow (see [`super::flow`]). The
+/// iterable is evaluated into `source_name` BEFORE the aliases' block opens, so
+/// an alias never shadows a name its own iterable reads (`v-for="node in
+/// node.children"`), exactly as Vue evaluates the source in the outer scope.
+/// The caller opens the frame's narrowing scope right after this; that scope
+/// emits the frame's snapshot declarations and [`V_FOR_BODY_OPEN`]. The aliases
+/// and the iterable are mapped to their authored positions; the scaffolding is
+/// unmapped. Everything goes through the ordered prepend channel at the element
+/// start. `bare` omits the JSX expression container (a lifted ternary branch).
+/// Returns whether a frame was opened.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_v_for_open<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
-    _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
-    is_jsx: bool,
     bare: bool,
-) {
-    let v_for_prop = match &el.v_for {
-        Some(p) => p,
-        None => return,
+    source_name: &str,
+) -> bool {
+    let Some(v_for_prop) = &el.v_for else {
+        return false;
     };
+    let (Some(vs), Some(ve)) = (v_for_prop.value_start, v_for_prop.value_end) else {
+        return false;
+    };
+    let v_for_expr = &source[vs as usize..ve as usize];
 
-    if let (Some(vs), Some(ve)) = (v_for_prop.value_start, v_for_prop.value_end) {
-        let v_for_expr = &source[vs as usize..ve as usize];
+    // Parse "item in items" or "(item, index) in items"
+    let Some((params, source_expr)) = parse_v_for_expr(v_for_expr) else {
+        return false;
+    };
+    let target_pos = el.tag_open.start;
+    let params_trimmed = params.trim();
+    let iterable_trimmed = source_expr.trim();
+    let arity = alias_arity(params_trimmed);
 
-        // Parse "item in items" or "(item, index) in items"
-        if let Some((params, source_expr)) = parse_v_for_expr(v_for_expr) {
-            let target_pos = el.tag_open.start;
-
-            // Emit iterable with per-identifier source mapping
-            emit_mapped_v_for_iterable(
-                out,
-                target_pos,
-                source_expr.trim(),
-                vs,
-                v_for_expr,
-                oxc_el,
-                source,
-                bare,
-                resolver,
-            );
-
-            // Emit ".map((" — unmapped bridge
-            // Use mapped_with_offset with offset = content.len() to stay in mapped_prepends vec
-            // for correct ordering (regular prepends merge before mapped at same position).
-            let map_open = ".map((";
-            out.prepend_alloc_mapped_with_offset(target_pos, 0, map_open.len() as u32, map_open);
-
-            // Emit params with source mapping to their position in the v-for value.
-            // Compute the byte offset of the trimmed params within the v-for expression.
-            let params_trimmed = params.trim();
-            let params_offset = v_for_expr
-                .find(params_trimmed)
-                .map(|off| vs + off as u32)
-                .unwrap_or(vs);
-            out.prepend_alloc_mapped(target_pos, params_offset, params_trimmed);
-
-            // Add type annotation for v-for parameter to preserve named types in hover.
-            // Only for TSX (not JSX — TS annotations are invalid in plain JS), simple
-            // identifier iterables, and single/destructured params (no comma).
-            let iterable_trimmed = source_expr.trim();
-            let has_comma = params_trimmed.contains(',');
-            let is_simple_ident = !iterable_trimmed.is_empty()
-                && iterable_trimmed
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
-                && iterable_trimmed
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '$');
-            if !is_jsx && !has_comma && is_simple_ident {
-                let annotation = format!(": (typeof {})[number]", iterable_trimmed);
-                out.prepend_alloc_mapped_with_offset(
-                    target_pos,
-                    0,
-                    annotation.len() as u32,
-                    &annotation,
-                );
-            }
-
-            // Emit ") => { return (" — unmapped tail (statement-body for nested IIFEs)
-            let map_close = ") => { return (";
-            out.prepend_alloc_mapped_with_offset(target_pos, 0, map_close.len() as u32, map_close);
-        }
+    out.prepend_ordered_unmapped(
+        target_pos,
+        &format!(
+            "{}(() => {{ const {source_name} = ",
+            if bare { "" } else { "{" }
+        ),
+    );
+    emit_mapped_v_for_iterable(
+        out,
+        target_pos,
+        iterable_trimmed,
+        vs,
+        v_for_expr,
+        oxc_el,
+        source,
+        resolver,
+    );
+    out.prepend_ordered_unmapped(target_pos, "; { const ");
+    if arity > 1 {
+        out.prepend_ordered_unmapped(target_pos, "[");
     }
+    // The aliases, mapped to their position in the v-for value.
+    let params_offset = v_for_expr
+        .find(params_trimmed)
+        .map(|off| vs + off as u32)
+        .unwrap_or(vs);
+    out.prepend_alloc_mapped(target_pos, params_offset, params_trimmed);
+    if arity > 1 {
+        out.prepend_ordered_unmapped(target_pos, "]");
+    }
+
+    out.prepend_ordered_unmapped(
+        target_pos,
+        &format!(" = {}({source_name});", super::flow::each_helper(arity)),
+    );
+    true
 }
 
-/// Emit the iterable part of v-for as one source-mapped expression plan.
+/// Opens the body of a `v-for` frame after its declarations.
+pub const V_FOR_BODY_OPEN: &str = " return (";
+
+/// Number of top-level aliases in a `v-for` alias list (`item`, `item, index`,
+/// `{ a, b }, index`).
+pub(crate) fn alias_arity(aliases: &str) -> usize {
+    let mut depth = 0i32;
+    let mut arity = 1;
+    for byte in aliases.bytes() {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => arity += 1,
+            _ => {}
+        }
+    }
+    arity
+}
+
+/// Emit the iterable of a `v-for` frame as one source-mapped expression plan,
+/// parenthesised as the frame helper's argument: `(<iterable>)`.
 ///
-/// The iterable lowering builds a single [`MappedGeneratedText`] plan through the
-/// shared expression producer: the JS wrappers (`{(` / `Array.from({length: …`),
-/// the numeric scaffolding, and the resolver-injected binding prefixes/suffixes
-/// (`__props.`, `.value`, keyword brackets) are synthetic and carry no source-map
-/// token, while the authored iterable identifiers carry their source offsets. The
-/// whole plan lowers through [`CodeGenOutput::prepend_mapped_generated_text`].
+/// The plan comes from the shared expression producer: the parentheses and the
+/// resolver-injected binding prefixes/suffixes (`__props.`, `.value`, keyword
+/// brackets) are synthetic and carry no source-map token, while the authored
+/// iterable identifiers carry their source offsets.
 #[allow(clippy::too_many_arguments)]
 fn emit_mapped_v_for_iterable<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
@@ -234,7 +216,6 @@ fn emit_mapped_v_for_iterable<'alloc>(
     v_for_full_expr: &str,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &str,
-    bare: bool,
     resolver: &BindingResolver<'alloc>,
 ) {
     // Absolute byte offset of the iterable within the source.
@@ -243,26 +224,7 @@ fn emit_mapped_v_for_iterable<'alloc>(
 
     // Resolve the iterable through the shared segmented producer.
     let resolved = resolve_iterable_segments(iterable, iterable_start, oxc_el, source, resolver);
-
-    // Wrap with the synthetic JS scaffolding around the resolved iterable.
-    // Numeric literals (`v-for="i in 12"`) can't call `.map()` directly — `12.map(…)`
-    // is invalid JS — so they wrap in `Array.from({length: N}, …)`. Other iterables
-    // are parenthesised so a trailing numeric literal (`endIndex - startIndex + 1`)
-    // can't bind into the following `.map(`.
-    let (prefix, suffix): (&str, &str) = if is_numeric_v_for_iterable(iterable) {
-        if bare {
-            ("Array.from({length: ", "}, (_, __i) => __i + 1)")
-        } else {
-            ("{Array.from({length: ", "}, (_, __i) => __i + 1)")
-        }
-    } else if bare {
-        ("(", ")")
-    } else {
-        ("{(", ")")
-    };
-
-    let wrapped = resolved.wrapped(prefix, suffix);
-    out.prepend_mapped_generated_text(target_pos, &wrapped);
+    out.prepend_mapped_generated_text(target_pos, &resolved.wrapped("(", ")"));
 }
 
 /// Resolve the v-for iterable into a [`MappedGeneratedText`] through the shared
@@ -284,7 +246,7 @@ fn emit_mapped_v_for_iterable<'alloc>(
 ///
 /// This adapter performs NO prefix/suffix logic of its own — every accessor
 /// decision is the producer's.
-fn resolve_iterable_segments(
+pub(crate) fn resolve_iterable_segments(
     iterable: &str,
     iterable_start: u32,
     oxc_el: Option<&OxcParsedElement<'_>>,
@@ -336,33 +298,26 @@ fn resolve_iterable_segments(
         offset: iterable_start,
         expression: None,
         multi_statement: false,
+        statements: None,
         errors: None,
         bindings: Some(BindingExtractionResult {
             bindings,
             ..Default::default()
         }),
-        ide_recovery_scope: Vec::new(),
+        ide_recovery_scope: None,
         dynamism: Dynamism::Dynamic,
     };
     build_prefixed_expr_segments(iterable, iterable_start, &parsed, resolver, &[])
 }
 
-/// Emit the closing of a v-for map expression.
-///
-/// Normal mode: `) })}` — closes statement-body, map call, JSX expression.
-/// Bare mode (lifted chain branch): `) })` — no outer JSX `}` (parent ternary owns braces).
-pub fn emit_v_for_close(el: &ElementNode, _source: &str, out: &mut CodeGenOutput<'_>, bare: bool) {
+/// Close a `v-for` frame: `); } })()}` (`bare`: `); } })()`).
+pub fn emit_v_for_close(el: &ElementNode, out: &mut CodeGenOutput<'_>, bare: bool) {
     let el_end = el
         .tag_close
         .as_ref()
         .map(|tc| tc.end)
         .unwrap_or(el.tag_open.end);
-
-    if bare {
-        out.prepend_alloc(el_end, ") })");
-    } else {
-        out.prepend_alloc(el_end, ") })}");
-    }
+    out.prepend_alloc(el_end, if bare { "); } })()" } else { "); } })()}" });
 }
 
 /// Emit v-show as a style attribute.
@@ -532,47 +487,16 @@ pub fn emit_mapped_condition_expr<'alloc>(
     // shorthand keys, and the surrounding IIFE `prefix`/`suffix` wrappers —
     // carries no source-map token. The plan keeps each suffix as its own
     // unmapped segment, so a `.value` can never fold into the identifier token.
-    // Generated bytes equal the flat `resolve_condition_expr`; only the source
-    // map gains per-identifier precision.
     let raw = &source[vs as usize..ve as usize];
     let wrapped =
         resolve_condition_expr_segments(raw, vs, oxc_el, resolver).wrapped(prefix, suffix);
     out.prepend_mapped_generated_text(target_pos, &wrapped);
+    super::flow::record(|work| work.conditions += 1);
 }
 
-/// Build a fully resolved condition expression for v-if/v-else-if.
-/// Public wrapper for use by the condition scope builder.
-pub fn resolve_condition_expr_pub(
-    raw_expr: &str,
-    expr_start: u32,
-    oxc_el: Option<&OxcParsedElement<'_>>,
-    resolver: &BindingResolver<'_>,
-) -> String {
-    resolve_condition_expr(raw_expr, expr_start, oxc_el, resolver)
-}
-
-/// Build a fully resolved condition expression for v-if/v-else-if.
-/// Uses `build_prefixed_expr` to inject binding prefixes into the expression string,
-/// instead of positional patches that would conflict with attribute removal.
-fn resolve_condition_expr(
-    raw_expr: &str,
-    expr_start: u32,
-    oxc_el: Option<&OxcParsedElement<'_>>,
-    resolver: &BindingResolver<'_>,
-) -> String {
-    if let Some(oxc_el) = oxc_el {
-        if let Some(ref cond) = oxc_el.condition {
-            return build_prefixed_expr(raw_expr, expr_start, cond, resolver, &[]);
-        }
-    }
-    resolver.resolve_simple_expr(raw_expr)
-}
-
-/// Segmented analogue of [`resolve_condition_expr`]: the resolved condition as a
-/// [`MappedGeneratedText`] plan, so the no-OXC-binding emission path maps the
-/// authored identifier while leaving any injected `__props.` / `.value` /
-/// bracket scaffolding unmapped. `.text` is byte-identical to
-/// `resolve_condition_expr`.
+/// The resolved condition as a [`MappedGeneratedText`] plan: authored
+/// identifiers are mapped, injected `__props.` / `.value` / bracket
+/// scaffolding is unmapped.
 fn resolve_condition_expr_segments(
     raw_expr: &str,
     expr_start: u32,
@@ -585,13 +509,6 @@ fn resolve_condition_expr_segments(
         }
     }
     resolve_simple_expr_segments(resolver, raw_expr, expr_start)
-}
-
-/// Check if a v-for iterable expression is a pure numeric literal (e.g., "12", "100").
-/// Vue supports `v-for="i in 12"` to iterate 1..12, but `12.map(...)` is invalid JS.
-fn is_numeric_v_for_iterable(iterable: &str) -> bool {
-    let trimmed = iterable.trim();
-    !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Parse a v-for expression into (params, source).
@@ -798,6 +715,7 @@ mod tests {
             offset: pos,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: Some(BindingExtractionResult {
                 bindings: vec![Binding {
@@ -812,7 +730,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
-            ide_recovery_scope: Vec::new(),
+            ide_recovery_scope: None,
             dynamism: Dynamism::Dynamic,
         };
         OxcParsedElement {
@@ -821,7 +739,7 @@ mod tests {
             v_slot: None,
             props: vec![],
             prop_lookup: vec![],
-            provided_locals: None,
+            props_scope: crate::template::oxc::types::LexicalScopeId::ROOT,
             expression_flag: ExpressionFlag::empty(),
         }
     }
@@ -938,7 +856,7 @@ mod tests {
             v_slot: None,
             props: Vec::new(),
             prop_lookup: Vec::new(),
-            provided_locals: None,
+            props_scope: crate::template::oxc::types::LexicalScopeId::ROOT,
             expression_flag: ExpressionFlag::empty(),
         }
     }
@@ -971,16 +889,15 @@ mod tests {
             "item in items",
             None,
             source,
-            false,
             &resolver,
         );
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
         out.apply_to(&mut ct);
 
-        // Iterable head bytes unchanged: `{(__props.items)`.
+        // Iterable head bytes: `(__props.items)`.
         assert!(
-            ct.build_string().starts_with("{(__props.items)"),
+            ct.build_string().starts_with("(__props.items)"),
             "got: {}",
             ct.build_string()
         );
@@ -999,10 +916,10 @@ mod tests {
             })
             .collect();
 
-        // `items` maps at gen col 10 (`{(` = 2 + `__props.` = 8) → src col 11.
+        // `items` maps at gen col 9 (`(` = 1 + `__props.` = 8) → src col 11.
         let items = tokens
             .iter()
-            .find(|t| t.get_dst_col() == 10 && t.get_source_id().is_some());
+            .find(|t| t.get_dst_col() == 9 && t.get_source_id().is_some());
         assert!(items.is_some(), "`items` must map; tokens: {dump:?}");
         assert_eq!(
             items.unwrap().get_src_col(),
@@ -1010,12 +927,12 @@ mod tests {
             "`items` must map to src col 11, not the synthetic `__props.`"
         );
 
-        // The synthetic `{(__props.` region [2, 10) carries NO source token.
+        // The synthetic `(__props.` region [0, 9) carries NO source token.
         assert!(
-            !tokens.iter().any(|t| t.get_dst_col() >= 2
-                && t.get_dst_col() < 10
-                && t.get_source_id().is_some()),
-            "synthetic `{{(__props.` prefix must be unmapped; tokens: {dump:?}"
+            !tokens
+                .iter()
+                .any(|t| t.get_dst_col() < 9 && t.get_source_id().is_some()),
+            "synthetic `(__props.` prefix must be unmapped; tokens: {dump:?}"
         );
     }
 
@@ -1050,7 +967,7 @@ mod tests {
             v_slot: None,
             props: Vec::new(),
             prop_lookup: Vec::new(),
-            provided_locals: None,
+            props_scope: crate::template::oxc::types::LexicalScopeId::ROOT,
             expression_flag: ExpressionFlag::empty(),
         }
     }
@@ -1059,7 +976,7 @@ mod tests {
     /// ZERO in-range references must emit the iterable VERBATIM, never routing it
     /// through the resolver-only path. Here `items` is a registered prop, so the
     /// resolver-only path would prefix it to `__props.items`; the zero-reference
-    /// v-for sub-case must instead keep the bare `{(items)` (matching a verbatim
+    /// v-for sub-case must instead keep the bare `(items)` (matching a verbatim
     /// patch over an empty reference set) and map the identifier to its source
     /// offset with no synthetic prefix.
     #[test]
@@ -1088,18 +1005,17 @@ mod tests {
             "item in items",
             Some(&el),
             source,
-            false,
             &resolver,
         );
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
         out.apply_to(&mut ct);
 
-        // Iterable head bytes must be VERBATIM `{(items)` — no `__props.` prefix.
+        // Iterable head bytes must be VERBATIM `(items)` — no `__props.` prefix.
         let built = ct.build_string();
         assert!(
-            built.starts_with("{(items)"),
-            "zero-ref v-for iterable must stay verbatim `{{(items)`, got: {built}"
+            built.starts_with("(items)"),
+            "zero-ref v-for iterable must stay verbatim `(items)`, got: {built}"
         );
         assert!(
             !built.contains("__props."),
@@ -1120,10 +1036,10 @@ mod tests {
             })
             .collect();
 
-        // `items` maps at gen col 2 (after `{(`) → src col 11 (the authored offset).
+        // `items` maps at gen col 1 (after `(`) → src col 11 (the authored offset).
         let body = tokens
             .iter()
-            .find(|t| t.get_dst_col() == 2 && t.get_source_id().is_some());
+            .find(|t| t.get_dst_col() == 1 && t.get_source_id().is_some());
         assert!(body.is_some(), "`items` must map; tokens: {dump:?}");
         assert_eq!(
             body.unwrap().get_src_col(),
@@ -1163,16 +1079,15 @@ mod tests {
             "item in todos",
             Some(&el),
             source,
-            false,
             &resolver,
         );
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
         out.apply_to(&mut ct);
 
-        // `.value` injected; iterable head bytes: `{(todos.value)`.
+        // `.value` injected; iterable head bytes: `(todos.value)`.
         assert!(
-            ct.build_string().starts_with("{(todos.value)"),
+            ct.build_string().starts_with("(todos.value)"),
             "got: {}",
             ct.build_string()
         );
@@ -1191,10 +1106,10 @@ mod tests {
             })
             .collect();
 
-        // `todos` maps at gen col 2 (after `{(`) → src col 11.
+        // `todos` maps at gen col 1 (after `(`) → src col 11.
         let body = tokens
             .iter()
-            .find(|t| t.get_dst_col() == 2 && t.get_source_id().is_some());
+            .find(|t| t.get_dst_col() == 1 && t.get_source_id().is_some());
         assert!(body.is_some(), "`todos` must map; tokens: {dump:?}");
         assert_eq!(
             body.unwrap().get_src_col(),
@@ -1203,20 +1118,20 @@ mod tests {
         );
 
         // Discriminating: the synthetic `.value` begins at gen col 7
-        // (`{(` = 2 + `todos` = 5) and must START its own UNMAPPED segment.
+        // (`(` = 1 + `todos` = 5) and must START its own UNMAPPED segment.
         assert!(
             tokens
                 .iter()
-                .any(|t| t.get_dst_col() == 7 && t.get_source_id().is_none()),
-            "synthetic `.value` must start an unmapped segment at col 7; tokens: {dump:?}"
+                .any(|t| t.get_dst_col() == 6 && t.get_source_id().is_none()),
+            "synthetic `.value` must start an unmapped segment at col 6; tokens: {dump:?}"
         );
 
-        // No source token anywhere inside the `.value` region [7, 13).
+        // No source token anywhere inside the `.value` region [6, 12).
         assert!(
-            !tokens.iter().any(|t| t.get_dst_col() >= 7
-                && t.get_dst_col() < 13
+            !tokens.iter().any(|t| t.get_dst_col() >= 6
+                && t.get_dst_col() < 12
                 && t.get_source_id().is_some()),
-            "`.value` region [7, 13) must carry no source token; tokens: {dump:?}"
+            "`.value` region [6, 12) must carry no source token; tokens: {dump:?}"
         );
     }
 }

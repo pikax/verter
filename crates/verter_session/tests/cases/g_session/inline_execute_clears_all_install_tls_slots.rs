@@ -16,8 +16,8 @@
 //! asserts the inner stage observes `None` on every install_tls
 //! slot:
 //!
-//! - `verter_session::request_context::current_request_context()`
-//! - `verter_session::request_context::current_accumulator()`
+//! - `verter_type_engine::request_context::current_request_context()`
+//! - `verter_type_engine::request_context::current_accumulator()`
 //! - `verter_audit::current_observer()`
 //!
 //! Discriminator: if the scheduler-side inline-execute path reverts
@@ -31,20 +31,20 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering as MOrd};
 use std::sync::Arc;
 
 use verter_audit::current_observer;
+use verter_execution::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::caller_kind::CallerKind;
-use verter_scheduler::executor::{StageError, StageExecutor};
+use verter_scheduler::execution::executor::{StageError, StageExecutor};
 use verter_scheduler::job::CompletionState;
 use verter_scheduler::node::{AnalysisSnapshot, SourceSnapshot};
-use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
 use verter_scheduler::stage::{Priority, TargetStage};
-use verter_session::component_meta_audit::accumulator::RequestFootprintAccumulator;
-use verter_session::request_context::{
+use verter_type_engine::request_context::{
     current_accumulator, current_request_context, install_clear_tls_hook, RequestContext,
     RequestContextGuard,
 };
+use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
 const OUTER_ID: u64 = 9091;
 
@@ -65,6 +65,7 @@ impl StageExecutor for InlineReentryExecutor {
         _file_language: SchedFileKind,
         content: Arc<str>,
         generation: u64,
+        _incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         Ok(SourceSnapshot::new_empty(content, generation))
     }

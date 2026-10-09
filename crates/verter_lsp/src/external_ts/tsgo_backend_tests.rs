@@ -30,7 +30,7 @@ fn ensure(backend: &TsgoEngineBackend, workspace_root: &str, tsconfig_uri: &str)
         ENGINE_VERSION,
         env_dims(),
         Vec::new(),
-        verter_workspace::ProjectId(0),
+        verter_session_query::resolution::ProjectId(0),
         verter_workspace::SnapshotGeneration(1),
     );
     assert!(matches!(
@@ -69,9 +69,15 @@ fn capability_handshake_records_api_wire_cancel_false_and_no_static_map() {
         "the shipped tsgo --api exposes no static module-resolution-map endpoint"
     );
     assert_eq!(
-        caps.reported_version.as_deref(),
+        caps.version.as_str(),
         Some(ENGINE_VERSION),
-        "the handshake records the negotiated engine version"
+        "the record names the negotiated engine version"
+    );
+    assert_eq!(
+        caps.version,
+        verter_session::external_ts::EngineVersion::Declared(Arc::from(ENGINE_VERSION)),
+        "a version this session negotiated is a DECLARATION here, not a handshake the \
+         engine never made"
     );
 }
 
@@ -81,7 +87,7 @@ fn witness_capabilities_match_the_backend_handshake() {
     let witness = ensure(&backend, "file:///ws", "file:///ws/tsconfig.json");
     // The witness carries the SAME negotiated capabilities the backend reports.
     assert_eq!(
-        witness.capabilities().reported_version.as_deref(),
+        witness.capabilities().version.as_str(),
         Some(ENGINE_VERSION)
     );
     assert!(!witness.capabilities().async_cancellable_queries);
@@ -93,9 +99,32 @@ fn query_is_not_a_silent_stub() {
     let backend = TsgoEngineBackend::new(ENGINE_VERSION);
     let witness = ensure(&backend, "file:///ws", "file:///ws/tsconfig.json");
     // query() must fail LOUDLY (the live transport is the provider, wired
-    // separately) — never a silent always-NoResult stub.
-    let _ = backend.query(
+    // separately) — never a silent always-NoResult stub. Reaching it needs the
+    // certified binding: the op no longer answers for a bare bound-project
+    // witness.
+    let serving = verter_session::external_ts::EngineIdentity::for_mode(
+        verter_session::external_ts::ServeMode::Owned,
+        &verter_session::external_ts::EngineSessionFacts {
+            observed_version: std::sync::Arc::from(ENGINE_VERSION),
+            wire_pin: 7,
+            editor_session_generation: 3,
+        },
+    );
+    let certified = verter_session::semantic_capability::CertifiedTypeEngineBinding::certify(
         &witness,
+        &serving,
+        verter_session::semantic_capability::ServingLease::new(1),
+        verter_session::external_ts::PublishSnapshot {
+            project: std::sync::Arc::from("file:///ws/tsconfig.json"),
+            files: Vec::new(),
+            resolution_map_version: 0,
+            fs_generation: 0,
+        }
+        .input_basis(),
+    )
+    .expect("an observed handshake certifies");
+    let _ = backend.query(
+        &certified,
         verter_session::external_ts::Query {
             project: std::sync::Arc::from("file:///ws/tsconfig.json"),
             provider_uri: std::sync::Arc::from("file:///ws/src/A.vue.tsx"),

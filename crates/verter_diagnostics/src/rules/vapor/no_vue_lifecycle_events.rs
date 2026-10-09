@@ -8,7 +8,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::{TemplateDirective, TemplateElement};
+use verter_session_query::analysis::template::{TemplateDirective, TemplateElement};
 
 const LIFECYCLE_NAMES: &[&str] = &[
     "mounted",
@@ -81,7 +81,9 @@ mod tests {
     use super::*;
     use crate::config::{LintConfig, LintPreset};
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::ElementNamespace;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+
     use verter_span::Span;
 
     fn run_rule(

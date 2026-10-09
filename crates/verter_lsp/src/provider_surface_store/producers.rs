@@ -14,8 +14,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::Uri;
 
-use verter_semantic::analysis::types::Hash16;
 use verter_session::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::carrier_cache::{EngineRecheckState, RegenKey};
 use crate::carrier_provider_projection::PreparedCarrierProviderContent;
@@ -68,13 +68,18 @@ pub fn external_ide_context_from_snapshot(
 /// location drops):
 /// - the path was not captured as a `Current` `CarrierIde` surface when the
 ///   request began;
-/// - the captured surface is no longer honored at merge time (a mid-request
-///   re-sync with different content, or a close, invalidates — a
-///   byte-identical same-map re-sync stays honored);
+/// - the captured surface is no longer current at merge time: its content
+///   epoch, incarnation or owner moved — a mid-request re-sync with different
+///   content or map, a close, or a change that changes back all invalidate; a
+///   byte-identical same-map re-record keeps every epoch and stays current;
 /// - when the foreign carrier is OPEN, its live buffer no longer byte-matches
 ///   the captured carrier source. A CLOSED imported carrier stays mappable
 ///   through the coherent captured source/map generation;
 /// - the captured surface has no usable source map.
+///
+/// A surface that yields a context joins the enclosing foreground request's
+/// settlement bracket, so a change after this decode still supersedes the
+/// answer built from it.
 #[must_use]
 pub fn foreign_ide_context_from_captured(
     store: &ProviderSurfaceStore,
@@ -87,7 +92,7 @@ pub fn foreign_ide_context_from_captured(
     if snapshot.kind != ProviderSurfaceKind::CarrierIde {
         return None;
     }
-    if !store.captured_snapshot_still_honored(snapshot) {
+    if !store.captured_surface_is_current(snapshot) {
         return None;
     }
     // An open foreign carrier is governed by its editor buffer and must still
@@ -96,13 +101,27 @@ pub fn foreign_ide_context_from_captured(
     // coherent generation the provider answered against, so it remains
     // mappable. Requiring an open document here would make cross-file
     // navigation start working only after the user manually opened the target.
-    if let Some(uri) = documents.canonical_id_to_uri(&snapshot.source_canonical) {
-        let document = documents.get(&uri)?;
-        if ContentHash::of(&document.source) != snapshot.source_hash {
-            return None;
+    //
+    // The open revision whose bytes matched joins the current navigation or
+    // edit request's captured targets: a location or edit decoded through this
+    // map addresses exactly that revision, and settlement refuses the answer if
+    // the client's document moves before delivery.
+    let open_target = match documents.open_uri_for_fs_path(&snapshot.source_canonical) {
+        Some(uri) => {
+            let identity = documents.snapshot_identity(&uri)?;
+            if ContentHash::of(identity.source()) != snapshot.source_hash {
+                return None;
+            }
+            Some((uri, identity))
         }
+        None => None,
+    };
+    let context = external_ide_context_from_snapshot(snapshot, negotiated_encoding)?;
+    if let Some((uri, identity)) = open_target {
+        crate::documents::ForegroundRequest::bracket_target(&uri, identity);
     }
-    external_ide_context_from_snapshot(snapshot, negotiated_encoding)
+    crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
+    Some(context)
 }
 
 /// Locate the byte range of a child component's prop identifier IN the captured
@@ -223,8 +242,11 @@ pub fn locate_prop_decl_range_in_carrier_api(
 /// 1. **Captured [`CapturedPathState::Current`] (a `CarrierApi` surface at capture),
 ///    context builds** → `Vouched(ctx)`: map the API-surface offsets onto the `.vue`
 ///    through THAT captured generation's own source map.
-/// 2. **Captured [`CapturedPathState::Current`] but no context (no source map)** →
-///    `VirtualDrop` (fail closed).
+/// 2. **Captured [`CapturedPathState::Current`] but no context (no source map), or
+///    a surface the serving provider does not hold at decode
+///    ([`ProviderQuerySnapshot::delivery_of`] is not delivered)** → `VirtualDrop`
+///    (fail closed). The delivery read is the serving provider's own ledger, bound
+///    at capture — not a read of mutable store state.
 /// 3. **Captured [`CapturedPathState::KnownNonMappable`]** (was `Closing`, or a
 ///    non-`CarrierApi`/snapshot-less `Current` at capture) → `VirtualDrop`. The store
 ///    knew the path as virtual; its offsets index VIRTUAL content, so it must NEVER
@@ -233,7 +255,14 @@ pub fn locate_prop_decl_range_in_carrier_api(
 ///    `Child.vue.ts` next to `Child.vue`) the store did not know as virtual at
 ///    capture: `NotVirtual` (edit it in place).
 #[must_use]
+///
+/// With `documents`, a vouching surface whose carrier is open in the client
+/// must have been built from the open revision's exact bytes, and that revision
+/// joins the current navigation or edit request's captured targets (as in
+/// [`foreign_ide_context_from_captured`]); a surface built from other bytes is
+/// a `VirtualDrop`, never an offset mapped through another revision.
 pub fn classify_captured_api_surface(
+    documents: Option<&DocumentRegistry>,
     captured: &ProviderQuerySnapshot,
     api_path: &str,
     negotiated_encoding: tower_lsp_server::ls_types::PositionEncodingKind,
@@ -244,9 +273,40 @@ pub fn classify_captured_api_surface(
         // Mappable captured surface: build the context from THE CAPTURED snapshot
         // (its own provider/carrier indexes + source map). A snapshot with no source
         // map fails closed.
+        // A vouching surface joins the enclosing foreground request's settlement
+        // bracket: a change to it before settlement — including one that changes
+        // back — supersedes the answer mapped through it.
+        // A captured surface the serving provider does not hold at this
+        // decode — recorded ahead of its publication, diverged or lost — is
+        // known virtual but unmappable: the provider's offsets index bytes it
+        // does not describe.
+        Some(CapturedPathState::Current(snapshot))
+            if !captured.delivery_of(snapshot).is_servable() =>
+        {
+            ApiSurfaceResolution::VirtualDrop
+        }
         Some(CapturedPathState::Current(snapshot)) => {
+            let open_target = match documents.and_then(|documents| {
+                let uri = documents.open_uri_for_fs_path(&snapshot.source_canonical)?;
+                let identity = documents.snapshot_identity(&uri);
+                Some((uri, identity))
+            }) {
+                None => None,
+                Some((uri, Some(identity)))
+                    if ContentHash::of(identity.source()) == snapshot.source_hash =>
+                {
+                    Some((uri, identity))
+                }
+                Some(_) => return ApiSurfaceResolution::VirtualDrop,
+            };
             match external_ide_context_from_snapshot(snapshot, negotiated_encoding) {
-                Some(ctx) => ApiSurfaceResolution::Vouched(ctx),
+                Some(ctx) => {
+                    if let Some((uri, identity)) = open_target {
+                        crate::documents::ForegroundRequest::bracket_target(&uri, identity);
+                    }
+                    crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
+                    ApiSurfaceResolution::Vouched(ctx)
+                }
                 None => ApiSurfaceResolution::VirtualDrop,
             }
         }
@@ -447,14 +507,15 @@ pub fn captured_surface_still_valid_for_canonical(
 /// open paths; the tsserver publish path records through
 /// [`record_and_version_carrier_companions`] inside the carrier-sync gateway,
 /// and the server-side interactive paths through
-/// `VerterLanguageServer::record_carrier_ide_snapshot`).
+/// `VerterLanguageServer::record_prepared_carrier_ide_snapshot`).
 ///
-/// Records a fresh generation pinning the EXACT `ide_code` synced under
-/// `provider_path`, with the source map parsed from the SAME bytes. Called ONLY
-/// after a SUCCESSFUL provider sync (fail-closed: a failed sync records
-/// nothing). Without this record the interactive request-surface capture has
-/// no `CarrierIde` snapshot to serve, and every provider-backed feature drops
-/// its provider contribution for the synced file.
+/// Records the coordinate model this operation owns under `provider_path`,
+/// with the source map parsed from the same bytes. Buffer transport supplies
+/// certified delivered content; membership-only transport supplies its own
+/// prepared model. Recording coordinates does not certify engine application:
+/// that evidence remains in the delivery or gateway membership receipt.
+/// A failed/refused operation records nothing. Without a matching record,
+/// interactive capture drops the provider contribution for the carrier.
 pub(crate) fn record_carrier_ide_surface(
     store: &ProviderSurfaceStore,
     documents: Option<&DocumentRegistry>,
@@ -519,7 +580,7 @@ pub(crate) fn record_carrier_ide_surface_with_source(
 ///   live document identity, via [`DocumentRegistry::with_current_snapshot_identity`],
 ///   using the open document's own live source captured under that same guard.
 ///   A moved identity records nothing (fail closed) — the same hazard class as
-///   `VerterLanguageServer::record_carrier_ide_snapshot_if_current`.
+///   `VerterLanguageServer::record_delivered_carrier_ide_snapshot`.
 /// - `None`: the caller captured no pin because it believed the carrier closed
 ///   at compile time (no document to race). If the carrier is, right now,
 ///   open anyway — a close→open mid-flight transition, or simply a call site
@@ -659,7 +720,7 @@ pub(crate) fn record_carrier_companion_surface(
     )
 }
 
-fn record_carrier_companion_surface_with_source(
+pub(crate) fn record_carrier_companion_surface_with_source(
     store: &ProviderSurfaceStore,
     canonical_id: &str,
     provider_path: &str,
@@ -716,6 +777,11 @@ fn record_carrier_companion_surface_with_source(
 /// difference is this returns the linearized generation so the caller can
 /// stamp `companion.version` from it, the same contract
 /// [`record_carrier_companion_surface`] offers non-fenced callers.
+///
+/// `Err(CompanionRecordSuperseded)` when the pin no longer matches the open
+/// document: the compiled IDE content belongs to a revision the editor no
+/// longer holds. `Ok(None)` when the record was skipped for any other reason
+/// (an open carrier compiled without a pin, or an unavailable source).
 #[allow(
     clippy::too_many_arguments,
     reason = "the fenced record choke point needs the pin alongside every other producer input"
@@ -729,11 +795,13 @@ fn record_carrier_companion_surface_fenced(
     surface: RecordedProviderSurface<'_>,
     source_map_json: Option<&str>,
     open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
-) -> Option<u64> {
+) -> Result<Option<u64>, CompanionRecordSuperseded> {
     if let Some((open_uri, revision)) = open_pin {
-        let documents = documents?;
-        let generation = documents
-            .with_current_snapshot_identity(open_uri, revision, |document| {
+        let Some(documents) = documents else {
+            return Err(CompanionRecordSuperseded);
+        };
+        let Some(generation) =
+            documents.with_current_snapshot_identity(open_uri, revision, |document| {
                 record_carrier_companion_surface_with_source(
                     store,
                     canonical_id,
@@ -743,14 +811,14 @@ fn record_carrier_companion_surface_fenced(
                     Arc::clone(&document.source),
                 )
             })
-            .flatten();
-        if generation.is_none() {
+        else {
             tracing::debug!(
                 "provider_surface_store: discarding IDE companion for {provider_path} — the \
                  open document moved mid-sync"
             );
-        }
-        return generation;
+            return Err(CompanionRecordSuperseded);
+        };
+        return Ok(generation);
     }
     if let Some(documents) = documents {
         if documents.canonical_id_to_uri(canonical_id).is_some() {
@@ -758,10 +826,10 @@ fn record_carrier_companion_surface_fenced(
                 "provider_surface_store: discarding IDE companion for {provider_path} — the \
                  carrier is open but no revision was pinned for this compile"
             );
-            return None;
+            return Ok(None);
         }
     }
-    record_carrier_companion_surface(
+    Ok(record_carrier_companion_surface(
         store,
         documents,
         host,
@@ -769,8 +837,19 @@ fn record_carrier_companion_surface_fenced(
         provider_path,
         surface,
         source_map_json,
-    )
+    ))
 }
+
+/// The fenced `CarrierIde` record was refused because the open document moved
+/// after the compile's pin: the companions carry content of a revision the
+/// editor no longer holds. A caller must publish none of them — the provider
+/// store would otherwise serve that content while every LSP-side record (the
+/// refused surface, the committed state) still describes the live revision,
+/// and a later edit back to an already-committed text would find nothing to
+/// republish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a superseded companion set must not be published"]
+pub(crate) struct CompanionRecordSuperseded;
 
 /// Record EVERY published carrier companion's surface through the store at publish
 /// time (so each role's generation — the plugin's `getScriptVersion` — advances on
@@ -787,7 +866,9 @@ fn record_carrier_companion_surface_fenced(
 /// [`record_carrier_ide_surface_fenced`] for the full invariant). It fences
 /// only the `CarrierIde` companion — the role the torn-pairing hazard applies
 /// to — through [`record_carrier_companion_surface_fenced`]; every other role
-/// records through the ordinary unfenced path unaffected by this pin.
+/// records through the ordinary unfenced path unaffected by this pin. A refused
+/// IDE record stops the pass with [`CompanionRecordSuperseded`] before any
+/// later companion is recorded.
 pub(crate) fn record_and_version_carrier_companions(
     store: &ProviderSurfaceStore,
     documents: Option<&DocumentRegistry>,
@@ -795,7 +876,7 @@ pub(crate) fn record_and_version_carrier_companions(
     canonical_id: &str,
     companions: &mut [crate::external_ts::CarrierCompanion],
     open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
-) {
+) -> Result<(), CompanionRecordSuperseded> {
     use verter_session::external_ts::SnapshotRole;
     for companion in companions.iter_mut() {
         let kind = match companion.role {
@@ -830,7 +911,7 @@ pub(crate) fn record_and_version_carrier_companions(
                 surface,
                 companion.map_json.as_deref(),
                 open_pin,
-            )
+            )?
         } else {
             record_carrier_companion_surface(
                 store,
@@ -845,6 +926,7 @@ pub(crate) fn record_and_version_carrier_companions(
         .unwrap_or(1);
         companion.version = generation;
     }
+    Ok(())
 }
 
 /// Hash a string into a [`Hash16`] (the env-hash representation the contract

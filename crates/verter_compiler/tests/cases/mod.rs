@@ -3,6 +3,7 @@ mod capability_matrix_compile_request_coverage;
 mod compiler_capability_catalog;
 mod compiler_layer_dependency_closure;
 mod css_class_extraction_uses_style_syntax_ir;
+mod flow_check_boundary;
 mod framework_option_wire_paths;
 mod ide_no_baked_prefix_overwrite;
 mod ide_script_recovery_guard;
@@ -54,3 +55,5 @@ mod vue_carrier_frontend;
 mod vue_projection_backend;
 mod vue_runtime_backend;
 mod vue_semantic_authority;
+
+mod compile_type_info_routes;

@@ -4,7 +4,7 @@
 //! # Why this crate exists
 //!
 //! NoTypeExpr-witnessed carriers (e.g. the session's lazily-served
-//! `LoweredValueDecl` in `crates/verter_session/src/decl_body_memo.rs`) must
+//! `LoweredValueDecl` in `crates/verter_semantic_source/src/decl_body_memo.rs`) must
 //! own NO transitive `verter_type_expr::TypeExpr`: every type-body position
 //! is a narrowed fact or content-free locator, never the symbolic IR. The first guard for that invariant was a `syn` SOURCE SCANNER that
 //! allow-listed field-type SPELLINGS. It was empirically launderable: planting

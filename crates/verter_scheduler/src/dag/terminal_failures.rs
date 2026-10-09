@@ -68,19 +68,21 @@ impl SchedulerDag {
     /// disambiguate the failure mode (FileNotFound vs StageFailed)
     /// instead of reconstructing it from the dep key alone.
     ///
-    /// This method ONLY touches the `waiters` reverse-index entry
-    /// for the Analysis DepKey; it does NOT cancel any DAG node,
+    /// This method ONLY takes the Analysis DepKey's edges from the
+    /// dependency-edge store; it does NOT cancel any DAG node,
     /// release any capacity permit, or alter `by_identity`. The
     /// caller (`terminalize_failure(Source)`) handles the Source
     /// identity cancellation separately.
     pub fn fanout_source_failure_to_analysis_waiters(
         &mut self,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         cause: &SchedulerError,
     ) -> Vec<SubmissionToken> {
         let analysis_dep_key = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -108,21 +110,23 @@ impl SchedulerDag {
     /// disambiguate the failure mode (FileNotFound vs StageFailed)
     /// instead of reconstructing it from the dep key alone.
     ///
-    /// This method ONLY touches the `waiters` reverse-index entry
-    /// for the Analysis DepKey; it does NOT cancel the Analysis
+    /// This method ONLY takes the Analysis DepKey's edges from the
+    /// dependency-edge store; it does NOT cancel the Analysis
     /// DAG identity or release its capacity permit. The caller
     /// (`terminalize_failure(Analysis)`) calls this BEFORE
-    /// `cancel(&analysis_identity)` so the cancel's waiter sweep
-    /// observes an empty reverse-index entry and does not strip
-    /// the dep without recording the failure.
+    /// `cancel(&analysis_identity)` so the cancel finds no edge
+    /// left to take and does not strip the dep without recording
+    /// the failure.
     pub fn fanout_analysis_failure_to_waiters(
         &mut self,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         cause: &SchedulerError,
     ) -> Vec<SubmissionToken> {
         let analysis_dep_key = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -130,7 +134,7 @@ impl SchedulerDag {
     }
 
     /// Shared fan-out helper for both Source- and Analysis-stage
-    /// failure paths: drains `self.waiters[analysis_dep_key]`,
+    /// failure paths: takes every edge on `analysis_dep_key`,
     /// removes the dep from each waiter's `deps_remaining`, and
     /// records a [`FailedDepRecord`] on the waiter so the
     /// pre-dispatch chokepoint surfaces a typed
@@ -142,18 +146,19 @@ impl SchedulerDag {
         cause: &SchedulerError,
     ) -> Vec<SubmissionToken> {
         let mut stranded = Vec::new();
-        let Some(waiters) = self.waiters.remove(analysis_dep_key) else {
+        let Some(waiters) = self.dep_edges.take(analysis_dep_key) else {
             return stranded;
         };
-        for waiter_tok in waiters {
+        for waiter_tok in waiters.into_values() {
             {
                 let Some(waiter) = self.nodes.get_mut(&waiter_tok) else {
                     continue;
                 };
+                // The edge left the store; its node side goes with it.
+                waiter.deps_remaining.remove(analysis_dep_key);
                 if waiter.cancelled {
                     continue;
                 }
-                waiter.deps_remaining.remove(analysis_dep_key);
                 // Record the failed DepKey on the waiter so the
                 // executor short-circuits with a typed
                 // `DependencyFailed` instead of running the user-side
@@ -256,16 +261,15 @@ impl SchedulerDag {
     /// as an Artifact / FileStage canonical payload). Called from
     /// `Scheduler::remove(canonical)` so a stale terminal-failure
     /// record on a removed file cannot pin a future admission as
-    /// `Failed`. Idempotent.
+    /// `Failed`. Idempotent. Visits only `canonical`'s records through the
+    /// per-canonical index.
     pub fn scrub_terminal_dep_failures_referencing(&mut self, canonical: &str) {
-        self.terminal_dep_failures.retain(|key, _record| match key {
-            DepKey::FileStage { canonical: c, .. } | DepKey::Artifact { canonical: c, .. } => {
-                c.as_ref() != canonical
-            }
-            DepKey::CacheNode { .. } => true,
-        });
-        self.canonical_index
-            .remove_terminal_failures_for_canonical(canonical);
+        for dep_key in self
+            .canonical_index
+            .remove_terminal_failures_for_canonical(canonical)
+        {
+            self.terminal_dep_failures.remove(&dep_key);
+        }
     }
 
     /// Drop the persistent terminal-dep-failure entry for
@@ -276,9 +280,15 @@ impl SchedulerDag {
     /// generation and succeeding) does not leave a stale record
     /// behind that would misclassify the dep as `Failed` on the
     /// next admission. Idempotent: a missing entry is a no-op.
-    pub fn clear_terminal_dep_failure_for_gen(&mut self, canonical: &Arc<str>, generation: u64) {
+    pub fn clear_terminal_dep_failure_for_gen(
+        &mut self,
+        canonical: &Arc<str>,
+        incarnation: u64,
+        generation: u64,
+    ) {
         let analysis_key = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };

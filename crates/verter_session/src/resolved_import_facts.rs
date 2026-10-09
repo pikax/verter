@@ -31,8 +31,8 @@
 //!
 //! The store is one [`ValidatedFactCache`] slot per key: the shared
 //! bounded multi-candidate substrate, the standard per-slot
-//! [`CANDIDATE_CAP`](crate::resolver_core::CANDIDATE_CAP) FIFO policy,
-//! and per-reader [`ReadSetSignature`](verter_workspace::ReadSetSignature)
+//! [`CANDIDATE_CAP`](verter_session_query::facts::fact_cache::CANDIDATE_CAP) FIFO policy,
+//! and per-reader [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 //! validation. Each candidate roots on the owner's own content
 //! (`FileWholeHash`) — the bundle describes exactly one owner's import
 //! clauses — and two concurrent resolve envs reading the same parsed
@@ -52,12 +52,13 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::Hash16;
-use verter_workspace::FactVersionRef;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
-use crate::resolver_core::{StoreView, ValidatedFactCache};
-use verter_semantic::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
+use crate::resolver_core::ValidatedFactCache;
+use verter_session_query::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
+use verter_session_query::facts::store_view::StoreView;
 
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,7 +132,7 @@ pub struct ResolvedSpecifier {
 
 /// One resolved import-clause binding.
 ///
-/// Mirrors the payload of [`verter_semantic::facts::FactKey::ResolvedImportClause`]:
+/// Mirrors the payload of [`verter_session_query::facts::FactKey::ResolvedImportClause`]:
 /// `(specifier, binding, space, resolved_canonical,
 /// resolved_source_name)` — the resolver's claim that a particular
 /// `import { binding } from "spec"` (or default / namespace import)
@@ -160,7 +161,7 @@ pub struct ResolvedImportClauseEntry {
 
 /// One resolved re-export-binding entry.
 ///
-/// Mirrors the payload of [`verter_semantic::facts::FactKey::ResolvedReexportBinding`]:
+/// Mirrors the payload of [`verter_session_query::facts::FactKey::ResolvedReexportBinding`]:
 /// `(specifier, source_name, target_name, space, resolved_canonical,
 /// resolved_source_name)` — the resolver's claim that
 /// `export { source_name as target_name } from "specifier"` reaches a
@@ -226,7 +227,7 @@ const RECENT_CONTENT_HASHES: usize = 2;
 ///
 /// One [`ValidatedFactCache`] slot per key: the shared bounded
 /// multi-candidate substrate with the standard
-/// [`CANDIDATE_CAP`](crate::resolver_core::CANDIDATE_CAP) FIFO policy
+/// [`CANDIDATE_CAP`](verter_session_query::facts::fact_cache::CANDIDATE_CAP) FIFO policy
 /// and per-reader signature validation. Concurrent resolution states
 /// of the same parsed file coexist as candidates and are told apart by
 /// the witness each one recorded, not by a key dimension.
@@ -445,6 +446,12 @@ impl ResolvedImportFactsDb {
     /// guessing — the same fail-safe direction as a domain with no
     /// producer at all.
     #[must_use]
+    pub(crate) fn generation_reader(
+        &self,
+    ) -> verter_session_query::facts::clocks::BracketedGenerationRead {
+        self.generation.reader()
+    }
+
     pub(crate) fn stable_generation(&self) -> Option<u64> {
         self.generation.stable()
     }

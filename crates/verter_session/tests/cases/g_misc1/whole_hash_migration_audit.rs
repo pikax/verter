@@ -198,7 +198,7 @@ fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
 /// not exposed at the cache key."
 #[test]
 fn whole_hash_read_site_4_node_scope_id_inventoried() {
-    let path = workspace_root().join("crates/verter_session/src/semantic_query.rs");
+    let path = workspace_root().join("crates/verter_type_engine/src/semantic_query.rs");
     let source = read_source_file(&path);
 
     // The legacy pattern: NodeScopeId::File { ..., whole_hash, ... }.
@@ -221,7 +221,7 @@ fn whole_hash_read_site_4_node_scope_id_inventoried() {
 /// `ResolvedDeclSlotIdentity` exists alongside `DeclIdentity`.
 #[test]
 fn whole_hash_read_site_5_decl_identity_hash_alongside_content_free_slot() {
-    let path = workspace_root().join("crates/verter_session/src/semantic_query.rs");
+    let path = workspace_root().join("crates/verter_type_engine/src/semantic_query.rs");
     let source = read_source_file(&path);
 
     // The content-free `ResolvedDeclSlotIdentity` exists alongside

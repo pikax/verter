@@ -27,18 +27,19 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
     NoFallthroughReason, PropAnalysis, ResolvedTypeAnalysis, RootReachability,
 };
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
 
-use crate::capture_token::assert_no_stack_overflow;
 use crate::component_meta_resolution_policy::apply_component_meta_resolution_policy;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+use verter_type_engine::capture_token::assert_no_stack_overflow;
 
 // ---------------------------------------------------------------------------
 // Test fixture helpers
@@ -151,7 +152,7 @@ fn run_policy_with_overflow_check(
     mut meta: ComponentMetaAnalysis,
     registry: Vec<ResolvedTypeAnalysis>,
     registry_meta: Vec<ResolvedTypeRegistryMeta>,
-) -> Result<ComponentMetaAnalysis, crate::capture_token::StackOverflow> {
+) -> Result<ComponentMetaAnalysis, verter_type_engine::capture_token::StackOverflow> {
     let host = empty_host();
     for (id, source) in files {
         upsert_ts(&host, id, source);
@@ -170,6 +171,9 @@ fn run_policy_with_overflow_check(
     });
     assert_no_stack_overflow(move || {
         crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            let fixture_dispatch_0 =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             apply_component_meta_resolution_policy(
                 &mut meta,
                 &registry,
@@ -178,6 +182,7 @@ fn run_policy_with_overflow_check(
                 "/owner.vue",
                 None,
                 ctx,
+                &fixture_dispatch_0,
             );
         });
         meta
@@ -508,9 +513,9 @@ fn normalized_type_args_distinguishes_distinct_decl_instantiations() {
     use crate::component_meta_resolution_policy::cycle_guard::{
         hash_literal, NormalizedTypeArg, NormalizedTypeArgs,
     };
-    use crate::semantic_query::DeclIdentity;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+    use verter_type_engine::semantic_query::DeclIdentity;
 
     fn decl(canonical_id: &str, decl_name: &str) -> DeclIdentity {
         DeclIdentity {

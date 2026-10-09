@@ -7,7 +7,7 @@ use verter_session::framework::{
     ComponentContractAvailability, ComponentContractUnsupported, PublicParameter, PublicSlot,
     PublicTypeReference,
 };
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_type_expr::{render_type_expr_display, PublicationResult, TypeExpr};
 
 use crate::documents::carrier_structure::{
@@ -97,7 +97,7 @@ pub struct SlotAttributeHoverTarget {
 pub struct ComponentUsagePropInfo {
     pub name: String,
     pub is_bound: bool,
-    pub constness: verter_semantic::analysis::template::PropValueConstness,
+    pub constness: verter_session_query::analysis::template::PropValueConstness,
 }
 
 impl From<Hover> for VerterHoverResult {
@@ -437,14 +437,14 @@ pub fn build_child_component_hover(
         lines.push("**Usage:**".to_string());
         for prop in usage_props {
             let constness_label = match prop.constness {
-                verter_semantic::analysis::template::PropValueConstness::Const => "const",
-                verter_semantic::analysis::template::PropValueConstness::Dynamic => "dynamic",
-                verter_semantic::analysis::template::PropValueConstness::Unknown => "unknown",
+                verter_session_query::analysis::template::PropValueConstness::Const => "const",
+                verter_session_query::analysis::template::PropValueConstness::Dynamic => "dynamic",
+                verter_session_query::analysis::template::PropValueConstness::Unknown => "unknown",
             };
             let icon = match prop.constness {
-                verter_semantic::analysis::template::PropValueConstness::Const => "\u{2713}",
-                verter_semantic::analysis::template::PropValueConstness::Dynamic => "\u{2197}",
-                verter_semantic::analysis::template::PropValueConstness::Unknown => "?",
+                verter_session_query::analysis::template::PropValueConstness::Const => "\u{2713}",
+                verter_session_query::analysis::template::PropValueConstness::Dynamic => "\u{2197}",
+                verter_session_query::analysis::template::PropValueConstness::Unknown => "?",
             };
             let bound = if prop.is_bound { ":" } else { "" };
             lines.push(format!(
@@ -1024,7 +1024,7 @@ pub(crate) fn class_css_rule_hover(
     name: &str,
     element: Option<(
         usize,
-        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     )>,
     source: &str,
     analysis: &FileAnalysisSnapshot,
@@ -1230,14 +1230,14 @@ fn component_prop_constness_hover(
 
     for prop in &comp.props {
         let constness_label = match prop.constness {
-            verter_semantic::analysis::template::PropValueConstness::Const => "const",
-            verter_semantic::analysis::template::PropValueConstness::Dynamic => "dynamic",
-            verter_semantic::analysis::template::PropValueConstness::Unknown => "unknown",
+            verter_session_query::analysis::template::PropValueConstness::Const => "const",
+            verter_session_query::analysis::template::PropValueConstness::Dynamic => "dynamic",
+            verter_session_query::analysis::template::PropValueConstness::Unknown => "unknown",
         };
         let icon = match prop.constness {
-            verter_semantic::analysis::template::PropValueConstness::Const => "\u{2713}", // ✓
-            verter_semantic::analysis::template::PropValueConstness::Dynamic => "\u{2197}", // ↗
-            verter_semantic::analysis::template::PropValueConstness::Unknown => "?",
+            verter_session_query::analysis::template::PropValueConstness::Const => "\u{2713}", // ✓
+            verter_session_query::analysis::template::PropValueConstness::Dynamic => "\u{2197}", // ↗
+            verter_session_query::analysis::template::PropValueConstness::Unknown => "?",
         };
         let bound = if prop.is_bound { ":" } else { "" };
         lines.push(format!(
@@ -1258,7 +1258,7 @@ fn component_prop_constness_hover(
 fn component_tag_hover_target(
     offset: u32,
     source: &str,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<ComponentTagHoverTarget> {
     let comp = find_component_usage_at_tag_offset(offset, source, template)?;
@@ -1282,7 +1282,7 @@ fn component_tag_hover_target(
 
 fn component_event_hover_target(
     offset: u32,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<ComponentEventHoverTarget> {
     for el in &template.elements {
@@ -1323,7 +1323,7 @@ fn component_event_hover_target(
 /// mapped bytes inside the slot IIFE) and are answered by the provider's typed
 /// binding quickinfo (D4); only the name/arg region is Verter-owned (D3).
 fn slot_directive_name_arg_region(
-    dir: &verter_semantic::analysis::template::TemplateDirective,
+    dir: &verter_session_query::analysis::template::TemplateDirective,
 ) -> (u32, u32) {
     let end = dir
         .arg_span
@@ -1339,7 +1339,7 @@ fn slot_directive_name_arg_region(
 /// parent component element for `<template #header>`.
 fn slot_attribute_hover_target(
     offset: u32,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<SlotAttributeHoverTarget> {
     for el in &template.elements {
@@ -1434,7 +1434,7 @@ pub fn build_child_slot_hover(
 /// components and unresolved tags still fail closed because they have no
 /// matching value import.
 fn component_import_source(
-    component: &verter_semantic::analysis::template::TemplateComponentUsage,
+    component: &verter_session_query::analysis::template::TemplateComponentUsage,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<String> {
     component.import_source.clone().or_else(|| {
@@ -1455,8 +1455,8 @@ fn component_import_source(
 fn find_component_usage_at_tag_offset<'a>(
     offset: u32,
     source: &str,
-    template: &'a verter_semantic::analysis::template::TemplateAnalysisSnapshot,
-) -> Option<&'a verter_semantic::analysis::template::TemplateComponentUsage> {
+    template: &'a verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+) -> Option<&'a verter_session_query::analysis::template::TemplateComponentUsage> {
     template.components.iter().find(|component| {
         let tag_start = component.span.start + 1;
         let tag_end = source
@@ -1474,13 +1474,13 @@ fn find_component_usage_at_tag_offset<'a>(
 /// Check if the offset is on a Vue API call site name, and if so return a hover
 /// with Vue API context (category, sync requirement, description).
 /// Client-only lifecycle hooks that never fire during SSR.
-const CLIENT_ONLY_HOOKS: &[verter_semantic::analysis::VueApiClassification] = &[
-    verter_semantic::analysis::VueApiClassification::OnMounted,
-    verter_semantic::analysis::VueApiClassification::OnUpdated,
-    verter_semantic::analysis::VueApiClassification::OnActivated,
-    verter_semantic::analysis::VueApiClassification::OnDeactivated,
-    verter_semantic::analysis::VueApiClassification::OnBeforeUpdate,
-    verter_semantic::analysis::VueApiClassification::OnBeforeMount,
+const CLIENT_ONLY_HOOKS: &[verter_session_query::analysis::types::VueApiClassification] = &[
+    verter_session_query::analysis::types::VueApiClassification::OnMounted,
+    verter_session_query::analysis::types::VueApiClassification::OnUpdated,
+    verter_session_query::analysis::types::VueApiClassification::OnActivated,
+    verter_session_query::analysis::types::VueApiClassification::OnDeactivated,
+    verter_session_query::analysis::types::VueApiClassification::OnBeforeUpdate,
+    verter_session_query::analysis::types::VueApiClassification::OnBeforeMount,
 ];
 
 mod vue_api;

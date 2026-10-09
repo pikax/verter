@@ -60,9 +60,9 @@ struct AuditBundleForWalker {
 }
 
 /// Parse a 32-character lowercase hex string into a
-/// `verter_session::types::Hash16`. Returns a NAPI error on malformed
+/// `verter_session_query::analysis::types::Hash16`. Returns a NAPI error on malformed
 /// input.
-fn parse_hash16_hex(hex: &str) -> Result<verter_session::Hash16> {
+fn parse_hash16_hex(hex: &str) -> Result<verter_session_query::analysis::types::Hash16> {
     if hex.len() != 32 {
         return Err(Error::new(
             Status::InvalidArg,
@@ -175,7 +175,7 @@ impl NapiMetaProject {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+            let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
                 .map(crate::napi_project_config_to_ide)
                 .collect();

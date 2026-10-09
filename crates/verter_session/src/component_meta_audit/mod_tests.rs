@@ -10,7 +10,7 @@ use super::{
     RequestAuditRecord, RequestFootprintAudit, RequestKind, RequestKindPayload, SemanticNodeKind,
     SharedLoadReuseRecord, VfsLayer, VfsReadRecord,
 };
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 #[test]
 fn audit_builder_captures_total_timing() {
@@ -308,7 +308,8 @@ defineProps<Props>()
     let (_analysis, resolution) = host
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("resolver must produce metadata for the probe fixture");
-    host.take_audit_record(resolution.request_id)
+    host.host_audit_runtime()
+        .take_record(resolution.request_id)
         .expect("audit record must publish for the probe fixture")
 }
 
@@ -464,7 +465,8 @@ defineModel<string>()
     let (_analysis, resolution) = host
         .get_component_meta_with_resolution("/Surfaces.vue")
         .expect("resolver must produce metadata for the surfaces fixture");
-    host.take_audit_record(resolution.request_id)
+    host.host_audit_runtime()
+        .take_record(resolution.request_id)
         .expect("audit record must publish for the surfaces fixture")
 }
 

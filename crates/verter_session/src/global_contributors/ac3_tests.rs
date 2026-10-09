@@ -23,13 +23,15 @@ fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
 
 #[test]
 fn lookup_path_source_has_no_known_canonicals_scan() {
-    let build = include_str!("../project_semantic_dispatch/build.rs");
+    let build = include_str!("../../../verter_type_engine/src/project_semantic_dispatch/build.rs");
     let external = build
         .split("fn resolve_external_module_augmentation(")
         .nth(1)
         .and_then(|rest| rest.split("\n    pub(super) fn ").next())
         .expect("resolve_external_module_augmentation body");
-    let discovery = include_str!("../project_semantic_dispatch/signature_discovery.rs");
+    let discovery = include_str!(
+        "../../../verter_type_engine/src/project_semantic_dispatch/signature_discovery.rs"
+    );
     let nominal = discovery
         .split("fn runtime_nominal(")
         .nth(1)
@@ -134,7 +136,7 @@ fn lookup_does_not_call_known_canonicals() {
     let _ = host.resolve_named_symbol(
         "/use.ts",
         "fa",
-        Some(crate::semantic_query::ProjectionMode::Expanded),
+        Some(verter_type_engine::semantic_query::ProjectionMode::Expanded),
     );
     assert_eq!(
         verter_workspace::known_canonicals_calls(),
@@ -181,7 +183,7 @@ fn injected_unimported_ambient_is_ingested_without_upserting_it() {
             "x",
             None,
             true,
-            verter_semantic::facts::SymbolSpace::Value,
+            verter_session_query::facts::SymbolSpace::Value,
         );
     assert!(
         !hit.entries.is_empty(),
@@ -222,7 +224,7 @@ fn upserted_unimported_ambient_is_ingested_on_standalone_host() {
             "Cfg",
             None,
             true,
-            verter_semantic::facts::SymbolSpace::Type,
+            verter_session_query::facts::SymbolSpace::Type,
         );
     assert!(
         !hit.entries.is_empty(),
@@ -423,8 +425,8 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
 
 #[test]
 fn script_file_scope_values_enter_the_population_by_name() {
-    use super::ContributorOrigin;
-    use verter_semantic::facts::SymbolSpace;
+    use verter_session_query::facts::SymbolSpace;
+    use verter_session_query::inputs::contributors::ContributorOrigin;
     let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -570,7 +572,7 @@ fn snapshot_replacement_discovers_new_globals_without_membership_change() {
 /// and removing the script drops every record it held.
 #[test]
 fn script_file_scope_types_are_released_on_supersession_and_removal() {
-    use super::ContributorOrigin;
+    use verter_session_query::inputs::contributors::ContributorOrigin;
     let host = VerterHost::new(
         HostConfig::default(),
         Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -624,5 +626,103 @@ fn script_file_scope_types_are_released_on_supersession_and_removal() {
     assert!(
         !index.record_canonicals().contains("/script.ts"),
         "a removed script keeps no contribution record"
+    );
+}
+
+/// Every declaring base of a merged global demands its contributors: the
+/// space-filtered answer, the type+namespace answer and the observation
+/// fingerprint. One population serves them all, so the entries those
+/// demands copy grow with the contributors added, never with
+/// bases × contributors.
+#[test]
+fn all_base_demands_share_one_population_and_copy_proportional_to_additions() {
+    use verter_session_query::facts::SymbolSpace;
+    let target = AugmentationTargetKind::GlobalAugmentation;
+    let mut copied_per_size: Vec<(usize, u64)> = Vec::new();
+    for size in [128usize, 256, 512, 1024] {
+        let store = FileArtifactStore::new();
+        for index in 0..size {
+            let canonical = format!("/merged/decl{index:04}.d.ts");
+            // Script file-scope interfaces and namespaces and module
+            // `declare global` blocks all declare the one merged global.
+            let source = if index % 4 == 0 {
+                format!(
+                    "interface Merged {{ m{index}: number }}\nnamespace Merged {{ export const n{index} = 1; }}\n"
+                )
+            } else if index % 2 == 0 {
+                format!("interface Merged {{ m{index}: number }}\n")
+            } else {
+                format!(
+                    "export {{}};\ndeclare global {{ interface Merged {{ m{index}: number }} }}\n"
+                )
+            };
+            publish(&store, &canonical, &source);
+        }
+        let snapshot = store.global_contributor_index().snapshot();
+        let first_in_space =
+            snapshot.lookup_in_space(&target, "Merged", None, true, SymbolSpace::Type);
+        let first_merged = snapshot.lookup(&target, "Merged", None, true);
+        let observed = snapshot.observation_fingerprint(&target, "Merged", None);
+        assert_eq!(
+            first_in_space.entries.len(),
+            size,
+            "one entry per declaration"
+        );
+        assert_eq!(
+            first_merged.entries.len(),
+            size + size / 4,
+            "a file's interface and namespace are both contributors"
+        );
+        assert_eq!(observed, first_merged.fingerprint);
+        let canonicals: Vec<&str> = first_merged
+            .entries
+            .iter()
+            .map(|entry| entry.artifact_key.canonical.as_ref())
+            .collect();
+        let mut sorted = canonicals.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            canonicals, sorted,
+            "contributor order is the population order"
+        );
+
+        for _base in 0..size {
+            let in_space =
+                snapshot.lookup_in_space(&target, "Merged", None, true, SymbolSpace::Type);
+            let merged = snapshot.lookup(&target, "Merged", None, true);
+            assert!(Arc::ptr_eq(&in_space.entries, &first_in_space.entries));
+            assert!(Arc::ptr_eq(&merged.entries, &first_merged.entries));
+            assert_eq!(
+                snapshot.observation_fingerprint(&target, "Merged", None),
+                observed
+            );
+        }
+        copied_per_size.push((size, snapshot.materialized_view_entry_count()));
+
+        // A later declaration publishes a new population; the earlier
+        // snapshot's answers stay what they were.
+        publish(
+            &store,
+            "/merged/later.d.ts",
+            "interface Merged { later: number }\n",
+        );
+        let next = store.global_contributor_index().snapshot();
+        let grown = next.lookup_in_space(&target, "Merged", None, true, SymbolSpace::Type);
+        assert_eq!(grown.entries.len(), size + 1);
+        assert_ne!(grown.fingerprint, first_in_space.fingerprint);
+        assert_eq!(first_in_space.entries.len(), size);
+    }
+    for &(size, copied) in &copied_per_size {
+        assert!(
+            copied <= 3 * size as u64,
+            "{size} bases copied {copied} entries: one copy per view, not per base"
+        );
+    }
+    let (smallest, smallest_copied) = copied_per_size[0];
+    let (largest, largest_copied) = copied_per_size[copied_per_size.len() - 1];
+    assert_eq!(
+        largest_copied * smallest as u64,
+        smallest_copied * largest as u64,
+        "copies grow linearly with the contributors: {copied_per_size:?}"
     );
 }

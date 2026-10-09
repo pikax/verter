@@ -1,4 +1,4 @@
-use crate::analysis::types::{StoreApiClassification, VueApiClassification};
+use verter_session_query::analysis::types::{StoreApiClassification, VueApiClassification};
 
 /// Classify a Vue API name into a known category.
 pub fn classify_vue_api(name: &str) -> VueApiClassification {

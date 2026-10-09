@@ -10,11 +10,22 @@
 //! - The host constructs the input by projecting from its internal snapshots
 //! - [`ComponentMetaAnalysis`] is the analysis-domain result (no serde)
 //! - Conversion to transport-facing DTOs happens via `verter_protocol` and its adapter layers
+use verter_session_query::analysis::component_meta::{
+    AcceptedSurfaceCompleteness, BindingAnalysis, BindingKindAnalysis,
+    ComponentBindingUsageAnalysis, ComponentEventUsageAnalysis, ComponentMetaAnalysis,
+    ComponentMetaFlags, ComponentPropUsageAnalysis, ComponentUsageAnalysis,
+    ComponentVModelUsageAnalysis, ConsumedRootBindings, EventAnalysis, ExposedAnalysis,
+    FallthroughSurface, ImportAnalysis, ImportBindingAnalysis, MacroExpansionDiagnostics,
+    MacroExpansionKind, ModelAnalysis, NoFallthroughReason, PropAnalysis, ResolvedTypeAnalysis,
+    RootBranch, RootReachability, RootTargetRef, SelectorAnalysis, SlotAnalysis,
+    SlotBindingAnalysis, StyleAnalysis, TemplateRefAnalysis, UnresolvedRootTargetReason,
+    VueApiCallAnalysis,
+};
 
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedExposeField, AnalyzedImport, AnalyzedMacro,
-    AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
-    JsdocTag, StoreUsage, VueApiCallSite,
+    AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, JsdocTag,
+    StoreUsage, VueApiCallSite,
 };
 use verter_type_expr::facts::{SemanticTypeSource, SourcePosition};
 use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadLocator};
@@ -58,7 +69,7 @@ fn authored_type_evidence(
 }
 
 fn exactness_from_expansion(
-    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
+    metadata: Option<&verter_session_query::analysis::type_expand::ExpansionMetadata>,
     position: &SourcePosition,
 ) -> ResolutionExactness {
     metadata.map_or_else(
@@ -74,13 +85,13 @@ fn exactness_from_expansion(
             None => ResolutionExactness::Incomplete,
         },
         |metadata| match metadata.exactness {
-            crate::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+            verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
                 ResolutionExactness::ExactConcrete
             }
-            crate::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
+            verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
                 ResolutionExactness::ExactSymbolic
             }
-            crate::analysis::type_expand::ExpansionExactness::Incomplete => {
+            verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete => {
                 ResolutionExactness::Incomplete
             }
         },
@@ -88,9 +99,9 @@ fn exactness_from_expansion(
 }
 
 fn diagnostic_kind(
-    reason: crate::analysis::type_expand::ExpansionStopReason,
+    reason: verter_session_query::analysis::type_expand::ExpansionStopReason,
 ) -> ResolutionDiagnosticKind {
-    use crate::analysis::type_expand::ExpansionStopReason as Source;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason as Source;
     match reason {
         Source::BudgetExceeded => ResolutionDiagnosticKind::BudgetExceeded,
         Source::ProjectionWorkLimit => ResolutionDiagnosticKind::ProjectionWorkLimit,
@@ -113,7 +124,7 @@ fn diagnostic_kind(
 }
 
 fn diagnostics_from_expansion(
-    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
+    metadata: Option<&verter_session_query::analysis::type_expand::ExpansionMetadata>,
 ) -> std::sync::Arc<[ResolutionDiagnostic]> {
     metadata.map_or_else(
         || std::sync::Arc::from([]),
@@ -137,7 +148,7 @@ fn diagnostics_from_expansion(
 
 fn publication_from_position(
     position: &SourcePosition,
-    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
+    metadata: Option<&verter_session_query::analysis::type_expand::ExpansionMetadata>,
     evidence: Option<AuthoredTypeEvidence>,
     provenance: ResolutionProvenance,
 ) -> TypePublication {
@@ -189,7 +200,7 @@ pub struct ResolvedEmitInput {
     /// Authored producer description.
     pub description: Option<String>,
     /// Authored producer JSDoc tags.
-    pub tags: Vec<crate::analysis::types::JsdocTag>,
+    pub tags: Vec<verter_session_query::analysis::types::JsdocTag>,
     /// The payload's published source position.
     pub payload_source: SourcePosition,
     /// Atomic payload publication owned by this occurrence.
@@ -261,10 +272,10 @@ pub struct ComponentMetaInput<'a> {
     pub macros: &'a [AnalyzedMacro],
     pub bindings: &'a [AnalyzedBinding],
     pub imports: &'a [AnalyzedImport],
-    pub template: Option<&'a crate::analysis::template::TemplateAnalysisSnapshot>,
+    pub template: Option<&'a verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     pub options_api: Option<&'a AnalyzedOptionsApi>,
     pub analysis_flags: AnalysisFlags,
-    pub styles: &'a [crate::analysis::style::StyleBlockAnalysis],
+    pub styles: &'a [verter_session_query::analysis::style::StyleBlockAnalysis],
     pub vue_api_calls: &'a [VueApiCallSite],
     pub store_usages: &'a [StoreUsage],
     pub resolved_macros: &'a [ResolvedMacroInput],
@@ -272,7 +283,8 @@ pub struct ComponentMetaInput<'a> {
     /// bindings the host demanded. Empty when nothing was demanded.
     pub resolved_binding_reactivity: &'a [ResolvedBindingReactivityInput],
     pub resolved_type_registry: &'a [ResolvedTypeAnalysis],
-    pub evaluated_types: Option<&'a crate::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<&'a verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub file_path: &'a str,
 }
 
@@ -280,768 +292,13 @@ pub struct ComponentMetaInput<'a> {
 // Domain result types
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Analysis-domain component metadata. No serde — only used in Rust.
-/// Converted to `FfiComponentMeta` at the NAPI/WASM boundary.
-#[derive(Debug, Clone)]
-pub struct ComponentMetaAnalysis {
-    pub props: Vec<PropAnalysis>,
-    pub events: Vec<EventAnalysis>,
-    pub slots: Vec<SlotAnalysis>,
-    pub models: Vec<ModelAnalysis>,
-    pub exposed: Vec<ExposedAnalysis>,
-    /// Host-populated public-instance sidecar derived from runtime-observable members.
-    pub public_instance: Option<PublicInstanceAnalysis>,
-    /// Host-populated, content-free structure projected from the registered artifact.
-    pub ordered_sfc_structure: Option<OrderedSfcStructureAnalysis>,
-    pub type_registry: Vec<ResolvedTypeAnalysis>,
-    pub components: Vec<ComponentUsageAnalysis>,
-    pub template_refs: Vec<TemplateRefAnalysis>,
-    pub imports: Vec<ImportAnalysis>,
-    pub bindings: Vec<BindingAnalysis>,
-    pub vue_api_calls: Vec<VueApiCallAnalysis>,
-    pub styles: Vec<StyleAnalysis>,
-    pub flags: ComponentMetaFlags,
-    /// Root reachability classification for fallthrough inheritance.
-    /// Extracted from template facts only — host owns all inheritance semantics.
-    pub root_reachability: RootReachability,
-    /// Accepted props: declared props + inherited attrs (host-populated).
-    pub accepted_props: Vec<AcceptedPropAnalysis>,
-    /// Accepted events: declared emits + inherited listeners (host-populated).
-    pub accepted_events: Vec<AcceptedEventAnalysis>,
-    /// Whether the accepted surface is exact or a lower bound.
-    pub accepted_surface_completeness: AcceptedSurfaceCompleteness,
-    /// Branch-structured inherited surface (host-populated).
-    pub fallthrough_surface: FallthroughSurface,
-    /// Macro-wide expansion diagnostics that apply to the entire macro, not to a
-    /// specific property. Lifted out of per-field `type_expansion.diagnostics` to
-    /// avoid duplication across every prop/event/slot in the same macro.
-    pub macro_expansion_diagnostics: Vec<MacroExpansionDiagnostics>,
-    pub options_api: bool,
-    pub file_path: String,
-}
-
-/// Which macro kind produced the expansion diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MacroExpansionKind {
-    DefineProps,
-    DefineEmits,
-    DefineSlots,
-}
-
-/// Macro-wide expansion diagnostics that are not specific to any property.
-/// Stored once per macro instead of duplicated on every field.
-#[derive(Debug, Clone)]
-pub struct MacroExpansionDiagnostics {
-    pub macro_kind: MacroExpansionKind,
-    pub macro_index: usize,
-    pub diagnostics: Vec<crate::analysis::type_expand::ExpansionDiagnostic>,
-    pub exactness: crate::analysis::type_expand::ExpansionExactness,
-    pub execution_status: crate::analysis::type_expand::ExpansionExecutionStatus,
-}
-
-/// Analyzed prop from `defineProps` / Options API `props`.
-#[derive(Debug, Clone)]
-pub struct PropAnalysis {
-    pub name: String,
-    /// Typed callable role; display text never participates in classification.
-    pub callable_role: verter_type_expr::PropCallableRole,
-    /// The resolved type SOURCE POSITION: the evaluated source unless the
-    /// expansion is incomplete and an authored payload exists (the symbolic
-    /// fallback); a PROVEN schema absence when the position carries no
-    /// annotation; a typed failure when the REQUIRED value position's source
-    /// could not be constructed (fails output materialization).
-    pub publication: TypePublication,
-    /// Completeness and diagnostics from native expansion when available.
-    pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-    /// The author's own annotation is carried separately as bundled evidence
-    /// inside `publication`.
-    pub required: bool,
-    pub has_default: bool,
-    pub default_value: Option<String>,
-    pub description: Option<String>,
-    pub tags: Vec<JsdocTag>,
-    /// True iff the SFC author explicitly wrote this prop name as a member
-    /// of the `defineProps<T>()` type argument's own body. Propagates the
-    /// per-prop provenance fact carried by [`AnalyzedPropField`] so the
-    /// `verter_audit::PublishedSurfacePolicy::Refined` projection can
-    /// distinguish author-declared names (Vue intrinsics like `class` /
-    /// `style` and `on{Event}` shadows of declared emits the author *kept*
-    /// on purpose) from names that arrived via heritage / utility-type
-    /// expansion (HTMLAttributes inheritance, etc.).
-    pub declared_in_macro_type_arg: bool,
-}
-
-/// Analyzed event from `defineEmits`.
-#[derive(Debug, Clone)]
-pub struct EventAnalysis {
-    pub name: String,
-    /// Legacy semantic source lane retained for accepted/fallthrough mechanics.
-    /// Public contract consumers use `publication`.
-    pub payload: SourcePosition,
-    /// Producer-owned payload publication. This retains typed authority,
-    /// exactness, diagnostics, and provenance through terminal materialization.
-    pub publication: TypePublication,
-    /// Producer-owned callable return publication. `None` denotes the
-    /// property/event-map implicit `void` return.
-    pub return_publication: Option<TypePublication>,
-    /// Scope used to raise [`Self::return_publication`]'s selected source.
-    pub return_publication_scope: Option<TypeExprScope>,
-    pub payload_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-    pub raw_signature: Option<String>,
-    pub description: Option<String>,
-    pub tags: Vec<JsdocTag>,
-}
-
-/// Analyzed slot from `defineSlots` / template.
-#[derive(Debug, Clone)]
-pub struct SlotAnalysis {
-    pub name: String,
-    pub is_scoped: bool,
-    pub bindings: Vec<SlotBindingAnalysis>,
-    pub is_required: bool,
-    pub return_type: Option<String>,
-    /// Producer-owned typed return publication. Source outcome, exactness,
-    /// diagnostics, provenance, and authored evidence travel together to the
-    /// terminal output sink.
-    pub return_publication: Option<TypePublication>,
-    /// Scope used to raise [`Self::return_publication`]'s selected source.
-    pub return_publication_scope: Option<TypeExprScope>,
-    pub description: Option<String>,
-    pub tags: Vec<JsdocTag>,
-    /// Producer fact: does this slot come from the component's own AUTHORED
-    /// slots surface — a member of the resolved `defineSlots<T>()` macro
-    /// surface (inline body, referenced interface, or its heritage) or a
-    /// template `<slot>` element? `false` only for rows arriving purely
-    /// through the evaluated type-expansion channel with no authored
-    /// counterpart — the residual channel VNode-transport keys could leak
-    /// through. Consumed by `@verter/component-meta/published-surface`'s
-    /// `Compat` / `Refined` slot blocklist (an author-declared slot is
-    /// never blocked, whatever its name).
-    pub declared_in_macro_type_arg: bool,
-}
-
-/// A single binding property on a scoped slot.
-#[derive(Debug, Clone)]
-pub struct SlotBindingAnalysis {
-    pub name: String,
-    /// The resolved binding type SOURCE POSITION (`Absent` = display text
-    /// only; the typed binding channel is host-raised).
-    pub publication: TypePublication,
-    pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-}
-
-/// Analyzed model from `defineModel`.
-#[derive(Debug, Clone)]
-pub struct ModelAnalysis {
-    pub name: String,
-    /// The model value's resolved type SOURCE POSITION (`Absent` = untyped
-    /// model).
-    pub type_source: SourcePosition,
-}
-
-/// Analyzed exposed member from `defineExpose`.
-#[derive(Debug, Clone)]
-pub struct ExposedAnalysis {
-    pub name: String,
-    /// The exposed member's resolved type SOURCE POSITION (`Absent` =
-    /// untyped binding).
-    pub type_source: SourcePosition,
-    pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-    pub description: Option<String>,
-    /// JSDoc tags from the exposed member's leading `/** ... */` block.
-    pub tags: Vec<JsdocTag>,
-}
-
-/// Host-populated public-instance sidecar exposed by the official API.
-#[derive(Debug, Clone)]
-pub struct PublicInstanceAnalysis {
-    pub members: Vec<PublicInstanceMemberAnalysis>,
-    pub completeness: PublicInstanceCompleteness,
-}
-
-/// A single runtime-observable public-instance member.
-#[derive(Debug, Clone)]
-pub struct PublicInstanceMemberAnalysis {
-    pub name: String,
-    pub kind: PublicInstanceMemberKind,
-    /// The member's resolved type SOURCE POSITION (`Absent` = untyped
-    /// member).
-    pub type_source: SourcePosition,
-    pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-    pub raw_type: Option<String>,
-    pub description: Option<String>,
-    /// JSDoc tags carried onto the public member from its source surface.
-    pub tags: Vec<JsdocTag>,
-}
-
-/// Content-free schema-8 structure authority. Token arrays are indexed only
-/// by the corresponding canonical local IDs; public identity is the token.
-#[derive(Debug, Clone)]
-pub struct OrderedSfcStructureAnalysis {
-    pub schema_version: u32,
-    pub artifact_token: String,
-    pub inventory:
-        std::sync::Arc<verter_language::parse_artifact::carrier_inventory::CarrierBlockInventory>,
-    pub source_space_tokens: std::sync::Arc<[String]>,
-    pub block_tokens: std::sync::Arc<[String]>,
-    pub markup_node_tokens: std::sync::Arc<[String]>,
-    pub attribute_tokens: std::sync::Arc<[String]>,
-}
-
-/// What kind of member this public-instance entry represents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PublicInstanceMemberKind {
-    Prop,
-    SlotContainer,
-    Exposed,
-}
-
-/// Whether the host believes the surfaced public-instance contract is complete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PublicInstanceCompleteness {
-    Exact,
-    Partial,
-}
-
-/// A named resolved type available for schema expansion.
-#[derive(Debug, Clone)]
-pub struct ResolvedTypeAnalysis {
-    pub name: String,
-    /// The registry entry's resolved type SOURCE POSITION (registry entries
-    /// always resolve a present source; the position type keeps the lane
-    /// uniform with every other materialized output lane).
-    pub type_source: SourcePosition,
-    pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-}
-
-/// A component usage discovered in the template.
-#[derive(Debug, Clone)]
-pub struct ComponentUsageAnalysis {
-    pub name: String,
-    pub import_source: Option<String>,
-    pub is_dynamic: bool,
-    pub props: Vec<ComponentPropUsageAnalysis>,
-    pub has_spread: bool,
-    pub slots_used: Vec<String>,
-    pub static_classes: Vec<String>,
-    pub has_dynamic_class: bool,
-    pub v_models: Vec<String>,
-    pub v_model_entries: Vec<ComponentVModelUsageAnalysis>,
-    /// Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for
-    /// Vue.
-    pub bindings: Vec<ComponentBindingUsageAnalysis>,
-    /// Framework-neutral events (the legacy Svelte `on:` directive only — a
-    /// plain `on*` attribute is a prop, never an event). Empty for Vue.
-    pub events: Vec<ComponentEventUsageAnalysis>,
-}
-
-/// A two-way binding passed to a child component (the Svelte `bind:` family).
-#[derive(Debug, Clone)]
-pub struct ComponentBindingUsageAnalysis {
-    /// The bound local member name (`value` in `bind:value`).
-    pub name: String,
-    /// The `|modifier` list, in source order.
-    pub modifiers: Vec<String>,
-}
-
-/// An event listened on a child component via the legacy Svelte `on:`
-/// directive. A plain `on*` attribute is a prop, never an event (the
-/// props/events split is syntactic — the child component-meta, not a name
-/// guess, decides which passed props are callback events).
-#[derive(Debug, Clone)]
-pub struct ComponentEventUsageAnalysis {
-    /// The event name — the legacy directive local (`click` from `on:click`).
-    pub name: String,
-    /// The handler expression text, when present.
-    pub handler_expression: Option<String>,
-    /// Whether the handler is an inline function expression.
-    pub is_inline: bool,
-    /// The `|modifier` list, in source order.
-    pub modifiers: Vec<String>,
-}
-
-/// A single prop passed to a child component in the template.
-#[derive(Debug, Clone)]
-pub struct ComponentPropUsageAnalysis {
-    pub name: String,
-    pub is_bound: bool,
-    pub constness: crate::analysis::template::PropValueConstness,
-    pub expression: Option<String>,
-    pub referenced_bindings: Vec<String>,
-    pub from_spread: bool,
-    pub is_shorthand: bool,
-}
-
-/// A v-model directive used on a child component in the template.
-#[derive(Debug, Clone)]
-pub struct ComponentVModelUsageAnalysis {
-    pub binding_name: String,
-}
-
-/// A template ref usage.
-#[derive(Debug, Clone)]
-pub struct TemplateRefAnalysis {
-    pub name: String,
-    pub is_dynamic: bool,
-    pub target_tag: String,
-}
-
-/// A script import.
-#[derive(Debug, Clone)]
-pub struct ImportAnalysis {
-    pub source: String,
-    pub is_type_only: bool,
-    pub bindings: Vec<ImportBindingAnalysis>,
-}
-
-/// A single imported binding.
-#[derive(Debug, Clone)]
-pub struct ImportBindingAnalysis {
-    pub name: String,
-    pub kind: ImportBindingKind,
-    pub imported_name: Option<String>,
-    pub is_type_only: bool,
-}
-
-/// Declaration kind for a script binding in the component-meta result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingKindAnalysis {
-    Const,
-    Let,
-    Var,
-    Function,
-    AsyncFunction,
-    Class,
-}
-
-/// A script-level binding.
-#[derive(Debug, Clone)]
-pub struct BindingAnalysis {
-    pub name: String,
-    pub kind: BindingKindAnalysis,
-    pub reactivity_kind: crate::analysis::types::ReactivityKind,
-    /// The EXACTNESS carrier for a composable binding's whole-return type.
-    ///
-    /// [`Self::reactivity_kind`] is a collapsed decoration vocabulary with no
-    /// degraded arm, so it cannot distinguish "proven `Ref`" from "proven not a
-    /// Vue wrapper" from "could not be resolved, and here is why". This field
-    /// carries that distinction:
-    ///
-    /// - `None` — no whole-return role was demanded for this binding (it is not
-    ///   a whole-value composable call, or the value-space walk already decided
-    ///   it). NOT a claim about reactivity.
-    /// - `Some(Ref | ShallowRef | ComputedRef | ModelRef | Reactive |
-    ///   ShallowReactive)` — the exact package-backed `vue` wrapper family the
-    ///   callee's authored return annotation resolves to.
-    /// - `Some(ReactiveWrapperRole::None)` — a COMPLETED proof that the return
-    ///   type is not a Vue wrapper. This is not a proof of non-reactivity:
-    ///   `reactive()` returns `UnwrapNestedRefs<T>`, not `Reactive<T>`, so it
-    ///   never downgrades [`Self::reactivity_kind`].
-    /// - `Some(ReactiveWrapperRole::Unresolved { reason })` — a typed
-    ///   degradation with its exact reason.
-    pub return_wrapper_role: Option<verter_type_expr::ReactiveWrapperRole>,
-    pub type_annotation: Option<String>,
-    pub used_in_template: bool,
-    pub used_in_style: bool,
-}
-
-/// A Vue API call site.
-#[derive(Debug, Clone)]
-pub struct VueApiCallAnalysis {
-    pub api: crate::analysis::types::VueApiClassification,
-    pub arg_value: Option<String>,
-}
-
-/// Analysis of a single style block.
-#[derive(Debug, Clone)]
-pub struct StyleAnalysis {
-    pub lang: crate::analysis::style::StyleAnalysisLang,
-    pub scoped: bool,
-    pub is_module: bool,
-    pub module_name: Option<String>,
-    /// Sealed artifact-bound block identity carried through from the style
-    /// analysis; the wire boundary revalidates it against the ordered
-    /// structure before minting a public block token.
-    pub block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
-    pub classes: Vec<String>,
-    pub ids: Vec<String>,
-    pub custom_properties: Vec<String>,
-    pub v_binds: Vec<String>,
-    pub selectors: Vec<SelectorAnalysis>,
-}
-
-/// A CSS selector plus specificity.
-#[derive(Debug, Clone)]
-pub struct SelectorAnalysis {
-    pub text: String,
-    pub specificity: (u32, u32, u32),
-}
-
-/// Capability flags derived from script analysis.
-#[derive(Debug, Clone, Default)]
-pub struct ComponentMetaFlags {
-    pub async_setup: bool,
-    pub has_reactive_state: bool,
-    pub has_computed: bool,
-    pub has_watchers: bool,
-    pub has_lifecycle_hooks: bool,
-    pub has_provide: bool,
-    pub has_inject: bool,
-    pub has_inherit_attrs_false: bool,
-    pub has_store_usage: bool,
-    /// D123 — marks a macro-impacting lowering failure (a
-    /// `verter_session::owned_artifacts::eval_program::LoweringError`).
-    /// Currently always `false`: `extract_flags` emits the default and
-    /// no production path flips it; consumers detect macro-impacting
-    /// failures via the structured `macro_expansion_diagnostics`
-    /// entries instead. Per D117, the public `getComponentMeta` API
-    /// still returns `Option<ComponentMetaPayload>` (NOT `Result`);
-    /// macro-impacting lowering failures surface as a populated
-    /// payload, so NAPI does not throw exceptions.
-    pub has_macro_failure: bool,
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Root Reachability
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Classification of a component's template root structure for fallthrough
-/// inheritance resolution. Extracted from `TemplateAnalysisSnapshot` facts only.
-///
-/// The host-owned resolver uses this to determine whether and how fallthrough
-/// inheritance applies. Analysis extracts facts; the host owns all semantics.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RootReachability {
-    /// No fallthrough inheritance is possible.
-    NoFallthrough { reason: NoFallthroughReason },
-    /// One or more conditional branches, each with exactly one root target.
-    /// A single-element vec means an unconditional single root.
-    Branches { branches: Vec<RootBranch> },
-}
-
-/// Why a component has no fallthrough surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoFallthroughReason {
-    /// `defineOptions({ inheritAttrs: false })` or Options API `inheritAttrs: false`.
-    InheritAttrsFalse,
-    /// Multiple unconditional root elements (fragment).
-    MultiRoot,
-    /// A conditional branch does not resolve to exactly one root target.
-    BranchNotSingleRoot,
-    /// Root element has `v-for` (produces multiple DOM nodes).
-    RootVFor,
-    /// No `<template>` block in the SFC.
-    NoTemplate,
-    /// `<template>` exists but has no children.
-    EmptyTemplate,
-    /// Root children are only text/interpolation nodes (no element root).
-    TextOrInterpolationRoot,
-}
-
-/// A single root render branch in a component's template.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RootBranch {
-    /// Branch index in normalized source order (after transparent `<template v-if>` expansion).
-    pub branch_index: u16,
-    /// Condition text for diagnostics and UI display only. Serialized to FFI/JSON for
-    /// debugging purposes but never used for identity, hashing, equality, or cache keys.
-    /// Semantic identity comes from `branch_index` / `branch_key`, not condition text.
-    pub condition_text: Option<String>,
-    /// What the root target is.
-    pub target: RootTargetRef,
-    /// Attrs/listeners explicitly consumed on the root element.
-    pub consumed: ConsumedRootBindings,
-    /// Whether `v-bind="obj"` spread (without argument) is used on the root.
-    pub has_unknown_spread: bool,
-}
-
-/// The kind of root render target.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RootTargetRef {
-    /// Native HTML element (e.g., `<div>`, `<input>`).
-    NativeElement {
-        /// Index into `TemplateAnalysisSnapshot.elements`.
-        element_index: u32,
-        /// Tag name (lowercase).
-        tag: String,
-    },
-    /// Dynamic `<component :is>` root with a stable link to `TemplateComponentUsage`.
-    DynamicComponentUsage {
-        /// Index into `TemplateAnalysisSnapshot.elements`.
-        element_index: u32,
-        /// Index into `TemplateAnalysisSnapshot.components`.
-        usage_index: u32,
-    },
-    /// Resolved component with a stable link to `TemplateComponentUsage`.
-    ComponentUsage {
-        /// Index into `TemplateAnalysisSnapshot.elements`.
-        element_index: u32,
-        /// Index into `TemplateAnalysisSnapshot.components`.
-        usage_index: u32,
-        /// PascalCase component name.
-        name: String,
-        /// Import source path for cross-file resolution.
-        import_source: Option<String>,
-    },
-    /// Dynamic, slot, built-in, or otherwise unresolvable root target.
-    UnresolvedTarget {
-        /// Index into `TemplateAnalysisSnapshot.elements`.
-        element_index: u32,
-        /// Tag name as written.
-        tag: String,
-        /// Why this target cannot be resolved.
-        reason: UnresolvedRootTargetReason,
-    },
-}
-
-/// Why a root target cannot be resolved for fallthrough inheritance.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UnresolvedRootTargetReason {
-    /// `<component :is="...">` — dynamic component.
-    DynamicComponentIs,
-    /// `<slot>` outlet as root.
-    SlotOutlet,
-    /// Vue built-in with special render behavior (Teleport, Transition, etc.).
-    UnsupportedBuiltin { tag: String },
-    /// Component element without a matching `TemplateComponentUsage` entry.
-    MissingUsageLink,
-    /// Component whose import source could not be resolved.
-    UnresolvedImport,
-    /// Catch-all for unrecognized root target patterns.
-    UnknownRootTarget,
-}
-
-/// Attrs/listeners explicitly bound on the root element (consumed, not inherited).
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct ConsumedRootBindings {
-    /// Static attr names consumed on the root (e.g., `disabled`, `placeholder`).
-    /// Does NOT include `class` or `style` (Vue always merges those).
-    pub attrs: Vec<String>,
-    /// Canonical listener names consumed on the root (e.g., `click` from `@click` or `:onClick`).
-    pub listeners: Vec<String>,
-    /// Whether a computed/dynamic attr name is bound (e.g., `:[expr]`).
-    /// When true, the branch is a lower bound — some consumed attrs are unknown.
-    pub has_dynamic_attr_name: bool,
-    /// Whether a computed/dynamic listener name is bound (e.g., `@[expr]`, `v-on="obj"`,
-    /// or spread with unknown keys). When true, the branch is a lower bound.
-    pub has_dynamic_listener_name: bool,
-}
-
-/// Why generic-root specialization could not resolve a concrete instantiation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum GenericResolutionFailure {
-    SpreadInput,
-    DynamicKey,
-    MissingType,
-    UnsupportedExpression,
-    MissingUsageLink,
-    UnresolvedChildGenericSurface,
-}
-
-/// Known lower-bound causes for a partially resolved fallthrough branch.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PartialBranchReason {
-    DynamicAttrName,
-    DynamicListenerName,
-    UnknownSpread,
-    GenericResolution { failure: GenericResolutionFailure },
-}
-
-/// Why a fallthrough branch could not be resolved at all.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UnresolvedBranchReason {
-    Cycle { canonical_id: String },
-    DynamicComponentIs,
-    ChildResolutionFailed,
-    UnresolvedChildImport { import_source: Option<String> },
-    RootTarget { reason: UnresolvedRootTargetReason },
-    GenericResolution { failure: GenericResolutionFailure },
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Fallthrough Inheritance Types (host-populated)
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// How a member arrived on the accepted surface.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MemberProvenance {
-    /// Member is declared locally (defineProps / defineEmits / Options API).
-    Declared,
-    /// Member is inherited from one or more fallthrough sources.
-    Inherited { sources: Vec<InheritedSource> },
-}
-
-/// A single inheritance source.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InheritedSource {
-    /// Inherited from a native HTML element.
-    NativeTag { tag: String },
-    /// Inherited from a child component.
-    Component { canonical_id: String },
-}
-
-/// Whether a member is always available or only in certain branches.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MemberAvailability {
-    /// Available in all branches (unconditional single-root or all branches).
-    Always,
-    /// Available only in specific branches.
-    Conditional { branch_keys: Vec<String> },
-}
-
-/// Kind of accepted prop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptedPropKind {
-    /// Locally declared prop.
-    DeclaredProp,
-    /// Inherited HTML attribute.
-    Attr,
-}
-
-/// Kind of accepted event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptedEventKind {
-    /// Locally declared emit.
-    DeclaredEmit,
-    /// Inherited native listener.
-    Listener,
-}
-
-/// Whether the accepted surface is exact or only a lower bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptedSurfaceCompleteness {
-    /// All accepted members are known exactly.
-    Exact,
-    /// Some members may be missing due to unresolved or partial branches.
-    LowerBound,
-}
-
-/// An accepted prop on the computed call-site surface.
-#[derive(Debug, Clone)]
-pub struct AcceptedPropAnalysis {
-    pub name: String,
-    /// Typed callable role preserved through accepted-surface inheritance.
-    pub callable_role: verter_type_expr::PropCallableRole,
-    /// The accepted prop's resolved type SOURCE POSITION (`Absent` =
-    /// untyped / cross-branch divergent).
-    pub publication: TypePublication,
-    /// The canonical file scope `type_source`'s SCOPE-RELATIVE names (bare
-    /// `Ref` leaf spellings, producer-local anchors at any nesting depth)
-    /// resolve under — the PRODUCING owner of an inherited source, carried
-    /// positionally per the cross-owner effective-scope invariant. `None` =
-    /// the analysis owner itself (own/declared rows, intrinsic attr rows).
-    pub type_source_scope: Option<String>,
-    pub required: bool,
-    pub provenance: MemberProvenance,
-    pub availability: MemberAvailability,
-    pub kind: AcceptedPropKind,
-}
-
-/// An accepted event on the computed call-site surface.
-#[derive(Debug, Clone)]
-pub struct AcceptedEventAnalysis {
-    pub name: String,
-    /// The accepted event's resolved payload SOURCE POSITION (`Absent` =
-    /// untyped / cross-branch divergent).
-    pub payload: SourcePosition,
-    /// The canonical file scope `payload`'s SCOPE-RELATIVE names resolve
-    /// under — the PRODUCING owner of an inherited source, carried
-    /// positionally (see [`AcceptedPropAnalysis::type_source_scope`]).
-    /// `None` = the analysis owner itself.
-    pub payload_scope: Option<String>,
-    pub raw_signature: Option<String>,
-    pub provenance: MemberProvenance,
-    pub availability: MemberAvailability,
-    pub kind: AcceptedEventKind,
-}
-
-/// The branch-structured inherited surface. Declared members do NOT appear here.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FallthroughSurface {
-    /// No fallthrough inheritance.
-    None { reason: NoFallthroughReason },
-    /// Branch-structured inherited props and events.
-    Branches { branches: Vec<FallthroughBranch> },
-}
-
-/// An inherited prop entry in a fallthrough branch.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FallthroughPropEntry {
-    pub name: String,
-    /// Typed callable role inherited from the producing prop.
-    pub callable_role: verter_type_expr::PropCallableRole,
-    /// The inherited prop's resolved type SOURCE POSITION (`Absent` =
-    /// untyped).
-    pub publication: TypePublication,
-    /// The canonical file scope `type_source`'s SCOPE-RELATIVE names resolve
-    /// under — the PRODUCING owner (the terminal origin of a multi-hop
-    /// inheritance chain), carried positionally per the cross-owner
-    /// effective-scope invariant. `None` = the intrinsic/native case with no
-    /// producing file (the branch owner's scope applies).
-    pub type_source_scope: Option<String>,
-    pub sources: Vec<InheritedSource>,
-}
-
-/// An inherited event entry in a fallthrough branch.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FallthroughEventEntry {
-    pub name: String,
-    /// The inherited event's resolved payload SOURCE POSITION (`Absent` =
-    /// untyped).
-    pub payload: SourcePosition,
-    /// The canonical file scope `payload`'s SCOPE-RELATIVE names resolve
-    /// under — the PRODUCING owner (the terminal origin of a multi-hop
-    /// inheritance chain), carried positionally (see
-    /// [`FallthroughPropEntry::type_source_scope`]).
-    pub payload_scope: Option<String>,
-    pub raw_signature: Option<String>,
-    pub sources: Vec<InheritedSource>,
-}
-
-/// Status of a fallthrough branch.
-#[derive(Debug, Clone, PartialEq)]
-pub enum BranchStatus {
-    /// All members in this branch are exactly known.
-    Resolved,
-    /// Some members are known but the branch may have additional unknown members.
-    PartiallyUnresolved { reasons: Vec<PartialBranchReason> },
-    /// This branch could not be resolved at all.
-    Unresolved { reason: UnresolvedBranchReason },
-}
-
-/// A single step in the root resolution chain.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ResolvedRootStep {
-    /// Native HTML element target.
-    NativeTag { tag: String },
-    /// Resolved child component target.
-    Component {
-        canonical_id: String,
-        component_name: String,
-    },
-    /// Unresolved root target.
-    Unresolved {
-        tag: String,
-        reason: UnresolvedBranchReason,
-    },
-}
-
-/// A single branch in the fallthrough surface.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FallthroughBranch {
-    /// Deterministic branch key (e.g., "0", "0.1", "2.0.3").
-    pub branch_key: String,
-    /// Condition text for diagnostics only.
-    pub condition_text: Option<String>,
-    /// Inherited props in this branch (after subtraction).
-    pub props: Vec<FallthroughPropEntry>,
-    /// Inherited events in this branch (after subtraction).
-    pub events: Vec<FallthroughEventEntry>,
-    /// Chain of root steps traversed to produce this branch.
-    pub root_chain: Vec<ResolvedRootStep>,
-    /// Resolution status of this branch.
-    pub status: BranchStatus,
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Root Reachability Extraction
@@ -1067,7 +324,7 @@ const UNSUPPORTED_BUILTINS: &[&str] = &[
 /// This is a pure fact extraction — no fallthrough semantics, no merge logic.
 /// The host-owned resolver consumes this to compute the actual inherited surface.
 pub fn extract_root_reachability(
-    template: Option<&crate::analysis::template::TemplateAnalysisSnapshot>,
+    template: Option<&verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     flags: &ComponentMetaFlags,
 ) -> RootReachability {
     // Rule 1: inheritAttrs: false → no fallthrough
@@ -1095,7 +352,10 @@ pub fn extract_root_reachability(
     }
 
     // Collect root elements (parent_index == None)
-    let root_elements: Vec<(u32, &crate::analysis::template::TemplateElement)> = template
+    let root_elements: Vec<(
+        u32,
+        &verter_session_query::analysis::template::TemplateElement,
+    )> = template
         .elements
         .iter()
         .enumerate()
@@ -1113,9 +373,16 @@ pub fn extract_root_reachability(
     // Partition root elements into independent roots and conditional branches.
     // An element with has_v_else or has_v_else_if is a branch continuation,
     // not an independent root.
-    let mut independent_roots: Vec<Vec<(u32, &crate::analysis::template::TemplateElement)>> =
-        Vec::new();
-    let mut current_chain: Vec<(u32, &crate::analysis::template::TemplateElement)> = Vec::new();
+    let mut independent_roots: Vec<
+        Vec<(
+            u32,
+            &verter_session_query::analysis::template::TemplateElement,
+        )>,
+    > = Vec::new();
+    let mut current_chain: Vec<(
+        u32,
+        &verter_session_query::analysis::template::TemplateElement,
+    )> = Vec::new();
 
     for (idx, el) in &root_elements {
         if el.has_v_else || el.has_v_else_if {
@@ -1180,8 +447,14 @@ pub fn extract_root_reachability(
 /// interpolation content.
 fn normalize_root_actual_target(
     element_index: u32,
-    template: &crate::analysis::template::TemplateAnalysisSnapshot,
-) -> Result<(u32, &crate::analysis::template::TemplateElement), NoFallthroughReason> {
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+) -> Result<
+    (
+        u32,
+        &verter_session_query::analysis::template::TemplateElement,
+    ),
+    NoFallthroughReason,
+> {
     let el = &template.elements[element_index as usize];
 
     if el.v_for.is_some() {
@@ -1214,8 +487,8 @@ fn normalize_root_actual_target(
 /// Classify a root element into a `RootTargetRef`.
 fn classify_root_target(
     element_index: u32,
-    el: &crate::analysis::template::TemplateElement,
-    template: &crate::analysis::template::TemplateAnalysisSnapshot,
+    el: &verter_session_query::analysis::template::TemplateElement,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
 ) -> RootTargetRef {
     let tag = &el.tag;
 
@@ -1303,7 +576,7 @@ fn classify_root_target(
 /// `class` and `style` are never consumed because Vue always merges them through.
 /// `@click` and `:onClick` normalize to the same canonical listener name `"click"`.
 fn extract_consumed_root_bindings(
-    el: &crate::analysis::template::TemplateElement,
+    el: &verter_session_query::analysis::template::TemplateElement,
 ) -> ConsumedRootBindings {
     let mut bindings = ConsumedRootBindings::default();
 
@@ -1432,6 +705,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
     let options_api = input.options_api.is_some();
     let flags = extract_flags(&input);
     let evaluated_types = input.evaluated_types;
+    let slot_binding_index = SlotBindingIndex::new(evaluated_types);
 
     let mut props = Vec::new();
     let mut events = Vec::new();
@@ -1502,6 +776,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                     &slot_fields.fields,
                     &slot_fields.return_publications,
                     evaluated_types,
+                    &slot_binding_index,
                     &mut slots,
                 );
             }
@@ -1557,6 +832,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             &resolved.slots,
             &resolved.slot_return_publications,
             evaluated_types,
+            &slot_binding_index,
             &mut slots,
         );
     }
@@ -1659,7 +935,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
 // ── Macro-wide diagnostics ────────────────────────────────────────────────
 
 fn collect_macro_expansion_diagnostics(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macros: &[AnalyzedMacro],
 ) -> Vec<MacroExpansionDiagnostics> {
     let Some(evaluated) = evaluated else {
@@ -1704,9 +980,10 @@ fn collect_macro_expansion_diagnostics(
             .collect();
 
         if !global_diags.is_empty()
-            || result.exactness != crate::analysis::type_expand::ExpansionExactness::ExactConcrete
+            || result.exactness
+                != verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete
             || result.execution_status
-                != crate::analysis::type_expand::ExpansionExecutionStatus::Completed
+                != verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed
         {
             out.push(MacroExpansionDiagnostics {
                 macro_kind: kind,
@@ -1728,7 +1005,7 @@ fn extract_props_from_macro(
     prop_fields: &[ResolvedPropInput],
     default_keys: &std::collections::HashSet<&str>,
     default_values: &std::collections::HashMap<&str, &str>,
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<PropAnalysis>,
 ) {
     if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
@@ -1889,9 +1166,9 @@ fn extract_props_from_macro(
 }
 
 fn expanded_define_props_fields(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
-) -> Option<&[crate::analysis::type_expand::ExpandedProperty]> {
+) -> Option<&[verter_session_query::analysis::type_expand::ExpandedProperty]> {
     evaluated?
         .define_props
         .iter()
@@ -1900,9 +1177,9 @@ fn expanded_define_props_fields(
 }
 
 fn field_expansion_metadata(
-    field: &crate::analysis::type_expand::ExpandedField,
-) -> crate::analysis::type_expand::ExpansionMetadata {
-    crate::analysis::type_expand::ExpansionMetadata {
+    field: &verter_session_query::analysis::type_expand::ExpandedField,
+) -> verter_session_query::analysis::type_expand::ExpansionMetadata {
+    verter_session_query::analysis::type_expand::ExpansionMetadata {
         exactness: field.exactness,
         execution_status: field.execution_status,
         diagnostics: field.diagnostics.clone(),
@@ -1910,10 +1187,10 @@ fn field_expansion_metadata(
 }
 
 fn define_props_property_expansion_metadata(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
     prop_name: &str,
-) -> Option<crate::analysis::type_expand::ExpansionMetadata> {
+) -> Option<verter_session_query::analysis::type_expand::ExpansionMetadata> {
     let entry = evaluated?
         .define_props
         .iter()
@@ -1930,17 +1207,19 @@ fn define_props_property_expansion_metadata(
         .cloned()
         .collect();
 
-    Some(crate::analysis::type_expand::ExpansionMetadata {
-        exactness: entry.result.exactness,
-        execution_status: entry.result.execution_status,
-        diagnostics,
-    })
+    Some(
+        verter_session_query::analysis::type_expand::ExpansionMetadata {
+            exactness: entry.result.exactness,
+            execution_status: entry.result.execution_status,
+            diagnostics,
+        },
+    )
 }
 
 fn expanded_define_slots_shape(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
-) -> Option<&crate::analysis::type_expand::ExpandedMacroObjectShape> {
+) -> Option<&verter_session_query::analysis::type_expand::ExpandedMacroObjectShape> {
     evaluated?
         .define_slots
         .iter()
@@ -2036,10 +1315,10 @@ fn merged_resolved_macro_input(
 /// and can be removed.
 fn resolve_prop_type(
     row: &ResolvedPropInput,
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
 ) -> (
     TypePublication,
-    Option<crate::analysis::type_expand::ExpansionMetadata>,
+    Option<verter_session_query::analysis::type_expand::ExpansionMetadata>,
 ) {
     let metadata = evaluated.and_then(|eval| {
         eval.props
@@ -2104,7 +1383,7 @@ fn resolve_prop_type(
 /// carries the display text; no closed fact exists for it).
 fn constructor_binding_source_position(
     bindings: &[verter_type_expr::ConstructorBindingEntry],
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
 ) -> Option<SourcePosition> {
     use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticSourceFailure};
     use verter_type_expr::{ConstructorBindingOutcome, PrimitiveName};
@@ -2276,9 +1555,10 @@ fn extract_events_from_macro(emit_fields: &[ResolvedEmitInput], out: &mut Vec<Ev
 
 fn extract_slots_from_macro(
     macro_index: usize,
-    slot_fields: &[crate::analysis::types::AnalyzedSlotField],
+    slot_fields: &[verter_session_query::analysis::types::AnalyzedSlotField],
     slot_return_publications: &[Option<TypePublication>],
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+    binding_index: &SlotBindingIndex<'_>,
     out: &mut Vec<SlotAnalysis>,
 ) {
     // The three lanes are independent partial observations:
@@ -2293,23 +1573,33 @@ fn extract_slots_from_macro(
     // Never use non-emptiness of one lane as proof that it is complete. An open
     // intersection arm can leave `define_slots` as a strict subset while the
     // graph-native binding walk still resolves every callable explicit arm.
-    let mut expanded_remaining = expanded_define_slot_entries(evaluated, macro_index);
+    let mut expanded_remaining =
+        expanded_define_slot_entries(evaluated, macro_index, binding_index);
+    // First occurrence of each expanded name. Field names are deduplicated
+    // below, so each name is claimed at most once — exactly the entry a
+    // first-match scan of the remaining list would select.
+    let mut expanded_first: rustc_hash::FxHashMap<String, usize> =
+        rustc_hash::FxHashMap::with_capacity_and_hasher(
+            expanded_remaining.len(),
+            Default::default(),
+        );
+    for (index, slot) in expanded_remaining.iter().enumerate() {
+        if let Some(slot) = slot {
+            expanded_first.entry(slot.name.clone()).or_insert(index);
+        }
+    }
     let mut seen_slots = rustc_hash::FxHashSet::default();
 
     for (field_index, field) in slot_fields.iter().enumerate() {
         if !seen_slots.insert(field.name.clone()) {
             continue;
         }
-        let expanded = expanded_remaining
-            .iter()
-            .position(|slot| slot.name == field.name)
-            .map(|index| expanded_remaining.remove(index));
+        let expanded = expanded_first
+            .get(field.name.as_str())
+            .and_then(|&index| expanded_remaining[index].take());
         let (expanded_bindings, is_required) = match expanded {
             Some(slot) => (slot.bindings, slot.is_required),
-            None => (
-                expanded_slot_bindings(evaluated, &field.name),
-                field.is_required,
-            ),
+            None => (binding_index.bindings_for(&field.name), field.is_required),
         };
         let bindings = merge_slot_bindings_with_source(field, expanded_bindings);
 
@@ -2337,7 +1627,7 @@ fn extract_slots_from_macro(
     // Expanded-only names append after the authored/resolved lane, preserving
     // the evaluator's deterministic property order. Exact name dedup prevents
     // duplicate shape rows from publishing the same slot twice.
-    for slot in expanded_remaining {
+    for slot in expanded_remaining.into_iter().flatten() {
         if !seen_slots.insert(slot.name.clone()) {
             continue;
         }
@@ -2358,7 +1648,7 @@ fn extract_slots_from_macro(
 }
 
 fn slot_return_publication_from_field(
-    field: &crate::analysis::types::AnalyzedSlotField,
+    field: &verter_session_query::analysis::types::AnalyzedSlotField,
 ) -> Option<TypePublication> {
     let position = SourcePosition::Present(authored_payload_source(field.payload.as_ref())?);
     Some(publication_from_position(
@@ -2376,10 +1666,13 @@ struct ExpandedSlotEntry {
     is_required: bool,
 }
 
+/// Evaluated `define_slots` members in property order. Authored fields take
+/// (`None`) the entries they claim, so the remainder keeps evaluator order.
 fn expanded_define_slot_entries(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
-) -> Vec<ExpandedSlotEntry> {
+    binding_index: &SlotBindingIndex<'_>,
+) -> Vec<Option<ExpandedSlotEntry>> {
     let Some(entry) = expanded_define_slots_shape(evaluated, macro_index) else {
         return Vec::new();
     };
@@ -2389,64 +1682,128 @@ fn expanded_define_slot_entries(
         .value
         .properties
         .iter()
-        .map(|prop| ExpandedSlotEntry {
-            name: prop.name.clone(),
-            bindings: expanded_slot_bindings(evaluated, &prop.name),
-            is_required: !prop.optional,
+        .map(|prop| {
+            Some(ExpandedSlotEntry {
+                name: prop.name.clone(),
+                bindings: binding_index.bindings_for(&prop.name),
+                is_required: !prop.optional,
+            })
         })
         .collect()
 }
 
-fn expanded_slot_bindings(
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
-    slot_name: &str,
-) -> Vec<SlotBindingAnalysis> {
-    // The per-binding evaluation channel ("slotName.bindingName" entries) is
-    // the only lower-crate source of evaluated bindings: deriving bindings by
-    // walking a slot's materialized function shape is a host concern (the
-    // materialized surface lives on the host's hot mirror, never here).
-    let Some(evaluated) = evaluated else {
-        return Vec::new();
-    };
-    let prefix = format!("{slot_name}.");
-    let mut seen_bindings = rustc_hash::FxHashSet::default();
-    evaluated
-        .slot_bindings
-        .iter()
-        .filter_map(|field| {
-            // Graph-native no-parser rows carry the exact typed pair. Other
-            // rows use the established flat `slot.binding` transport key.
-            let binding_name = match field.authority.source() {
+#[cfg(any(test, feature = "semantic-observe"))]
+std::thread_local! {
+    static SLOT_BINDING_ROW_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Slot-binding rows inspected on the current thread since the last call:
+/// one per evaluated row while partitioning, plus one per bucket entry read
+/// while joining a slot. Measurement only; no production decision reads it.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn take_slot_binding_row_visits() -> u64 {
+    SLOT_BINDING_ROW_VISITS.with(|visits| visits.replace(0))
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+fn record_slot_binding_row_visits(rows: usize) {
+    SLOT_BINDING_ROW_VISITS.with(|visits| visits.set(visits.get() + rows as u64));
+}
+
+/// The evaluated per-binding channel partitioned once by exact slot identity.
+///
+/// The channel (`ExpandedComponentTypes::slot_bindings`) is the only
+/// lower-crate source of evaluated bindings: deriving bindings by walking a
+/// slot's materialized function shape is a host concern (the materialized
+/// surface lives on the host's hot mirror, never here). One partition per
+/// component keeps every slot join proportional to that slot's own rows
+/// instead of rescanning the whole binding population per slot.
+///
+/// Identity rules:
+///
+/// - graph-native rows carry the typed `(slot_name, binding_name)` pair and
+///   join only the slot with exactly that name — a typed `a`/`b.c` row never
+///   joins slot `a.b`, and a typed row without a slot name joins none;
+/// - other rows use the flat `slot.binding` transport key and join every slot
+///   whose name followed by `.` prefixes the key, so `a.b.c` is visible to
+///   both slot `a` (binding `b.c`) and slot `a.b` (binding `c`).
+///
+/// Each bucket keeps evaluator row order; when a slot is joined the first row
+/// per binding name wins and an empty binding name never joins.
+struct SlotBindingIndex<'a> {
+    by_slot: rustc_hash::FxHashMap<&'a str, Vec<SlotBindingRow<'a>>>,
+}
+
+/// One evaluated row as seen from one slot: the binding name under that slot
+/// and the row it came from.
+type SlotBindingRow<'a> = (
+    &'a str,
+    &'a verter_session_query::analysis::type_expand::ExpandedField,
+);
+
+impl<'a> SlotBindingIndex<'a> {
+    fn new(
+        evaluated: Option<&'a verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+    ) -> Self {
+        let rows = evaluated.map_or(&[][..], |evaluated| evaluated.slot_bindings.as_slice());
+        let mut by_slot: rustc_hash::FxHashMap<&'a str, Vec<SlotBindingRow<'a>>> =
+            rustc_hash::FxHashMap::default();
+        for field in rows {
+            match field.authority.source() {
                 Some(SemanticTypeSource::SyntheticSlotBinding(key))
                     if key.surface_kind
                         == verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding =>
                 {
-                    if key.slot_name.as_deref() != Some(slot_name) {
-                        return None;
+                    if let Some(slot_name) = key.slot_name.as_deref() {
+                        by_slot
+                            .entry(slot_name)
+                            .or_default()
+                            .push((&key.binding_name, field));
                     }
-                    key.binding_name.as_ref()
                 }
-                _ => field.name.strip_prefix(&prefix)?,
-            };
-            if binding_name.is_empty() || !seen_bindings.insert(binding_name.to_string()) {
-                return None;
+                _ => {
+                    let name = field.name.as_str();
+                    for (dot, _) in name.match_indices('.') {
+                        by_slot
+                            .entry(&name[..dot])
+                            .or_default()
+                            .push((&name[dot + 1..], field));
+                    }
+                }
             }
-            let type_expansion = field_expansion_metadata(field);
-            Some(SlotBindingAnalysis {
+        }
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_slot_binding_row_visits(rows.len());
+        Self { by_slot }
+    }
+
+    /// The slot's evaluated bindings in evaluator row order.
+    fn bindings_for(&self, slot_name: &str) -> Vec<SlotBindingAnalysis> {
+        let Some(rows) = self.by_slot.get(slot_name) else {
+            return Vec::new();
+        };
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_slot_binding_row_visits(rows.len());
+        let mut seen_bindings = rustc_hash::FxHashSet::default();
+        rows.iter()
+            .filter(|(binding_name, _)| {
+                !binding_name.is_empty() && seen_bindings.insert(*binding_name)
+            })
+            .map(|&(binding_name, field)| SlotBindingAnalysis {
                 name: binding_name.to_string(),
                 publication: TypePublication::new(
                     field.authority.clone(),
                     field.authored_evidence.clone(),
                     &PublicationPolicy::exact_only(),
                 ),
-                type_expansion: Some(type_expansion),
+                type_expansion: Some(field_expansion_metadata(field)),
             })
-        })
-        .collect()
+            .collect()
+    }
 }
 
 fn merge_slot_bindings_with_source(
-    source_field: &crate::analysis::types::AnalyzedSlotField,
+    source_field: &verter_session_query::analysis::types::AnalyzedSlotField,
     expanded_bindings: Vec<SlotBindingAnalysis>,
 ) -> Vec<SlotBindingAnalysis> {
     // Order discipline: source-captured bindings (parser-side
@@ -2455,9 +1812,15 @@ fn merge_slot_bindings_with_source(
     // Membership sets only suppress duplicate identities; no hash iteration
     // participates in output order.
     let mut expanded_seen = rustc_hash::FxHashSet::default();
-    let mut expanded_remaining: Vec<SlotBindingAnalysis> = expanded_bindings
+    let mut expanded_remaining: Vec<Option<SlotBindingAnalysis>> = expanded_bindings
         .into_iter()
         .filter(|binding| expanded_seen.insert(binding.name.clone()))
+        .map(Some)
+        .collect();
+    let expanded_by_name: rustc_hash::FxHashMap<String, usize> = expanded_remaining
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| Some((binding.as_ref()?.name.clone(), index)))
         .collect();
     let mut merged: Vec<SlotBindingAnalysis> =
         Vec::with_capacity(source_field.bindings.len() + expanded_remaining.len());
@@ -2467,9 +1830,9 @@ fn merge_slot_bindings_with_source(
         if !merged_seen.insert(source_binding.name.clone()) {
             continue;
         }
-        let Some(position) = expanded_remaining
-            .iter()
-            .position(|candidate| candidate.name == source_binding.name)
+        let Some(mut binding) = expanded_by_name
+            .get(source_binding.name.as_str())
+            .and_then(|&index| expanded_remaining[index].take())
         else {
             merged.push(SlotBindingAnalysis {
                 name: source_binding.name.clone(),
@@ -2486,7 +1849,6 @@ fn merge_slot_bindings_with_source(
             });
             continue;
         };
-        let mut binding = expanded_remaining.remove(position);
         let source_evidence = authored_type_evidence(
             source_binding.payload.as_ref(),
             source_binding.type_annotation.as_deref(),
@@ -2509,6 +1871,7 @@ fn merge_slot_bindings_with_source(
     merged.extend(
         expanded_remaining
             .into_iter()
+            .flatten()
             .filter(|binding| merged_seen.insert(binding.name.clone())),
     );
     merged
@@ -2561,11 +1924,13 @@ fn reconcile_update_events_with_props(
 }
 
 fn merge_template_slots(
-    template_slots: &[crate::analysis::template::DefinedSlot],
+    template_slots: &[verter_session_query::analysis::template::DefinedSlot],
     out: &mut Vec<SlotAnalysis>,
 ) {
+    let mut published: rustc_hash::FxHashSet<String> =
+        out.iter().map(|slot| slot.name.clone()).collect();
     for tslot in template_slots {
-        if !out.iter().any(|s| s.name == tslot.name) {
+        if published.insert(tslot.name.clone()) {
             // Template-discovered slots have no AnalyzedSlotField source —
             // pair is (None, None) per the pairing invariant.
             out.push(SlotAnalysis {
@@ -2617,7 +1982,7 @@ fn extract_model_from_macro(
 fn synthesize_model_prop_and_event(
     mac: &AnalyzedMacro,
     prop_fields: &[ResolvedPropInput],
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     props: &mut Vec<PropAnalysis>,
     events: &mut Vec<EventAnalysis>,
 ) {
@@ -2843,7 +2208,7 @@ fn extract_exposed_from_macro(
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
     bindings: &[AnalyzedBinding],
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<ExposedAnalysis>,
 ) {
     for field in &mac.expose_fields {
@@ -2947,10 +2312,10 @@ fn extract_exposed_from_macro(
 /// `(macro_index, name)` — the join key pairing a type-argument-derived
 /// exposure with its projected surface field.
 fn exposed_lane_field<'a>(
-    evaluated: Option<&'a crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&'a verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
     name: &str,
-) -> Option<&'a crate::analysis::type_expand::ExpandedField> {
+) -> Option<&'a verter_session_query::analysis::type_expand::ExpandedField> {
     evaluated?
         .exposed
         .iter()
@@ -2963,7 +2328,7 @@ fn exposed_lane_field<'a>(
 fn resolve_exposed_type(
     key: &verter_type_expr::DeclBindingKey,
     bindings: &[AnalyzedBinding],
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
 ) -> Option<SourcePosition> {
     if let Some(eval) = evaluated {
         // Same `(owner, name)` join constructors already use. A leftover
@@ -3126,7 +2491,7 @@ fn canonical_emit_occurrences(
 }
 
 struct MergedSlotFields {
-    fields: Vec<crate::analysis::types::AnalyzedSlotField>,
+    fields: Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
     return_publications: Vec<Option<TypePublication>>,
 }
 
@@ -3221,7 +2586,7 @@ fn merged_slot_fields(
 
 fn extract_props_from_options(
     opts: &AnalyzedOptionsApi,
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<PropAnalysis>,
 ) {
     for prop in &opts.props {
@@ -3293,7 +2658,7 @@ fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAna
 // ── Flags ──────────────────────────────────────────────────────────────────
 
 fn extract_components(
-    template: Option<&crate::analysis::template::TemplateAnalysisSnapshot>,
+    template: Option<&verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
 ) -> Vec<ComponentUsageAnalysis> {
     let Some(template) = template else {
         return Vec::new();
@@ -3358,7 +2723,7 @@ fn extract_components(
 }
 
 fn extract_template_refs(
-    template: Option<&crate::analysis::template::TemplateAnalysisSnapshot>,
+    template: Option<&verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
 ) -> Vec<TemplateRefAnalysis> {
     let Some(template) = template else {
         return Vec::new();
@@ -3407,10 +2772,10 @@ fn extract_imports(imports: &[AnalyzedImport]) -> Vec<ImportAnalysis> {
 /// - A typed degradation refines nothing; the reason is published on the
 ///   binding's `return_wrapper_role` sidecar instead.
 fn refined_reactivity_kind(
-    current: crate::analysis::types::ReactivityKind,
+    current: verter_session_query::analysis::types::ReactivityKind,
     role: &verter_type_expr::ReactiveWrapperRole,
-) -> crate::analysis::types::ReactivityKind {
-    use crate::analysis::types::ReactivityKind;
+) -> verter_session_query::analysis::types::ReactivityKind {
+    use verter_session_query::analysis::types::ReactivityKind;
     use verter_type_expr::ReactiveWrapperRole;
     match role {
         ReactiveWrapperRole::Ref
@@ -3426,7 +2791,7 @@ fn refined_reactivity_kind(
 
 fn extract_bindings(
     bindings: &[AnalyzedBinding],
-    template: Option<&crate::analysis::template::TemplateAnalysisSnapshot>,
+    template: Option<&verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     resolved_binding_reactivity: &[ResolvedBindingReactivityInput],
 ) -> Vec<BindingAnalysis> {
     let template_bindings: std::collections::HashSet<&str> = template
@@ -3450,16 +2815,24 @@ fn extract_bindings(
         .map(|(binding_index, binding)| BindingAnalysis {
             name: binding.name.clone(),
             kind: match binding.kind {
-                crate::analysis::types::AnalyzedBindingKind::Const => BindingKindAnalysis::Const,
-                crate::analysis::types::AnalyzedBindingKind::Let => BindingKindAnalysis::Let,
-                crate::analysis::types::AnalyzedBindingKind::Var => BindingKindAnalysis::Var,
-                crate::analysis::types::AnalyzedBindingKind::Function => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::Const => {
+                    BindingKindAnalysis::Const
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Let => {
+                    BindingKindAnalysis::Let
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Var => {
+                    BindingKindAnalysis::Var
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function => {
                     BindingKindAnalysis::Function
                 }
-                crate::analysis::types::AnalyzedBindingKind::AsyncFunction => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
                     BindingKindAnalysis::AsyncFunction
                 }
-                crate::analysis::types::AnalyzedBindingKind::Class => BindingKindAnalysis::Class,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    BindingKindAnalysis::Class
+                }
             },
             reactivity_kind: match resolved_roles.get(&binding_index) {
                 Some(role) => refined_reactivity_kind(binding.reactivity_kind, role),
@@ -3485,7 +2858,9 @@ fn extract_vue_api_calls(calls: &[VueApiCallSite]) -> Vec<VueApiCallAnalysis> {
         .collect()
 }
 
-fn extract_styles(styles: &[crate::analysis::style::StyleBlockAnalysis]) -> Vec<StyleAnalysis> {
+fn extract_styles(
+    styles: &[verter_session_query::analysis::style::StyleBlockAnalysis],
+) -> Vec<StyleAnalysis> {
     styles
         .iter()
         .map(|style| {

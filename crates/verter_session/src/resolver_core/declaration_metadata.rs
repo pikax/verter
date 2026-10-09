@@ -1,12 +1,9 @@
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::type_eval::DeclarationId;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedExportTarget {
-    pub source_canonical_id: Option<String>,
-    pub source_owner: verter_type_expr::TopLevelOwnerId,
-    pub source_name: String,
-}
+use verter_session_query::declarations::metadata::{
+    ResolvedDeclarationKind, ResolvedExportTarget, ResolvedLocalTypeSymbolMetadata,
+    ResolvedTypeDeclaration,
+};
+use verter_session_query::declarations::DeclarationId;
 
 pub trait DeclarationMetadataResolver {
     fn resolve_export_target(
@@ -70,32 +67,6 @@ pub trait DeclarationMetadataResolver {
     ) -> Option<ResolvedLocalTypeSymbolMetadata> {
         None
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedDeclarationKind {
-    Interface,
-    TypeAlias,
-    Class,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolvedLocalTypeSymbolMetadata {
-    pub kind: ResolvedDeclarationKind,
-    pub span: verter_span::Span,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedTypeDeclaration {
-    pub requested_name: String,
-    pub declaration_id: Option<DeclarationId>,
-    pub resolved_name: String,
-    pub canonical_source: String,
-    pub owner: verter_type_expr::TopLevelOwnerId,
-    pub span: verter_span::Span,
-    pub kind: ResolvedDeclarationKind,
-    pub text: Option<String>,
 }
 
 fn resolve_local_symbol_details<R: DeclarationMetadataResolver>(

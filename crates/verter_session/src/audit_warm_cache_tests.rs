@@ -59,7 +59,8 @@ fn audit_warm_path_first_call_is_cold_and_publishes_record() {
         .expect("first call must succeed");
 
     let record = host
-        .take_audit_record(resolution.request_id)
+        .host_audit_runtime()
+        .take_record(resolution.request_id)
         .expect("audit record must be published for the first call");
 
     assert!(
@@ -80,7 +81,8 @@ fn audit_warm_path_second_call_short_circuits_with_from_cache_true() {
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("first call must succeed");
     let _first_record = host
-        .take_audit_record(first.request_id)
+        .host_audit_runtime()
+        .take_record(first.request_id)
         .expect("first audit record must publish");
 
     // Second call: warm. The cache-hit short-circuit synthesizes a
@@ -89,7 +91,8 @@ fn audit_warm_path_second_call_short_circuits_with_from_cache_true() {
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("second call must succeed");
     let second_record = host
-        .take_audit_record(second.request_id)
+        .host_audit_runtime()
+        .take_record(second.request_id)
         .expect("second audit record must publish (synthesized from_cache)");
 
     assert!(
@@ -147,7 +150,8 @@ fn audit_warm_path_second_call_synthesizes_footprint_and_files_when_footprint_ca
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("first (cold) call must succeed");
     let first_record = host
-        .take_audit_record(first.request_id)
+        .host_audit_runtime()
+        .take_record(first.request_id)
         .expect("first (cold) audit record must publish");
 
     assert!(
@@ -172,7 +176,8 @@ fn audit_warm_path_second_call_synthesizes_footprint_and_files_when_footprint_ca
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("second (warm) call must succeed");
     let second_record = host
-        .take_audit_record(second.request_id)
+        .host_audit_runtime()
+        .take_record(second.request_id)
         .expect("second (warm) audit record must publish (synthesised from_cache)");
 
     assert!(
@@ -202,7 +207,7 @@ fn audit_warm_path_dep_change_invalidates_cache() {
     let (_, first) = host
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("first call must succeed");
-    let _first_record = host.take_audit_record(first.request_id);
+    let _first_record = host.host_audit_runtime().take_record(first.request_id);
 
     // Mutate the imported types file. The cache entry's dep_signature
     // becomes stale and is rejected at lookup.
@@ -222,7 +227,8 @@ fn audit_warm_path_dep_change_invalidates_cache() {
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("second call after dep change must succeed");
     let second_record = host
-        .take_audit_record(second.request_id)
+        .host_audit_runtime()
+        .take_record(second.request_id)
         .expect("second audit record must publish (cold path)");
 
     assert!(
@@ -269,7 +275,8 @@ fn audit_warm_path_finalizes_footprint_some_with_per_request_isolation() {
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("first (cold) call must succeed");
     let first_record = host
-        .take_audit_record(first.request_id)
+        .host_audit_runtime()
+        .take_record(first.request_id)
         .expect("first audit record must publish");
     assert!(
         !first_record.from_cache,
@@ -281,7 +288,8 @@ fn audit_warm_path_finalizes_footprint_some_with_per_request_isolation() {
         .get_component_meta_with_resolution("/Owner.vue")
         .expect("second (warm) call must succeed");
     let warm_record = host
-        .take_audit_record(second.request_id)
+        .host_audit_runtime()
+        .take_record(second.request_id)
         .expect("warm audit record must publish");
 
     assert!(

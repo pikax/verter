@@ -54,7 +54,8 @@ use verter_session::{
     VerterHost,
 };
 
-use verter_semantic::resolver_core::ConfiguredMembership;
+use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::ProjectId;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -65,7 +66,7 @@ use verter_workspace::snapshot_builder::{
     build_workspace_snapshot_simple, membership_to_spec, supported_extensions_for,
 };
 use verter_workspace::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess, WorkspaceRead};
 
@@ -1079,24 +1080,45 @@ async fn shared_provider_reconnect_mints_fresh_engine_no_split_brain() {
 /// shared result is discriminating; in the topology test it is wrapped by
 /// [`LazyManagedTypeProvider`] and must never be constructed at all.
 #[derive(Default)]
-struct OwnedBaselineDouble;
+struct OwnedBaselineDouble {
+    applied: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<str>>>,
+}
 
 impl TypeProvider for OwnedBaselineDouble {
+    fn applied_content(&self, path: &str) -> verter_lsp::type_provider::traits::AppliedContent {
+        use verter_lsp::type_provider::traits::AppliedContent;
+        match self.applied.lock().expect("applied").get(path) {
+            Some(bytes) => AppliedContent::Applied(std::sync::Arc::clone(bytes)),
+            None => AppliedContent::NotApplied,
+        }
+    }
     fn provider_id(&self) -> &'static str {
         "tsgo"
     }
-    fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async move { Ok(()) })
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        let content = std::sync::Arc::<str>::from(content);
+        Box::pin(async move {
+            self.applied
+                .lock()
+                .expect("applied")
+                .insert(path, std::sync::Arc::clone(&content));
+            Ok(())
+        })
     }
     /// This double does not distinguish a background load from an editor open.
     fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         self.open_file(path, content)
     }
-    fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async move { Ok(()) })
+    fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
     }
-    fn close_file(&self, _path: &str) -> ProviderFuture<'_, ()> {
-        Box::pin(async move { Ok(()) })
+    fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        Box::pin(async move {
+            self.applied.lock().expect("applied").remove(&path);
+            Ok(())
+        })
     }
     fn get_completions(
         &self,
@@ -1458,11 +1480,29 @@ struct CompositeHarness {
     src: PathBuf,
 }
 
+async fn managed_baseline() -> Arc<verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider>
+{
+    let managed = Arc::new(new_lazy_managed(|| async {
+        Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
+    }));
+    // Preserve the eager baseline's actual byte receipts. Tests of a cold
+    // fallback supply their own unestablished hub instead.
+    managed
+        .establish()
+        .await
+        .expect("owned baseline establishes");
+    managed
+}
+
 /// Drive the full chain to a production composite whose SHARED overlay binds
 /// lazily per query: spawn the shim, run the editor LSP handshake, publish the real
 /// fixture snapshot onto the host workspace, then build the composite (OWNED double
 /// + a SHARED overlay over that host — NO fabricated binding, NO `new_for_test`).
-async fn setup_composite(tsgo: &Path, tag: &str, owned: Arc<dyn TypeProvider>) -> CompositeHarness {
+async fn setup_composite(
+    tsgo: &Path,
+    tag: &str,
+    owned: Arc<verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider>,
+) -> CompositeHarness {
     let dir = tempdir(tag);
     let (tsconfig, src) = write_fixture(&dir);
     let tsconfig_norm = norm(&tsconfig);
@@ -1549,7 +1589,7 @@ async fn composite_overlays_shared_diagnostics_via_live_resolver() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite(&tsgo, "composite", Arc::new(OwnedBaselineDouble)).await;
+    let h = setup_composite(&tsgo, "composite", managed_baseline().await).await;
 
     // REAL IDE codegen (NOT handcrafted): the imported-prop type flows through the
     // macro into the carrier via the shared resolver.
@@ -1649,10 +1689,10 @@ async fn composite_successful_shared_route_never_activates_managed_fallback() {
             let activation_count = Arc::clone(&activation_count);
             async move {
                 activation_count.fetch_add(1, Ordering::SeqCst);
-                Ok(Arc::new(OwnedBaselineDouble) as Arc<dyn TypeProvider>)
+                Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
             }
         }
-    })) as Arc<dyn TypeProvider>;
+    }));
     let h = setup_composite(&tsgo, "shared_only", fallback).await;
 
     let (ide_code, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
@@ -1755,10 +1795,10 @@ async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
             let activation_count = Arc::clone(&activation_count);
             async move {
                 activation_count.fetch_add(1, Ordering::SeqCst);
-                Ok(Arc::new(OwnedBaselineDouble) as Arc<dyn TypeProvider>)
+                Ok(Arc::new(OwnedBaselineDouble::default()) as Arc<dyn TypeProvider>)
             }
         }
-    })) as Arc<dyn TypeProvider>;
+    }));
     let composite = Arc::new(TsgoCompositeProvider::new(fallback, host, Some(overlay)));
 
     let (ide_code, _source_map, companion) = compile_vue_ide(WIDGET_VUE);
@@ -1908,7 +1948,7 @@ fn monorepo_fixture_snapshot(ws_root: &str) -> WorkspaceSnapshot {
 async fn setup_composite_monorepo(
     tsgo: &Path,
     tag: &str,
-    owned: Arc<dyn TypeProvider>,
+    owned: Arc<verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider>,
 ) -> CompositeHarness {
     let dir = tempdir(tag);
     let (_app_tsconfig, src) = write_monorepo_fixture(&dir);
@@ -2125,7 +2165,7 @@ async fn composite_shared_template_answers_are_typed_single_project() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite(&tsgo, "tpl_single", Arc::new(OwnedBaselineDouble)).await;
+    let h = setup_composite(&tsgo, "tpl_single", managed_baseline().await).await;
     assert_template_member_served_typed(&h, "single-project").await;
     teardown_composite(h).await;
 }
@@ -2139,7 +2179,7 @@ async fn composite_shared_template_answers_are_typed_monorepo_nested_leaf() {
     let Some(tsgo) = engine_or_skip().await else {
         return;
     };
-    let h = setup_composite_monorepo(&tsgo, "tpl_mono", Arc::new(OwnedBaselineDouble)).await;
+    let h = setup_composite_monorepo(&tsgo, "tpl_mono", managed_baseline().await).await;
     assert_template_member_served_typed(&h, "monorepo").await;
     teardown_composite(h).await;
 }

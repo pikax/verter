@@ -22,8 +22,8 @@ use std::sync::Arc;
 use super::frontier_helpers::{
     ordered_wildcard_indices_for_exported_name, RouteShallowStateCache, RoutedShallowServe,
 };
-use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
+use verter_type_engine::component_meta_trace_custom;
 
 /// One node of the layer-ordered wildcard walk.
 ///
@@ -41,13 +41,15 @@ enum RouteLayerNode {
 impl VerterHost {
     fn append_route_participant_fact_versions_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
-        facts: &mut Vec<crate::resolver_core::FactVersionRef>,
-        seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
+        facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
         if let Some(hash) = ctx.authoritative_current_content_hash(canonical) {
-            let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_string(),
                 hash,
             };
@@ -61,9 +63,9 @@ impl VerterHost {
             .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
             .and_then(|indexed| indexed.route_surface_hash())
         {
-            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::Route,
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                 hash,
             };
             if seen.insert(fact.clone()) {
@@ -89,8 +91,8 @@ impl VerterHost {
                 admitted.into_result()?
             }
             verter_workspace::ResolutionPublication::Refused(_) => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
@@ -130,7 +132,9 @@ impl VerterHost {
 
     pub(crate) fn resolve_route_type_edge_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         owner_canonical: &str,
         source_specifier: &str,
     ) -> Option<String> {
@@ -147,15 +151,19 @@ impl VerterHost {
 
     fn resolve_named_type_export_route_from_target(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         provider_canonical: &str,
-        target: &crate::resolver_core::ExportTarget,
+        target: &verter_session_query::inputs::shallow::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
-        route_shallow_cache: &mut RouteShallowStateCache,
+        route_shallow_cache: &mut RouteShallowStateCache<
+            verter_session_query::inputs::shallow::ShallowInputRecord,
+        >,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
-            crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
+            verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name } => {
                 let state = self.route_shallow_state_with_context(
                     ctx,
                     provider_canonical,
@@ -184,7 +192,7 @@ impl VerterHost {
                     defining_symbol: symbol_name.clone(),
                 })
             }
-            crate::resolver_core::ExportTarget::Reexport {
+            verter_session_query::inputs::shallow::ExportTarget::Reexport {
                 source_specifier,
                 original_name,
                 ..
@@ -321,20 +329,26 @@ impl VerterHost {
     /// lookup.
     pub(crate) fn routed_shallow_state_serve_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical_id: &str,
-    ) -> Option<RoutedShallowServe> {
+    ) -> Option<RoutedShallowServe<verter_session_query::inputs::shallow::ShallowInputRecord>> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state_serve_with_context(ctx, canonical_id, &mut route_shallow_cache)
     }
 
     fn route_shallow_state_serve_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical_id: &str,
-        route_shallow_cache: &mut RouteShallowStateCache,
-    ) -> Option<RoutedShallowServe> {
-        let cache_key = ctx.normalized_analysis_canonical(canonical_id).into_owned();
+        route_shallow_cache: &mut RouteShallowStateCache<
+            verter_session_query::inputs::shallow::ShallowInputRecord,
+        >,
+    ) -> Option<RoutedShallowServe<verter_session_query::inputs::shallow::ShallowInputRecord>> {
+        let cache_key = ctx.normalized_analysis_canonical(canonical_id);
         if let Some(cached) = route_shallow_cache.get(cache_key.as_str()) {
             return Some(cached.clone());
         }
@@ -351,10 +365,14 @@ impl VerterHost {
 
     fn route_shallow_state_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical_id: &str,
-        route_shallow_cache: &mut RouteShallowStateCache,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        route_shallow_cache: &mut RouteShallowStateCache<
+            verter_session_query::inputs::shallow::ShallowInputRecord,
+        >,
+    ) -> Option<Arc<verter_session_query::inputs::shallow::ShallowInputRecord>> {
         self.route_shallow_state_serve_with_context(ctx, canonical_id, route_shallow_cache)
             .map(|serve| serve.state)
     }
@@ -382,14 +400,6 @@ impl VerterHost {
     /// This is the route-surface fallback
     /// [`Self::shallow_file_state_with_context`] uses; its indexed fast
     /// path is content-pinned via [`Self::route_shallow_state`].
-    pub(crate) fn routed_shallow_state_with_context(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        canonical_id: &str,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.routed_shallow_state_with_view(canonical_id, ctx.active_session_view())
-    }
-
     /// View-aware variant of [`Self::routed_shallow_state`].
     ///
     /// When `view: Some(...)` carries parse artifacts for `canonical_id`,
@@ -435,12 +445,16 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn resolve_named_type_export_route_uncached(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         provider_canonical: &str,
         exported_name: &str,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
-        route_shallow_cache: &mut RouteShallowStateCache,
+        route_shallow_cache: &mut RouteShallowStateCache<
+            verter_session_query::inputs::shallow::ShallowInputRecord,
+        >,
     ) -> Option<crate::resolver_core::RouteResult> {
         let key = (provider_canonical.to_string(), exported_name.to_string());
         if !active.insert(key.clone()) {
@@ -538,10 +552,11 @@ impl VerterHost {
                     {
                         let ordinary = verter_type_expr::TopLevelOwnerId::ordinary_file();
                         if exported_name == "default" {
-                            let target = crate::resolver_core::ExportTarget::Local {
-                                owner: ordinary,
-                                symbol_name: assigned.to_string(),
-                            };
+                            let target =
+                                verter_session_query::inputs::shallow::ExportTarget::Local {
+                                    owner: ordinary,
+                                    symbol_name: assigned.to_string(),
+                                };
                             return self.resolve_named_type_export_route_from_target(
                                 ctx,
                                 canonical.as_str(),
@@ -552,7 +567,7 @@ impl VerterHost {
                             );
                         }
                         let member = format!("{assigned}.{exported_name}");
-                        let headers = state.decl_bodies().header_index();
+                        let headers = &state.headers;
                         let declared = (state.effective_value_header_present_in(ordinary, &member)
                             || state.effective_type_header_present_in(ordinary, &member)
                             || headers.namespace_blocks.iter().any(|block| {
@@ -604,7 +619,7 @@ impl VerterHost {
         requested_name: &str,
     ) -> Option<(
         crate::resolver_core::RouteResult,
-        Vec<crate::resolver_core::FactVersionRef>,
+        Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     )> {
         self.with_base_resolver_context(|ctx| {
             self.build_named_type_export_route_entry_with_context(
@@ -617,12 +632,14 @@ impl VerterHost {
 
     pub(crate) fn build_named_type_export_route_entry_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(
         crate::resolver_core::RouteResult,
-        Vec<crate::resolver_core::FactVersionRef>,
+        Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     )> {
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
@@ -642,7 +659,7 @@ impl VerterHost {
         // retargets a hop without moving a single byte of any file in the
         // walk — invisible to every parse fact, visible to this witness.
         let (route_result, traversal_witness, refused_edge) = {
-            let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
+            let refusals = verter_type_engine::fact_tracing::RefusalObservationScope::enter();
             let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
             let route_result = self.resolve_named_type_export_route_uncached(
                 ctx,
@@ -727,8 +744,10 @@ impl VerterHost {
     /// direct-host convenience remains compile-fenced to tests.
     pub(super) fn resolve_named_type_export_target_uncached_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        view: &dyn crate::resolver_core::StoreView,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
@@ -748,7 +767,7 @@ impl VerterHost {
         let route_key = crate::resolver_core::route_db::RouteNameKey::new(
             provider,
             requested_name,
-            verter_semantic::facts::registry::SymbolSpace::Type,
+            verter_session_query::facts::registry::SymbolSpace::Type,
             self.host_view_project_identity_for(provider),
             env.resolve_env_hash,
             env.lib_env_hash,
@@ -767,13 +786,12 @@ impl VerterHost {
         // funnel's post-compute verdict is the structural floor that covers all
         // four — including the content-neutral ones, where the hash does not move
         // and a warm-rooted entry would validate forever.
-        let cached_route = self
-            .resolver
-            .runtime
-            .routes
-            .get_or_resolve_route_observing_facts_with_context(route_key, view, ctx, || {
-                self.build_named_type_export_route_entry_with_context(ctx, provider, requested_name)
-            });
+        let cached_route = crate::host_manage::source_request::RouteRequestDriver::new(
+            &self.resolver.runtime.routes,
+        )
+        .get_or_resolve_route_observing_facts_with_context(route_key, view, ctx, || {
+            self.build_named_type_export_route_entry_with_context(ctx, provider, requested_name)
+        });
         let cached_route = cached_route?;
         cached_route
             .resolved()
@@ -815,8 +833,10 @@ impl VerterHost {
     /// `HostResolverContext` / `SessionResolverContext` callers.
     pub(crate) fn resolve_named_type_export_target_shallow_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        view: &dyn crate::resolver_core::StoreView,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {

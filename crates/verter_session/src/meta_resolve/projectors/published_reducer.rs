@@ -5,11 +5,10 @@
 //! `output_sink`; these predicates inspect only the semantic graph and never
 //! cross the output-materialization boundary.
 
-use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+use verter_session_query::type_solver::builtin::BuiltinUtility;
 
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
-use crate::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 /// The shallow reduction-gate facts of a graph `node`, read in NODE DOMAIN —
 /// the shape decisions used by the per-member publication path:
@@ -56,10 +55,13 @@ fn peel_alias_root(
 /// triad. Parity-checked field-for-field against the `TypeExpr` predicates on
 /// `raise(node)`.
 pub(crate) fn classify_node_reduction_gates(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> NodeReductionGateFacts {
-    let graph = ctx.project_type_store().semantic_graph();
+    let graph = dispatch.graph();
     // Peel a single `Alias` chain so the root classification reads the underlying
     // carrier kind (the reverse boundary unwraps an `Alias` before raising).
     let root = peel_alias_root(graph, node, 0);

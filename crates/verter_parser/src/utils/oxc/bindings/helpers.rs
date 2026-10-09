@@ -475,7 +475,7 @@ pub fn collect_assignment_target_maybe_default_locals(
 pub fn collect_pattern_local_spans(pattern: &BindingPattern<'_>, locals: &mut Vec<Span>) {
     match pattern {
         BindingPattern::BindingIdentifier(ident) => {
-            locals.push(ident.span.into());
+            locals.push(verter_span::Span::new(ident.span.start, ident.span.end));
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
@@ -505,7 +505,7 @@ pub fn collect_pattern_local_spans(pattern: &BindingPattern<'_>, locals: &mut Ve
 /// Applies the `is_global` filter (runtime `_ctx`-prefixing semantics).
 pub fn collect_pattern_reference_spans(
     pattern: &BindingPattern<'_>,
-    ignored: &FxHashSet<&[u8]>,
+    ignored: &dyn Fn(&str) -> bool,
     references: &mut FxHashSet<Span>,
 ) {
     collect_pattern_reference_spans_inner(pattern, ignored, references);
@@ -513,7 +513,7 @@ pub fn collect_pattern_reference_spans(
 
 fn collect_pattern_reference_spans_inner(
     pattern: &BindingPattern<'_>,
-    ignored: &FxHashSet<&[u8]>,
+    ignored: &dyn Fn(&str) -> bool,
     references: &mut FxHashSet<Span>,
 ) {
     match pattern {
@@ -546,7 +546,7 @@ fn collect_pattern_reference_spans_inner(
 /// semantics): a global-named identifier is NOT recorded.
 pub fn collect_expression_reference_spans(
     expr: &Expression<'_>,
-    ignored: &FxHashSet<&[u8]>,
+    ignored: &dyn Fn(&str) -> bool,
     references: &mut FxHashSet<Span>,
 ) {
     collect_expression_reference_spans_inner(expr, ignored, references);
@@ -563,14 +563,14 @@ pub fn collect_expression_reference_spans(
 /// [`collect_expression_free_ref_spans`]: crate::utils::oxc::bindings::collect_expression_free_ref_spans
 fn collect_expression_reference_spans_inner(
     expr: &Expression<'_>,
-    ignored: &FxHashSet<&[u8]>,
+    ignored: &dyn Fn(&str) -> bool,
     references: &mut FxHashSet<Span>,
 ) {
     match expr {
         Expression::Identifier(ident) => {
             let name_bytes = ident.name.as_bytes();
-            if !ignored.contains(name_bytes) && !is_keyword(name_bytes) && !is_global(name_bytes) {
-                references.insert(ident.span.into());
+            if !ignored(ident.name.as_str()) && !is_keyword(name_bytes) && !is_global(name_bytes) {
+                references.insert(verter_span::Span::new(ident.span.start, ident.span.end));
             }
         }
         Expression::BinaryExpression(binary) => {
@@ -614,11 +614,14 @@ fn collect_expression_reference_spans_inner(
                     if p.shorthand {
                         if let PropertyKey::StaticIdentifier(ident) = &p.key {
                             let name_bytes = ident.name.as_bytes();
-                            if !ignored.contains(name_bytes)
+                            if !ignored(ident.name.as_str())
                                 && !is_keyword(name_bytes)
                                 && !is_global(name_bytes)
                             {
-                                references.insert(ident.span.into());
+                                references.insert(verter_span::Span::new(
+                                    ident.span.start,
+                                    ident.span.end,
+                                ));
                             }
                         }
                     } else {
@@ -685,7 +688,7 @@ fn collect_expression_reference_spans_inner(
 /// `is_global` filter (runtime `_ctx`-prefixing semantics).
 pub fn collect_chain_element_reference_spans(
     element: &ChainElement<'_>,
-    ignored: &FxHashSet<&[u8]>,
+    ignored: &dyn Fn(&str) -> bool,
     references: &mut FxHashSet<Span>,
 ) {
     collect_chain_element_reference_spans_inner(element, ignored, references);
@@ -693,7 +696,7 @@ pub fn collect_chain_element_reference_spans(
 
 fn collect_chain_element_reference_spans_inner(
     element: &ChainElement<'_>,
-    ignored: &FxHashSet<&[u8]>,
+    ignored: &dyn Fn(&str) -> bool,
     references: &mut FxHashSet<Span>,
 ) {
     match element {
@@ -727,7 +730,7 @@ pub fn collect_type_reference_spans(ts_type: &TSType<'_>, references: &mut FxHas
                 let name_bytes = ident.name.as_bytes();
                 // Note: don't filter globals here — Array, Map, Set etc. are valid TS types
                 if !is_keyword(name_bytes) {
-                    references.insert(ident.span.into());
+                    references.insert(verter_span::Span::new(ident.span.start, ident.span.end));
                 }
             }
             // Also check generic type arguments
@@ -810,7 +813,7 @@ pub fn collect_type_reference_spans(ts_type: &TSType<'_>, references: &mut FxHas
                 let name_bytes = ident.name.as_bytes();
                 // Note: don't filter globals here — typeof Array etc. are valid TS type queries
                 if !is_keyword(name_bytes) {
-                    references.insert(ident.span.into());
+                    references.insert(verter_span::Span::new(ident.span.start, ident.span.end));
                 }
             }
         }
@@ -1007,7 +1010,7 @@ mod tests {
         let ignored = FxHashSet::default();
 
         let mut runtime = FxHashSet::default();
-        collect_expression_reference_spans(&expr, &ignored, &mut runtime);
+        collect_expression_reference_spans(&expr, &|_| false, &mut runtime);
         assert!(
             runtime.is_empty(),
             "runtime collector must drop the global-named `Date`"

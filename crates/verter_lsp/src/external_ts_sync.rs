@@ -42,13 +42,13 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use verter_span::TsPosition;
 
-use verter_scheduler::cancellation::CancellationToken;
+use verter_execution::cancellation::CancellationToken;
 use verter_session::external_ts::{
     CarrierOwnershipResolution, ProjectBinding, PublishSnapshot, QueryFeature, ScriptKind,
     SnapshotFile, SnapshotRole,
 };
 
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::provider_surface_store::ProviderSurfaceStore;

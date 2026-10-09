@@ -2,7 +2,7 @@
 //!
 //! These modules have no `#[test]` bodies: they fail to compile on
 //! regression. The compile-fail half lives in the session trybuild
-//! fixtures (`no_typeexpr_*`, `output_projector_not_impl_outside_crate`)
+//! fixtures (`no_typeexpr_*`, `output_authority_*`)
 //! run by `scripts/compile-contracts.mjs`.
 
 /// The symbolic IR and its common owner shapes must never implement
@@ -37,8 +37,8 @@ mod hot_structural_rail_not_impl_asserts {
 /// satisfy the hot-carrier marker, and a shared reference is never a
 /// witness — type identity is the strictly stronger statement.
 mod semantic_api_wire_input_witness {
-    use verter_session::semantic_query::SemanticNodeId;
     use verter_session::typeinfo::types::TypeArgList;
+    use verter_type_engine::semantic_query::SemanticNodeId;
 
     fn identity(args: &'static [SemanticNodeId]) -> &'static [SemanticNodeId] {
         args

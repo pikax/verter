@@ -15,12 +15,15 @@
 //!   its request's snapshot superseded by the next request's), the
 //!   authority releases every entry it holds, and an entry no other
 //!   authority holds goes with it;
-//! - every entry's bytes are charged to the host's aggregate retention
+//! - every entry's bytes are charged to the process-local aggregate retention
 //!   account through [`ResolutionRetentionAccount`]; a refused charge
 //!   leaves the entry out (the answer is served, not retained);
 //! - independently of authority, each map is bounded: a per-key item cap
 //!   and a key cap, oldest key evicted first. Evicting a live entry only
 //!   forces a recompute.
+use verter_session_query::retention::resolution_charge::{
+    ResolutionRetentionAccount, ResolutionRetentionCharge,
+};
 
 use std::collections::VecDeque;
 use std::hash::Hash;
@@ -35,60 +38,42 @@ use smallvec::SmallVec;
 // The retention-account seam
 // ─────────────────────────────────────────────────────────────────────────
 
-/// The host's aggregate retention account, as the workspace sees it.
+/// The account the Engine's resident resolution state charges.
 ///
-/// Dependency-neutral: the host adapts its own account to this, so the
-/// workspace charges resident resolution state to the same ceiling every
-/// other host store charges, without depending on the host.
-pub trait ResolutionRetentionAccount: Send + Sync {
-    /// Reserve `bytes` for a retained, evictable entry. `None` refuses the
-    /// reservation: the caller serves its value without retaining it.
-    fn reserve_retained(&self, bytes: usize) -> Option<ResolutionRetentionCharge>;
-}
+/// Every Engine charges the one process-local aggregate account from
+/// construction: [`Default`] binds
+/// [`ResolutionRetention::process_local`](verter_session_query::retention::ResolutionRetention::process_local),
+/// and there is no account-less state, so a retained entry without a charge
+/// is unrepresentable. Replacing the account is a test-support seam only.
+pub(crate) struct RetentionHook(RwLock<Arc<dyn ResolutionRetentionAccount>>);
 
-/// One admitted reservation. Dropping it releases the bytes — once — which
-/// is why an entry keeps its charge beside its payload.
-pub struct ResolutionRetentionCharge {
-    _charge: Box<dyn std::any::Any + Send + Sync>,
-}
-
-impl ResolutionRetentionCharge {
-    /// Wrap the host account's own RAII charge.
-    #[must_use]
-    pub fn new(charge: impl std::any::Any + Send + Sync) -> Self {
-        Self {
-            _charge: Box::new(charge),
-        }
+impl Default for RetentionHook {
+    fn default() -> Self {
+        Self(RwLock::new(Arc::new(
+            verter_session_query::retention::ResolutionRetention::process_local(),
+        )))
     }
 }
 
-impl std::fmt::Debug for ResolutionRetentionCharge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ResolutionRetentionCharge")
-    }
-}
-
-/// The Engine's installed account, if any. A workspace with no host behind
-/// it has no account: its entries are bounded but not charged.
-#[derive(Default)]
-pub(crate) struct RetentionHook(RwLock<Option<Arc<dyn ResolutionRetentionAccount>>>);
-
-/// A reservation the installed account refused.
+/// A reservation the account refused.
 pub(crate) struct RetentionRefused;
 
 impl RetentionHook {
+    /// Replace the account entries are charged to from here on. Charges
+    /// already granted stay with the account that granted them.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install(&self, account: Arc<dyn ResolutionRetentionAccount>) {
-        *self.0.write() = Some(account);
+        *self.0.write() = account;
     }
 
-    fn reserve(&self, bytes: usize) -> Result<Option<ResolutionRetentionCharge>, RetentionRefused> {
-        match self.0.read().as_ref() {
-            None => Ok(None),
-            Some(account) => account
-                .reserve_retained(bytes)
-                .map(Some)
-                .ok_or(RetentionRefused),
-        }
+    pub(crate) fn reserve(
+        &self,
+        bytes: usize,
+    ) -> Result<ResolutionRetentionCharge, RetentionRefused> {
+        self.0
+            .read()
+            .reserve_retained(bytes)
+            .ok_or(RetentionRefused)
     }
 }
 
@@ -206,7 +191,7 @@ struct HeldItem<T> {
     seq: u64,
     value: T,
     holders: SmallVec<[u64; 2]>,
-    _charge: Option<ResolutionRetentionCharge>,
+    _charge: ResolutionRetentionCharge,
 }
 
 impl<K, T> AuthorityHeld<K, T>
@@ -269,7 +254,7 @@ where
         state: &mut HeldState<K, T>,
         key: K,
         value: T,
-        charge: Option<ResolutionRetentionCharge>,
+        charge: ResolutionRetentionCharge,
         authority: &OverlayAuthority,
     ) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);

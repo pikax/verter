@@ -1,0 +1,28 @@
+error[E0599]: no method named `output_authority` found for struct `EngineBinding<M>` in the current scope
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_recoverable_from_query_access.rs
+  |
+  |     port.attach_engine().output_authority()
+  |                          ^^^^^^^^^^^^^^^^ method not found in `EngineBinding<<P as ExecutionSubmission>::MacroMirrors>`
+
+error[E0599]: no method named `output_authority` found for reference `&<P as HostAttachmentPort>::HostAttachment` in the current scope
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_recoverable_from_query_access.rs
+  |
+  |     port.host_attachment().output_authority()
+  |                            ^^^^^^^^^^^^^^^^ method not found in `&<P as HostAttachmentPort>::HostAttachment`
+
+error[E0624]: method `output_lease` is private
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_recoverable_from_query_access.rs
+  |
+  |         .output_lease()
+  |          ^^^^^^^^^^^^ private method
+  |
+ ::: $WORKSPACE/crates/verter_session/src/session_attachment.rs
+  |
+  |     pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
+  |     ---------------------------------------------------------------------- private method defined here
+
+error[E0599]: no method named `output_lease` found for reference `&Arc<ProjectTypeStore>` in the current scope
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_recoverable_from_query_access.rs
+  |
+  |     host.project_type_store().output_lease().authority()
+  |                               ^^^^^^^^^^^^ method not found in `&Arc<ProjectTypeStore>`

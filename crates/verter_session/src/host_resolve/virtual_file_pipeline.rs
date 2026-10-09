@@ -2,13 +2,14 @@
 //!
 //! Public resolve / ensure / get / list accessors and the on-demand
 //! compile path through the scheduler-backed cache.
+use verter_session_query::analysis::types::Hash16;
 
 use super::compile_request_build::BoundCompiledProducts;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 // The runtime-render half of this module is native-only: the bound
 // framework backends, their refusal mappers and `Main` assembly all live
@@ -159,7 +160,7 @@ mod compose_template_virtual_file_tests;
 
 pub(crate) fn vue_macro_output_matches_revision(
     output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
-    expected: verter_semantic::analysis::types::Hash16,
+    expected: verter_session_query::analysis::types::Hash16,
 ) -> bool {
     output.origin_whole_hash == Some(expected)
 }
@@ -233,7 +234,7 @@ fn content_mode_profile_hash(profile: &CompileProfile) -> Hash16 {
     buf.extend_from_slice(b"verter.content_mode_profile.v1:");
     buf.extend_from_slice(&CompileCacheMode::Content.stable_hash());
     buf.extend_from_slice(&compile_profile_hash(profile).to_le_bytes());
-    crate::hash::hash_16(&buf)
+    verter_semantic_source::source_hash::hash_16(&buf)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -257,7 +258,9 @@ fn validate_registered_carrier_inputs(
 /// Compiler-crate version hash. Different versions must not share a
 /// content-addressed cache entry.
 fn compiler_version_hash() -> Hash16 {
-    crate::hash::hash_16(concat!("verter.compiler.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
+    verter_semantic_source::source_hash::hash_16(
+        concat!("verter.compiler.v1:", env!("CARGO_PKG_VERSION")).as_bytes(),
+    )
 }
 
 /// Deployment version hash for the codegen plugin set. The compile
@@ -265,7 +268,9 @@ fn compiler_version_hash() -> Hash16 {
 /// so the plugin-set identity tracks the crate semantic version in
 /// lockstep with [`compiler_version_hash`].
 fn plugin_versions_hash() -> Hash16 {
-    crate::hash::hash_16(concat!("verter.plugins.v1:", env!("CARGO_PKG_VERSION")).as_bytes())
+    verter_semantic_source::source_hash::hash_16(
+        concat!("verter.plugins.v1:", env!("CARGO_PKG_VERSION")).as_bytes(),
+    )
 }
 
 /// What a compile request demands of the shared compile result.
@@ -393,7 +398,8 @@ enum CompiledProducts {
     Produced {
         outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
         tsx: Option<CachedTsx>,
-        template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        template_analysis:
+            Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     },
     RuntimeSurfaceRefused {
         diagnostic_code: Arc<str>,
@@ -411,7 +417,7 @@ impl CompiledProducts {
 
     fn template_analysis(
         &self,
-    ) -> Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot> {
         match self {
             Self::Produced {
                 template_analysis, ..
@@ -475,7 +481,7 @@ pub(crate) enum CompileEntryOutcome {
     /// The compile's semantic inputs were aborted (a cancelled request, a
     /// shut down host, a superseded view): the transaction publishes
     /// nothing, not even diagnostics.
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
 /// The products of a successful compile transaction.
@@ -484,9 +490,9 @@ pub(crate) struct CompileEntryProducts {
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) tsx: Option<CachedTsx>,
     pub(crate) template_analysis:
-        Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     pub(crate) template_class_admission:
-        crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
+        crate::host_manage::template_class_facts::TemplateClassCacheAdmission,
 }
 
 /// A compile transaction that fail-closed on the runtime surface it was asked
@@ -580,9 +586,9 @@ impl VerterHost {
             let resolved = match self.resolve_for_persistent_state(
                 canonical_id,
                 &request.specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                 },
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -595,7 +601,7 @@ impl VerterHost {
                     pending_routes.push((
                         request.specifier,
                         resolution.source_id.clone(),
-                        verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     ));
                     resolution.source_id
                 }
@@ -610,9 +616,9 @@ impl VerterHost {
             let type_resolution = self.resolve_for_persistent_state(
                 canonical_id,
                 &dep.import_source,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             );
             let resolved = match type_resolution {
@@ -622,16 +628,16 @@ impl VerterHost {
                             pending_routes.push((
                                 dep.import_source.clone(),
                                 resolution.source_id.clone(),
-                                verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                                verter_session_query::resolution::ResolveRequestKind::TypeImport,
                             ));
                             Some(resolution)
                         }
                         None => match self.resolve_for_persistent_state(
                             canonical_id,
                             &dep.import_source,
-                            verter_semantic::resolver_core::ResolutionContext {
-                                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                            verter_session_query::resolution::ResolutionContext {
+                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                             },
                         ) {
                             verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -639,7 +645,7 @@ impl VerterHost {
                                     pending_routes.push((
                                         dep.import_source.clone(),
                                         resolution.source_id.clone(),
-                                        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                                        verter_session_query::resolution::ResolveRequestKind::EsmImport,
                                     ));
                                 })
                             }
@@ -706,8 +712,8 @@ impl VerterHost {
     fn prefetch_compile_tier_observation_targets(
         &self,
         owner_canonical: &str,
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
+        script_imports: &[verter_session_query::analysis::types::AnalyzedImport],
+        macro_type_deps: &[verter_session_query::analysis::types::MacroTypeDep],
         external_requests: &[ExternalSourceRequest],
     ) -> CompileTierPrefetchObservation {
         // Test/debug-only invocation count. The cold-compute path gates
@@ -751,28 +757,28 @@ impl VerterHost {
             let type_resolution = self.resolve_for_persistent_state(
                 owner_canonical,
                 &dep.import_source,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             );
             let resolved = match type_resolution {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     match admitted.into_result() {
                         Some(resolution) => {
-                            Some((resolution, verter_semantic::resolver_core::ResolveRequestKind::TypeImport))
+                            Some((resolution, verter_session_query::resolution::ResolveRequestKind::TypeImport))
                         }
                         None => match self.resolve_for_persistent_state(
                             owner_canonical,
                             &dep.import_source,
-                            verter_semantic::resolver_core::ResolutionContext {
-                                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                            verter_session_query::resolution::ResolutionContext {
+                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                             },
                         ) {
                             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                                 admitted.into_result().map(|resolution| {
-                                    (resolution, verter_semantic::resolver_core::ResolveRequestKind::EsmImport)
+                                    (resolution, verter_session_query::resolution::ResolveRequestKind::EsmImport)
                                 })
                             }
                             verter_workspace::ResolutionPublication::Refused(_) => {
@@ -807,15 +813,15 @@ impl VerterHost {
         // phase; value imports use EsmImport.
         for import in script_imports {
             let kind = if import.is_type_only {
-                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                verter_session_query::resolution::ResolveRequestKind::TypeImport
             } else {
-                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                verter_session_query::resolution::ResolveRequestKind::EsmImport
             };
             match self.resolve_for_persistent_state(
                 owner_canonical,
                 import.source.as_str(),
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                     kind,
                 },
             ) {
@@ -878,9 +884,9 @@ impl VerterHost {
                 let resolved = match self.resolve_for_persistent_state(
                     owner_canonical,
                     &request.specifier,
-                    verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                        kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                        kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     },
                 ) {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
@@ -897,7 +903,7 @@ impl VerterHost {
                     pending_routes.push((
                         request.specifier.clone(),
                         resolved.clone(),
-                        verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     ));
                 }
                 resolved
@@ -985,7 +991,7 @@ impl VerterHost {
                     // closure. Omitting it would serve a stale slot and
                     // return `Ok(())` without recompiling.
                     let session_node =
-                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                        crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                     if let Some(hit) = session_node.lookup(
                         &cc,
                         profile_hash,
@@ -1049,13 +1055,13 @@ impl VerterHost {
     /// R3/R26/R28 warm-hit fact validator closure body.
     ///
     /// Validates every fact recorded on a non-empty
-    /// [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+    /// [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
     /// against the host's current `HostStoreView`. A single mismatch
     /// returns `false` and the warm hit misses; the caller falls
     /// through to cold recompute.
     ///
     /// This is the validator closure passed to
-    /// [`crate::cache_runtime::CompileOutputNodeFactValidatedSession::lookup`].
+    /// [`crate::compile_output_node::CompileOutputNodeFactValidatedSession::lookup`].
     /// The node owns the warm-hit gate: it refuses an overflowed
     /// carrier and short-circuits an empty fact rail (where the
     /// upstream `semantic_hash` / override-hash pre-filter is the sole
@@ -1077,10 +1083,10 @@ impl VerterHost {
     pub(crate) fn compile_slot_facts_validate(
         &self,
         current_view: &crate::resolver_store::CurrentHostStoreView,
-        signature: &crate::fact_signature_helpers::ReadSetSignature,
+        signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
         let view = current_view.view();
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         view.validates_fact_signature(&signature.facts)
     }
 
@@ -1131,7 +1137,7 @@ impl VerterHost {
         // (`StoreViewRead::ReturnOnly`) can never serve a sound warm hit,
         // so `acquire_view` yields `None` there and the predicate reports
         // "not warm" — the consumer would route through cold recompute.
-        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        let session_node = crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
         session_node
             .lookup(
                 &cc,
@@ -1163,10 +1169,10 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         profile: &CompileProfile,
-    ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+    ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
-        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        let session_node = crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
         self.compile_cache()
             .get(&canonical)
             .and_then(|cc| session_node.peek_signature(&cc, profile_hash))
@@ -1187,7 +1193,7 @@ impl VerterHost {
         canonical_id: &str,
         content_hash: Hash16,
         profile: &CompileProfile,
-    ) -> crate::cache_runtime::CompileOutputPureContentKey {
+    ) -> crate::compile_output_node::CompileOutputPureContentKey {
         let env = self.host_view_env_hashes_for(canonical_id);
         let project_identity = self.host_view_project_identity_for(canonical_id).0;
         // Source-map emission policy projected from the profile. The
@@ -1199,7 +1205,7 @@ impl VerterHost {
         } else {
             SourceMapPolicy::None
         };
-        crate::cache_runtime::CompileOutputPureContentKey {
+        crate::compile_output_node::CompileOutputPureContentKey {
             canonical_id: Arc::from(canonical_id),
             content_hash,
             parse_env_hash: env.parse_env_hash,
@@ -1499,7 +1505,8 @@ impl VerterHost {
             /// post-compile live re-read would stamp old-input bytes
             /// under a new-current identity. `None` for `Session` /
             /// `Stateless`.
-            content_publish_stamp: Option<(crate::cache_runtime::CompileOutputPureContentKey, u64)>,
+            content_publish_stamp:
+                Option<(crate::compile_output_node::CompileOutputPureContentKey, u64)>,
             /// Exact compiler block-content projection captured with the owner
             /// snapshot. Publish revalidates this after the cold compute so a
             /// concurrent supplied apply or external/owner publication cannot
@@ -1516,10 +1523,17 @@ impl VerterHost {
         // `semantic_hash`, and the artifact-commit generation.
         // Independent re-reads could each observe a different source
         // version, pairing bytes from one version with the key hash of
-        // another.
-        let source_snap = self
+        // another. The scheduler witness captured with it names the node
+        // incarnation the bytes came from; publication and artifact
+        // cleanup are fenced on it, so a delete/re-add or reset that
+        // reuses the generation for the same content cannot accept this
+        // flight's output.
+        let verter_scheduler::node::WitnessedSource {
+            snapshot: source_snap,
+            witness: source_witness,
+        } = self
             .scheduler
-            .try_get_source(&canonical_id)
+            .try_get_witnessed_source(&canonical_id)
             .ok_or_else(|| HostError::MissingSource {
                 canonical_id: canonical_id.clone(),
             })?;
@@ -1610,7 +1624,7 @@ impl VerterHost {
                 // never builds a workspace snapshot.
                 let fallback_last_good = cc_ref.as_ref().and_then(|cc| {
                     let session_node =
-                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                        crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
                     session_node.peek_last_good(cc, profile_hash, |sig| {
                         #[cfg(test)]
                         crate::resolver_store::record_compile_warm_validation_view_read();
@@ -1748,7 +1762,8 @@ impl VerterHost {
                     // requests a store-view root capture.
                     CompileCacheMode::Session => cc_ref.as_ref().and_then(|cc| {
                         let session_node =
-                            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new(
+                            );
                         session_node
                             .lookup(
                                 cc,
@@ -1911,7 +1926,7 @@ impl VerterHost {
         // is preserved on the event for telemetry even though the public
         // single-reason projection keeps only the first.
         if actual_mode != classification.requested_mode {
-            crate::host_manage::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::CompileModeDowngrade {
                     requested: classification.requested_mode.into(),
                     actual: actual_mode.into(),
@@ -1961,7 +1976,7 @@ impl VerterHost {
         // and never finalise a signature.
         let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
             let (result, fact_read_set) =
-                self.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                self.with_fact_tracer(verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched, || {
                     // Replay the prefetch's BY-VALUE fenced-serve consumption
                     // into THIS tracer scope: the compile's payload derives from
                     // the prefetch-populated state, so a fenced serve consumed
@@ -1969,8 +1984,8 @@ impl VerterHost {
                     // serve would — one admission rail
                     // (`non_cacheable_read_observed`), consulted below.
                     if prefetch_observation.fenced_serve_observed {
-                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                     }
                     crate::compile_fact_emission::observe_compile_tier_dependencies(
@@ -1991,8 +2006,8 @@ impl VerterHost {
                         .load(std::sync::atomic::Ordering::Relaxed);
                     if force_n > 0 {
                         for n in 0..force_n {
-                            crate::resolver_core::resolver_context::observe_fan_out(
-                                crate::resolver_core::FactVersionRef::FileWholeHash {
+                            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                                     canonical_id: format!("__compile_force_overflow_{n}.ts"),
                                     hash: [(n & 0xff) as u8; 16],
                                 },
@@ -2018,11 +2033,13 @@ impl VerterHost {
             // the caller is still served the fresh output below.
             let non_cacheable_read_observed = fact_read_set.non_cacheable_read_observed();
             let admission = if non_cacheable_read_observed {
-                crate::cache_runtime::SignatureAdmission::NonCacheable(
-                    crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+                verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                    verter_audit::NonAdmissionReason::GenerationSuperseded,
                 )
             } else {
-                crate::cache_runtime::SignatureAdmission::from_finalise(fact_read_set.finalise())
+                verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
+                    fact_read_set.finalise(),
+                )
             };
             (result, Some(admission))
         } else {
@@ -2058,13 +2075,14 @@ impl VerterHost {
                 },
                 refusal.diagnostics,
                 false,
-                crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable(),
+                crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable(),
             ),
             Err(diagnostics) => {
                 let publication_fence = self.block_content.admission_fence.lock();
                 if self.compiler_block_content_capture_is_current(
                     &canonical_id,
                     crate::block_content::SuppliedBlockScope::Profile(profile),
+                    &source_witness,
                     captured_whole_hash,
                     &captured_block_content_stamp,
                 ) {
@@ -2099,7 +2117,7 @@ impl VerterHost {
                             },
                             diagnostics,
                             true,
-                            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::refused(),
+                            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::refused(),
                         )
                     } else {
                         return Err(HostError::CompileError(CompileFailure {
@@ -2142,17 +2160,18 @@ impl VerterHost {
         // The last-good rail belongs to the PRODUCED arm only: a refusal committed
         // no output, so there is nothing to remember as last-good, and the
         // conversion cannot smuggle one in.
-        let compile_output_value = crate::cache_runtime::CompileOutputValue::from_compile_record(
-            captured_semantic_hash,
-            content_override_hash,
-            profile.svelte_css_hash_override.as_deref().map(Arc::from),
-            compiled_products.to_cached(if stale {
-                fallback_last_good.clone()
-            } else {
-                None
-            }),
-            diagnostics.clone(),
-        );
+        let compile_output_value =
+            crate::compile_output_node::CompileOutputValue::from_compile_record(
+                captured_semantic_hash,
+                content_override_hash,
+                profile.svelte_css_hash_override.as_deref().map(Arc::from),
+                compiled_products.to_cached(if stale {
+                    fallback_last_good.clone()
+                } else {
+                    None
+                }),
+                diagnostics.clone(),
+            );
 
         // The `latest_diagnostics` + generation bump runs for EVERY mode
         // so compile errors / warnings surface regardless of caching.
@@ -2176,6 +2195,7 @@ impl VerterHost {
         let compile_capture_is_current = self.compiler_block_content_capture_is_current(
             &canonical_id,
             crate::block_content::SuppliedBlockScope::Profile(profile),
+            &source_witness,
             captured_whole_hash,
             &captured_block_content_stamp,
         );
@@ -2256,7 +2276,7 @@ impl VerterHost {
                         .expect("Session mode always finalises a SignatureAdmission");
                     let is_cacheable = matches!(
                         admission,
-                        crate::cache_runtime::SignatureAdmission::Cacheable(_)
+                        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
                     );
 
                     // The scheduler artifact carries PRODUCTS. A refused
@@ -2276,7 +2296,8 @@ impl VerterHost {
                         && matches!(compiled_products, CompiledProducts::Produced { .. });
                     if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
                         let session_node =
-                            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new(
+                            );
                         session_node.publish(
                             &mut cc,
                             profile_hash,
@@ -2304,7 +2325,7 @@ impl VerterHost {
                                 Arc::new(template_analysis),
                                 crate::types::RawTemplateSlotAdmission {
                                     store_published: true,
-                                    source_generation: Some(source_snap.generation),
+                                    source_version: Some(source_snap.version()),
                                     has_src_blocks: !compile_input.src_blocks.is_empty(),
                                     default_extraction: !profile
                                         .has_parse_affecting_template_options(),
@@ -2324,16 +2345,12 @@ impl VerterHost {
                     match compiled_products.outputs().filter(|_| commits_artifact) {
                         Some(outputs) => {
                             self.scheduler.commit_artifact(
-                                &canonical_id,
+                                &source_witness,
                                 profile_hash,
-                                verter_scheduler::node::ArtifactSnapshot {
-                                    generation: source_snap.generation,
-                                    profile_hash,
-                                    data: Arc::new(crate::host_executor::HostArtifactData {
-                                        outputs: outputs.clone(),
-                                        diagnostics: diagnostics.clone(),
-                                    }),
-                                },
+                                Arc::new(crate::host_executor::HostArtifactData {
+                                    outputs: outputs.clone(),
+                                    diagnostics: diagnostics.clone(),
+                                }),
                             );
                         }
                         None => {
@@ -2345,21 +2362,17 @@ impl VerterHost {
                             // stale result on the companion warm-hit substrate;
                             // no fresh artifact is committed.
                             //
-                            // The eviction is gated on the compile's
-                            // start-of-compile generation captured on the
-                            // request's single source snapshot: a slow compile
-                            // that started at generation N can race with a fast
-                            // successful compile at N+k that already committed a
-                            // newer artifact, and an unconditional evict would
-                            // clobber it. Passing the captured start generation
-                            // as `max_generation` makes the eviction symmetric
-                            // with `commit_artifact`'s own node-generation
-                            // rejection.
-                            self.scheduler.remove_artifact_if_not_newer_than(
-                                &canonical_id,
-                                profile_hash,
-                                source_snap.generation,
-                            );
+                            // The eviction is gated on the source witness
+                            // captured with the request's single source
+                            // snapshot: a slow compile that started at
+                            // generation N can race with a fast successful
+                            // compile at N+k that already committed a newer
+                            // artifact, and an unconditional evict would
+                            // clobber it; a witness whose node was retired
+                            // evicts nothing from its successor. Symmetric
+                            // with `commit_artifact`'s witness rejection.
+                            self.scheduler
+                                .remove_artifact_not_newer_than(&source_witness, profile_hash);
                         }
                     }
                 }
@@ -2546,7 +2559,8 @@ impl VerterHost {
                 return None;
             }
             let cc = self.compile_cache().get(&canonical)?;
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             let tsx = session_node.peek_tsx(&cc, profile_hash)?;
             Some(IdeResponse {
                 code: tsx.code.clone(),
@@ -2699,7 +2713,7 @@ impl VerterHost {
             crate::framework::ComponentContractAvailability,
             Option<crate::framework::api_projector::ComponentApiProjectionWitness>,
         ),
-        crate::semantic_query::ExecutionAbort,
+        verter_type_engine::semantic_query::ExecutionAbort,
     > {
         Ok(match self.get_component_meta_output_via_view_with_publication_evidence(
             canonical, view, fixed, false,
@@ -3425,7 +3439,7 @@ impl VerterHost {
 
         // Convert raw template data into analysis types when available.
         let mut template_class_admission =
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable();
+            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::not_applicable();
         let template_analysis = products.template_facts().map(|facts_product| {
             let (analysis, admission) = self.template_analysis_from_facts(snapshot, facts_product);
             template_class_admission = admission;
@@ -3451,8 +3465,8 @@ impl VerterHost {
         snapshot: &CompileInput,
         facts_product: &verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct,
     ) -> (
-        verter_semantic::analysis::template::TemplateAnalysisSnapshot,
-        crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        crate::host_manage::template_class_facts::TemplateClassCacheAdmission,
     ) {
         // Build script import pairs for component â†’ source resolution
         let all_imports =
@@ -3461,7 +3475,7 @@ impl VerterHost {
             &snapshot.canonical_id,
             snapshot.whole_hash,
             Arc::clone(&snapshot.source),
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+            crate::host_manage::template_class_facts::TemplateClassScriptInputs {
                 macros: &snapshot.script_macros,
                 bindings: &snapshot.script_bindings,
             },
@@ -3469,7 +3483,7 @@ impl VerterHost {
             // The compile lane's bytes attestation: an override layer is a
             // fenced input, plain snapshot bytes are store-published. The
             // seed-currentness half is composed inside the wrapper.
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
+            crate::host_manage::template_class_facts::TemplateClassPublicationScope::BasePublishable,
         );
         let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
             &facts,
@@ -3478,7 +3492,9 @@ impl VerterHost {
         )
         .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
         let template_class_admission =
-            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::from_facts(&facts);
+            crate::host_manage::template_class_facts::TemplateClassCacheAdmission::from_facts(
+                &facts,
+            );
         let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
             &snapshot.script_macros,
             snapshot.script_macro_usage.as_ref(),

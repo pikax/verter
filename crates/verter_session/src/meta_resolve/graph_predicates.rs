@@ -16,8 +16,8 @@
 //! and surface materialisation belong to the one shared query route
 //! (`SemanticQueryKey` → `ProjectSemanticDispatch::execute`).
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+
 use std::sync::Arc;
 
 /// Build a string-literal-union node from a list of keys
@@ -30,14 +30,14 @@ use std::sync::Arc;
 /// produces a `Union` of literals. Both are interned at global scope
 /// (no file scope) since the keys are workspace-shared sentinels.
 pub(crate) fn build_keys_union_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     keys: &[verter_type_expr::facts::FactPropertyKey],
-) -> Option<crate::semantic_query::SemanticNodeId> {
-    use crate::semantic_query::SemanticNodeData;
+) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
+    use verter_type_engine::semantic_query::SemanticNodeData;
     use verter_type_expr::LiteralValue;
     use verter_type_expr::PropertyKey;
 
-    let key_ids: Option<Vec<crate::semantic_query::SemanticNodeId>> = keys
+    let key_ids: Option<Vec<verter_type_engine::semantic_query::SemanticNodeId>> = keys
         .iter()
         .map(|key| match key {
             PropertyKey::String(value) => Some(graph.intern_node(SemanticNodeData::Literal(
@@ -57,11 +57,12 @@ pub(crate) fn build_keys_union_node(
     // arm is a freshly interned `Global`-scoped childless literal, so the
     // walk records no file roots and can never be incomplete — asserted
     // below rather than threaded to a disposition boundary.
-    let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        graph,
-        &key_ids,
-        crate::semantic_query::NullabilityPolicy::Strict,
-    );
+    let composite =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            graph,
+            &key_ids,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     verter_debug_assert::verter_debug_assert!(
         composite.evidence.inspected_file_roots.is_empty() && !composite.evidence.incomplete,
         "key-domain union over freshly interned Global literals must carry no evidence"
@@ -72,7 +73,7 @@ pub(crate) fn build_keys_union_node(
 /// Extract the package-backed gate's ROOT declaration IDENTITY from a graph
 /// `node` — the node front of the SHARED root-identity tail
 /// ([`crate::meta_resolve::materialize::package_backed_object_like_root_identity_with_fence`]).
-/// The node carrier already holds the RESOLVED [`crate::semantic_query::DeclIdentity`]
+/// The node carrier already holds the RESOLVED [`verter_type_engine::semantic_query::DeclIdentity`]
 /// (`DeclRef.identity` / `InstantiationRef.base`), so NO name re-resolution from
 /// `scope` is needed — this is the identity-preserving fix for the former
 /// synthetic `TypeExpr::named(name)` bridge, which could re-resolve a DIFFERENT
@@ -90,18 +91,20 @@ pub(crate) fn build_keys_union_node(
 ///   `None`.
 /// - anything else — `None`.
 fn node_root_identity(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: crate::semantic_query::SemanticNodeId,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     depth: u32,
-) -> Option<crate::semantic_query::DeclIdentity> {
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SemanticNodeData};
+) -> Option<verter_type_engine::semantic_query::DeclIdentity> {
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+    };
 
     if depth > 256 {
         return None;
     }
     enum Action {
-        Recurse(crate::semantic_query::SemanticNodeId),
-        Identity(crate::semantic_query::DeclIdentity),
+        Recurse(verter_type_engine::semantic_query::SemanticNodeId),
+        Identity(verter_type_engine::semantic_query::DeclIdentity),
         ResolveBare,
         None,
     }
@@ -154,11 +157,14 @@ fn node_root_identity(
 pub(crate) fn node_package_backed_object_like_root_with_fence(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
-    node: crate::semantic_query::SemanticNodeId,
-) -> (bool, Option<crate::semantic_query::DepSignature>) {
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> (
+    bool,
+    Option<verter_type_engine::semantic_query::DepSignature>,
+) {
     let root_identity = {
-        let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
-        node_root_identity(&dispatch, node, 0)
+        let dispatch = query_engine.dispatch;
+        node_root_identity(dispatch, node, 0)
     };
     let Some(root_identity) = root_identity else {
         return (false, Some(Arc::from(Vec::new())));
@@ -183,13 +189,15 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
 /// is set so the aggregate demotes to a fallback instead of silently ORing a
 /// partial root set.
 fn collect_node_root_identities(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: crate::semantic_query::SemanticNodeId,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     depth: u32,
-    out: &mut Vec<crate::semantic_query::DeclIdentity>,
+    out: &mut Vec<verter_type_engine::semantic_query::DeclIdentity>,
     truncated: &mut bool,
 ) {
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SemanticNodeData};
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+    };
     const MAX_CYCLE_ROOTS: usize = 16;
     const MAX_ROOT_COLLECT_DEPTH: u32 = 8;
     if out.len() >= MAX_CYCLE_ROOTS || depth >= MAX_ROOT_COLLECT_DEPTH {
@@ -212,11 +220,11 @@ fn collect_node_root_identities(
         return;
     }
     enum Step {
-        Recurse(crate::semantic_query::SemanticNodeId),
-        Push(crate::semantic_query::DeclIdentity),
+        Recurse(verter_type_engine::semantic_query::SemanticNodeId),
+        Push(verter_type_engine::semantic_query::DeclIdentity),
         PushAndRecurseArgs(
-            crate::semantic_query::DeclIdentity,
-            Vec<crate::semantic_query::SemanticNodeId>,
+            verter_type_engine::semantic_query::DeclIdentity,
+            Vec<verter_type_engine::semantic_query::SemanticNodeId>,
         ),
         ResolveBare,
         Stop,
@@ -272,7 +280,7 @@ fn collect_node_root_identities(
 /// sealed materialization cycle gate
 /// ([`ProjectSemanticDispatch::classify_materialization_cycle_gate`]) over
 /// each through the OR lattice
-/// ([`crate::semantic_query::MaterializationCycleGateOutcome::aggregate`]):
+/// ([`verter_type_engine::semantic_query::MaterializationCycleGateOutcome::aggregate`]):
 /// Stop dominates Continue, any `LegacyFallback` infects the aggregate
 /// (its partial rail is observed onto the request), and a truncated root
 /// collection adds `RootCollectorLimit` (never a silent false). Each root
@@ -281,32 +289,34 @@ fn collect_node_root_identities(
 /// node carries resolved identities, so no name-resolution engine is
 /// needed).
 pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
-    node: crate::semantic_query::SemanticNodeId,
-) -> (bool, crate::semantic_query::DepSignature) {
-    use crate::semantic_query::{
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> (bool, verter_type_engine::semantic_query::DepSignature) {
+    use verter_type_engine::semantic_query::{
         MaterializationCycleGateFallbackReason, MaterializationCycleGateFallbackReasons,
         MaterializationCycleGateOutcome, MaterializationCycleGateVerdict,
     };
 
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let mut roots: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
+    let mut roots: Vec<verter_type_engine::semantic_query::DeclIdentity> = Vec::new();
     let mut truncated = false;
-    collect_node_root_identities(&dispatch, node, 0, &mut roots, &mut truncated);
+    collect_node_root_identities(dispatch, node, 0, &mut roots, &mut truncated);
     if roots.is_empty() {
         if truncated {
             // A truncated collection with no collected roots cannot
             // prove "no cycle": the walk is incomplete, the verdict is
             // fail-open Continue, and the request goes partial.
-            crate::request_context::mark_request_result_partial();
+            verter_type_engine::request_context::mark_request_result_partial();
         }
         return (false, Arc::from(Vec::new()));
     }
-    let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let mut fence: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> = Vec::new();
     let mut outcomes: Vec<MaterializationCycleGateOutcome> = Vec::with_capacity(roots.len() + 1);
     if truncated {
-        crate::request_context::mark_request_result_partial();
+        verter_type_engine::request_context::mark_request_result_partial();
         outcomes.push(MaterializationCycleGateOutcome::LegacyFallback {
             verdict: MaterializationCycleGateVerdict::Continue,
             reasons: MaterializationCycleGateFallbackReasons::new([
@@ -322,20 +332,24 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
         {
             fence.push((
                 Arc::clone(&identity.canonical_id),
-                crate::semantic_query::DepVersion::WholeHash(identity.whole_hash),
+                verter_type_engine::semantic_query::DepVersion::WholeHash(identity.whole_hash),
             ));
         }
         let read = dispatch.classify_materialization_cycle_gate(identity);
-        crate::request_context::observe_component_meta_read_suppress(&read);
-        crate::component_meta_audit::merge_dep_signature_into_local_fence(
+        verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
+        verter_type_engine::fact_signature_helpers::merge_dep_signature_into_local_fence(
             &mut fence,
             &read.dep_signature,
         );
         outcomes.push(read.value);
     }
     let aggregate = MaterializationCycleGateOutcome::aggregate(outcomes);
-    let fence_signature: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
-    crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(ctx, &fence_signature);
+    let fence_signature: verter_type_engine::semantic_query::DepSignature =
+        Arc::from(fence.into_boxed_slice());
+    verter_type_engine::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(
+        dispatch,
+        &fence_signature,
+    );
     (
         matches!(aggregate.verdict(), MaterializationCycleGateVerdict::Stop),
         fence_signature,

@@ -13,7 +13,9 @@ use verter_session::component_meta_payload::{
     LiteralShape, NamedTypeHandle, PrimitiveKind, ShapeOutline, StaleHandleReason, TypeExpansion,
     TypeHandle, TypeHandleError, TypeQueryPath, MAX_BRIDGE_DEPTH,
 };
-use verter_session::for_tests::{BatchExpandError as MemoBatchExpandError, SemanticGraphStore};
+use verter_type_engine::semantic_query_memo::{
+    BatchExpandError as MemoBatchExpandError, SemanticGraphStore,
+};
 
 fn handle(canonical: &str, name: &str) -> TypeHandle {
     let mut fp = [0u8; 16];
@@ -632,7 +634,7 @@ fn compat_checker_unchanged_calls_get_component_meta() {
     fn _signature_check(
         s: &MetaSession,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         verter_session::meta::MetaError,
     > {
         s.get_component_meta("x.vue")
@@ -649,7 +651,7 @@ fn benchmark_worker_unchanged_calls_get_component_meta() {
     fn _signature_check(
         s: &MetaSession,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         verter_session::meta::MetaError,
     > {
         s.get_component_meta("x.vue")

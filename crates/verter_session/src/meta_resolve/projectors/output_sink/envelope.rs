@@ -17,8 +17,8 @@ use verter_type_expr::TypeExpr;
 use super::{
     materialize_output_source, missing_source_output_type_expr, MetaResolveProjectorsOutputCap,
 };
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Request-local output-materialization memo: `(effective scope, source
 /// identity)` → materialized value, shared across ALL lanes of one output
@@ -143,8 +143,8 @@ impl<'a> OutputSourceMemo<'a> {
     #[allow(clippy::too_many_arguments)]
     fn materialize_output_lane_slot(
         &mut self,
-        dispatch: &ProjectSemanticDispatch<'_>,
-        cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         effective_scope: &'a str,
         lane: crate::meta_resolve::ComponentMetaOutputLane,
         index: usize,
@@ -206,8 +206,8 @@ impl<'a> OutputSourceMemo<'a> {
     #[allow(clippy::too_many_arguments)]
     fn materialize_publication_lane_slot(
         &mut self,
-        dispatch: &ProjectSemanticDispatch<'_>,
-        cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         effective_scope: &'a str,
         lane: crate::meta_resolve::ComponentMetaOutputLane,
         index: usize,
@@ -323,16 +323,16 @@ impl<'a> OutputSourceMemo<'a> {
 ///
 /// [`ComponentMetaOutputError`]: crate::meta_resolve::ComponentMetaOutputError
 fn materialize_component_meta_output_types<'a>(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
     scope_canonical_id: &'a str,
-    analysis: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &'a verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Result<
     crate::meta_resolve::MaterializedComponentMetaTypes,
     crate::meta_resolve::ComponentMetaOutputError,
 > {
     use crate::meta_resolve::ComponentMetaOutputLane as Lane;
-    use verter_semantic::analysis::component_meta::FallthroughSurface;
+    use verter_session_query::analysis::component_meta::FallthroughSurface;
 
     let mut memo = OutputSourceMemo::new();
     let scope: &'a str = scope_canonical_id;
@@ -590,8 +590,8 @@ fn effective_output_scope<'a>(owner: &'a str, row_scope: Option<&'a str>) -> &'a
 /// decision and runs HERE, in the session owner, BEFORE materialization —
 /// never in the wire converter.
 fn finalize_resolved_type_registry_overlay(
-    registry: &mut Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
-    resolved_entries: Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
+    registry: &mut Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis>,
+    resolved_entries: Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis>,
 ) {
     for resolved_entry in resolved_entries {
         if let Some(existing) = registry
@@ -634,9 +634,13 @@ fn finalize_resolved_type_registry_overlay(
 ///
 /// [`ComponentMetaOutput`]: crate::meta_resolve::ComponentMetaOutput
 pub(crate) fn build_component_meta_output(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
-    mut analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    mut analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<crate::meta_resolve::output::ComponentMetaResolutionSeed>,
     completeness: crate::meta_resolve::PublishedCompleteness,
 ) -> Result<crate::meta_resolve::ComponentMetaOutput, crate::meta_resolve::ComponentMetaOutputError>
@@ -674,10 +678,9 @@ pub(crate) fn build_component_meta_output(
 
     // ONE dispatch for the whole output payload; the capability mint and
     // every sealed-carrier unwrap live here, in the terminal sink.
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let cap = MetaResolveProjectorsOutputCap::new(&dispatch);
+    let cap = MetaResolveProjectorsOutputCap::new(dispatch);
     let types =
-        materialize_component_meta_output_types(&dispatch, &cap, scope_canonical_id, &analysis)?;
+        materialize_component_meta_output_types(dispatch, &cap, scope_canonical_id, &analysis)?;
     let adapter_id = ctx
         .ensure_indexed_ready_serve(scope_canonical_id)
         .and_then(|serve| {

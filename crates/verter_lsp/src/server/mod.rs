@@ -3,8 +3,11 @@ use std::{collections::HashSet, sync::Arc};
 use dashmap::{DashMap, DashSet};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
-use tower_lsp_server::{Client, LanguageServer};
+use tower_lsp_server::LanguageServer;
 
+use crate::outbound::Outbound;
+
+use crate::document_sync_lane::DocumentLaneLease;
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::{uri_to_canonical_id, DocumentRegistry};
@@ -34,21 +37,28 @@ use crate::features::cursor_context::{
 #[allow(unused_imports)]
 use crate::type_provider::merge;
 
-// ── Handler tracking for freeze diagnosis ──────────────────────────────
-// Moved to `handler_guard.rs`. Imported here so the
+// ── Handler activity and blocking guard ─────────────────────────────────
+// Lives in `handler_guard.rs`. Imported here so the
 // `#[path = "../background_init.rs"]` sibling (which references
-// ACTIVE_HANDLERS and block_in_place_if_available via `use super::*`
-// or implicit module-level lookup) compiles.
+// block_in_place_if_available via `use super::*` or implicit module-level
+// lookup) compiles.
 mod handler_guard;
 #[allow(unused_imports)]
-use self::handler_guard::{block_in_place_if_available, ACTIVE_HANDLERS};
+use self::handler_guard::block_in_place_if_available;
+// The server-scoped admission activity reaches the separate
+// integration-test binary through the default-off `test-support` seam —
+// the same pattern as every other item the consolidated test target
+// drives. Default builds (and any dependent) still see only the
+// crate-internal path below.
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use self::handler_guard::HandlerActivity;
+#[cfg(any(test, feature = "test-support"))]
+pub use self::handler_guard::{HandlerActivity, HandlerGuard};
 // Re-export the runtime-flavor-guarded blocking helper so sibling top-level
 // modules (e.g. the background `sync_coordinator` / `background_init` diagnostic
 // publish paths) can route VFS source reads through the same guard the server
 // handlers use, instead of an unguarded `tokio::task::block_in_place`.
 pub(crate) use self::handler_guard::block_in_place_if_available as block_in_place_guarded;
-pub(crate) use self::handler_guard::wait_for_handlers_idle;
-pub(crate) use self::handler_guard::wait_for_handlers_quiet;
 
 // Provider-sync state CRUD + context helpers. Inherent-impl
 // extension methods on `VerterLanguageServer` covering MRU bookkeeping,
@@ -129,7 +139,7 @@ mod rename_plan;
 mod rename_prepare;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 // Completion-resolve auto-import edit translation:
 // `resolve_provider_auto_import_edits` and `completion_resolve_error`, called
@@ -177,6 +187,7 @@ pub(crate) use background_drain::{
     arm_pending_sync_redrive_once, drain_pending_snapshot_provider_sync_owned,
     signal_pending_sync_redrive, PendingSyncDrain, PENDING_SYNC_REDRIVE,
 };
+pub(crate) use background_drain::{sync_carrier_api_transaction, ApiLegOutcome};
 #[path = "../background_drain_decl_closure.rs"]
 mod background_drain_decl_closure;
 #[path = "../background_init.rs"]
@@ -205,7 +216,7 @@ pub(crate) struct PublishedResolutionView {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedResolverSnapshot {
-    pub(crate) resolver: verter_semantic::resolver_core::ModuleResolverCore,
+    pub(crate) resolver: verter_resolution::ModuleResolverCore,
     /// Exact Engine-backed workspace publication paired with `resolver`.
     pub(crate) resolution_view: Option<PublishedResolutionView>,
     /// `true` after `background_init` publishes a real snapshot with the
@@ -256,85 +267,13 @@ pub(crate) struct ProviderProjectionContext {
 pub(crate) struct PreparedNonCarrierProviderSync {
     pub(crate) provider_path: String,
     pub(crate) rewritten: String,
-    pub(crate) resolved_dependencies: Vec<verter_semantic::resolver_core::ResolveResult>,
+    pub(crate) resolved_dependencies: Vec<verter_session_query::resolution::ResolveResult>,
 }
 
 pub(crate) struct ResolvedComponentDocument {
     pub(crate) uri: Uri,
-    pub(crate) analysis: verter_session::FileAnalysisSnapshot,
+    pub(crate) analysis: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     pub(crate) line_index: LineIndex,
-}
-
-/// One generation-aware IDE-sync repair lane. Retirement belongs to the lane
-/// object, never merely to its canonical-id key, so a stale close cannot retire
-/// a reopened document's replacement lane (the key-reuse/ABA case).
-struct IdeSyncRepairLane {
-    mutex: tokio::sync::Mutex<()>,
-    generation: std::sync::atomic::AtomicU64,
-    /// Advances once an admitted projection-less repair has attempted its
-    /// compile. Waiters that observed the prior value join that attempt; a
-    /// later request observes the new value and may retry transient failure.
-    repair_sequence: std::sync::atomic::AtomicU64,
-    retired: std::sync::atomic::AtomicBool,
-}
-
-impl IdeSyncRepairLane {
-    fn new(generation: u64) -> Self {
-        Self {
-            mutex: tokio::sync::Mutex::new(()),
-            generation: std::sync::atomic::AtomicU64::new(generation),
-            repair_sequence: std::sync::atomic::AtomicU64::new(0),
-            retired: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-}
-
-/// One participant in a document's generation-bound IDE-sync repair lane. A
-/// closed lane is retired synchronously by the final participant's drop, so
-/// cleanup is event-driven and never needs a polling task.
-struct IdeSyncRepairLease {
-    canonical_id: String,
-    lane: Arc<IdeSyncRepairLane>,
-    lanes: Arc<DashMap<String, Arc<IdeSyncRepairLane>>>,
-}
-
-impl IdeSyncRepairLease {
-    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.lane.mutex.lock().await
-    }
-
-    fn retire(&self) {
-        self.lane
-            .retired
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    fn lane(&self) -> &Arc<IdeSyncRepairLane> {
-        &self.lane
-    }
-
-    fn repair_sequence(&self) -> u64 {
-        self.lane
-            .repair_sequence
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    fn complete_repair_attempt(&self) {
-        self.lane
-            .repair_sequence
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    }
-}
-
-impl Drop for IdeSyncRepairLease {
-    fn drop(&mut self) {
-        if !self.lane.retired.load(std::sync::atomic::Ordering::Acquire) {
-            return;
-        }
-        self.lanes.remove_if(&self.canonical_id, |_, current| {
-            Arc::ptr_eq(current, &self.lane) && Arc::strong_count(&self.lane) == 2
-        });
-    }
 }
 
 #[cfg(test)]
@@ -378,41 +317,31 @@ struct CompletionSnapshotPause {
 /// against it. The generation-free driver reservation survives replacement so
 /// an old driver and a new trigger cannot overlap for one canonical identity.
 mod import_sync_state;
-pub(crate) use import_sync_state::ImportSyncMemo;
+pub(crate) use import_sync_state::{dependency_freshness_key, ImportSyncMemo};
 
-#[derive(Clone, Debug)]
+/// The host authority a child contract was published under. A contract is
+/// served only while the host still answers under it: an equivalent root
+/// republication or a cache eviction keeps it, a workspace replacement — even
+/// one repeating the scalar snapshot generation — or a reconfiguration does
+/// not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImportedChildContractFreshnessKey {
-    resolver_snapshot_generation: u64,
-    published_root: Option<Arc<verter_workspace::PublishedRoot>>,
-    project_generation: u64,
+    authority: verter_session::HostAuthority,
 }
-
-impl PartialEq for ImportedChildContractFreshnessKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.resolver_snapshot_generation == other.resolver_snapshot_generation
-            && self.project_generation == other.project_generation
-            && match (&self.published_root, &other.published_root) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
-            }
-    }
-}
-
-impl Eq for ImportedChildContractFreshnessKey {}
 
 #[derive(Clone)]
 struct ChildPublicContractSnapshot {
     contract: verter_session::framework::ComponentContractAvailability,
-    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
-    host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    publication_witness:
+        Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
+    source_hash: verter_session::CommittedSourceContent,
     freshness: ImportedChildContractFreshnessKey,
 }
 
 #[derive(Clone)]
 struct ChildPublicContractFailureSnapshot {
     error: verter_session::PublicApiProjectionError,
-    host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    source_hash: verter_session::CommittedSourceContent,
     freshness: ImportedChildContractFreshnessKey,
     workspace_content_generation: u64,
 }
@@ -422,7 +351,7 @@ struct AuthoredBarrelComponentRouteIdentity {
     source: String,
     imported_name: String,
     local_binding: String,
-    kind: verter_semantic::analysis::types::ImportBindingKind,
+    kind: verter_session_query::analysis::types::ImportBindingKind,
     import_span: verter_span::Span,
     binding_span: verter_span::Span,
 }
@@ -432,13 +361,17 @@ struct BarrelComponentRouteSnapshot {
     identity: AuthoredBarrelComponentRouteIdentity,
     terminal_canonical_id: String,
     contract: verter_session::framework::ComponentContractAvailability,
-    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
-    terminal_host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    publication_witness:
+        Arc<verter_session::framework::api_projector::ComponentApiProjectionWitness>,
+    terminal_source_hash: verter_session::CommittedSourceContent,
     freshness: ImportedChildContractFreshnessKey,
 }
 
 #[cfg(test)]
 type ChildContractAfterProjectionHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+type ChildReadHook = Box<dyn FnMut() + Send + 'static>;
 
 /// The Verter language server implementation.
 ///
@@ -475,7 +408,9 @@ impl std::ops::Deref for VerterLanguageServer {
 /// session, `Arc`-shared between tower-lsp's request dispatch and any detached
 /// background task the server spawns.
 pub struct ServerCore {
-    client: Client,
+    /// The only route by which the server sends anything to the client: the
+    /// bounded outbound transport.
+    client: Outbound,
     documents: Arc<DocumentRegistry>,
     type_provider: Option<Arc<dyn TypeProvider>>,
     project_sync: Option<ProjectSync>,
@@ -497,6 +432,10 @@ pub struct ServerCore {
     pub(crate) client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool,
     /// The editor re-pulls inlay hints when asked to (`workspace.inlayHint.refreshSupport`).
     pub(crate) client_refreshes_inlay_hints: std::sync::atomic::AtomicBool,
+    /// Whether the editor applies versioned `documentChanges`
+    /// (`workspace.workspaceEdit.documentChanges`). Every foreground request
+    /// captures it at admission, so one request delivers its edits in one shape.
+    pub(crate) client_applies_versioned_edits: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document:
     /// URI → (document_version, diagnostics_generation, diagnostics).
     /// Avoids re-running host + lint + component diagnostics when both push and
@@ -545,20 +484,13 @@ pub struct ServerCore {
     /// Canonical IDs needing **interactive IDE sync** (set by did_change, cleared by
     /// `ensure_current_file_synced`). Only the IDE TSX path is flushed on hover/completion.
     needs_ide_sync: Arc<DashSet<String>>,
-    /// Per-document singleflight for the interactive IDE-sync repair
-    /// (`ensure_current_file_synced`). A hover/completion/definition storm on one
-    /// document must coalesce into ONE repair, not N concurrent foreground repairs
-    /// stampeding the provider (recompile + carrier gateway + sync per request).
-    /// The guard serializes repairs per canonical id; a waiter re-checks freshness
-    /// after acquiring it and returns without re-repairing when a concurrent repair
-    /// already made the document fresh.
-    ide_sync_repair_locks: Arc<DashMap<String, Arc<IdeSyncRepairLane>>>,
-    /// Current open-document generation per canonical ID. A repair captures this
-    /// before lane acquisition and revalidates it after locking; close removes
-    /// only its exact generation, so reopen/key reuse cannot be mistaken for the
-    /// document instance that initiated stale work.
-    ide_sync_open_generations: Arc<DashMap<String, u64>>,
-    ide_sync_next_generation: std::sync::atomic::AtomicU64,
+    /// The ONE owner of the per-document provider-sync lanes, shared with every
+    /// background writer through [`DocumentRegistry`]. A hover/completion/
+    /// definition storm on one document coalesces into ONE transaction, and a
+    /// background sync of the same document (coordinator, API task, drains,
+    /// scanner) waits or yields on that SAME transaction instead of interleaving
+    /// with it. See [`crate::document_sync_lane`] for the lock order.
+    ide_sync_repair_locks: Arc<crate::document_sync_lane::DocumentSyncLanes>,
     /// Per-document import-set freshness memo and its singleflight locks.
     /// Shared with `background_init` so a workspace swap evicts both.
     import_sync: Arc<ImportSyncMemo>,
@@ -578,6 +510,10 @@ pub struct ServerCore {
     #[cfg(test)]
     child_contract_after_projection_hook:
         parking_lot::Mutex<Option<ChildContractAfterProjectionHook>>,
+    /// Runs after each read of an imported child and before the read is
+    /// proven to describe one child revision.
+    #[cfg(test)]
+    child_read_hook: parking_lot::Mutex<Option<ChildReadHook>>,
     /// Project-level coalescing singleflight for `resync_open_files`. Background
     /// init fires a full close+reopen sweep of every open file up to twice per
     /// pass, and a superseded init generation can fire it concurrently with the
@@ -605,6 +541,11 @@ pub struct ServerCore {
     /// provider-surface store records the retained bytes and map.
     #[cfg(test)]
     ide_sync_before_surface_record_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause after the provider-surface record and immediately before the
+    /// receipt-gated commit — the last window in which an interleaved edit can
+    /// land while a repair still believes it is publishing a live revision.
+    #[cfg(test)]
+    ide_sync_after_surface_record_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     /// Pause point immediately after `publish_carrier_to_external_ts`'s own
     /// compile, before it calls the carrier-sync gateway — the exact window
     /// an interleaved `did_change` must land in to test that the pin captured
@@ -612,6 +553,18 @@ pub struct ServerCore {
     /// the gateway's eventual record.
     #[cfg(test)]
     publish_carrier_after_compile_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
+    /// Pause point inside `publish_open_carrier_to_external_ts` after the open
+    /// generation is resolved and BEFORE it takes the document's repair lease.
+    /// A caller that reaches it has therefore been *wiring-proven* onto the
+    /// lane-taking wrapper (the fence) rather than onto the lane-less publish,
+    /// which has no such point. Paired with
+    /// `publish_carrier_after_compile_pause` it gives a test-owned ordering
+    /// protocol: "the recovery arm parked at the fence" and "the recovery arm
+    /// reached the publish's compile" are two mutually exclusive, positively
+    /// observed events, so lane exclusion is a scheduling-independent fact
+    /// instead of a deadline.
+    #[cfg(test)]
+    open_carrier_publish_before_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     /// Canonical IDs needing **deferred API/.vue.ts sync** + owner-aware reconciliation.
     /// Set by did_change and by the interactive path (when API is deferred).
     /// Cleared by the coordinator's debounced sync after a resolver snapshot exists.
@@ -646,10 +599,9 @@ pub struct ServerCore {
     #[cfg(test)]
     completion_snapshot_pauses:
         parking_lot::Mutex<std::collections::VecDeque<CompletionSnapshotPause>>,
+    /// Named points inside a foreground request at which a test moves state.
     #[cfg(test)]
-    completion_before_final_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
-    #[cfg(test)]
-    completion_final_snapshot_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
+    request_barriers: Arc<test_support::RequestBarriers>,
     /// Handle for the background workspace scanner. Receives priority signals
     /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
     /// Arc-wrapped so background init can install the scanner without &self.
@@ -660,6 +612,10 @@ pub struct ServerCore {
     /// init task. Background tasks check this before committing results to discard
     /// stale work when a newer init supersedes them.
     init_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// This server's interactive-handler activity: every request handler
+    /// holds a guard on it, and the background scanner and heartbeat read
+    /// it. Owned per server, so no other server in the process shares it.
+    handler_activity: Arc<HandlerActivity>,
     /// Generation fence joining the provider's configured-owner authority to the
     /// atomically published workspace root. Provider-backed consumers capture a
     /// witness before awaiting and revalidate it before using the response.
@@ -725,6 +681,222 @@ fn e2e_provider_only_completions_enabled() -> bool {
 }
 
 impl VerterLanguageServer {
+    /// Repair request-answering surfaces before capturing their response basis.
+    /// Passive decoration requests keep their existing cache-only policy.
+    async fn prepare_foreground(&self, uri: &Uri) -> Result<()> {
+        let before = self.documents.snapshot_identity(uri);
+        if self.type_provider.is_some() && self.current_file_needs_inline_type_provider_sync(uri) {
+            self.ensure_current_file_synced(uri).await;
+        }
+        let current = match before {
+            Some(before) => self.documents.snapshot_identity_is_current(uri, &before),
+            None => self.documents.snapshot_identity(uri).is_none(),
+        };
+        if current {
+            Ok(())
+        } else {
+            Err(tower_lsp_server::jsonrpc::Error::new(
+                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+            ))
+        }
+    }
+
+    /// How the editor applies a workspace edit, as negotiated at `initialize`.
+    pub(super) fn workspace_edit_support(
+        &self,
+    ) -> crate::features::action_utils::WorkspaceEditSupport {
+        if self
+            .client_applies_versioned_edits
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            crate::features::action_utils::WorkspaceEditSupport::VersionedDocumentChanges
+        } else {
+            crate::features::action_utils::WorkspaceEditSupport::Unversioned
+        }
+    }
+
+    /// Admit one foreground request: capture its document revision and
+    /// project authority, once, before any of its computation reads them.
+    pub(super) async fn admit_foreground(
+        &self,
+        route: crate::documents::ForegroundRoute,
+        uri: &Uri,
+    ) -> Arc<crate::documents::ForegroundRequest> {
+        let request = crate::documents::ForegroundRequest::admit(
+            &self.documents,
+            route,
+            uri,
+            self.workspace_edit_support(),
+        );
+        self.captured_foreground(request).await
+    }
+
+    /// [`Self::admit_foreground`] for a route whose answer reads source under
+    /// the edit-commit fence. Admission waits for every edit already queued on
+    /// that fence to commit and releases it before any computation, so a
+    /// request sent after an edit is never pinned to the revision that edit
+    /// replaces. An edit that commits after admission still moves the
+    /// admitted revision.
+    async fn admit_foreground_after_edit_commit(
+        &self,
+        route: crate::documents::ForegroundRoute,
+        uri: &Uri,
+    ) -> Arc<crate::documents::ForegroundRequest> {
+        let request = {
+            let _edit_commit = self.did_change_mutex.lock().await;
+            crate::documents::ForegroundRequest::admit(
+                &self.documents,
+                route,
+                uri,
+                self.workspace_edit_support(),
+            )
+        };
+        self.captured_foreground(request).await
+    }
+
+    async fn captured_foreground(
+        &self,
+        request: Arc<crate::documents::ForegroundRequest>,
+    ) -> Arc<crate::documents::ForegroundRequest> {
+        #[cfg(test)]
+        self.request_barriers
+            .reach(test_support::RequestBarrier::Capture)
+            .await;
+        request
+    }
+
+    /// Settle `request`'s computed answer through its one disposition.
+    pub(super) async fn settle_foreground<T>(
+        &self,
+        request: &crate::documents::ForegroundRequest,
+        response: Option<T>,
+    ) -> crate::documents::Settled<T> {
+        #[cfg(test)]
+        self.request_barriers
+            .reach(test_support::RequestBarrier::Settlement)
+            .await;
+        request.settle(&self.documents, response)
+    }
+
+    /// Answer one foreground request: admit it, compute its answer once
+    /// against that admission, and settle it. Background work that moves no
+    /// admitted input — a diagnostics-generation advance, an identical surface
+    /// re-record, an equivalent root publication — neither recomputes the
+    /// answer nor costs it; an edit, close/reopen, project-authority
+    /// replacement or a change to a provider surface the answer was decoded
+    /// through answers `ContentModified`.
+    pub(super) fn answer_foreground<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        // Route computations are large state machines: move each to the heap
+        // once, at entry, so no enclosing future or poll frame holds it inline.
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground(route, uri).await;
+            self.answer_admitted(&request, compute).await
+        }
+    }
+
+    /// [`Self::answer_foreground`] admitted through
+    /// [`Self::admit_foreground_after_edit_commit`].
+    pub(super) fn answer_foreground_after_edit_commit<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground_after_edit_commit(route, uri).await;
+            self.answer_admitted(&request, compute).await
+        }
+    }
+
+    /// Compute `request`'s answer once against its admission and settle it.
+    async fn answer_admitted<T, F>(
+        &self,
+        request: &Arc<crate::documents::ForegroundRequest>,
+        compute: F,
+    ) -> Result<Option<T>>
+    where
+        F: std::future::Future<Output = Result<Option<T>>>,
+    {
+        let response = request.compute(compute).await?;
+        self.settle_foreground(request, response)
+            .await
+            .into_result()
+    }
+
+    /// [`Self::answer_repaired_foreground`] for an edit-bearing route: the
+    /// settled answer's edits are bound to the revisions the request captured
+    /// ([`crate::documents::ForegroundRequest::bind_edits`]). An edit to an open
+    /// document the request never captured answers `ContentModified`.
+    pub(super) fn answer_repaired_edit_foreground<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: crate::documents::EditBearing + 'a,
+    {
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground(route, uri).await;
+            let response = request
+                .compute(async {
+                    self.prepare_foreground(uri).await?;
+                    compute.await
+                })
+                .await?;
+            let mut response = self
+                .settle_foreground(&request, response)
+                .await
+                .into_result()?;
+            if let Some(response) = response.as_mut() {
+                if request.bind_edits(&self.documents, response).is_err() {
+                    return Err(tower_lsp_server::jsonrpc::Error::new(
+                        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                    ));
+                }
+            }
+            Ok(response)
+        }
+    }
+
+    /// [`Self::answer_foreground`] for request-answering routes that repair the
+    /// current file's provider surface first. The repair runs inside the
+    /// admitted request, so an edit that commits while it runs is a revision
+    /// change of that request, never the revision the request answers.
+    pub(super) fn answer_repaired_foreground<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        let compute = Box::pin(compute);
+        self.answer_foreground(route, uri, async move {
+            self.prepare_foreground(uri).await?;
+            compute.await
+        })
+    }
+
     /// Select this request's production deadline from the configured budget
     /// table. `pick` names the row, so a handler without an audit tag still
     /// takes its bound from the same configured table as the audited ones
@@ -767,190 +939,35 @@ impl VerterLanguageServer {
         }
     }
 
-    #[cfg(test)]
-    fn pause_completion_before_final_native(
-        &self,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let arrived = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self.completion_before_final_pause.lock() = Some(CompletionSnapshotPause {
-            arrived: Arc::clone(&arrived),
-            release: Arc::clone(&release),
-        });
-        (arrived, release)
-    }
-
-    #[cfg(test)]
-    async fn maybe_pause_completion_before_final_native(&self) {
-        let pause = self.completion_before_final_pause.lock().take();
-        if let Some(pause) = pause {
-            pause.arrived.notify_one();
-            pause.release.notified().await;
-        }
-    }
-
-    #[cfg(test)]
-    fn pause_final_completion_after_snapshot(
-        &self,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let arrived = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self.completion_final_snapshot_pause.lock() = Some(CompletionSnapshotPause {
-            arrived: Arc::clone(&arrived),
-            release: Arc::clone(&release),
-        });
-        (arrived, release)
-    }
-
-    #[cfg(test)]
-    async fn maybe_pause_final_completion_after_snapshot(&self) {
-        let pause = self.completion_final_snapshot_pause.lock().take();
-        if let Some(pause) = pause {
-            pause.arrived.notify_one();
-            pause.release.notified().await;
-        }
-    }
-
     /// Acquire the current lifecycle lane. Open and close use this before
     /// mutating registry membership, so a reopen cannot land in the middle of a
     /// close of the prior document generation.
-    fn ide_sync_lifecycle_lease(&self, canonical_id: &str) -> IdeSyncRepairLease {
-        let lane = match self.ide_sync_repair_locks.entry(canonical_id.to_string()) {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                if entry
-                    .get()
-                    .retired
-                    .load(std::sync::atomic::Ordering::Acquire)
-                {
-                    let generation = self
-                        .ide_sync_open_generations
-                        .get(canonical_id)
-                        .map(|entry| *entry)
-                        .unwrap_or(0);
-                    let replacement = Arc::new(IdeSyncRepairLane::new(generation));
-                    entry.insert(Arc::clone(&replacement));
-                    replacement
-                } else {
-                    Arc::clone(entry.get())
-                }
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let generation = self
-                    .ide_sync_open_generations
-                    .get(canonical_id)
-                    .map(|entry| *entry)
-                    .unwrap_or(0);
-                let lane = Arc::new(IdeSyncRepairLane::new(generation));
-                entry.insert(Arc::clone(&lane));
-                lane
-            }
-        };
-        IdeSyncRepairLease {
-            canonical_id: canonical_id.to_string(),
-            lane,
-            lanes: Arc::clone(&self.ide_sync_repair_locks),
-        }
+    fn ide_sync_lifecycle_lease(&self, canonical_id: &str) -> DocumentLaneLease {
+        self.ide_sync_repair_locks.lifecycle_lease(canonical_id)
     }
 
     /// Acquire only the lane belonging to `generation`. A stale repair never
     /// inserts or replaces the lane of a closed/reopened document: it receives a
     /// detached retired lane, fails generation revalidation after locking, and
     /// disappears on drop without touching the map.
-    fn ide_sync_repair_lease(&self, canonical_id: &str, generation: u64) -> IdeSyncRepairLease {
-        let generation_is_current = self
-            .ide_sync_open_generations
-            .get(canonical_id)
-            .is_some_and(|current| *current == generation);
-        let lane = if generation_is_current {
-            match self.ide_sync_repair_locks.entry(canonical_id.to_string()) {
-                dashmap::mapref::entry::Entry::Occupied(entry)
-                    if !entry
-                        .get()
-                        .retired
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        && entry
-                            .get()
-                            .generation
-                            .load(std::sync::atomic::Ordering::Acquire)
-                            == generation =>
-                {
-                    Arc::clone(entry.get())
-                }
-                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                    // Re-check while owning the map entry. If this request lost
-                    // the generation race, it must not replace the winner's lane.
-                    if self
-                        .ide_sync_open_generations
-                        .get(canonical_id)
-                        .is_some_and(|current| *current == generation)
-                    {
-                        let replacement = Arc::new(IdeSyncRepairLane::new(generation));
-                        entry.insert(Arc::clone(&replacement));
-                        replacement
-                    } else {
-                        let detached = Arc::new(IdeSyncRepairLane::new(generation));
-                        detached
-                            .retired
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        detached
-                    }
-                }
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    if self
-                        .ide_sync_open_generations
-                        .get(canonical_id)
-                        .is_some_and(|current| *current == generation)
-                    {
-                        let lane = Arc::new(IdeSyncRepairLane::new(generation));
-                        entry.insert(Arc::clone(&lane));
-                        lane
-                    } else {
-                        let detached = Arc::new(IdeSyncRepairLane::new(generation));
-                        detached
-                            .retired
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        detached
-                    }
-                }
-            }
-        } else {
-            let detached = Arc::new(IdeSyncRepairLane::new(generation));
-            detached
-                .retired
-                .store(true, std::sync::atomic::Ordering::Release);
-            detached
-        };
-        IdeSyncRepairLease {
-            canonical_id: canonical_id.to_string(),
-            lane,
-            lanes: Arc::clone(&self.ide_sync_repair_locks),
-        }
+    fn ide_sync_repair_lease(&self, canonical_id: &str, generation: u64) -> DocumentLaneLease {
+        self.ide_sync_repair_locks
+            .repair_lease(canonical_id, generation)
     }
 
     fn begin_ide_sync_open_generation(
         &self,
         canonical_id: &str,
-        lane: &Arc<IdeSyncRepairLane>,
+        lane: &Arc<crate::document_sync_lane::DocumentSyncLane>,
     ) -> u64 {
-        let generation = self
-            .ide_sync_next_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        lane.generation
-            .store(generation, std::sync::atomic::Ordering::Release);
-        lane.repair_sequence
-            .store(0, std::sync::atomic::Ordering::Release);
-        lane.retired
-            .store(false, std::sync::atomic::Ordering::Release);
         self.ide_sync_repair_locks
-            .insert(canonical_id.to_string(), Arc::clone(lane));
-        self.ide_sync_open_generations
-            .insert(canonical_id.to_string(), generation);
-        generation
+            .begin_open_generation(canonical_id, lane)
     }
 
-    /// Test helpers often register directly through `DocumentRegistry`; lazily
-    /// establish the same open generation production `did_open` records.
-    fn current_or_init_ide_sync_open_generation(
+    /// The document's open generation. Test helpers often register directly
+    /// through `DocumentRegistry`; their generation is established lazily under
+    /// the lifecycle lane, the same lane production `did_open` mints under.
+    async fn current_or_init_ide_sync_open_generation(
         &self,
         uri: &Uri,
         canonical_id: &str,
@@ -958,36 +975,19 @@ impl VerterLanguageServer {
         if self.documents.get_canonical_id(uri).as_deref() != Some(canonical_id) {
             return None;
         }
-        if let Some(generation) = self.ide_sync_open_generations.get(canonical_id) {
-            return Some(*generation);
-        }
-        let generation = self
-            .ide_sync_next_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let generation = match self
-            .ide_sync_open_generations
-            .entry(canonical_id.to_string())
-        {
-            dashmap::mapref::entry::Entry::Occupied(entry) => *entry.get(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(generation);
-                generation
-            }
-        };
-        Some(generation)
+        self.documents.establish_open_generation(canonical_id).await
     }
 
     fn ide_sync_generation_is_open(&self, uri: &Uri, canonical_id: &str, generation: u64) -> bool {
         self.documents.get_canonical_id(uri).as_deref() == Some(canonical_id)
             && self
-                .ide_sync_open_generations
-                .get(canonical_id)
-                .is_some_and(|current| *current == generation)
+                .ide_sync_repair_locks
+                .generation_is_open(canonical_id, generation)
     }
 
     fn close_ide_sync_open_generation(&self, canonical_id: &str, generation: u64) {
-        self.ide_sync_open_generations
-            .remove_if(canonical_id, |_, current| *current == generation);
+        self.ide_sync_repair_locks
+            .close_open_generation(canonical_id, generation);
     }
 
     #[cfg(test)]
@@ -1048,11 +1048,30 @@ impl VerterLanguageServer {
     }
 
     #[cfg(test)]
+    fn pause_next_ide_sync_after_surface_record(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.ide_sync_after_surface_record_pause, canonical_id)
+    }
+
+    #[cfg(test)]
     fn pause_next_publish_carrier_after_compile(
         &self,
         canonical_id: &str,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
         Self::pause_next_ide_sync_at(&self.publish_carrier_after_compile_pause, canonical_id)
+    }
+
+    /// Pause the next `publish_open_carrier_to_external_ts` for `canonical_id`
+    /// at its pre-lease fence point — the positive observation that a caller
+    /// reached the lane-taking wrapper at all.
+    #[cfg(test)]
+    fn pause_next_open_carrier_publish_before_lease(
+        &self,
+        canonical_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        Self::pause_next_ide_sync_at(&self.open_carrier_publish_before_lease_pause, canonical_id)
     }
 
     #[cfg(test)]
@@ -1107,6 +1126,12 @@ impl VerterLanguageServer {
     }
 
     #[cfg(test)]
+    async fn maybe_pause_ide_sync_after_surface_record(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.ide_sync_after_surface_record_pause, canonical_id)
+            .await;
+    }
+
+    #[cfg(test)]
     async fn maybe_pause_ide_sync_before_surface_record(&self, canonical_id: &str) {
         Self::maybe_pause_ide_sync_at(&self.ide_sync_before_surface_record_pause, canonical_id)
             .await;
@@ -1115,6 +1140,12 @@ impl VerterLanguageServer {
     #[cfg(test)]
     async fn maybe_pause_publish_carrier_after_compile(&self, canonical_id: &str) {
         Self::maybe_pause_ide_sync_at(&self.publish_carrier_after_compile_pause, canonical_id)
+            .await;
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_open_carrier_publish_before_lease(&self, canonical_id: &str) {
+        Self::maybe_pause_ide_sync_at(&self.open_carrier_publish_before_lease_pause, canonical_id)
             .await;
     }
 
@@ -1140,7 +1171,10 @@ impl VerterLanguageServer {
         }
     }
 
-    pub fn new(client: Client, config: LspConfig) -> Self {
+    /// A server that sends everything through `client`, the outbound transport
+    /// its writer ([`crate::outbound::serve`]) drains. Its diagnostics are
+    /// published through that transport's replaceable lane.
+    pub fn new(client: Outbound, config: LspConfig) -> Self {
         let vfs_workspace: Arc<
             parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
         > = Arc::new(parking_lot::RwLock::new(None));
@@ -1157,13 +1191,31 @@ impl VerterLanguageServer {
         });
 
         let needs_ide_sync = Arc::new(DashSet::new());
-        let ide_sync_repair_locks = Arc::new(DashMap::new());
-        let ide_sync_open_generations = Arc::new(DashMap::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
-        let documents = Arc::new(DocumentRegistry::new(config.host));
+        let documents = Arc::new(DocumentRegistry::with_diagnostics_lane(
+            config.host,
+            client.diagnostics_lane(),
+        ));
+        // The one per-document sync-lane registry. Owned by the registry above and
+        // read here, so the server and every background writer share ONE lane per
+        // open document instead of each holding its own view of it.
+        let ide_sync_repair_locks = Arc::clone(documents.document_lanes());
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
         let provider_sync_states = Arc::new(DashMap::new());
+        // The provider-surface store reads what the serving provider holds from
+        // the provider's own delivery ledger, so a recorded surface the engine
+        // has not (or no longer) received is never served as current.
+        if let Some(sync) = &project_sync {
+            documents
+                .provider_surfaces()
+                .bind_delivery_witness(Arc::new(
+                    crate::provider_sync::ProviderSyncDeliveryWitness::new(
+                        sync.clone(),
+                        Arc::clone(&provider_sync_states),
+                    ),
+                ));
+        }
         let decl_overlay_owner = Arc::new(DeclOverlayOwner::default());
         let pending_snapshot_provider_sync = Arc::new(DashSet::new());
         // The live editor-membership publisher. Managed tsgo still opens its own
@@ -1220,6 +1272,10 @@ impl VerterLanguageServer {
         // half carries Verter-owned diagnostics on every route; the
         // provider-sync half no-ops when no in-process provider is connected
         // (editor-owned tsserver plugin serving, verter-only mode).
+        // The DependencyReady receipts: minted by the background import
+        // publication, read by the coordinator while a workspace scan runs.
+        let import_sync = Arc::new(ImportSyncMemo::default());
+
         let sync_coordinator = crate::sync_coordinator::spawn_sync_coordinator(
             crate::sync_coordinator::SyncCoordinatorDeps {
                 documents: Arc::clone(&documents),
@@ -1235,6 +1291,7 @@ impl VerterLanguageServer {
                 type_provider_kind: config.type_provider_kind,
                 carrier_publish_coordinator: carrier_publish_coordinator.clone(),
                 carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+                dependency_receipts: Arc::clone(&import_sync),
             },
         );
 
@@ -1255,6 +1312,7 @@ impl VerterLanguageServer {
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool::new(false),
             client_refreshes_inlay_hints: std::sync::atomic::AtomicBool::new(false),
+            client_applies_versioned_edits: std::sync::atomic::AtomicBool::new(false),
             cached_verter_diags,
             provider_sync_states,
             decl_overlay_owner,
@@ -1267,9 +1325,7 @@ impl VerterLanguageServer {
             ),
             needs_ide_sync,
             ide_sync_repair_locks,
-            ide_sync_open_generations,
-            ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
-            import_sync: Arc::new(ImportSyncMemo::default()),
+            import_sync,
             child_public_contracts: Arc::new(DashMap::new()),
             child_public_contract_failures: Arc::new(DashMap::new()),
             barrel_component_routes: Arc::new(DashMap::new()),
@@ -1277,6 +1333,8 @@ impl VerterLanguageServer {
             child_public_contract_projection_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             child_contract_after_projection_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            child_read_hook: parking_lot::Mutex::new(None),
             resync_coordinator: Arc::new(crate::resync_singleflight::ResyncCoordinator::new()),
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),
@@ -1291,7 +1349,11 @@ impl VerterLanguageServer {
             #[cfg(test)]
             ide_sync_before_surface_record_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]
+            ide_sync_after_surface_record_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
             publish_carrier_after_compile_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            open_carrier_publish_before_lease_pause: parking_lot::Mutex::new(None),
             needs_deferred_sync,
             pending_snapshot_provider_sync,
             sync_coordinator,
@@ -1300,11 +1362,10 @@ impl VerterLanguageServer {
             #[cfg(test)]
             completion_snapshot_pauses: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
-            completion_before_final_pause: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            completion_final_snapshot_pause: parking_lot::Mutex::new(None),
+            request_barriers: Arc::default(),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            handler_activity: Arc::new(HandlerActivity::default()),
             ownership_generation_fence: Arc::new(
                 crate::configured_owner::OwnershipGenerationFence::default(),
             ),
@@ -1372,6 +1433,23 @@ impl VerterLanguageServer {
     }
 }
 
+impl VerterLanguageServer {
+    /// The outbound transport this server sends through.
+    pub fn outbound(&self) -> &Outbound {
+        &self.client
+    }
+
+    /// This server's interactive-handler activity — the ONE activity its
+    /// handlers hold guards on and its background scanner waits behind.
+    /// Test-support seam for the consolidated integration-test binary,
+    /// which proves the server-scoped admission wiring; the field itself
+    /// stays server-private so no caller can substitute another activity.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handler_activity(&self) -> &std::sync::Arc<HandlerActivity> {
+        &self.handler_activity
+    }
+}
+
 // Test-only accessors for the cross-module test harness (`test_harness.rs`).
 #[cfg(test)]
 impl VerterLanguageServer {
@@ -1390,6 +1468,28 @@ impl VerterLanguageServer {
     /// Trigger interactive file sync to the type provider (test harness access).
     pub(crate) async fn test_ensure_synced(&self, uri: &tower_lsp_server::ls_types::Uri) {
         self.ensure_current_file_synced(uri).await;
+    }
+
+    /// Wait until the debounced coordinator owes an open document nothing: it
+    /// holds a complete diagnostics receipt and no publication is in flight.
+    /// The coordinator delivers a document's provider sync inline in the same
+    /// tick that dispatches the pull producing that receipt, so a complete
+    /// receipt proves the sync its open queued has landed (test harness access).
+    pub(crate) async fn test_settle_open_document(&self, uri: &tower_lsp_server::ls_types::Uri) {
+        self.sync_coordinator
+            .await_until(
+                || {
+                    self.documents.diagnostics_ready(uri)
+                        && self.sync_coordinator.diag_tasks_live() == 0
+                },
+                || {
+                    panic!(
+                        "{} never settled into a complete diagnostics receipt",
+                        uri.as_str()
+                    )
+                },
+            )
+            .await;
     }
 
     /// Deterministically settle the background-owned import dependency receipt
@@ -1603,10 +1703,52 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
-        crate::audit_harness::run_with_deadline(
-            self.request_deadline(|b| b.completion),
-            nav_features::handle_completion_resolve(self, item),
-        )
+        let uri = item.data.as_ref().and_then(|data| {
+            if let Some(uri) = data.get("uri").and_then(serde_json::Value::as_str) {
+                return uri.parse::<Uri>().ok();
+            }
+            let path = data.get("verter_resolve")?.get("provider_path")?.as_str()?;
+            self.documents
+                .canonical_id_to_uri(path)
+                .or_else(|| self.carrier_uri_from_ide_path(path))
+        });
+        let is_provider_resolve = item.data.as_ref().is_some_and(|data| {
+            data.get("verter_resolve")
+                .and_then(|envelope| envelope.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some("type_provider")
+        });
+        crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.completion), async {
+            let content_modified = || {
+                tower_lsp_server::jsonrpc::Error::new(
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                )
+            };
+            let Some(uri) = uri else {
+                if is_provider_resolve {
+                    return Err(content_modified());
+                }
+                return nav_features::handle_completion_resolve(self, item).await;
+            };
+            let request = self
+                .admit_foreground(crate::documents::ForegroundRoute::CompletionResolve, &uri)
+                .await;
+            if is_provider_resolve && !request.document_was_open() {
+                return Err(content_modified());
+            }
+            // A resolve always answers an item, so it always settles a `Some`.
+            let resolved = request
+                .compute(Box::pin(nav_features::handle_completion_resolve(
+                    self,
+                    item.clone(),
+                )))
+                .await?;
+            let resolved = self
+                .settle_foreground(&request, Some(resolved))
+                .await
+                .into_result()?;
+            Ok(resolved.unwrap_or(item))
+        })
         .await
     }
 
@@ -1621,9 +1763,21 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
-            nav_features_navigation::handle_goto_type_definition(self, params),
+            async {
+                self.answer_repaired_foreground(
+                    crate::documents::ForegroundRoute::TypeDefinition,
+                    &uri,
+                    nav_features_navigation::handle_goto_type_definition(self, params),
+                )
+                .await
+            },
         )
         .await
     }
@@ -1636,9 +1790,17 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri.clone();
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
-            rename_prepare::handle_prepare_rename(self, params),
+            async {
+                self.answer_repaired_foreground(
+                    crate::documents::ForegroundRoute::PrepareRename,
+                    &uri,
+                    rename_prepare::handle_prepare_rename(self, params),
+                )
+                .await
+            },
         )
         .await
     }
@@ -1677,10 +1839,19 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
-        crate::audit_harness::run_with_deadline(
-            self.request_deadline(|b| b.code_action),
-            aux_features::handle_signature_help(self, params),
-        )
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.code_action), async {
+            self.answer_repaired_foreground(
+                crate::documents::ForegroundRoute::SignatureHelp,
+                &uri,
+                aux_features::handle_signature_help(self, params),
+            )
+            .await
+        })
         .await
     }
 
@@ -1772,7 +1943,7 @@ impl LanguageServer for VerterLanguageServer {
     clippy::too_many_arguments,
     clippy::cloned_ref_to_slice_refs
 )]
-#[path = "../server_tests.rs"]
+#[path = "tests/mod.rs"]
 mod server_tests;
 
 /// Throwaway future-size instrumentation (ignored tests). See docs/contributing/gate-performance.md.
@@ -1785,3 +1956,7 @@ mod request_surface_guard_tests;
 
 #[cfg(test)]
 mod retention_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "../request_validity_tests/mod.rs"]
+mod request_validity_tests;

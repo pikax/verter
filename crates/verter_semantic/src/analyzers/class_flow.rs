@@ -5,9 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::facts::boundary::ComponentInstanceEdge;
-use crate::facts::component::ComponentSurface;
-use crate::facts::css::{ClassFlowCertainty, ClassFlowFact};
+use verter_session_query::facts::boundary::ComponentInstanceEdge;
+use verter_session_query::facts::component::ComponentSurface;
+use verter_session_query::facts::css::{ClassFlowCertainty, ClassFlowFact};
 
 /// Class flow report for a component-instance edge.
 #[derive(Debug, Clone, Serialize, Deserialize)]

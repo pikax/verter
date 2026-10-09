@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_type_engine::semantic_query::{
     DeclIdentity, DeclPartId, ResolvedDeclSlotIdentity, SemanticSymbolSpace, VersionedDeclIdentity,
 };
 

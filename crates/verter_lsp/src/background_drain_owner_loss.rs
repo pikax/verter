@@ -87,6 +87,14 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> CarrierApplyOutcome {
+    let _document_lane = match documents.try_delivery_lane(canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => Some(guard),
+        crate::document_sync_lane::DeliveryLane::Closed => None,
+        crate::document_sync_lane::DeliveryLane::Busy => return CarrierApplyOutcome::Pending,
+    };
+    if _document_lane.is_none() && documents.canonical_id_to_uri(canonical_id).is_some() {
+        return CarrierApplyOutcome::Pending;
+    }
     // Owner-absent ⇒ route the membership RETRACT/DEFER through the gateway; it
     // resolves the empty companion set to Absent (retract) / Bootstrap (defer) and
     // returns a no-owner outcome (`Unresolved` terminal / `NotReady` transient), or
@@ -165,7 +173,8 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
                 // `RetractFailed` additionally means the cross-process store may still
                 // advertise it, so it is never treated as a settled disposition.
                 crate::external_ts::SettleClass::Pending
-                | crate::external_ts::SettleClass::RetractFailed => CarrierApplyOutcome::Pending,
+                | crate::external_ts::SettleClass::RetractFailed
+                | crate::external_ts::SettleClass::Superseded => CarrierApplyOutcome::Pending,
             }
         }
         // The authoritative resolver resolved an OWNER (disagreeing with the cheap

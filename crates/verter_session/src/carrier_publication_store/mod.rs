@@ -9,19 +9,19 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::framework_common::FrameworkParseArtifact;
+use verter_execution::cancellation::CancellationToken;
 use verter_language::carrier_grammar::{
     AcceptedRegisteredCarrierSource, CarrierAcceptanceError, CarrierGrammarAuthority,
     CarrierGrammarFingerprint, GrammarAuthorityNamespaceId,
 };
 use verter_language::registered_source_authority::{
-    FileIncarnation, RegisteredSourceAuthority, RegisteredSourceSnapshot,
-    RegisteredSourceSnapshotId, SourceAuthorityNamespaceId, SourceGeneration,
+    RegisteredSourceAuthority, RegisteredSourceSnapshot, RegisteredSourceSnapshotId,
+    SourceAuthorityNamespaceId,
 };
 use verter_language::{FrameworkAdapterId, LanguageId, ParseKey};
-use verter_scheduler::cancellation::CancellationToken;
 
 use crate::carrier_artifact_cohort::current_persisted_carrier_artifact_cohort;
-use crate::types::MetaProvenance;
+use crate::meta_provenance::MetaProvenance;
 use persistence::{
     CarrierStableUnitStore, InMemoryStableUnitStore, RetainedStableUnit, StableUnitKey,
 };
@@ -537,20 +537,27 @@ impl HostInstanceId {
     }
 }
 
+/// One host's revision of one source: the host and the scheduler source
+/// version (node object + generation) that committed it.
+///
+/// The version is always the committing host's own scheduler fact, on every
+/// ingress — an ingested envelope's owner-minted registration identity lives
+/// in another numbering space and never enters this token. A removed or
+/// reset file's successor restarts its generation sequence, so the node
+/// object is what keeps a successor from repeating a retired revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostSourceRevisionToken {
     pub host_instance: HostInstanceId,
-    pub file_incarnation: FileIncarnation,
-    pub source_generation: SourceGeneration,
+    pub source_version: verter_scheduler::node::SourceVersion,
 }
 
 impl HostSourceRevisionToken {
     pub fn public_token(self) -> String {
         let mut digest = Sha256::new();
-        digest.update(b"verter.host-source-revision.v2\0");
+        digest.update(b"verter.host-source-revision.v3\0");
         digest.update(self.host_instance.get().to_le_bytes());
-        digest.update(self.file_incarnation.get().to_le_bytes());
-        digest.update(self.source_generation.get().to_le_bytes());
+        digest.update(self.source_version.incarnation.to_le_bytes());
+        digest.update(self.source_version.generation.to_le_bytes());
         base64url_32(digest.finalize().into())
     }
 }
@@ -1576,28 +1583,16 @@ fn parse_key_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseKe
         },
         CarrierGrammarConfig::Svelte => verter_language::ParseOptions::default(),
     };
-    let language = accepted.source().resolved_file_language();
-    let syntax_profile = verter_language::syntax_profile_id_for(language, &options)
-        .expect("accepted carrier grammar has a supported syntax profile");
-    let (domain, epoch) = if language.is_vue() {
-        (
-            verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
-            verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
-        )
-    } else {
-        (
-            verter_language::SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
-            verter_language::SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
-        )
-    };
-    verter_language::parse_key_for(
+    // The language crate owns the (language, options) → compatibility
+    // domain/epoch selection: an accepted carrier of any adapter keys under
+    // its OWN domain, never another framework's.
+    let (_, parse_key) = verter_language::parse_identity_for(
         accepted.source().bytes(),
-        language,
-        domain,
-        epoch,
-        &syntax_profile,
+        accepted.source().resolved_file_language(),
+        &options,
     )
-    .expect("accepted carrier source has a supported parse identity")
+    .expect("accepted carrier source has a supported parse identity");
+    parse_key
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

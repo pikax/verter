@@ -33,6 +33,14 @@ const LAYER_1_IDENTITY_SPAN_LANGUAGE_CONTRACTS: &[&str] = &[
     // Zero-dependency debug_assert!/debug_assert_eq!/debug_assert_ne! entry
     // point; sits below every crate that uses it.
     "verter_debug_assert",
+    // Scheduler-independent execution primitives (task identity and wait
+    // graph, cancellation, opaque request-context propagation); depends on
+    // nothing above the leaf utilities.
+    "verter_execution",
+    // Dependency-free construction authorities reserved for the syntax
+    // analyzer; its direct dependents are pinned by
+    // `analyzer_mint_authority_is_reachable_only_by_its_sanctioned_dependents`.
+    "verter_analyzer_mint",
 ];
 
 const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[
@@ -44,8 +52,14 @@ const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[
     "verter_session_query",
 ];
 
-const LAYER_3_SEMANTIC_KERNEL: &[&str] =
-    &["verter_semantic", "verter_diagnostics", "verter_actions"];
+const LAYER_3_SEMANTIC_KERNEL: &[&str] = &[
+    "verter_semantic",
+    "verter_semantic_source",
+    "verter_type_engine",
+    "verter_resolution",
+    "verter_diagnostics",
+    "verter_actions",
+];
 
 const LAYER_4_COMPILER: &[&str] = &["verter_compiler"];
 
@@ -563,6 +577,35 @@ fn layer_matrix_entries_are_each_listed_exactly_once() {
              separately)"
         );
     }
+}
+
+/// The analyzer-only construction authority is sealed by the dependency
+/// graph: a crate can obtain it only by naming `verter_analyzer_mint`, which
+/// needs a direct dependency. Pin that edge to the analyzer and the record
+/// crate whose constructors take the authority, across every dependency kind
+/// — a dev-dependency is as much a forging route for a test as a normal one.
+#[test]
+fn analyzer_mint_authority_is_reachable_only_by_its_sanctioned_dependents() {
+    let metadata = workspace_metadata();
+    let packages = metadata["packages"].as_array().expect("packages array");
+    let dependents: BTreeSet<&str> = packages
+        .iter()
+        .filter(|package| {
+            package["dependencies"]
+                .as_array()
+                .expect("package dependencies array")
+                .iter()
+                .any(|dependency| dependency["name"].as_str() == Some("verter_analyzer_mint"))
+        })
+        .map(|package| package["name"].as_str().expect("package name is a string"))
+        .collect();
+    let sanctioned: BTreeSet<&str> = ["verter_semantic", "verter_session_query"]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        dependents, sanctioned,
+        "only the analyzer and the record crate may depend on the analyzer mint authority;          any other dependent can mint analyzer-only records from arithmetic"
+    );
 }
 
 /// Every workspace member `cargo metadata` reports is accounted for

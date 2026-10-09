@@ -6,9 +6,9 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::template::{TemplateComponentUsage, TemplatePropUsage};
-use verter_semantic::analysis::types::{AnalyzedMacroKind, VueApiClassification};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::template::{TemplateComponentUsage, TemplatePropUsage};
+use verter_session_query::analysis::types::{AnalyzedMacroKind, VueApiClassification};
 
 use crate::documents::line_index::LineIndex;
 

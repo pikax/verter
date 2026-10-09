@@ -2,22 +2,27 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
+use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-use crate::resolver_core::resolver_context::{
-    MaterializeScopeObservation, RequestBoundAdapter, RequestBoundLifecycle, ResolverContext,
-};
+#[cfg(any(test, feature = "test-support"))]
 use crate::resolver_store::HostStoreView;
 use crate::session_view::SessionView;
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::resolver_core::resolver_context::{
+    MaterializeScopeObservation, ResolverContext,
+};
 
 pub(crate) struct SessionRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
     view: &'a dyn SessionView,
     request_view: RequestStoreView<'a>,
+    snapshot: verter_type_engine::resolver_core::RequestSnapshot<
+        crate::resolver_store::WorkspaceSlotClocks,
+    >,
     /// The view's overlay, built here only when the store view does not
     /// already carry it (a store view not derived from this view).
     fallback_overlay: std::sync::OnceLock<Option<verter_workspace::ResolutionOverlaySnapshot>>,
@@ -37,6 +42,7 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
     ) -> Self {
         Self(SessionRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view,
             request_view: RequestStoreView::new(base, overlay),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -52,6 +58,7 @@ impl<'a> RequestBoundAdapter<SessionRequestLifecycle<'a>> {
     ) -> Self {
         Self(SessionRequestLifecycle {
             inner,
+            snapshot: inner.capture_request_snapshot(),
             view,
             request_view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -66,6 +73,14 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn request_view(&self) -> &RequestStoreView<'_> {
         &self.request_view
+    }
+
+    fn request_snapshot(
+        &self,
+    ) -> &verter_type_engine::resolver_core::RequestSnapshot<
+        crate::resolver_store::WorkspaceSlotClocks,
+    > {
+        &self.snapshot
     }
 
     fn session_view(&self) -> Option<&dyn SessionView> {
@@ -95,46 +110,66 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
             );
     }
 
-    #[track_caller]
-    fn owned_store_view(&self) -> HostStoreView {
-        self.request_view.base().clone()
-    }
-
     fn prepared_decl_bundle(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<PreparedDeclBundle>> {
-        self.inner
-            .prepared_decl_bundle_with_context(ctx, canonical_id)
+        self.inner.prepared_decl_bundle_with_context(
+            ctx,
+            crate::host_manage::prepared_decl::SourceRequestServices {
+                session_view: Some(self.view),
+                completion_overlay: Some(self.request_view.overlay()),
+                base_view: Some(self.request_view.base()),
+            },
+            canonical_id,
+        )
     }
 
     fn prepared_type_decl(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
-        self.inner
-            .prepared_type_decl_in_with_context(ctx, canonical_id, owner, symbol_name)
+        self.inner.prepared_type_decl_in_with_context(
+            ctx,
+            crate::host_manage::prepared_decl::SourceRequestServices {
+                session_view: Some(self.view),
+                completion_overlay: Some(self.request_view.overlay()),
+                base_view: Some(self.request_view.base()),
+            },
+            canonical_id,
+            owner,
+            symbol_name,
+        )
     }
 
     fn prepared_value_decl(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
-        self.inner
-            .prepared_value_decl_in_with_context(ctx, canonical_id, owner, symbol_name)
+        self.inner.prepared_value_decl_in_with_context(
+            ctx,
+            crate::host_manage::prepared_decl::SourceRequestServices {
+                session_view: Some(self.view),
+                completion_overlay: Some(self.request_view.overlay()),
+                base_view: Some(self.request_view.base()),
+            },
+            canonical_id,
+            owner,
+            symbol_name,
+        )
     }
 
     fn materialize_indexed_ready_serve(
@@ -158,11 +193,18 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn shallow_file_state(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.inner
-            .shallow_file_state_with_context(ctx, canonical_id)
+        self.inner.shallow_file_state_with_context(
+            ctx,
+            crate::host_manage::prepared_decl::SourceRequestServices {
+                session_view: Some(self.view),
+                completion_overlay: Some(self.request_view.overlay()),
+                base_view: Some(self.request_view.base()),
+            },
+            canonical_id,
+        )
     }
 
     fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
@@ -191,7 +233,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
     fn artifact_key_for_current_content(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         if self.view.overlay_content_hash_for(canonical).is_some() {
             return self
                 .inner
@@ -203,11 +245,13 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn observe_materialize_scope(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical: &str,
     ) -> Option<MaterializeScopeObservation> {
         if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
-            let _ = ResolverContext::ensure_indexed_ready_serve(ctx, canonical);
+            let _ = verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
+                ctx, canonical,
+            );
             let identity = self.inner.overlay_artifact_identity(canonical);
             let indexed = Arc::clone(
                 &identity
@@ -215,16 +259,17 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
                     .indexed,
             );
             let syntactic_export_set =
-                crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+                verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                     ctx,
                     canonical,
                     overlay_hash,
-                    verter_semantic::facts::FactKey::SyntacticExportSet,
-                    verter_semantic::facts::FactLane::Semantic,
+                    verter_session_query::facts::FactKey::SyntacticExportSet,
+                    verter_session_query::facts::FactLane::Semantic,
                 );
             return Some(MaterializeScopeObservation {
                 canonical_id: Arc::from(canonical),
-                indexed,
+                observed_whole_hash: indexed.whole_hash,
+                observed_shallow_hash: indexed.shallow_state.whole_hash,
                 syntactic_export_set,
             });
         }
@@ -240,7 +285,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<String> {
-        crate::resolver_core::resolver_context::type_route_answer(
+        crate::resolver_core::request_bound::type_route_answer(
             self.inner.resolve_type_dependency_canonical_in(
                 self.resolution_overlay(),
                 owner_canonical,

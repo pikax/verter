@@ -4,7 +4,7 @@
 //
 // Every helper is pure, so the discriminations the release depends on are
 // exercised against small synthetic fixtures: a platform package whose
-// artifact is missing or ambiguous, each npm/cargo publish outcome, the
+// artifact is missing or ambiguous, each npm publish outcome, the
 // executable-bit rewrite on a hand-built ustar archive (including a pax
 // header), and the publish loop's one-time-password re-prompt.
 
@@ -15,7 +15,6 @@ import { pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
-  classifyCargoPublishOutcome,
   invokedAsEntrypoint,
   classifyNpmPublishOutcome,
   distTagForVersion,
@@ -194,22 +193,6 @@ test("classifyNpmPublishOutcome distinguishes the five outcomes, OTP first", () 
   assert.equal(classifyNpmPublishOutcome(1, "npm error code E401 Unauthorized"), "failed");
   // An expired OTP surfaces alongside a 403-ish message; OTP wins so the loop re-prompts.
   assert.equal(classifyNpmPublishOutcome(1, "E403 … one-time password …"), "otp-required");
-});
-
-test("classifyCargoPublishOutcome tolerates only an already-uploaded version", () => {
-  assert.equal(classifyCargoPublishOutcome(0, ""), "published");
-  assert.equal(
-    classifyCargoPublishOutcome(101, "crate version `0.0.1-beta.5` is already uploaded"),
-    "already-published",
-  );
-  assert.equal(
-    classifyCargoPublishOutcome(101, "error: crate verter_span@0.0.1-beta.5 already exists"),
-    "already-published",
-  );
-  assert.equal(
-    classifyCargoPublishOutcome(101, "error: failed to verify package tarball"),
-    "failed",
-  );
 });
 
 test("npmPublishArgs passes the dist-tag only for a pre-release channel and adds each optional flag exactly once", () => {

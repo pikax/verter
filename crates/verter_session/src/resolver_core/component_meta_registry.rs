@@ -8,9 +8,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::resolver_core::ResolverContext;
 use crate::resolver_core::RouteDemand;
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::project_semantic_dispatch::reference_carriers::{
+    reference_carrier_head, walk_reference_carriers,
+};
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Issue #7 / capture-token counters for route-demand
 /// emission. Recorded inside [`enqueue_component_meta_registry_ref`]
@@ -87,7 +90,7 @@ impl RegistryProducerScope {
     }
 
     pub(crate) fn for_field(
-        field: &verter_semantic::analysis::type_expand::ExpandedField,
+        field: &verter_session_query::analysis::type_expand::ExpandedField,
         explicit_resolution_scope: &Self,
     ) -> Self {
         field
@@ -149,20 +152,22 @@ pub(crate) fn attach_component_meta_registry_member_use_site(
 }
 
 fn raise_component_meta_registry_source(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     producer_scope: &RegistryProducerScope,
     source: &verter_type_expr::facts::SemanticTypeSource,
-) -> Option<crate::semantic_query::HotTypeRef> {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+) -> Option<verter_type_engine::semantic_query::HotTypeRef> {
     dispatch
         .raise_semantic_type_source_to_hot(
             source,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: producer_scope.canonical_id.as_ref(),
                 scope_owner: producer_scope.owner,
                 context:
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        crate::semantic_query::ProjectionMode::Navigate,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
                 interior_failures: None,
             },
@@ -173,7 +178,11 @@ fn raise_component_meta_registry_source(
 /// Observe a registry publication source in its exact producing scope and
 /// enqueue the transitive routes exposed by that graph surface.
 pub(crate) fn observe_component_meta_registry_source(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     producer_scope: &RegistryProducerScope,
     source: &verter_type_expr::facts::SemanticTypeSource,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -181,10 +190,11 @@ pub(crate) fn observe_component_meta_registry_source(
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     member_ref_policy: RegistryMemberRefPolicy,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
-) -> Option<crate::semantic_query::HotTypeRef> {
-    let hot = raise_component_meta_registry_source(ctx, producer_scope, source)?;
+) -> Option<verter_type_engine::semantic_query::HotTypeRef> {
+    let hot = raise_component_meta_registry_source(dispatch, producer_scope, source)?;
     collect_component_meta_registry_refs_node(
         ctx,
+        dispatch,
         hot.node(),
         published_names,
         queued_names,
@@ -199,16 +209,20 @@ pub(crate) fn observe_component_meta_registry_source(
 pub(crate) fn upsert_component_meta_registry_entry(
     owner_canonical: &str,
     resolved_type_registry: &mut Vec<
-        verter_semantic::analysis::component_meta::ResolvedTypeAnalysis,
+        verter_session_query::analysis::component_meta::ResolvedTypeAnalysis,
     >,
     resolved_type_registry_meta: &mut Vec<crate::resolver_core::ResolvedTypeRegistryMeta>,
     published_names: &mut rustc_hash::FxHashSet<String>,
     queued_names: &mut RegistryQueuedNames,
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     name: String,
     type_source: verter_type_expr::facts::SemanticTypeSource,
-    declaration: crate::resolver_core::ResolvedTypeDeclaration,
+    declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration,
     producer_scope: &RegistryProducerScope,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {
@@ -223,7 +237,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
     // discovered by the node-domain walk — no materialised `TypeExpr`.
     let type_source = type_source.absolutized_against(producer_scope.canonical_id.as_ref());
     let raise = |source: &verter_type_expr::facts::SemanticTypeSource| {
-        raise_component_meta_registry_source(ctx, producer_scope, source)
+        raise_component_meta_registry_source(dispatch, producer_scope, source)
     };
     if let Some(index) = resolved_type_registry
         .iter()
@@ -298,6 +312,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                     if collect_nested_refs {
                         observe_component_meta_registry_source(
                             ctx,
+                            dispatch,
                             producer_scope,
                             &union_source,
                             published_names,
@@ -323,6 +338,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                 if collect_nested_refs {
                     observe_component_meta_registry_source(
                         ctx,
+                        dispatch,
                         producer_scope,
                         &type_source,
                         published_names,
@@ -346,9 +362,11 @@ pub(crate) fn upsert_component_meta_registry_entry(
                 .present()
                 .and_then(raise),
         ) {
-            (Some(candidate), Some(current)) => {
-                crate::meta_resolve::compare_node_improvement(ctx, candidate.node(), current.node())
-            }
+            (Some(candidate), Some(current)) => crate::meta_resolve::compare_node_improvement(
+                dispatch,
+                candidate.node(),
+                current.node(),
+            ),
             (Some(_), None) => true,
             (None, _) => false,
         };
@@ -364,6 +382,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
             if collect_nested_refs {
                 observe_component_meta_registry_source(
                     ctx,
+                    dispatch,
                     producer_scope,
                     &type_source,
                     published_names,
@@ -380,6 +399,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
     if collect_nested_refs {
         observe_component_meta_registry_source(
             ctx,
+            dispatch,
             producer_scope,
             &type_source,
             published_names,
@@ -390,7 +410,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
         );
     }
     resolved_type_registry.push(
-        verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+        verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
             name: name.clone(),
             type_source: verter_type_expr::facts::SourcePosition::Present(type_source),
             type_expansion: None,
@@ -411,19 +431,25 @@ pub(crate) fn should_collect_component_meta_registry_nested_refs(
 }
 
 pub(crate) fn owner_component_meta_registry_import_root(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     _snapshot: &FileAnalysisSnapshot,
     local_name: &str,
 ) -> Option<(String, verter_type_expr::TopLevelOwnerId, String)> {
-    let identity = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-        ctx,
-        owner_canonical,
-        owner,
-        None,
-        local_name,
-    )?;
+    let identity =
+        verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            ctx,
+            dispatch,
+            owner_canonical,
+            owner,
+            None,
+            local_name,
+        )?;
     (identity.canonical_id.as_ref() != owner_canonical || identity.owner != owner).then(|| {
         (
             identity.canonical_id.to_string(),
@@ -445,26 +471,35 @@ pub(crate) fn owner_component_meta_registry_import_root(
 ///   local alias whose body satisfies the rule (alias-of-alias depth 1)
 /// - body root is a `ComponentConfig` reference with no type arguments
 pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> bool {
     fn body_head(
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         owner_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<(String, Vec<SemanticNodeId>)> {
         let prepared = ctx.prepared_type_decl_return_only(owner_canonical, owner, name)?;
-        let root = prepared_body_root_node(ctx, prepared.as_ref())?;
-        if node_root_is_type_parameter(ctx, root) {
+        let root = prepared_body_root_node(dispatch, prepared.as_ref())?;
+        if node_root_is_type_parameter(dispatch, root) {
             return None;
         }
-        component_meta_registry_node_ref_head(ctx, root)
+        reference_carrier_head(dispatch, root)
     }
 
-    let Some((ref_name, type_arguments)) = body_head(ctx, owner_canonical, owner, name) else {
+    let Some((ref_name, type_arguments)) = body_head(ctx, dispatch, owner_canonical, owner, name)
+    else {
         return false;
     };
     if ref_name == "ComponentConfig" && !type_arguments.is_empty() {
@@ -473,7 +508,7 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
     // Single alias-of-alias indirection — follow once.
     if type_arguments.is_empty() {
         if let Some((nested_name, nested_args)) =
-            body_head(ctx, owner_canonical, owner, ref_name.as_str())
+            body_head(ctx, dispatch, owner_canonical, owner, ref_name.as_str())
         {
             return nested_name == "ComponentConfig" && !nested_args.is_empty();
         }
@@ -493,7 +528,11 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
 /// On owner-local hit, the caller MUST emit `RouteDemand::Whole`
 /// instead of the standard `MemberPath`/`Pick` route.
 pub(crate) fn component_meta_registry_public_route_owner_local_root(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     producer_scope: &RegistryProducerScope,
     snapshot: &FileAnalysisSnapshot,
     route_root_name: Option<&str>,
@@ -506,6 +545,7 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     // resolver routes the name to an external file, it is imported.
     if owner_component_meta_registry_import_root(
         ctx,
+        dispatch,
         producer_scope.canonical_id.as_ref(),
         producer_scope.owner,
         snapshot,
@@ -520,6 +560,7 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     // scope.
     if owner_component_meta_registry_import_root(
         ctx,
+        dispatch,
         producer_scope.canonical_id.as_ref(),
         producer_scope.owner,
         snapshot,
@@ -533,6 +574,7 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     // Alias body must be `ComponentConfig<...>`.
     if !component_meta_registry_owner_local_component_config_alias_name(
         ctx,
+        dispatch,
         producer_scope.canonical_id.as_ref(),
         producer_scope.owner,
         root_name.as_str(),
@@ -549,7 +591,11 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
 /// `Foo` members, while nested field annotations retain their own structural
 /// locators and continue through the existing field collector.
 pub(crate) fn collect_component_meta_registry_public_macro_root_refs(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -560,19 +606,19 @@ pub(crate) fn collect_component_meta_registry_public_macro_root_refs(
         if !macro_call.is_type_based || macro_call.parsed_type_argument.is_none() {
             continue;
         }
-        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-            ctx,
-            owner_canonical,
-            macro_index,
-        ) else {
+        let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) else {
             continue;
         };
-        let route_root_name = component_meta_registry_node_utility_route(ctx, product.hot.node())
-            .or_else(|| component_meta_registry_node_indexed_access_route(ctx, product.hot.node()))
-            .map(|(root, _)| root);
+        let route_root_name =
+            component_meta_registry_node_utility_route(dispatch, product.hot.node())
+                .or_else(|| {
+                    component_meta_registry_node_indexed_access_route(dispatch, product.hot.node())
+                })
+                .map(|(root, _)| root);
         let producer_scope = RegistryProducerScope::explicit(owner_canonical, macro_call.owner);
         let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
             ctx,
+            dispatch,
             &producer_scope,
             snapshot,
             route_root_name.as_deref(),
@@ -613,7 +659,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     #[cfg(any(test, feature = "test-support"))]
     let counter_name = route_demand_counter_name(&route);
     #[cfg(any(test, feature = "test-support"))]
-    crate::capture_token::with_active_capture(|t| t.record_counter(counter_name, 1));
+    verter_type_engine::capture_token::with_active_capture(|t| t.record_counter(counter_name, 1));
     let exported_name = exported_name
         .filter(|exported| !exported.is_empty())
         .map(str::to_string);
@@ -669,9 +715,13 @@ fn route_demand_keeps_exact_deep_member_path(
 }
 
 pub(crate) fn collect_component_meta_registry_public_field_refs(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     snapshot: &FileAnalysisSnapshot,
-    field: &verter_semantic::analysis::type_expand::ExpandedField,
+    field: &verter_session_query::analysis::type_expand::ExpandedField,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
@@ -680,10 +730,9 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     // One dispatch: the field's published SOURCE and its authored shallow
     // locator raise through the shared bridge; every route decision below
     // runs NODE-DOMAIN off the raised carriers.
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let transit_ctx =
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            crate::semantic_query::ProjectionMode::Navigate,
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            verter_type_engine::semantic_query::ProjectionMode::Navigate,
         );
     let type_node = field
         .authority
@@ -692,7 +741,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             dispatch
                 .raise_semantic_type_source_to_hot(
                     source,
-                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: producer_scope.canonical_id.as_ref(),
                         scope_owner: producer_scope.owner,
                         context: transit_ctx,
@@ -710,7 +759,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     // the user wrote. A deep indexed member path (len > 1) recovers only
     // when the resolved source is an explicit object surface.
     let shallow_node = (!type_node
-        .is_some_and(|node| component_meta_registry_node_has_actionable_route(ctx, node)))
+        .is_some_and(|node| component_meta_registry_node_has_actionable_route(dispatch, node)))
     .then(|| {
         field.authored_evidence.as_ref().and_then(|evidence| {
             dispatch
@@ -721,15 +770,17 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     })
     .flatten()
     .filter(|shallow| {
-        let deep_indexed_path = component_meta_registry_node_indexed_access_route(ctx, *shallow)
-            .is_some_and(|(_, route)| {
-                matches!(
-                    route,
-                    RouteDemand::MemberPath(ref path) if path.len() > 1,
-                )
-            });
+        let deep_indexed_path = component_meta_registry_node_indexed_access_route(
+            dispatch, *shallow,
+        )
+        .is_some_and(|(_, route)| {
+            matches!(
+                route,
+                RouteDemand::MemberPath(ref path) if path.len() > 1,
+            )
+        });
         !deep_indexed_path
-            || type_node.is_some_and(|node| node_root_has_explicit_object_surface(ctx, node))
+            || type_node.is_some_and(|node| node_root_has_explicit_object_surface(dispatch, node))
     });
     let Some(node) = shallow_node.or(type_node) else {
         return;
@@ -744,11 +795,12 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     //
     // External imports preserve `MemberPath`/`Pick` (the predicate
     // declines when the route root has an import binding).
-    let route_root_name = component_meta_registry_node_utility_route(ctx, node)
-        .or_else(|| component_meta_registry_node_indexed_access_route(ctx, node))
+    let route_root_name = component_meta_registry_node_utility_route(dispatch, node)
+        .or_else(|| component_meta_registry_node_indexed_access_route(dispatch, node))
         .map(|(root, _)| root);
     if let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
         ctx,
+        dispatch,
         producer_scope,
         snapshot,
         route_root_name.as_deref(),
@@ -771,19 +823,20 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                               declaration_owner: verter_type_expr::TopLevelOwnerId,
                               symbol_name: &str| {
         ctx.prepared_type_decl_return_only(canonical_id, declaration_owner, symbol_name)
-            .and_then(|prepared| prepared_body_root_node(ctx, prepared.as_ref()))
+            .and_then(|prepared| prepared_body_root_node(dispatch, prepared.as_ref()))
     };
     let skip_direct_plain_ref =
-        component_meta_registry_node_ref_name(ctx, node).is_some_and(|name| {
+        component_meta_registry_node_ref_name(dispatch, node).is_some_and(|name| {
             let name = name.as_str();
             prepared_body_root(
                 producer_scope.canonical_id.as_ref(),
                 producer_scope.owner,
                 name,
             )
-            .is_some_and(|root| node_root_is_type_parameter(ctx, root))
+            .is_some_and(|root| node_root_is_type_parameter(dispatch, root))
                 || owner_component_meta_registry_import_root(
                     ctx,
+                    dispatch,
                     producer_scope.canonical_id.as_ref(),
                     producer_scope.owner,
                     snapshot,
@@ -802,11 +855,12 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 })
                 .flatten()
                 .is_some_and(|root| {
-                    node_root_has_non_object_top_level_surface(ctx, root)
-                        && !node_root_has_explicit_object_surface(ctx, root)
+                    node_root_has_non_object_top_level_surface(dispatch, root)
+                        && !node_root_has_explicit_object_surface(dispatch, root)
                 })
                 || owner_component_meta_registry_import_root(
                     ctx,
+                    dispatch,
                     producer_scope.canonical_id.as_ref(),
                     producer_scope.owner,
                     snapshot,
@@ -825,7 +879,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                     .as_str(),
                 )
         });
-    let direct_ref = component_meta_registry_node_ref_head(ctx, node);
+    let direct_ref = reference_carrier_head(dispatch, node);
     let skip_imported_generic_non_object_ref =
         direct_ref.as_ref().is_some_and(|(name, type_arguments)| {
             if type_arguments.is_empty() {
@@ -834,6 +888,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             let Some((canonical_id, target_owner, exported_name)) =
                 owner_component_meta_registry_import_root(
                     ctx,
+                    dispatch,
                     producer_scope.canonical_id.as_ref(),
                     producer_scope.owner,
                     snapshot,
@@ -847,8 +902,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             }
             prepared_body_root(canonical_id.as_str(), target_owner, exported_name.as_str())
                 .is_some_and(|root| {
-                    node_root_has_non_object_top_level_surface(ctx, root)
-                        && !node_root_has_explicit_object_surface(ctx, root)
+                    node_root_has_non_object_top_level_surface(dispatch, root)
+                        && !node_root_has_explicit_object_surface(dispatch, root)
                 })
         });
     if (skip_direct_plain_ref || skip_imported_generic_non_object_ref)
@@ -859,9 +914,10 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 producer_scope.owner,
                 name,
             )
-            .is_some_and(|root| node_root_is_type_parameter(ctx, root));
+            .is_some_and(|root| node_root_is_type_parameter(dispatch, root));
             let import_root = owner_component_meta_registry_import_root(
                 ctx,
+                dispatch,
                 producer_scope.canonical_id.as_ref(),
                 producer_scope.owner,
                 snapshot,
@@ -895,7 +951,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     }
     if !skip_direct_plain_ref && !skip_imported_generic_non_object_ref {
         collect_component_meta_registry_public_surface_refs_node(
-            ctx,
+            dispatch,
             node,
             published_names,
             queued_names,
@@ -906,13 +962,15 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
 
     // Indexed-access roots whose owner-local prepared body is not a type
     // parameter enqueue their member-path route.
-    if let Some((root_name, route)) = component_meta_registry_node_indexed_access_route(ctx, node) {
+    if let Some((root_name, route)) =
+        component_meta_registry_node_indexed_access_route(dispatch, node)
+    {
         if prepared_body_root(
             producer_scope.canonical_id.as_ref(),
             producer_scope.owner,
             root_name.as_str(),
         )
-        .is_some_and(|root| !node_root_is_type_parameter(ctx, root))
+        .is_some_and(|root| !node_root_is_type_parameter(dispatch, root))
         {
             // A single-member route records the field's authored annotation
             // slot as the member USE-SITE: when the member's declaring
@@ -954,7 +1012,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             }
         }
     } else if let Some((resolved_identity, route)) =
-        component_meta_registry_node_instantiated_indexed_access_route(ctx, node)
+        component_meta_registry_node_instantiated_indexed_access_route(dispatch, node)
     {
         // Instantiated-root indexed access (`LocalConfig<string>['slot']`):
         // enqueue under the unique AUTHORED name whose exact owner-qualified
@@ -1158,75 +1216,66 @@ pub(crate) fn component_meta_registry_public_indexed_access_route(
 // shared or cyclic (recursive types), unlike the tree-shaped `TypeExpr`
 // inputs of the sibling walkers.
 
-use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
 
-fn registry_node_data(
-    ctx: &dyn ResolverContext,
+fn registry_node_data<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<Arc<SemanticNodeData>> {
-    crate::project_semantic_dispatch::node_data_for(ctx, node)
+    verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
 }
 
 /// Unwrap ONE `Alias` hop (the node-domain analog of stripping a
 /// `Parenthesized` wrapper), mirroring the root-kind classifier convention
 /// in `meta_resolve::exactness::node_root_should_stay_symbolic`.
-fn registry_unalias(ctx: &dyn ResolverContext, node: SemanticNodeId) -> SemanticNodeId {
-    match registry_node_data(ctx, node).as_deref() {
+fn registry_unalias<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    match registry_node_data(dispatch, node).as_deref() {
         Some(SemanticNodeData::Alias(target)) => *target,
         _ => node,
-    }
-}
-
-/// The node's reference HEAD: `(name, type-argument nodes)` for the three
-/// reference carriers (`BareRef` / `InstantiationRef` / `DeclRef`).
-pub(crate) fn component_meta_registry_node_ref_head(
-    ctx: &dyn ResolverContext,
-    node: SemanticNodeId,
-) -> Option<(String, Vec<SemanticNodeId>)> {
-    let data = registry_node_data(ctx, registry_unalias(ctx, node))?;
-    if let Some((name, _scope)) = data.bare_ref_head() {
-        return Some((name.to_string(), data.carrier_type_args().to_vec()));
-    }
-    match data.as_ref() {
-        SemanticNodeData::DeclRef { identity } => {
-            Some((identity.decl_name.to_string(), Vec::new()))
-        }
-        SemanticNodeData::InstantiationRef { base, args } => {
-            Some((base.decl_name.to_string(), args.to_vec()))
-        }
-        _ => None,
     }
 }
 
 /// The node-domain sibling of [`component_meta_registry_ref_name`]: the
 /// bare (argument-free) reference head name.
 pub(crate) fn component_meta_registry_node_ref_name(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<String> {
-    component_meta_registry_node_ref_head(ctx, node)
+    reference_carrier_head(dispatch, node)
         .filter(|(_, args)| args.is_empty())
         .map(|(name, _)| name)
 }
 
 /// The node-domain sibling of [`component_meta_registry_string_literal_keys`].
 pub(crate) fn component_meta_registry_node_string_literal_keys(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<Vec<String>> {
     fn keys_of(
-        ctx: &dyn ResolverContext,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         node: SemanticNodeId,
         out: &mut Vec<String>,
     ) -> Option<()> {
-        match registry_node_data(ctx, registry_unalias(ctx, node)).as_deref() {
+        match registry_node_data(dispatch, registry_unalias(dispatch, node)).as_deref() {
             Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(value))) => {
                 out.push(value.clone());
                 Some(())
             }
             Some(SemanticNodeData::Union(arms)) => {
                 for arm in arms.iter() {
-                    keys_of(ctx, *arm, out)?;
+                    keys_of(dispatch, *arm, out)?;
                 }
                 Some(())
             }
@@ -1234,7 +1283,7 @@ pub(crate) fn component_meta_registry_node_string_literal_keys(
         }
     }
     let mut keys = Vec::new();
-    keys_of(ctx, node, &mut keys)?;
+    keys_of(dispatch, node, &mut keys)?;
     keys.sort();
     keys.dedup();
     Some(keys)
@@ -1244,18 +1293,21 @@ pub(crate) fn component_meta_registry_node_string_literal_keys(
 /// a `Pick<Inner, K>` / `Omit<Inner, K>` reference head whose key argument is
 /// a string-literal set routes as `Pick`/`Omit` on the inner reference name.
 pub(crate) fn component_meta_registry_node_utility_route(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<(String, RouteDemand)> {
-    let (name, args) = component_meta_registry_node_ref_head(ctx, node)?;
+    let (name, args) = reference_carrier_head(dispatch, node)?;
     if args.len() != 2 || !matches!(name.as_str(), "Pick" | "Omit") {
         return None;
     }
     // The inner reference may carry type arguments (`Pick<Foo<T>, K>`) —
     // the route filter operates on member NAMES, matching the `TypeExpr`
     // sibling's contract.
-    let (root_name, _) = component_meta_registry_node_ref_head(ctx, args[0])?;
-    let members = component_meta_registry_node_string_literal_keys(ctx, args[1])?;
+    let (root_name, _) = reference_carrier_head(dispatch, args[0])?;
+    let members = component_meta_registry_node_string_literal_keys(dispatch, args[1])?;
     if members.is_empty() {
         return None;
     }
@@ -1272,11 +1324,14 @@ pub(crate) fn component_meta_registry_node_utility_route(
 /// `IndexedAccess` spine of string keys rooted at a bare reference routes as
 /// a `MemberPath`.
 pub(crate) fn component_meta_registry_node_indexed_access_route(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<(String, RouteDemand)> {
-    let (path_rev, cursor) = indexed_access_string_key_spine(ctx, node)?;
-    let root = component_meta_registry_node_ref_name(ctx, cursor)?;
+    let (path_rev, cursor) = indexed_access_string_key_spine(dispatch, node)?;
+    let root = component_meta_registry_node_ref_name(dispatch, cursor)?;
     Some((root, member_path_from_rev(path_rev)))
 }
 
@@ -1284,19 +1339,22 @@ pub(crate) fn component_meta_registry_node_indexed_access_route(
 /// `Some((keys outer-to-inner, root cursor))` for a non-empty spine whose
 /// every index is a string literal; `None` otherwise.
 fn indexed_access_string_key_spine(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<(Vec<String>, SemanticNodeId)> {
     let mut path_rev: Vec<String> = Vec::new();
-    let mut cursor = registry_unalias(ctx, node);
+    let mut cursor = registry_unalias(dispatch, node);
     while let Some(SemanticNodeData::IndexedAccess { object, index }) =
-        registry_node_data(ctx, cursor).as_deref()
+        registry_node_data(dispatch, cursor).as_deref()
     {
         let IndexKey::String(member) = index else {
             return None;
         };
         path_rev.push(member.to_string());
-        cursor = registry_unalias(ctx, *object);
+        cursor = registry_unalias(dispatch, *object);
     }
     (!path_rev.is_empty()).then_some((path_rev, cursor))
 }
@@ -1316,16 +1374,19 @@ fn member_path_from_rev(mut path_rev: Vec<String>) -> RouteDemand {
 /// through the exact owner's import table to recover a unique authored local
 /// alias) and the member-path route.
 pub(crate) fn component_meta_registry_node_instantiated_indexed_access_route(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<InstantiatedIndexedAccessRoute> {
-    let (path_rev, cursor) = indexed_access_string_key_spine(ctx, node)?;
-    let (_, args) = component_meta_registry_node_ref_head(ctx, cursor)?;
+    let (path_rev, cursor) = indexed_access_string_key_spine(dispatch, node)?;
+    let (_, args) = reference_carrier_head(dispatch, cursor)?;
     if args.is_empty() {
         // A bare root belongs to the plain extractor above.
         return None;
     }
-    let resolved_identity = match registry_node_data(ctx, cursor).as_deref() {
+    let resolved_identity = match registry_node_data(dispatch, cursor).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, .. }) => Some((
             std::sync::Arc::clone(&base.canonical_id),
             std::sync::Arc::clone(&base.decl_name),
@@ -1343,7 +1404,7 @@ pub(crate) type InstantiatedIndexedAccessRoute = (
 );
 
 fn component_meta_registry_local_import_for_instantiated_route(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     producer_scope: &RegistryProducerScope,
     resolved_identity: Option<&(std::sync::Arc<str>, std::sync::Arc<str>)>,
 ) -> Option<String> {
@@ -1378,12 +1439,15 @@ fn component_meta_registry_local_import_for_instantiated_route(
 /// The node-domain sibling of
 /// [`component_meta_registry_field_expr_has_actionable_route`].
 pub(crate) fn component_meta_registry_node_has_actionable_route(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> bool {
-    component_meta_registry_node_ref_head(ctx, node).is_some()
-        || component_meta_registry_node_utility_route(ctx, node).is_some()
-        || component_meta_registry_node_indexed_access_route(ctx, node).is_some()
+    reference_carrier_head(dispatch, node).is_some()
+        || component_meta_registry_node_utility_route(dispatch, node).is_some()
+        || component_meta_registry_node_indexed_access_route(dispatch, node).is_some()
 }
 
 /// The node-domain sibling of
@@ -1391,14 +1455,17 @@ pub(crate) fn component_meta_registry_node_has_actionable_route(
 /// reference head enqueues a `Whole` route; every other root enqueues
 /// nothing.
 pub(crate) fn collect_component_meta_registry_public_surface_refs_node(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     producer_scope: &RegistryProducerScope,
 ) {
-    if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
+    if let Some((name, _)) = reference_carrier_head(dispatch, node) {
         enqueue_component_meta_registry_ref(
             published_names,
             queued_names,
@@ -1449,7 +1516,10 @@ impl RegistryMemberRefPolicy {
 /// heritage-merged surface observation composes into ONE published surface,
 /// absorbing the heritage bases.
 fn intersection_is_lone_extends_heritage(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     arms: &[SemanticNodeId],
 ) -> bool {
     let mut decl_ref_arms = 0usize;
@@ -1457,7 +1527,7 @@ fn intersection_is_lone_extends_heritage(
     for arm in arms {
         let mut node = *arm;
         loop {
-            match registry_node_data(ctx, node).as_deref() {
+            match registry_node_data(dispatch, node).as_deref() {
                 Some(SemanticNodeData::Alias(inner)) => node = *inner,
                 Some(SemanticNodeData::DeclRef { .. }) => {
                     decl_ref_arms += 1;
@@ -1478,7 +1548,11 @@ fn intersection_is_lone_extends_heritage(
 /// walk a raised registry-entry body node and enqueue its transitive
 /// references, path-precise under `cursor`.
 pub(crate) fn collect_component_meta_registry_refs_node(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut RegistryQueuedNames,
@@ -1490,6 +1564,7 @@ pub(crate) fn collect_component_meta_registry_refs_node(
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
     collect_registry_refs_node_inner(
         ctx,
+        dispatch,
         node,
         published_names,
         queued_names,
@@ -1503,7 +1578,11 @@ pub(crate) fn collect_component_meta_registry_refs_node(
 
 #[allow(clippy::too_many_arguments)]
 fn collect_registry_refs_node_inner(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut RegistryQueuedNames,
@@ -1516,8 +1595,8 @@ fn collect_registry_refs_node_inner(
     if !visited.insert(node) {
         return;
     }
-    if let Some((root_name, route)) = component_meta_registry_node_utility_route(ctx, node)
-        .or_else(|| component_meta_registry_node_indexed_access_route(ctx, node))
+    if let Some((root_name, route)) = component_meta_registry_node_utility_route(dispatch, node)
+        .or_else(|| component_meta_registry_node_indexed_access_route(dispatch, node))
     {
         enqueue_component_meta_registry_ref(
             published_names,
@@ -1530,7 +1609,7 @@ fn collect_registry_refs_node_inner(
         );
         return;
     }
-    if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
+    if let Some((name, _)) = reference_carrier_head(dispatch, node) {
         enqueue_component_meta_registry_ref(
             published_names,
             queued_names,
@@ -1542,13 +1621,14 @@ fn collect_registry_refs_node_inner(
         );
         return;
     }
-    let Some(data) = registry_node_data(ctx, node) else {
+    let Some(data) = registry_node_data(dispatch, node) else {
         return;
     };
     match data.as_ref() {
         SemanticNodeData::Alias(target) => {
             collect_registry_refs_node_inner(
                 ctx,
+                dispatch,
                 *target,
                 published_names,
                 queued_names,
@@ -1562,6 +1642,7 @@ fn collect_registry_refs_node_inner(
         SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
             collect_registry_refs_node_inner(
                 ctx,
+                dispatch,
                 *element,
                 published_names,
                 queued_names,
@@ -1576,6 +1657,7 @@ fn collect_registry_refs_node_inner(
             for element in elements.iter() {
                 collect_registry_refs_node_inner(
                     ctx,
+                    dispatch,
                     element.value,
                     published_names,
                     queued_names,
@@ -1594,6 +1676,7 @@ fn collect_registry_refs_node_inner(
             for arm in arms.iter() {
                 collect_registry_refs_node_inner(
                     ctx,
+                    dispatch,
                     *arm,
                     published_names,
                     queued_names,
@@ -1616,16 +1699,17 @@ fn collect_registry_refs_node_inner(
             // dependencies of their own. Their members' routes (indexed
             // access / utilities) are discovered from the merged surface at
             // publication, so only route-scoped demands publish the base.
-            let heritage_shape = intersection_is_lone_extends_heritage(ctx, arms);
+            let heritage_shape = intersection_is_lone_extends_heritage(dispatch, arms);
             for arm in arms.iter() {
                 if heritage_shape
-                    && component_meta_registry_node_ref_head(ctx, *arm)
+                    && reference_carrier_head(dispatch, *arm)
                         .is_some_and(|(_, args)| args.is_empty())
                 {
                     continue;
                 }
                 collect_registry_refs_node_inner(
                     ctx,
+                    dispatch,
                     *arm,
                     published_names,
                     queued_names,
@@ -1644,6 +1728,7 @@ fn collect_registry_refs_node_inner(
             for expr in expressions.iter() {
                 collect_registry_refs_node_inner(
                     ctx,
+                    dispatch,
                     *expr,
                     published_names,
                     queued_names,
@@ -1668,6 +1753,7 @@ fn collect_registry_refs_node_inner(
                 }
                 collect_registry_member_surface_refs_node(
                     ctx,
+                    dispatch,
                     member.value,
                     published_names,
                     queued_names,
@@ -1685,6 +1771,7 @@ fn collect_registry_refs_node_inner(
                 {
                     collect_registry_member_surface_refs_node(
                         ctx,
+                        dispatch,
                         *signature,
                         published_names,
                         queued_names,
@@ -1697,6 +1784,7 @@ fn collect_registry_refs_node_inner(
                 for signature in surface.index_signatures.iter() {
                     collect_registry_member_surface_refs_node(
                         ctx,
+                        dispatch,
                         signature.key_type,
                         published_names,
                         queued_names,
@@ -1707,6 +1795,7 @@ fn collect_registry_refs_node_inner(
                     );
                     collect_registry_member_surface_refs_node(
                         ctx,
+                        dispatch,
                         signature.value_type,
                         published_names,
                         queued_names,
@@ -1733,6 +1822,7 @@ fn collect_registry_refs_node_inner(
             {
                 collect_registry_member_surface_refs_node(
                     ctx,
+                    dispatch,
                     position,
                     published_names,
                     queued_names,
@@ -1746,6 +1836,7 @@ fn collect_registry_refs_node_inner(
         SemanticNodeData::IndexedAccess { object, index } => {
             collect_registry_refs_node_inner(
                 ctx,
+                dispatch,
                 *object,
                 published_names,
                 queued_names,
@@ -1758,6 +1849,7 @@ fn collect_registry_refs_node_inner(
             if let IndexKey::Computed(index_node) = index {
                 collect_registry_refs_node_inner(
                     ctx,
+                    dispatch,
                     *index_node,
                     published_names,
                     queued_names,
@@ -1777,7 +1869,11 @@ fn collect_registry_refs_node_inner(
 /// [`collect_component_meta_registry_member_surface_refs`].
 #[allow(clippy::too_many_arguments)]
 fn collect_registry_member_surface_refs_node(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut RegistryQueuedNames,
@@ -1789,8 +1885,8 @@ fn collect_registry_member_surface_refs_node(
     if !visited.insert(node) {
         return;
     }
-    if let Some((root_name, route)) = component_meta_registry_node_utility_route(ctx, node)
-        .or_else(|| component_meta_registry_node_indexed_access_route(ctx, node))
+    if let Some((root_name, route)) = component_meta_registry_node_utility_route(dispatch, node)
+        .or_else(|| component_meta_registry_node_indexed_access_route(dispatch, node))
     {
         enqueue_component_meta_registry_ref(
             published_names,
@@ -1804,7 +1900,7 @@ fn collect_registry_member_surface_refs_node(
         return;
     }
     if let Some((resolved_identity, route)) =
-        component_meta_registry_node_instantiated_indexed_access_route(ctx, node)
+        component_meta_registry_node_instantiated_indexed_access_route(dispatch, node)
     {
         // Instantiated-root indexed access: recover the unique authored local
         // alias from the exact producer owner's import table. Missing or
@@ -1828,7 +1924,7 @@ fn collect_registry_member_surface_refs_node(
         }
         return;
     }
-    if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
+    if let Some((name, _)) = reference_carrier_head(dispatch, node) {
         if member_ref_policy.allows_plain_member_refs() {
             enqueue_component_meta_registry_ref(
                 published_names,
@@ -1842,10 +1938,10 @@ fn collect_registry_member_surface_refs_node(
         }
         return;
     }
-    let Some(data) = registry_node_data(ctx, node) else {
+    let Some(data) = registry_node_data(dispatch, node) else {
         return;
     };
-    let recurse = |ctx: &dyn ResolverContext,
+    let recurse = |ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
                    child: SemanticNodeId,
                    queued_names: &mut RegistryQueuedNames,
                    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
@@ -1853,6 +1949,7 @@ fn collect_registry_member_surface_refs_node(
                    visited: &mut rustc_hash::FxHashSet<SemanticNodeId>| {
         collect_registry_member_surface_refs_node(
             ctx,
+            dispatch,
             child,
             published_names,
             queued_names,
@@ -2066,11 +2163,14 @@ fn collect_registry_member_surface_refs_node(
 /// visited-guarded). Used for seeded-dependency-name accounting over
 /// raised registry sources in the host registry BFS.
 pub(crate) fn collect_node_ref_names(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     names: &mut rustc_hash::FxHashSet<String>,
 ) {
-    walk_reference_carriers(ctx, node, &mut |_, data, head_name| {
+    walk_reference_carriers(dispatch, node, &mut |_, data, head_name| {
         if let Some(name) = head_name {
             names.insert(name.to_string());
             return;
@@ -2099,127 +2199,6 @@ pub(crate) fn collect_node_ref_names(
             }
         }
     });
-}
-
-/// Every distinct NOMINAL `typeof` carrier reachable from `node` whose
-/// declaring identity lives in `canonical`, in visit order.
-///
-/// Shares [`walk_reference_carriers`] with [`collect_node_ref_names`] by
-/// construction, so the two answers cannot disagree: a carrier whose head
-/// name a rendered surface must have in scope is exactly a carrier this
-/// returns, and a shape the walk does not descend contributes neither a
-/// name nor a carrier.
-pub(crate) fn collect_owner_local_nominal_carriers(
-    ctx: &dyn ResolverContext,
-    node: SemanticNodeId,
-    canonical: &str,
-    carriers: &mut Vec<SemanticNodeId>,
-) {
-    walk_reference_carriers(ctx, node, &mut |reached, data, _| {
-        if data
-            .typeof_nominal_identity()
-            .is_some_and(|identity| identity.canonical_id.as_ref() == canonical)
-            && !carriers.contains(&reached)
-        {
-            carriers.push(reached);
-        }
-    });
-}
-
-/// The ONE bounded, visited-guarded walk over the reference carriers
-/// reachable from `node`. `visit` sees every reached node together with its
-/// reference-head name when it has one; descent stays the walk's own
-/// decision, so two consumers can never disagree about what the rendered
-/// surface reaches.
-fn walk_reference_carriers(
-    ctx: &dyn ResolverContext,
-    node: SemanticNodeId,
-    visit: &mut dyn FnMut(SemanticNodeId, &SemanticNodeData, Option<&str>),
-) {
-    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    let mut worklist: Vec<SemanticNodeId> = vec![node];
-    while let Some(node) = worklist.pop() {
-        if !visited.insert(node) {
-            continue;
-        }
-        let Some(data) = registry_node_data(ctx, node) else {
-            continue;
-        };
-        if let Some((name, args)) = component_meta_registry_node_ref_head(ctx, node) {
-            visit(node, data.as_ref(), Some(name.as_str()));
-            worklist.extend(args);
-            continue;
-        }
-        visit(node, data.as_ref(), None);
-        match data.as_ref() {
-            SemanticNodeData::Alias(target) => worklist.push(*target),
-            SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
-                worklist.push(*element)
-            }
-            SemanticNodeData::Tuple { elements, .. } => {
-                worklist.extend(elements.iter().map(|element| element.value));
-            }
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let arms = composite.composite_members().expect("composite arm");
-                worklist.extend(arms.iter().copied());
-            }
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                worklist.extend(expressions.iter().copied());
-            }
-            SemanticNodeData::Object(surface) => {
-                worklist.extend(surface.positive_members().iter().map(|member| member.value));
-                worklist.extend(surface.call_signatures.iter().copied());
-                worklist.extend(surface.construct_signatures.iter().copied());
-                for signature in surface.index_signatures.iter() {
-                    worklist.push(signature.key_type);
-                    worklist.push(signature.value_type);
-                }
-            }
-            SemanticNodeData::Signature {
-                params,
-                return_type,
-                predicate,
-                ..
-            } => {
-                worklist.extend(params.iter().map(|param| param.ty));
-                worklist.push(*return_type);
-                worklist.extend(predicate.and_then(|predicate| predicate.ty));
-            }
-            SemanticNodeData::IndexedAccess { object, index } => {
-                worklist.push(*object);
-                if let IndexKey::Computed(index_node) = index {
-                    worklist.push(*index_node);
-                }
-            }
-            SemanticNodeData::Conditional {
-                check,
-                extends,
-                true_branch_ref,
-                false_branch_ref,
-                pending,
-                ..
-            } => {
-                if let Some(frame) = pending {
-                    worklist.extend(frame.argument_nodes());
-                }
-                worklist.push(*check);
-                worklist.push(*extends);
-                worklist.push(*true_branch_ref);
-                worklist.push(*false_branch_ref);
-            }
-            SemanticNodeData::Mapped { source, .. } => worklist.push(*source),
-            SemanticNodeData::MergedDecl { contributors } => {
-                worklist.extend(contributors.iter().copied());
-            }
-            // A `typeof` carrier's own head is not a further node — the
-            // visitor records what a rendered surface needs from it — but
-            // its type arguments are, so the walk descends into them.
-            typeof_carrier @ (SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_)) => {
-                worklist.extend(typeof_carrier.carrier_type_args().iter().copied());
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Fact-domain classification of a published registry SOURCE as an explicit
@@ -2260,17 +2239,19 @@ pub(crate) fn source_bare_ref_name(
 /// shared dispatch and return the raised body-root node. `None` =
 /// unraisable under the live view (unloaded / evicted producing canonical).
 pub(crate) fn prepared_body_root_node(
-    ctx: &dyn ResolverContext,
-    prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+    prepared: &verter_session_query::type_solver::PreparedTypeDecl,
 ) -> Option<SemanticNodeId> {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     dispatch
         .raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 prepared.body_facts.body_slot.clone(),
             ),
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
+            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
         )
         .at_optional_boundary()
@@ -2279,9 +2260,15 @@ pub(crate) fn prepared_body_root_node(
 
 /// Node-domain sibling of the `matches!(body, TypeExpr::TypeParameter(_))`
 /// prepared-body classification: the raised body ROOT is a type parameter.
-pub(crate) fn node_root_is_type_parameter(ctx: &dyn ResolverContext, node: SemanticNodeId) -> bool {
+pub(crate) fn node_root_is_type_parameter(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
-        registry_node_data(ctx, registry_unalias(ctx, node)).as_deref(),
+        registry_node_data(dispatch, registry_unalias(dispatch, node)).as_deref(),
         Some(SemanticNodeData::TypeParam { .. })
     )
 }
@@ -2292,24 +2279,27 @@ pub(crate) fn node_root_is_type_parameter(ctx: &dyn ResolverContext, node: Seman
 /// / conditional / mapped root, or a union / intersection with a non-object
 /// arm).
 pub(crate) fn node_root_has_non_object_top_level_surface(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> bool {
-    let node = registry_unalias(ctx, node);
-    let Some(data) = registry_node_data(ctx, node) else {
+    let node = registry_unalias(dispatch, node);
+    let Some(data) = registry_node_data(dispatch, node) else {
         return false;
     };
-    if component_meta_registry_node_ref_head(ctx, node).is_some() {
+    if reference_carrier_head(dispatch, node).is_some() {
         return true;
     }
     match data.as_ref() {
         composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
             let arms = composite.composite_members().expect("composite arm");
             arms.iter()
-                .any(|arm| node_root_has_non_object_top_level_surface(ctx, *arm))
+                .any(|arm| node_root_has_non_object_top_level_surface(dispatch, *arm))
                 || arms.iter().any(|arm| {
                     !matches!(
-                        registry_node_data(ctx, registry_unalias(ctx, *arm)).as_deref(),
+                        registry_node_data(dispatch, registry_unalias(dispatch, *arm)).as_deref(),
                         Some(SemanticNodeData::Object(_))
                     )
                 })
@@ -2325,18 +2315,21 @@ pub(crate) fn node_root_has_non_object_top_level_surface(
 /// [`component_meta_registry_has_explicit_object_surface`]: the raised root
 /// is an object surface, or a union / intersection carrying one.
 pub(crate) fn node_root_has_explicit_object_surface(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> bool {
-    let node = registry_unalias(ctx, node);
-    match registry_node_data(ctx, node).as_deref() {
+    let node = registry_unalias(dispatch, node);
+    match registry_node_data(dispatch, node).as_deref() {
         Some(SemanticNodeData::Object(_)) => true,
         Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
             composite
                 .composite_members()
                 .expect("composite arm")
                 .iter()
-                .any(|arm| node_root_has_explicit_object_surface(ctx, *arm))
+                .any(|arm| node_root_has_explicit_object_surface(dispatch, *arm))
         }
         _ => false,
     }
@@ -2496,8 +2489,11 @@ export interface AvatarProps {
             .get_raw_analysis_snapshot("/src/App.vue")
             .expect("app snapshot should exist");
 
+        let fixture_dispatch_0 =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
         let resolved = owner_component_meta_registry_import_root(
             &host,
+            &fixture_dispatch_0,
             "/src/App.vue",
             verter_type_expr::TopLevelOwnerId::instance(0),
             &snapshot,

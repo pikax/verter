@@ -2,7 +2,7 @@
 //!
 //! These are core-native DTOs; indexed value expressions use the shared
 //! `verter_type_expr` carrier. `verter_session` converts them into
-//! `verter_semantic::analysis::TemplateAnalysisSnapshot`.
+//! `verter_session_query::analysis::template::TemplateAnalysisSnapshot`.
 
 use crate::ast::types::{AstNodeKind, ElementNode, TemplateAst};
 use crate::common::Span;
@@ -12,7 +12,7 @@ use crate::types::NodeId;
 use rustc_hash::FxHashMap;
 
 /// Raw template data extracted during compilation.
-/// `verter_session` converts this to `verter_semantic::analysis::TemplateAnalysisSnapshot`.
+/// `verter_session` converts this to `verter_session_query::analysis::template::TemplateAnalysisSnapshot`.
 #[derive(Debug, Default)]
 pub struct RawTemplateData {
     pub components: Vec<RawComponentUsage>,

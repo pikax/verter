@@ -28,11 +28,11 @@ use verter_compiler::compile_request::{
 
 use crate::host_compile::{CompileRequestBatchInput, CompileRequestBatchOptions};
 use crate::types::{
-    BlockContentAvailability, BlockContentRefusal, BlockOverrideEntry, BlockOverrideRequest,
-    CompileProfile, CompileRequestFailure, CompiledProduct, FileLanguage, HostError,
-    VirtualNodeKind,
+    BlockContentRefusal, BlockOverrideEntry, BlockOverrideRequest, CompileProfile,
+    CompileRequestFailure, CompiledProduct, FileLanguage, HostError, VirtualNodeKind,
 };
 use crate::{CompileTarget, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::style::BlockContentAvailability;
 
 const VUE_SFC: &str = r#"<script setup lang="ts">
 const greeting = 'hello'

@@ -21,7 +21,7 @@
 //! The architecture guard `no_std_fs_in_semantic_session_paths`
 //! allowlists `intrinsic_library.rs` so the production impl can route
 //! disk reads through `std::fs` here, while flagging any new direct
-//! `std::fs::` callsite that appears in `verter_session::intrinsic_registry`.
+//! `std::fs::` callsite that appears in `verter_type_engine::intrinsic_registry`.
 
 use std::io;
 

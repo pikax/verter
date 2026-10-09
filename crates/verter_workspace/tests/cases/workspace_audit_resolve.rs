@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, RequestKindPayload, RequestTargetIdentity, WorkspaceOp};
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     IdeProjectCompilerOptions, ResolutionContext, ResolvePhase, ResolveRequestKind,
 };
 use verter_workspace::{

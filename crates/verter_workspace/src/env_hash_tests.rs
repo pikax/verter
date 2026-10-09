@@ -20,7 +20,7 @@ use crate::canonical_path::CanonicalPath;
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
 use crate::ProjectMembership;
 use verter_scheduler::invalidation::Hash16;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     IdeProjectCompilerOptions, IdeProjectConfig, RawSemanticCompilerOptions, ScriptTarget,
     SemanticCompilerOptions, WorkspaceAlias,
 };

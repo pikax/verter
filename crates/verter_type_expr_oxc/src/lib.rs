@@ -37,6 +37,9 @@ use verter_type_expr::{
     TypePredicateSubject, UnknownValue, ValueRef,
 };
 
+mod binder_env;
+use binder_env::BinderEnv;
+
 mod dependency_facts;
 pub use dependency_facts::{
     collect_class_dependency_facts, collect_interface_dependency_facts,
@@ -44,6 +47,8 @@ pub use dependency_facts::{
     collect_type_dependency_paths, TypeDependencyFacts, UnsupportedValuePositionKind,
 };
 
+#[cfg(test)]
+mod binder_env_tests;
 #[cfg(test)]
 mod dependency_facts_tests;
 #[cfg(test)]
@@ -83,7 +88,9 @@ pub fn lower_ts_type_with_whole_query(
             TSType::TSTypeQuery(query)
                 if matches!(query.expr_name, TSTypeQueryExprName::IdentifierReference(_)) =>
             {
-                type_query_identifier(query).map(|identifier| identifier.span.into())
+                type_query_identifier(query).map(|identifier| {
+                    verter_span::Span::new(identifier.span.start, identifier.span.end)
+                })
             }
             _ => None,
         };
@@ -295,8 +302,11 @@ fn build_ts_type<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(ctor.span.into()),
-                    return_type: Some(ctor.return_type.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(ctor.span.start, ctor.span.end)),
+                    return_type: Some(verter_span::Span::new(
+                        ctor.return_type.type_annotation.span().start,
+                        ctor.return_type.type_annotation.span().end,
+                    )),
                 },
             ))
             .with_abstract(ctor.r#abstract);
@@ -786,12 +796,17 @@ fn lower_ts_signature<'b, 'a>(
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
 
             let spans = MemberSpans {
-                declaration: Some(prop.span.into()),
-                name: Some(prop.key.span().into()),
-                type_annotation: prop
-                    .type_annotation
-                    .as_ref()
-                    .map(|ta| ta.type_annotation.span().into()),
+                declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+                name: Some(verter_span::Span::new(
+                    prop.key.span().start,
+                    prop.key.span().end,
+                )),
+                type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                    verter_span::Span::new(
+                        ta.type_annotation.span().start,
+                        ta.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::Property(
                 ObjectProperty::with_key_spans_public(key, ty, prop.optional, prop.readonly, spans),
@@ -808,17 +823,22 @@ fn lower_ts_signature<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(method.span.into()),
-                    return_type: method
-                        .return_type
-                        .as_ref()
-                        .map(|rt| rt.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                    return_type: method.return_type.as_ref().map(|rt| {
+                        verter_span::Span::new(
+                            rt.type_annotation.span().start,
+                            rt.type_annotation.span().end,
+                        )
+                    }),
                 },
                 lower,
             ));
             let spans = MemberSpans {
-                declaration: Some(method.span.into()),
-                name: Some(method.key.span().into()),
+                declaration: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                name: Some(verter_span::Span::new(
+                    method.key.span().start,
+                    method.key.span().end,
+                )),
                 type_annotation: None,
             };
             Some(ObjectMember::Method(
@@ -834,11 +854,13 @@ fn lower_ts_signature<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(call.span.into()),
-                    return_type: call
-                        .return_type
-                        .as_ref()
-                        .map(|rt| rt.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(call.span.start, call.span.end)),
+                    return_type: call.return_type.as_ref().map(|rt| {
+                        verter_span::Span::new(
+                            rt.type_annotation.span().start,
+                            rt.type_annotation.span().end,
+                        )
+                    }),
                 },
                 lower,
             ));
@@ -848,13 +870,16 @@ fn lower_ts_signature<'b, 'a>(
             let param = &idx.parameter;
             let key_name = param.name.to_string();
             let key_type = lower(&param.type_annotation.type_annotation);
-            let key_span = Some(param.span.into());
+            let key_span = Some(verter_span::Span::new(param.span.start, param.span.end));
 
             let value_type = lower(&idx.type_annotation.type_annotation);
             let spans = IndexSignatureSpans {
-                declaration: Some(idx.span.into()),
+                declaration: Some(verter_span::Span::new(idx.span.start, idx.span.end)),
                 key: key_span,
-                value: Some(idx.type_annotation.type_annotation.span().into()),
+                value: Some(verter_span::Span::new(
+                    idx.type_annotation.type_annotation.span().start,
+                    idx.type_annotation.type_annotation.span().end,
+                )),
             };
             Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
                 key_name,
@@ -875,11 +900,13 @@ fn lower_ts_signature<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(ctor.span.into()),
-                    return_type: ctor
-                        .return_type
-                        .as_ref()
-                        .map(|rt| rt.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(ctor.span.start, ctor.span.end)),
+                    return_type: ctor.return_type.as_ref().map(|rt| {
+                        verter_span::Span::new(
+                            rt.type_annotation.span().start,
+                            rt.type_annotation.span().end,
+                        )
+                    }),
                 },
             ));
             Some(ObjectMember::ConstructSignature(func))
@@ -951,8 +978,11 @@ fn lower_function_type<'b, 'a>(
             .map(|tp| lower_type_params(tp, lower))
             .unwrap_or_default(),
         FunctionSpans {
-            signature: Some(func.span.into()),
-            return_type: Some(func.return_type.type_annotation.span().into()),
+            signature: Some(verter_span::Span::new(func.span.start, func.span.end)),
+            return_type: Some(verter_span::Span::new(
+                func.return_type.type_annotation.span().start,
+                func.return_type.type_annotation.span().end,
+            )),
         },
         lower,
     ))
@@ -981,7 +1011,7 @@ fn lower_formal_parameters<'b, 'a>(
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
             false,
             false,
-            Some(this.span.into()),
+            Some(verter_span::Span::new(this.span.start, this.span.end)),
             this.type_annotation.is_some(),
         ));
     }
@@ -1001,7 +1031,7 @@ fn lower_formal_parameters<'b, 'a>(
             ty,
             param.optional,
             false,
-            Some(param.span().into()),
+            Some(verter_span::Span::new(param.span().start, param.span().end)),
             has_ts_annotation,
         ));
     }
@@ -1018,7 +1048,7 @@ fn lower_formal_parameters<'b, 'a>(
             ty,
             false,
             true,
-            Some(rest.span().into()),
+            Some(verter_span::Span::new(rest.span().start, rest.span().end)),
             has_ts_annotation,
         ));
     }
@@ -1041,25 +1071,44 @@ fn lower_type_params<'b, 'a>(
         .collect()
 }
 
+/// Bind every reference in `func` to one of its own type parameters. Each
+/// parameter's constraint and default see only the parameters declared
+/// before it; the parameters, return and predicate see all of them.
 fn normalize_function_type_params(mut func: FunctionExpr) -> FunctionExpr {
     if func.type_parameters.is_empty() {
         return func;
     }
 
-    let scope = normalize_type_parameter_decls(func.type_parameters);
+    let mut env = BinderEnv::default();
+    for param in std::mem::take(&mut func.type_parameters) {
+        let constraint = param
+            .constraint
+            .as_ref()
+            .map(|expr| Arc::new(normalize_in_env(expr.as_ref(), &mut env, 0)));
+        let default = param
+            .default
+            .as_ref()
+            .map(|expr| Arc::new(normalize_in_env(expr.as_ref(), &mut env, 0)));
+        env.introduce(TypeParam {
+            name: param.name,
+            constraint,
+            default,
+            is_const: param.is_const,
+        });
+    }
     func.parameters = func
         .parameters
         .into_iter()
         .map(|mut param| {
-            param.ty = normalize_type_parameter_refs(&param.ty, &scope);
+            param.ty = normalize_in_env(&param.ty, &mut env, 0);
             param
         })
         .collect();
     func.return_type = func
         .return_type
-        .map(|ret| Arc::new(normalize_type_parameter_refs(ret.as_ref(), &scope)));
-    func.predicate = normalize_predicate_type_params(func.predicate.as_deref(), &scope);
-    func.type_parameters = scope;
+        .map(|ret| Arc::new(normalize_in_env(ret.as_ref(), &mut env, 0)));
+    func.predicate = normalize_predicate_type_params(func.predicate.as_deref(), &mut env);
+    func.type_parameters = env.release(0);
     func
 }
 
@@ -1067,7 +1116,7 @@ fn normalize_function_type_params(mut func: FunctionExpr) -> FunctionExpr {
 /// resolves that name to the binder, exactly as the return does.
 fn normalize_predicate_type_params(
     predicate: Option<&TypePredicate>,
-    scope: &[TypeParam],
+    env: &mut BinderEnv,
 ) -> Option<Arc<TypePredicate>> {
     predicate.map(|predicate| {
         Arc::new(TypePredicate {
@@ -1076,33 +1125,9 @@ fn normalize_predicate_type_params(
             ty: predicate
                 .ty
                 .as_deref()
-                .map(|ty| Arc::new(normalize_type_parameter_refs(ty, scope))),
+                .map(|ty| Arc::new(normalize_in_env(ty, env, 0))),
         })
     })
-}
-
-fn normalize_type_parameter_decls(type_parameters: Vec<TypeParam>) -> Vec<TypeParam> {
-    let mut normalized = Vec::with_capacity(type_parameters.len());
-
-    for param in type_parameters {
-        let constraint = param
-            .constraint
-            .as_ref()
-            .map(|expr| Arc::new(normalize_type_parameter_refs(expr.as_ref(), &normalized)));
-        let default = param
-            .default
-            .as_ref()
-            .map(|expr| Arc::new(normalize_type_parameter_refs(expr.as_ref(), &normalized)));
-
-        normalized.push(TypeParam {
-            name: param.name,
-            constraint,
-            default,
-            is_const: param.is_const,
-        });
-    }
-
-    normalized
 }
 
 /// What one normalization step rewrites: a type, or a function nested in
@@ -1138,87 +1163,47 @@ impl Normalized {
 /// How a node's rebuild normalizes each child it holds.
 type NormalizeChild<'l, 'e> = dyn FnMut(NormalizeJob<'e>) -> Normalized + 'l;
 
-/// The type parameters in scope, shared by every child normalized under
-/// them: a function's own, then those of the scopes enclosing it.
-type ParamScope = std::rc::Rc<ParamScopeNode>;
-
-/// One function's type parameters in a [`ParamScope`] chain. It lives for
-/// one [`normalize_type_parameter_refs`] call.
-struct ParamScopeNode {
-    params: Vec<TypeParam>,
-    enclosing: Option<ParamScope>,
-}
-
-impl ParamScopeNode {
-    /// The parameter a reference named `name` resolves to: the first of
-    /// that name in the outermost scope declaring one, as a lookup over the
-    /// enclosing parameters followed by the function's own reads it.
-    fn resolve(&self, name: &str) -> Option<&TypeParam> {
-        let mut found = None;
-        let mut scope = Some(self);
-        while let Some(current) = scope {
-            if let Some(param) = current.params.iter().find(|param| param.name == name) {
-                found = Some(param);
-            }
-            scope = current.enclosing.as_deref();
-        }
-        found
-    }
-}
-
-impl Drop for ParamScopeNode {
-    /// Release a chain of scopes from a loop, not a native level per scope.
-    fn drop(&mut self) {
-        let mut enclosing = self.enclosing.take();
-        while let Some(scope) = enclosing {
-            enclosing = match std::rc::Rc::try_unwrap(scope) {
-                Ok(mut node) => node.enclosing.take(),
-                Err(_) => None,
-            };
-        }
-    }
-}
-
-/// Rewrite every reference to an in-scope type parameter into that
-/// parameter, from an explicit stack: a type nested to any depth costs no
-/// native stack per level. A node is rebuilt as [`lower_ts_type`] builds
-/// one — once with a placeholder per child to enumerate its children, then
-/// over their results — and a nested function normalizes its own type
-/// parameters one at a time (each under the ones before it), then its
-/// parameters, return and predicate under the enclosing scope and its own.
-fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeExpr {
+/// Rewrite every reference in `expr` to a binder of `env` visible from
+/// `floor` up into that binder, from an explicit stack: a type nested to any
+/// depth costs no native stack per level. A node is rebuilt as
+/// [`lower_ts_type`] builds one — once with a placeholder per child to
+/// enumerate its children, then over their results — and a nested function
+/// introduces its own type parameters one at a time (each normalized under
+/// the ones before it, with the enclosing scopes hidden), then normalizes
+/// its parameters, return and predicate under the enclosing scopes and its
+/// own, and releases its parameters. Every scope a step enters it leaves
+/// before the walk returns, so `env` ends as it began.
+fn normalize_in_env(expr: &TypeExpr, env: &mut BinderEnv, floor: usize) -> TypeExpr {
     enum Frame<'e> {
-        Enter(NormalizeJob<'e>, ParamScope),
-        Rebuild(&'e TypeExpr, ParamScope, usize),
+        /// Normalize a job seeing the binders from the floor up.
+        Enter(NormalizeJob<'e>, usize),
+        Rebuild(&'e TypeExpr, usize, usize),
+        /// Introduce the next of a nested function's type parameters, or
+        /// start its body once all are introduced. `start` is the depth its
+        /// scope began at; `outer` the floor of the position enclosing it.
         Declare {
             function: &'e FunctionExpr,
-            outer: ParamScope,
-            declared: Vec<TypeParam>,
+            outer: usize,
+            start: usize,
         },
         Declared {
             function: &'e FunctionExpr,
-            outer: ParamScope,
-            declared: Vec<TypeParam>,
+            outer: usize,
+            start: usize,
         },
         Body {
             function: &'e FunctionExpr,
-            declared: Vec<TypeParam>,
+            start: usize,
             count: usize,
         },
     }
-    let mut frames = vec![Frame::Enter(
-        NormalizeJob::Type(expr),
-        std::rc::Rc::new(ParamScopeNode {
-            params: scope.to_vec(),
-            enclosing: None,
-        }),
-    )];
+    let mut frames = vec![Frame::Enter(NormalizeJob::Type(expr), floor)];
     let mut values: Vec<Normalized> = Vec::new();
     let mut children: Vec<NormalizeJob<'_>> = Vec::new();
     while let Some(frame) = frames.pop() {
         match frame {
-            Frame::Enter(NormalizeJob::Type(node), scope) => {
-                let rebuilt = rebuild_normalized(node, &scope, &mut |child| {
+            Frame::Enter(NormalizeJob::Type(node), floor) => {
+                let rebuilt = rebuild_normalized(node, env, floor, &mut |child| {
                     children.push(child);
                     match child {
                         NormalizeJob::Type(_) => {
@@ -1237,12 +1222,12 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                 if children.is_empty() {
                     values.push(Normalized::Type(rebuilt));
                 } else {
-                    frames.push(Frame::Rebuild(node, scope.clone(), children.len()));
+                    frames.push(Frame::Rebuild(node, floor, children.len()));
                     frames.extend(
                         children
                             .drain(..)
                             .rev()
-                            .map(|child| Frame::Enter(child, scope.clone())),
+                            .map(|child| Frame::Enter(child, floor)),
                     );
                 }
             }
@@ -1250,12 +1235,12 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                 frames.push(Frame::Declare {
                     function,
                     outer,
-                    declared: Vec::with_capacity(function.type_parameters.len()),
+                    start: env.depth(),
                 });
             }
-            Frame::Rebuild(node, scope, count) => {
+            Frame::Rebuild(node, floor, count) => {
                 let mut normalized = values.split_off(values.len() - count).into_iter();
-                let rebuilt = rebuild_normalized(node, &scope, &mut |_| {
+                let rebuilt = rebuild_normalized(node, env, floor, &mut |_| {
                     normalized
                         .next()
                         .expect("a rebuild asks for the children it enumerated, in order")
@@ -1267,33 +1252,22 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
             Frame::Declare {
                 function,
                 outer,
-                declared,
-            } => match function.type_parameters.get(declared.len()) {
+                start,
+            } => match function.type_parameters.get(env.depth() - start) {
                 Some(param) => {
-                    let scope = std::rc::Rc::new(ParamScopeNode {
-                        params: declared.clone(),
-                        enclosing: None,
-                    });
                     frames.push(Frame::Declared {
                         function,
                         outer,
-                        declared,
+                        start,
                     });
                     if let Some(default) = &param.default {
-                        frames.push(Frame::Enter(
-                            NormalizeJob::Type(default.as_ref()),
-                            scope.clone(),
-                        ));
+                        frames.push(Frame::Enter(NormalizeJob::Type(default.as_ref()), start));
                     }
                     if let Some(constraint) = &param.constraint {
-                        frames.push(Frame::Enter(NormalizeJob::Type(constraint.as_ref()), scope));
+                        frames.push(Frame::Enter(NormalizeJob::Type(constraint.as_ref()), start));
                     }
                 }
                 None => {
-                    let combined = std::rc::Rc::new(ParamScopeNode {
-                        params: declared.clone(),
-                        enclosing: Some(outer),
-                    });
                     let jobs = function
                         .parameters
                         .iter()
@@ -1305,28 +1279,26 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                                 .as_deref()
                                 .and_then(|predicate| predicate.ty.as_deref()),
                         );
-                    let start = frames.len() + 1;
+                    let body = frames.len() + 1;
                     frames.push(Frame::Body {
                         function,
-                        declared,
+                        start,
                         count: 0,
                     });
-                    frames.extend(
-                        jobs.map(|ty| Frame::Enter(NormalizeJob::Type(ty), combined.clone())),
-                    );
-                    let count = frames.len() - start;
-                    frames[start..].reverse();
-                    if let Some(Frame::Body { count: body, .. }) = frames.get_mut(start - 1) {
-                        *body = count;
+                    frames.extend(jobs.map(|ty| Frame::Enter(NormalizeJob::Type(ty), outer)));
+                    let count = frames.len() - body;
+                    frames[body..].reverse();
+                    if let Some(Frame::Body { count: slot, .. }) = frames.get_mut(body - 1) {
+                        *slot = count;
                     }
                 }
             },
             Frame::Declared {
                 function,
                 outer,
-                mut declared,
+                start,
             } => {
-                let param = &function.type_parameters[declared.len()];
+                let param = &function.type_parameters[env.depth() - start];
                 let default = param
                     .default
                     .as_ref()
@@ -1335,7 +1307,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                     .constraint
                     .as_ref()
                     .map(|_| Arc::new(values.pop().expect("the constraint").into_type()));
-                declared.push(TypeParam {
+                env.introduce(TypeParam {
                     name: param.name.clone(),
                     constraint,
                     default,
@@ -1344,12 +1316,12 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                 frames.push(Frame::Declare {
                     function,
                     outer,
-                    declared,
+                    start,
                 });
             }
             Frame::Body {
                 function,
-                declared,
+                start,
                 count,
             } => {
                 let mut normalized = values
@@ -1384,6 +1356,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
                             .map(|_| Arc::new(normalized.next().expect("the predicate's type"))),
                     })
                 });
+                let declared = env.release(start);
                 values.push(Normalized::Function(
                     FunctionExpr::with_spans(parameters, return_type, declared, function.spans)
                         .with_predicate(predicate),
@@ -1397,11 +1370,13 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
         .into_type()
 }
 
-/// Rebuild one node of [`normalize_type_parameter_refs`] from its children,
-/// each normalized through `child`.
+/// Rebuild one node of [`normalize_in_env`] from its children, each
+/// normalized through `child`; a reference resolves among the binders of
+/// `env` visible from `floor` up.
 fn rebuild_normalized<'e>(
     expr: &'e TypeExpr,
-    scope: &ParamScopeNode,
+    env: &BinderEnv,
+    floor: usize,
     child: &mut NormalizeChild<'_, 'e>,
 ) -> TypeExpr {
     let mut ty = |expr: &'e TypeExpr| child(NormalizeJob::Type(expr)).into_type();
@@ -1409,8 +1384,8 @@ fn rebuild_normalized<'e>(
         TypeExpr::Ref {
             name,
             type_arguments,
-        } if type_arguments.is_empty() => scope
-            .resolve(name)
+        } if type_arguments.is_empty() => env
+            .resolve(name, floor)
             .cloned()
             .map(TypeExpr::TypeParameter)
             .unwrap_or_else(|| expr.clone()),
@@ -1744,7 +1719,7 @@ mod synthetic_carrier_tests {
     #[test]
     fn synthetic_carrier_oxc_normalize_terminal() {
         let carrier = make_carrier();
-        let normalised = normalize_type_parameter_refs(&carrier, &[]);
+        let normalised = normalize_in_env(&carrier, &mut BinderEnv::default(), 0);
         // Structural equality holds.
         assert_eq!(carrier, normalised);
         // The walk took the terminal branch — the returned Arc is the
@@ -1756,7 +1731,7 @@ mod synthetic_carrier_tests {
         {
             assert!(
                 Arc::ptr_eq(input_key, out_key),
-                "synthetic carrier traversed through normalize_type_parameter_refs must reuse the input Arc"
+                "synthetic carrier traversed through normalize_in_env must reuse the input Arc"
             );
         } else {
             panic!(
@@ -1767,7 +1742,7 @@ mod synthetic_carrier_tests {
     }
 
     /// `normalize_object_member_type_params` (reached via
-    /// `normalize_type_parameter_refs` over a `TypeExpr::Object`) rebuilds each
+    /// `normalize_in_env` over a `TypeExpr::Object`) rebuilds each
     /// member to rewrite its type-parameter refs. That rebuild MUST preserve the
     /// member's declared accessibility — it is a reconstruction of an existing
     /// member, not a fresh mint.
@@ -1816,13 +1791,14 @@ mod synthetic_carrier_tests {
             ],
         }));
 
-        let scope = vec![TypeParam {
+        let mut env = BinderEnv::default();
+        env.introduce(TypeParam {
             name: "T".to_string(),
             constraint: None,
             default: None,
             is_const: false,
-        }];
-        let normalized = normalize_type_parameter_refs(&object, &scope);
+        });
+        let normalized = normalize_in_env(&object, &mut env, 0);
         let TypeExpr::Object(obj) = &normalized else {
             panic!("expected object, got {normalized:?}");
         };

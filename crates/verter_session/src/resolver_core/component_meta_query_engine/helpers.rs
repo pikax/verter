@@ -13,30 +13,36 @@
 
 use std::collections::BTreeSet;
 
-use super::ResolvedImportedRegistrySymbol;
-use crate::resolver_core::ResolverContext;
+use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Thin `Option<&str>` wrapper over [`is_package_canonical`]. Its only
 /// consumer is the workspace-classification guard test, so it is gated to
 /// test builds (the production path uses [`is_package_canonical`] on a
 /// concrete `&str`).
 #[cfg(test)]
-pub(super) fn is_package_source(ctx: &dyn ResolverContext, source: Option<&str>) -> bool {
+pub(super) fn is_package_source(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    source: Option<&str>,
+) -> bool {
     source.is_some_and(|s| ctx.workspace_is_package_backed(s))
 }
 
-pub(super) fn is_package_canonical(ctx: &dyn ResolverContext, canonical_id: &str) -> bool {
+pub(super) fn is_package_canonical(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    canonical_id: &str,
+) -> bool {
     ctx.workspace_is_package_backed(canonical_id)
 }
 
 pub(super) fn is_builtin_name(name: &str) -> bool {
-    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
+    verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
         || matches!(name, "Array" | "ReadonlyArray" | "Promise")
 }
 
 pub(super) fn prepared_type_decl_canonical_dependencies(
     resolved_id: &str,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
 ) -> BTreeSet<String> {
     let mut canonical_dependencies = BTreeSet::from([resolved_id.to_string()]);
     if let Some((defining_file, _)) = prepared.cache_deps.defining_file.as_ref() {
@@ -83,7 +89,7 @@ pub(super) enum ImportedRegistrySymbolResolution {
 }
 
 pub(super) fn resolve_imported_registry_symbol_with_budget<F>(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     source_owner: verter_type_expr::TopLevelOwnerId,
     exported_name: &str,
@@ -96,17 +102,20 @@ where
         .prepared_type_decl_return_only(canonical_id, source_owner, exported_name)
         .is_some()
     {
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+        verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
             canonical_id,
             source_owner,
             exported_name,
         )
     } else if source_owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
-        if let Some(crate::resolver_core::ExportTarget::Local { owner, symbol_name }) = ctx
+        if let Some(verter_session_query::inputs::shallow::ExportTarget::Local {
+            owner,
+            symbol_name,
+        }) = ctx
             .shallow_file_state(canonical_id)
             .and_then(|state| state.export_target(exported_name).cloned())
         {
-            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+            verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
                 canonical_id,
                 owner,
                 symbol_name,

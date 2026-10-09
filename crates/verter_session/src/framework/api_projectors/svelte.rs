@@ -143,7 +143,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // The synthesized `default` carries the instance shape
         // (`{ $props: Props, …exports }`). A `.svelte` with no synth default
         // (no props, no exports) projects no public API.
-        let Some(crate::resolver_core::shallow_file_state::ExportTarget::Local {
+        let Some(verter_session_query::inputs::shallow::ExportTarget::Local {
             owner: component_owner,
             symbol_name: component_name,
         }) = shallow.exports.get("default")
@@ -202,7 +202,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         });
         let resolver_ctx = resolver_ctx
             .as_ref()
-            .map(|ctx| ctx as &dyn crate::resolver_core::ResolverContext);
+            .map(|ctx| ctx as &dyn crate::resolver_core::HostRequestContext);
+        let dispatch = resolver_ctx.map(|ctx| {
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+        });
         let script_fact_evidence = resolver_ctx
             .map(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
         let script_fact_state =
@@ -211,11 +214,19 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             resolver_ctx
                 .zip(script_fact_state.exact_syntax())
                 .and_then(|(ctx, syntax)| {
-                    resolve_public_exports_text(host, ctx, resolved_canonical, syntax)
+                    resolve_public_exports_text(
+                        ctx,
+                        dispatch.as_ref().expect("resolver context has facade"),
+                        resolved_canonical,
+                        syntax,
+                    )
                 });
-        let resolved_module_exports = resolver_ctx
+        let resolved_module_exports = dispatch
+            .as_ref()
             .zip(script_fact_state.exact_syntax())
-            .map(|(ctx, syntax)| resolve_public_module_exports(ctx, resolved_canonical, syntax))
+            .map(|(dispatch, syntax)| {
+                resolve_public_module_exports(dispatch, resolved_canonical, syntax)
+            })
             .unwrap_or_default();
 
         // Collect PRESERVED type references with their exact lexical owner
@@ -295,8 +306,8 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         });
         let resolved_props = resolver_ctx.and_then(|ctx| {
             resolve_public_props_text(
-                host,
                 ctx,
+                dispatch.as_ref().expect("resolver context has facade"),
                 resolved_canonical,
                 script_fact_state.exact_syntax(),
             )
@@ -327,8 +338,13 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                 )
             })
             .or_else(|| {
-                resolver_ctx
-                    .and_then(|ctx| resolve_public_dispatcher_text(host, ctx, resolved_canonical))
+                resolver_ctx.and_then(|ctx| {
+                    resolve_public_dispatcher_text(
+                        ctx,
+                        dispatch.as_ref().expect("resolver context has facade"),
+                        resolved_canonical,
+                    )
+                })
             });
         let component_props_text =
             render_native_component_props(&component_props_text, dispatcher_text.as_deref());
@@ -594,8 +610,11 @@ fn public_component_name<'a>(
 /// resolved one-level rows. A partial outcome contributes its best safe rows
 /// and is never admitted by the executor's surface cache.
 fn resolve_public_props_text(
-    host: &crate::VerterHost,
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     script_syntax: Option<
         &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
@@ -604,16 +623,16 @@ fn resolve_public_props_text(
     use crate::typeinfo::framework_surface::{ResolvedOutcome, SvelteSurfaceSource};
 
     let runes = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-        host,
         ctx,
+        dispatch,
         owner,
         SvelteSurfaceSource::RunesProps,
     );
     let uses_legacy = matches!(&runes, ResolvedOutcome::Missing);
     let outcome = if uses_legacy {
         crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-            host,
             ctx,
+            dispatch,
             owner,
             SvelteSurfaceSource::LegacyExportLet,
         )
@@ -722,15 +741,18 @@ fn resolve_public_props_text(
 /// dereferences it once and returns the one-level event rows; partial outcomes
 /// retain their best safe rows and are never admitted to the surface cache.
 fn resolve_public_dispatcher_text(
-    host: &crate::VerterHost,
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
 ) -> Option<String> {
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
 
     let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-        host,
         ctx,
+        dispatch,
         owner,
         SvelteSurfaceSource::LegacyDispatcher,
     );
@@ -760,16 +782,19 @@ fn resolve_public_dispatcher_text(
 /// binding's `typeof`, so an alias export keeps the public key while deriving
 /// its type from the real local identity.
 fn resolve_public_exports_text(
-    host: &crate::VerterHost,
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Option<ResolvedPublicExports> {
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
 
     let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-        host,
         ctx,
+        dispatch,
         owner,
         SvelteSurfaceSource::InstanceExports,
     );
@@ -805,7 +830,10 @@ fn resolve_public_exports_text(
 }
 
 fn resolve_public_module_exports(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Vec<ResolvedPublicModuleExport> {
@@ -815,7 +843,7 @@ fn resolve_public_module_exports(
         .map(|export| {
             let member =
                 crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_value_export_member(
-                    ctx,
+                    dispatch,
                     owner,
                     &export.exported_name,
                     &export.binding_key,
@@ -1175,7 +1203,7 @@ fn render_leaf_display(leaf: &LeafTypeFact) -> String {
 /// (`imported_name == "default"`) renders `import type <local> from '<source>'`.
 fn render_type_only_import(
     local: &str,
-    import: &crate::resolver_core::shallow_file_state::ImportTarget,
+    import: &verter_session_query::inputs::shallow::ImportTarget,
 ) -> String {
     let source = &import.source_specifier;
     if import.imported_name == "default" {

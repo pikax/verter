@@ -14,8 +14,7 @@ use verter_type_expr::{
     SymbolicEquivalenceKind, SymbolicEquivalenceMint, SymbolicEquivalenceProof, TypePublication,
 };
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     DeclIdentity, IndexKey, NodeScopeId, ProjectionMode, ProjectionReductionContext, QueryError,
     SemanticNodeData, SemanticNodeId,
 };
@@ -24,7 +23,7 @@ use super::core::{DeclLookup, PolicyCtx};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ProofPathStep {
-    ObjectMember(u32, crate::semantic_query::AuthoredPropertyKey),
+    ObjectMember(u32, verter_type_engine::semantic_query::AuthoredPropertyKey),
     ObjectCall(u32),
     ObjectConstruct(u32),
     ObjectIndexKey(u32),
@@ -505,7 +504,7 @@ fn normalized_projection_shape_equivalent(
     right: SemanticNodeId,
     ctx: &PolicyCtx<'_, '_>,
 ) -> Option<bool> {
-    let dispatch = ProjectSemanticDispatch::new(ctx.resolver_ctx());
+    let dispatch = ctx.engine.dispatch;
     let reduction = ProjectionReductionContext::published(ProjectionMode::Navigate);
     let mut visited = rustc_hash::FxHashSet::default();
     let mut stack = vec![(left, right)];

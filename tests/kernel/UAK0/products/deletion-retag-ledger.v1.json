@@ -1,0 +1,519 @@
+{
+  "id": "deletion-retag-ledger.v1",
+  "schema": 1,
+  "contractNode": "UAK0",
+  "describesHead": {
+    "landingTitle": "docs(arch): publish the docs-only rule for the kernel decision tier",
+    "date": "2026-10-07"
+  },
+  "categories": [
+    "central-framework-switch",
+    "untagged-coordinate-or-public-identity",
+    "duplicate-component-information-authority"
+  ],
+  "rules": {
+    "oneOwnerPerRoute": "Every displaced route names exactly one later production-capable deletion/rejection owner, its successor path from UAK0 and its receiving acceptance ID.",
+    "productionCapable": "An owner is production-capable when its charter allows production LOC and does not say it deletes nothing. The four family locks (UAI0, UAO0, UAP0, UAM0) and the verifiers (ENCT0, ENC1, PER0) delete nothing and are never deletion owners here.",
+    "retag": "disposition 'retag' means the artifact survives with a new identity or source of truth; its producer is still deleted by the owner."
+  },
+  "displacedRoutes": [
+    {
+      "id": "D01",
+      "category": "central-framework-switch",
+      "unit": "Closed carrier grammar enum and its matches",
+      "symbols": [
+        "CarrierGrammarConfig::{Vue, Svelte}",
+        "carrier_identity",
+        "grammar_fingerprint",
+        "parse_options_for_accepted",
+        "parse_key_for_accepted"
+      ],
+      "paths": [
+        "crates/verter_language/src/carrier_grammar.rs",
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_session/src/carrier_publication_store/mod.rs"
+      ],
+      "disposition": "replace",
+      "successor": "owner-local typed carrier grammar configs registered on the catalog",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D02",
+      "category": "central-framework-switch",
+      "unit": "Closed per-capability installed enums and frozen built-in catalogs",
+      "symbols": [
+        "InstalledCarrierFrontend",
+        "InstalledParseAdmission",
+        "InstalledSemanticAuthority",
+        "InstalledProjectionBackend",
+        "InstalledHostIntegration",
+        "InstalledRuntimeBackend",
+        "KnownRegisteredCompiler",
+        "built_in_frontend_catalog",
+        "built_in_semantic_catalog",
+        "built_in_projection_catalog",
+        "built_in_host_integration_catalog",
+        "built_in_runtime_catalog"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_compiler/src/framework_common/vue_host_integration.rs",
+        "crates/verter_compiler/src/standalone.rs"
+      ],
+      "disposition": "replace",
+      "successor": "CarrierFrontendRegistry plus optional CarrierCompilerBackendRegistry over CatalogSnapshot rows",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D03",
+      "category": "central-framework-switch",
+      "unit": "Closed Vue/Svelte request and product enums in the compiler and session",
+      "symbols": [
+        "FrameworkOption",
+        "FrameworkCompileRequest",
+        "DirectExecutionInputs",
+        "PreparedCarrier",
+        "FrameworkDomain",
+        "BoundRenderedMain",
+        "BoundCompiledProducts",
+        "BoundNativeHostRequest"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/compile_request/mod.rs",
+        "crates/verter_compiler/src/standalone.rs",
+        "crates/verter_compiler/src/assembly/fragment.rs",
+        "crates/verter_session/src/host_resolve/compile_request_build.rs",
+        "crates/verter_session/src/host_resolve/native_host_binding.rs"
+      ],
+      "disposition": "replace",
+      "successor": "catalog-row dispatch through the carrier frontend/backend registries",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D04",
+      "category": "central-framework-switch",
+      "unit": "Parse-identity and directive switches on adapter spelling",
+      "symbols": [
+        "FrameworkSyntaxProfile::{Vue, Svelte, Script, Requested}",
+        "syntax_profile_id_for",
+        "default_parse_identity_for",
+        "parse_identity_for",
+        "ParseOptions.{delimiters, custom_elements, svelte_loose}",
+        "DirectiveFamily::{Vue, Svelte}",
+        "parse_artifact JS module-kind is_vue branch"
+      ],
+      "paths": [
+        "crates/verter_language/src/parse_identity.rs",
+        "crates/verter_language/src/parse_artifact.rs",
+        "crates/verter_language/src/parse_artifact/carrier_inventory.rs"
+      ],
+      "disposition": "replace",
+      "successor": "carrier-profile-owned syntax profile and directive vocabulary",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D05",
+      "category": "central-framework-switch",
+      "unit": "Core is_vue()/is_svelte() predicate branches outside the LSP and MCP",
+      "symbols": [
+        "FileLanguage::is_vue",
+        "FileLanguage::is_svelte",
+        "FrameworkAdapterId::is_vue",
+        "FrameworkAdapterId::is_svelte",
+        "FileLanguage::vue()/svelte() and FrameworkAdapterId::vue()/svelte() call sites used for dispatch"
+      ],
+      "paths": [
+        "crates/verter_language/src/language.rs",
+        "crates/verter_language/src/ids.rs",
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_compiler/src/script/process.rs",
+        "crates/verter_compiler/src/svelte/runtime/client_surface_imports.rs",
+        "crates/verter_session/src/carrier_publication_store/mod.rs",
+        "crates/verter_session/src/framework/synth.rs",
+        "crates/verter_session/src/framework/self_file.rs",
+        "crates/verter_session/src/host_compile_audit.rs",
+        "crates/verter_session/src/host_manage/analysis_io.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/vue_exec/mod.rs",
+        "crates/verter_validation_probe/src/corpus/mod.rs",
+        "crates/verter_semantic_source/src/rune_ambient.rs",
+        "crates/verter_tsc/src/checker.rs"
+      ],
+      "disposition": "replace",
+      "successor": "capability predicates read from catalog rows (the FrameworkAdapterRegistry capability-predicate pattern generalised)",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D06",
+      "category": "central-framework-switch",
+      "unit": "Hard-coded host framework registrations and descriptors",
+      "symbols": [
+        "FrameworkAdapterRegistry::built_in",
+        "FrameworkAdapterRegistry::built_in_admitting",
+        "vue_registration",
+        "svelte_registration",
+        "built_in_descriptors",
+        "vue_descriptor",
+        "svelte_descriptor",
+        "FrameworkCapabilityCatalog::built_in",
+        "FrameworkAdapterRegistry::scratch_synthesizing_adapter_id"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/registry.rs",
+        "crates/verter_session/src/framework/descriptor.rs"
+      ],
+      "disposition": "replace",
+      "successor": "static registration rows in one immutable CatalogSnapshot",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D07",
+      "category": "central-framework-switch",
+      "unit": "Hard-coded extension table and process-global language registry",
+      "symbols": [
+        "LanguageRegistry::built_in",
+        "LanguageRegistry::global",
+        "SVELTE_RUNE_MODULE_LANGUAGE_ID"
+      ],
+      "paths": [
+        "crates/verter_language/src/registry.rs"
+      ],
+      "disposition": "replace",
+      "successor": "carrier rows of the CatalogSnapshot; classification reads the snapshot",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D08",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Conflated file-language identity and untagged interned ids",
+      "symbols": [
+        "FileLanguage::Framework { adapter_id, language_id }",
+        "FileLanguage::FrameworkTemplate { adapter_id, owner_hint }",
+        "ScriptFlavor::AdapterModule { adapter_id, language_id }",
+        "FrameworkAdapterId(Arc<str>)",
+        "LanguageId(Arc<str>)"
+      ],
+      "paths": [
+        "crates/verter_language/src/language.rs",
+        "crates/verter_language/src/ids.rs"
+      ],
+      "disposition": "replace",
+      "successor": "CarrierProfileId + FrameworkProfileId (VID0T newtypes); display family is never a dispatch key",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D09",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Untagged capability ids and process-flag global framework gates",
+      "symbols": [
+        "CapabilityId(Arc<str>)",
+        "GatedCandidate",
+        "framework_options_from_cli (--frameworks=)",
+        "FrameworkOptions::admitting_names",
+        "verter.enable client setting (declared, never read)",
+        "initializationOptions.frameworks (sent, never read)"
+      ],
+      "paths": [
+        "crates/verter_language/src/ids.rs",
+        "crates/verter_language/src/registry.rs",
+        "crates/verter_lsp/src/main.rs",
+        "crates/verter_session/src/framework/options.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "packages/vue-vscode/package.json",
+        "packages/vue-vscode/src/extension.ts"
+      ],
+      "disposition": "replace",
+      "successor": "per-profile, per-document-selector capability masks and participation presets",
+      "deletionOwner": "COX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "D10",
+      "category": "central-framework-switch",
+      "unit": "Per-framework LSP and editor-client branches",
+      "symbols": [
+        "handle_hover_attempt is_svelte branch",
+        "markup_occurrence_inventory / rename_plan resolve is_svelte branches",
+        "CursorContext::from_uri is_svelte branch",
+        "compute_verter_diagnostics_for_with_views Vue-only rule drop",
+        "svelte_package_diagnostic / owner_provider_path_config",
+        "prepare_managed_tsgo_svelte_carrier dispatch",
+        "CarrierKind::{Vue, Svelte} / carrier_kind_for_language",
+        "VueApiDecorationProvider languageId === 'vue'",
+        "extension.ts '**/*.{vue,svelte}' probe and 'vue' configuration section",
+        "typescript-plugin Svelte JSX runtime branches"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/server/nav_features.rs",
+        "crates/verter_lsp/src/server/rename_plan.rs",
+        "crates/verter_lsp/src/features/cursor_context.rs",
+        "crates/verter_lsp/src/server_utils.rs",
+        "crates/verter_lsp/src/svelte_assets.rs",
+        "crates/verter_lsp/src/background_init.rs",
+        "crates/verter_lsp/src/type_provider/project_sync/virtual_types.rs",
+        "crates/verter_lsp/src/features/auto_close_tag.rs",
+        "packages/vue-vscode/src/VueApiDecorationProvider.ts",
+        "packages/vue-vscode/src/extension.ts",
+        "packages/typescript-plugin/src/index.ts"
+      ],
+      "disposition": "replace",
+      "successor": "capability-mask contributions per profile; generated descriptor data for clients",
+      "deletionOwner": "COX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "D11",
+      "category": "central-framework-switch",
+      "unit": "MCP tool branches on is_vue()",
+      "symbols": [
+        "verter_mcp server tool handlers branching on kind.is_vue()"
+      ],
+      "paths": [
+        "crates/verter_mcp/src/server.rs"
+      ],
+      "disposition": "replace",
+      "successor": "per-profile capability masks; MCP tools read the same capability truth as the LSP",
+      "deletionOwner": "COX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "D12",
+      "category": "duplicate-component-information-authority",
+      "unit": "Component-meta resolver, cache and schema authority",
+      "symbols": [
+        "MetaSession::get_component_meta and its batch/resolution/payload/surface/type-expansion variants",
+        "VerterHost::get_component_meta_via_view",
+        "VerterHost::get_component_meta_with_resolution",
+        "resolve_component_meta_parts",
+        "component_meta_resolved_macros",
+        "component_meta_type_registry",
+        "ComponentMetaResultDb / ComponentMetaResultKey",
+        "CachedComponentMetaResult",
+        "ComponentMetaHost / ComponentMetaSession",
+        "component_meta_payload::{ComponentMetaSurface, TypeHandle, assemble_volar_payload, assemble_surface_from_analysis, resolve_type_expansion}",
+        "component_meta_resolution_policy",
+        "COMPONENT_META_SCHEMA_VERSION / component_meta_payload / encode_component_meta_payload",
+        "FfiComponentMeta / FfiComponentMetaOutputLane"
+      ],
+      "paths": [
+        "crates/verter_session/src/meta.rs",
+        "crates/verter_session/src/meta/output_api.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry_resolution.rs",
+        "crates/verter_session/src/resolver_core/component_meta",
+        "crates/verter_session/src/component_meta_result_db.rs",
+        "crates/verter_session/src/component_meta_cached_result.rs",
+        "crates/verter_session/src/component_meta_result_admission.rs",
+        "crates/verter_session/src/component_meta_host.rs",
+        "crates/verter_session/src/component_meta_payload.rs",
+        "crates/verter_session/src/component_meta_resolution_policy",
+        "crates/verter_session/src/meta_resolve",
+        "crates/verter_protocol/src/component_meta.rs",
+        "crates/verter_protocol/src/types.rs"
+      ],
+      "disposition": "replace",
+      "successor": "ComponentInfo as a versioned TypeInfo view plus framework facets; component-meta and vue-component-meta-compatible outputs become thin projections",
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D13",
+      "category": "duplicate-component-information-authority",
+      "unit": "Macro-only public-API projection authority",
+      "symbols": [
+        "VerterHost::get_public_api / get_public_api_batch / get_public_api_with_mode / get_public_api_projection",
+        "ComponentPublicContract / PublicProp",
+        "ComponentApiProjector and its Vue/Svelte impls",
+        "FfiComponentPublicContract / FfiPublicProp / FfiPublicEvent / FfiPublicSlot / FfiPublicApiResult / PublicApiProjectionSubject"
+      ],
+      "paths": [
+        "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
+        "crates/verter_session/src/framework/public_contract.rs",
+        "crates/verter_session/src/framework/api_projector.rs",
+        "crates/verter_session/src/framework/api_projectors",
+        "crates/verter_protocol/src/types.rs"
+      ],
+      "disposition": "replace",
+      "successor": "public-API facet over the TypeInfo-backed ComponentInfo view",
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D14",
+      "category": "duplicate-component-information-authority",
+      "unit": "Off-store framework-surface result caches",
+      "symbols": [
+        "FrameworkSurfaceStore / ErasedFrameworkSurfaceStore / StoredSurfaceDto",
+        "VueSurfaceKey / SvelteSurfaceKey"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/surface_store.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/mod.rs"
+      ],
+      "disposition": "delete",
+      "successor": "the shared semantic memo under ProjectTypeStore; no second component-surface cache",
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D15",
+      "category": "duplicate-component-information-authority",
+      "unit": "Legacy serde TypeInfo request vocabulary beside the graph envelope",
+      "symbols": [
+        "FfiEvaluateTypeExpressionRequest",
+        "FfiImportSpec",
+        "FfiSymbolEntry"
+      ],
+      "paths": [
+        "crates/verter_protocol/src/typeinfo.rs",
+        "crates/verter_ffi/src/convert/typeinfo.rs"
+      ],
+      "disposition": "replace",
+      "successor": "TypeInfoRequest operation descriptors (TIF0) carried by the one graph envelope",
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D16",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Untagged non-editor public positions",
+      "symbols": [
+        "NAPI get_code_actions(offset: u32) (UTF-16 by doc comment only)",
+        "WASM getCodeActions(offset: u32)",
+        "NapiTextEdit { spanStart, spanEnd }",
+        "NapiDocumentSymbol positions",
+        "NapiSourceRange { start, end }",
+        "NapiPreprocessorDiagnostic { line, column }",
+        "compile_request_response hard-coded OffsetEncoding::Utf16",
+        "MCP QuickFixParams.offset (byte offset)",
+        "proto GraphSpanRef { start, end }",
+        "proto GraphDiagnostic span offsets"
+      ],
+      "paths": [
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "crates/verter_napi/src/compile_request_response.rs",
+        "crates/verter_mcp/src/server.rs",
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "crates/verter_ffi/src/convert/offset.rs"
+      ],
+      "disposition": "replace",
+      "successor": "versioned encoding-tagged coordinates converted once at the adapter",
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
+      "receivingAcceptance": "ENCF0-AC1"
+    },
+    {
+      "id": "D17",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Fixed-UTF-16 editor contracts",
+      "symbols": [
+        "virtual_types.rs provider UTF16 literals",
+        "merge/position.rs mapped-run columns always UTF-16",
+        "utf16OffsetToPosition in the VS Code client"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/type_provider/project_sync/virtual_types.rs",
+        "crates/verter_lsp/src/type_provider/merge/position.rs",
+        "packages/vue-vscode/src/utils.ts"
+      ],
+      "disposition": "replace",
+      "successor": "negotiated encoding converted once at the LSP boundary; Rust core stays UTF-8 bytes",
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
+      "receivingAcceptance": "ENCL0-AC1"
+    },
+    {
+      "id": "D18",
+      "category": "duplicate-component-information-authority",
+      "unit": "Per-request framework component scan",
+      "symbols": [
+        "build_workspace_components"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/server_utils.rs"
+      ],
+      "disposition": "replace",
+      "successor": "bounded component/name index contributions with query/result parity",
+      "deletionOwner": "IDX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "IDX0"],
+      "receivingAcceptance": "IDX0-AC1"
+    },
+    {
+      "id": "D19",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "LSP project registry as project authority",
+      "symbols": [
+        "ProjectRegistry::from_workspace_roots / from_canonical_roots",
+        "ProjectConfig / RegistryBuildResult"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/config.rs"
+      ],
+      "disposition": "replace",
+      "successor": "derived project identity and membership (ProjectProfileId consumer); PM4 proves the deletion",
+      "deletionOwner": "PM1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "VID0", "CFG0", "PM0", "PM1"],
+      "receivingAcceptance": "PM1-AC1"
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "unit": "Combined CarrierCompiler trait and dynamic compiler registry",
+      "evidence": "No `CarrierCompiler` trait or dynamic compiler registry exists at the described head; capabilities are separate traits in crates/verter_compiler/src/framework_common/capability.rs. VueCarrierCompiler and SvelteCarrierCompiler are trait-less unit structs reached only through KnownRegisteredCompiler (D02).",
+      "consequence": "CPF1 subblock 6 has no trait to delete; its remaining population is D02."
+    },
+    {
+      "unit": "Shared Web Component schema/registry",
+      "evidence": "No shared custom-element schema, registry or custom-elements.json producer exists. Custom-element handling is per framework: Vue isCustomElement/custom_elements options and Svelte FfiSvelteCustomElementDescriptor.",
+      "consequence": "CEC0 receives an empty shared-schema deletion population at this head; the per-framework options are retained inputs of VCE0/SCE0."
+    },
+    {
+      "unit": "Framework-specific workspace index",
+      "evidence": "No Vue- or Svelte-specific persistent index exists; the only per-framework component discovery is the uncached scan D18.",
+      "consequence": "IDX0's displaced-index population is exactly D18."
+    }
+  ]
+}

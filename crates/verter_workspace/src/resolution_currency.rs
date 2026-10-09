@@ -12,13 +12,16 @@ use parking_lot::Mutex;
 
 use crate::published_state::PublishedRoot;
 use crate::types::ExactResolution;
-use crate::{
-    AggregateStamp, FactReadSet, FactVersionRef, FactVersionValidator, ResolveImportsFactRef,
-    SignatureAdmission,
+use verter_session_query::facts::{
+    fact_cache::{
+        AggregateStamp, FactVersionRef, FactVersionValidator, ResolveImportsFactRef,
+        SignatureAdmission,
+    },
+    fact_read_set::FactReadSet,
 };
 #[cfg(test)]
-use verter_semantic::resolver_core::SessionFingerprint;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::SessionFingerprint;
+use verter_session_query::resolution::{
     PathProbe, ResolutionContext, ResolutionPopulation, ResolutionWorldId, ResolvePhase,
     ResolveRequestKind, ResolveResult,
 };
@@ -30,7 +33,7 @@ use verter_semantic::resolver_core::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentRevision([u8; 16]);
 
-pub use verter_semantic::facts::resolution::{
+pub use verter_session_query::facts::resolution::{
     CanonicalResolutionId, NormalizedSpecifier, ProjectIdentity, ProviderPolicyIdentity,
     RawSpecifier, ResolutionEntry, ResolutionFactKey, ResolutionFactRef, ResolutionFactVersion,
     ResolutionQueryKey, ResolveContextId, ResolveEnvHash, ResolverPolicyIdentity,
@@ -153,13 +156,13 @@ impl ResolutionOverlaySnapshot {
         let mut entries = HashMap::new();
         for (canonical, source) in upserts {
             entries.insert(
-                verter_semantic::resolver_core::normalize_canonical_id(&canonical),
+                verter_session_query::resolution::normalize_canonical_id(&canonical),
                 Some(source),
             );
         }
         for canonical in tombstones {
             entries.insert(
-                verter_semantic::resolver_core::normalize_canonical_id(&canonical),
+                verter_session_query::resolution::normalize_canonical_id(&canonical),
                 None,
             );
         }
@@ -278,7 +281,7 @@ impl ResolutionOverlaySnapshot {
         #[cfg(test)]
         OVERLAY_LOOKUP_NORMALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.entries
-            .get(&verter_semantic::resolver_core::normalize_canonical_id(
+            .get(&verter_session_query::resolution::normalize_canonical_id(
                 canonical_id,
             ))
             .cloned()
@@ -383,7 +386,20 @@ type ResolutionEdgeMap = imbl::GenericHashMap<
     imbl::shared_ptr::DefaultSharedPtr,
 >;
 
-#[derive(Debug, Clone, Default)]
+/// Retired derived nodes below which [`ResolutionFactRoot`] never folds
+/// its history into the floor, however small the live graph is.
+pub(crate) const TOMBSTONE_RETIREMENT_MINIMUM: usize = 256;
+
+/// Occupancy of one root's derived graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DerivedGraphResidency {
+    pub(crate) derived_nodes: usize,
+    pub(crate) edges: usize,
+    pub(crate) dependency_buckets: usize,
+    pub(crate) retired_nodes: usize,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ResolutionFactRoot {
     versions: FactVersionLedger,
     /// derived node → its COMPLETE direct dependency set.
@@ -399,6 +415,33 @@ pub(crate) struct ResolutionFactRoot {
         rustc_hash::FxBuildHasher,
         imbl::shared_ptr::DefaultSharedPtr,
     >,
+    /// Removed derived nodes whose tombstone version is still stored in
+    /// [`Self::versions`]: the retirement history. A republished node
+    /// leaves it (its stored version is a live node's version again), and
+    /// [`Self::retire_tombstones_if_due`] drains it into
+    /// [`Self::derived_floor`].
+    retired_nodes: ResolutionEdgeSet,
+    /// The version every derived node with no stored version reads.
+    ///
+    /// [`ResolutionFactVersion::INITIAL`] until the first tombstone
+    /// retirement; each retirement raises it to a freshly minted version
+    /// no witness can hold, so a retired node reads a version different
+    /// from every one it ever had — the same no-ABA guarantee its stored
+    /// tombstone gave, without storing it.
+    derived_floor: ResolutionFactVersion,
+    /// Total direct edges across [`Self::forward`], maintained at every
+    /// attach and detach so the count is an occupancy read, not a scan.
+    edge_count: usize,
+    /// Each published decision's retention charge, shared with the
+    /// workspace-lane candidate that serves it. A root holds the charge for
+    /// as long as it holds the node, so a snapshot that outlives the
+    /// node's retirement keeps its bytes charged until the snapshot drops.
+    decision_charges: imbl::GenericHashMap<
+        ResolutionFactKey,
+        Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
+        rustc_hash::FxBuildHasher,
+        imbl::shared_ptr::DefaultSharedPtr,
+    >,
     /// Direct fact keys advanced since the enclosing mutation batch
     /// began, drained by [`Self::take_pending_seeds`] at the publication
     /// protocol's propagation step.
@@ -409,12 +452,29 @@ pub(crate) struct ResolutionFactRoot {
     pending_seeds: Vec<ResolutionFactKey>,
 }
 
+impl Default for ResolutionFactRoot {
+    fn default() -> Self {
+        Self {
+            versions: FactVersionLedger::default(),
+            forward: ResolutionEdgeMap::default(),
+            reverse: ResolutionEdgeMap::default(),
+            owner_decisions: imbl::GenericHashMap::default(),
+            retired_nodes: ResolutionEdgeSet::default(),
+            derived_floor: ResolutionFactVersion::INITIAL,
+            edge_count: 0,
+            decision_charges: imbl::GenericHashMap::default(),
+            pending_seeds: Vec::new(),
+        }
+    }
+}
+
 impl ResolutionFactRoot {
     pub(crate) fn version(&self, key: &ResolutionFactKey) -> ResolutionFactVersion {
-        self.versions
-            .get(key)
-            .copied()
-            .unwrap_or(ResolutionFactVersion::INITIAL)
+        match self.versions.get(key) {
+            Some(version) => *version,
+            None if key.is_derived_node() => self.derived_floor,
+            None => ResolutionFactVersion::INITIAL,
+        }
     }
 
     /// Semantic advance: the fact's observed meaning moved. Records the
@@ -474,6 +534,7 @@ impl ResolutionFactRoot {
         );
         let replaced = self.forward.contains_key(&node);
         self.detach_edges(&node);
+        self.retired_nodes.remove(&node);
         let mut direct = ResolutionEdgeSet::default();
         for dependency in dependencies {
             // A node is never its own dependency: a recompute of Q that
@@ -495,8 +556,22 @@ impl ResolutionFactRoot {
                 .or_default()
                 .insert(node.clone());
         }
+        self.edge_count += direct.len();
         self.forward.insert(node, direct);
         replaced
+    }
+
+    /// [`Self::publish_derived`] for a decision node whose bytes `charge`
+    /// covers: this root, and every root cloned from it while the node is
+    /// live, holds the charge with the node.
+    pub(crate) fn publish_charged_decision(
+        &mut self,
+        node: ResolutionFactKey,
+        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
+        charge: Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
+    ) -> bool {
+        self.decision_charges.insert(node.clone(), charge);
+        self.publish_derived(node, dependencies)
     }
 
     /// Drop a derived node: ADVANCE its version, then drop its complete
@@ -513,6 +588,13 @@ impl ResolutionFactRoot {
     /// Nothing is evicted. A dependent cache entry stays exactly where it
     /// is and goes cold only when its own recorded derived version fails
     /// ordinary read-side validation.
+    ///
+    /// Removing an owner's LAST decision also removes that owner's
+    /// `OwnerResolutionSet` node, under the same `version`: an owner set
+    /// with no child decision stands for nothing, and leaving it would
+    /// keep one node and its dangling edges per owner that ever resolved.
+    /// Sharing the version is sound because freshness is per key — the
+    /// version is newer than any the owner-set key ever had.
     pub(crate) fn remove_derived(
         &mut self,
         node: &ResolutionFactKey,
@@ -523,6 +605,8 @@ impl ResolutionFactRoot {
         }
         self.detach_edges(node);
         self.forward.remove(node);
+        self.decision_charges.remove(node);
+        let mut orphaned_owner_set = None;
         if let Some(owner) = node.owner_canonical() {
             let index_key = (owner.to_owned(), node.population());
             let empty = match self.owner_decisions.get_mut(&index_key) {
@@ -534,16 +618,70 @@ impl ResolutionFactRoot {
             };
             if empty {
                 self.owner_decisions.remove(&index_key);
+                orphaned_owner_set = Some(ResolutionFactKey::owner_resolution_set(
+                    CanonicalResolutionId::new(owner),
+                    node.population(),
+                ));
             }
         }
         self.advance(node.clone(), version);
+        self.retired_nodes.insert(node.clone());
+        if let Some(owner_set) = orphaned_owner_set {
+            self.remove_derived(&owner_set, version);
+        }
         true
+    }
+
+    /// Fold the retirement history into [`Self::derived_floor`] once it
+    /// outgrows the live graph.
+    ///
+    /// Every live derived node reading the current floor first stores that
+    /// value explicitly, so its witnesses keep validating; every retired
+    /// node's tombstone is then dropped and the floor raised to `fresh()`.
+    /// A retired node therefore reads a version no witness holds, exactly
+    /// as its tombstone did. The pass is `O(live + retired)` and runs only
+    /// once retired nodes outnumber both the live nodes and
+    /// [`TOMBSTONE_RETIREMENT_MINIMUM`], so its cost is amortised over the
+    /// removals that filled it and the history stays proportional to the
+    /// live graph.
+    ///
+    /// Returns whether it retired anything: the floor moved, which a
+    /// witness can observe, so the caller publishes a new world identity.
+    pub(crate) fn retire_tombstones_if_due(
+        &mut self,
+        fresh: impl FnOnce() -> ResolutionFactVersion,
+    ) -> bool {
+        if self.retired_nodes.len() <= self.forward.len().max(TOMBSTONE_RETIREMENT_MINIMUM) {
+            return false;
+        }
+        let floor = self.derived_floor;
+        for node in self.forward.keys() {
+            if !self.versions.contains_key(node) {
+                self.versions.insert(node.clone(), floor);
+            }
+        }
+        for node in std::mem::take(&mut self.retired_nodes) {
+            self.versions.remove(&node);
+        }
+        self.derived_floor = fresh();
+        true
+    }
+
+    /// Current occupancy of this root's derived graph.
+    pub(crate) fn residency(&self) -> DerivedGraphResidency {
+        DerivedGraphResidency {
+            derived_nodes: self.forward.len(),
+            edges: self.edge_count,
+            dependency_buckets: self.reverse.len(),
+            retired_nodes: self.retired_nodes.len(),
+        }
     }
 
     fn detach_edges(&mut self, node: &ResolutionFactKey) {
         let Some(previous) = self.forward.get(node).cloned() else {
             return;
         };
+        self.edge_count -= previous.len();
         for dependency in previous {
             let empty = match self.reverse.get_mut(&dependency) {
                 Some(dependents) => {
@@ -566,7 +704,7 @@ impl ResolutionFactRoot {
     ) -> Vec<ResolutionFactKey> {
         self.owner_decisions
             .get(&(
-                verter_semantic::resolver_core::normalize_canonical_id(owner),
+                verter_session_query::resolution::normalize_canonical_id(owner),
                 population,
             ))
             .map(|decisions| decisions.iter().cloned().collect())
@@ -963,22 +1101,77 @@ impl RequestOverlayRoot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ExactResolutionKey {
-    importer_id: String,
-    specifier: String,
-    phase: ResolvePhase,
-    kind: ResolveRequestKind,
+// Exact-resolution entries one thread's exact publications touched: owner
+// routes compared, replaced or turned into fact keys, plus any entry of
+// another owner a scan visited.
+#[cfg(any(test, feature = "semantic-observe"))]
+thread_local! {
+    static EXACT_PUBLICATION_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-impl ExactResolutionKey {
-    fn new(importer_id: &str, specifier: &str, context: ResolutionContext) -> Self {
-        Self {
-            importer_id: importer_id.to_owned(),
-            specifier: specifier.to_owned(),
-            phase: context.phase,
-            kind: context.kind,
+// Measurement only: the hook and every call site, including the work count
+// each passes, are absent from default builds.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub(crate) fn record_exact_publication_work(entries: usize) {
+    EXACT_PUBLICATION_WORK.with(|work| work.set(work.get() + entries as u64));
+}
+
+/// Exact-resolution entries this thread's exact publications touched since
+/// the last call, then reset.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn take_exact_publication_work() -> u64 {
+    EXACT_PUBLICATION_WORK.with(|work| work.replace(0))
+}
+
+/// One route of an owner's exact table: `(raw specifier, phase, kind)`.
+type ExactRouteKey = (String, ResolvePhase, ResolveRequestKind);
+
+/// One importer's exact resolutions. Immutable once published: a refresh of
+/// that importer publishes a replacement bucket, and every other importer's
+/// bucket is the same allocation in the outgoing and the replacement root.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ExactOwnerBucket {
+    routes: rustc_hash::FxHashMap<ExactRouteKey, ExactResolution>,
+}
+
+impl ExactOwnerBucket {
+    /// The bucket `resolutions` publish — the last route for a key wins, as
+    /// in the edge store — or `None` when there is none.
+    fn from_resolutions(resolutions: &[ExactResolution]) -> Option<Self> {
+        if resolutions.is_empty() {
+            return None;
         }
+        let routes = resolutions
+            .iter()
+            .map(|resolution| {
+                (
+                    (
+                        resolution.specifier.clone(),
+                        resolution.phase,
+                        resolution.kind,
+                    ),
+                    resolution.clone(),
+                )
+            })
+            .collect();
+        Some(Self { routes })
+    }
+
+    fn fact_keys<'a>(
+        &'a self,
+        importer_id: &'a str,
+    ) -> impl Iterator<Item = ResolutionFactKey> + 'a {
+        self.routes.keys().map(move |(specifier, phase, kind)| {
+            ResolutionFactKey::exact_importer(
+                importer_id,
+                specifier,
+                ResolutionContext {
+                    phase: *phase,
+                    kind: *kind,
+                },
+                ResolutionPopulation::Base,
+            )
+        })
     }
 }
 
@@ -1002,7 +1195,9 @@ pub(crate) struct ResolutionWorldRoot {
     /// `package.json` reads as a first observation and advances nothing.
     pub(crate) manifest_fingerprints: HashMap<String, Option<[u8; 16]>>,
     context_versions: HashMap<ResolveContextId, ResolutionFactVersion>,
-    exact_resolutions: HashMap<ExactResolutionKey, ExactResolution>,
+    /// Importer → its exact-resolution bucket. Ordered so a subtree's
+    /// importers are one range seek.
+    exact_owners: imbl::OrdMap<String, Arc<ExactOwnerBucket>>,
 }
 
 impl ResolutionWorldRoot {
@@ -1015,7 +1210,7 @@ impl ResolutionWorldRoot {
             realpaths: HashMap::new(),
             manifest_fingerprints: HashMap::new(),
             context_versions: HashMap::new(),
-            exact_resolutions: HashMap::new(),
+            exact_owners: imbl::OrdMap::new(),
         }
     }
 
@@ -1096,81 +1291,104 @@ impl ResolutionWorldRoot {
         specifier: &str,
         context: ResolutionContext,
     ) -> Option<&ExactResolution> {
-        self.exact_resolutions
-            .get(&ExactResolutionKey::new(importer_id, specifier, context))
+        self.exact_owners.get(importer_id)?.routes.get(&(
+            specifier.to_owned(),
+            context.phase,
+            context.kind,
+        ))
     }
 
+    /// Whether `other` holds the same allocation of every recorded-observation
+    /// map — path probes, realpaths, manifest fingerprints and context
+    /// versions — so building one root from the other copied none of their
+    /// entries.
+    #[cfg(test)]
+    pub(crate) fn shares_observation_maps_with(&self, other: &Self) -> bool {
+        self.path_probes.ptr_eq(&other.path_probes)
+            && self.realpaths.ptr_eq(&other.realpaths)
+            && self
+                .manifest_fingerprints
+                .ptr_eq(&other.manifest_fingerprints)
+            && self.context_versions.ptr_eq(&other.context_versions)
+    }
+
+    /// The importer's published exact bucket.
+    #[cfg(test)]
+    pub(crate) fn exact_bucket(&self, importer_id: &str) -> Option<Arc<ExactOwnerBucket>> {
+        self.exact_owners.get(importer_id).cloned()
+    }
+
+    /// Replace `importer_id`'s exact routes with `resolutions`, touching
+    /// only that importer's bucket. Returns `None` when the published bucket
+    /// already holds exactly these routes; otherwise the exact fact keys of
+    /// every route the importer had before or has now, sorted, which the
+    /// caller advances in the same publication.
     pub(crate) fn replace_owner_exacts(
         &mut self,
         importer_id: &str,
         resolutions: &[ExactResolution],
-    ) {
-        self.exact_resolutions
-            .retain(|key, _| key.importer_id != importer_id);
-        for resolution in resolutions {
-            self.exact_resolutions.insert(
-                ExactResolutionKey {
-                    importer_id: importer_id.to_owned(),
-                    specifier: resolution.specifier.clone(),
-                    phase: resolution.phase,
-                    kind: resolution.kind,
-                },
-                resolution.clone(),
-            );
+    ) -> Option<Vec<ResolutionFactKey>> {
+        let replacement = ExactOwnerBucket::from_resolutions(resolutions);
+        let stored = self.exact_owners.get(importer_id);
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_exact_publication_work(
+            stored.map_or(0, |bucket| bucket.routes.len()) + resolutions.len(),
+        );
+        if stored.map(Arc::as_ref) == replacement.as_ref() {
+            return None;
         }
+        let mut affected: Vec<ResolutionFactKey> = stored
+            .map(Arc::as_ref)
+            .into_iter()
+            .chain(replacement.as_ref())
+            .flat_map(|bucket| bucket.fact_keys(importer_id))
+            .collect();
+        affected.sort();
+        affected.dedup();
+        match replacement {
+            Some(bucket) => {
+                self.exact_owners
+                    .insert(importer_id.to_owned(), Arc::new(bucket));
+            }
+            None => {
+                self.exact_owners.remove(importer_id);
+            }
+        }
+        Some(affected)
     }
 
-    pub(crate) fn owner_exact_fact_keys(&self, importer_id: &str) -> Vec<ResolutionFactKey> {
-        self.exact_resolutions
-            .keys()
-            .filter(|key| key.importer_id == importer_id)
-            .map(|key| {
-                ResolutionFactKey::exact_importer(
-                    importer_id,
-                    &key.specifier,
-                    ResolutionContext {
-                        phase: key.phase,
-                        kind: key.kind,
-                    },
-                    ResolutionPopulation::Base,
-                )
-            })
-            .collect()
-    }
-
+    /// Every importer at or under `prefix` holding exact routes, in order:
+    /// one point lookup for the directory's own path and one range seek over
+    /// its `base/` descendants, visiting no importer outside the subtree —
+    /// a component-prefix sibling such as `base-x` or `baseway/…` sorts
+    /// outside `base/`'s range and is never reached.
     pub(crate) fn exact_owners_under(&self, prefix: &str) -> Vec<String> {
-        let mut owners = self
-            .exact_resolutions
-            .keys()
-            .filter(|key| crate::path_matches_prefix(&key.importer_id, prefix))
-            .map(|key| key.importer_id.clone())
-            .collect::<Vec<_>>();
-        owners.sort();
-        owners.dedup();
+        let base = prefix.strip_suffix('/').unwrap_or(prefix);
+        let descendants = format!("{base}/");
+        #[cfg(any(test, feature = "semantic-observe"))]
+        let mut visited = 1;
+        let mut owners: Vec<String> = self
+            .exact_owners
+            .get_key_value(base)
+            .map(|(owner, _)| owner.clone())
+            .into_iter()
+            .collect();
+        owners.extend(
+            self.exact_owners
+                .range(descendants.clone()..)
+                .map(|(owner, _)| owner)
+                .take_while(|owner| {
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    {
+                        visited += 1;
+                    }
+                    owner.starts_with(&descendants)
+                })
+                .cloned(),
+        );
+        #[cfg(any(test, feature = "semantic-observe"))]
+        record_exact_publication_work(visited);
         owners
-    }
-
-    pub(crate) fn owner_exacts_equal(
-        &self,
-        importer_id: &str,
-        resolutions: &[ExactResolution],
-    ) -> bool {
-        let stored = self
-            .exact_resolutions
-            .iter()
-            .filter(|(key, _)| key.importer_id == importer_id)
-            .collect::<Vec<_>>();
-        if stored.len() != resolutions.len() {
-            return false;
-        }
-        resolutions.iter().all(|resolution| {
-            self.exact_resolutions.get(&ExactResolutionKey {
-                importer_id: importer_id.to_owned(),
-                specifier: resolution.specifier.clone(),
-                phase: resolution.phase,
-                kind: resolution.kind,
-            }) == Some(resolution)
-        })
     }
 }
 
@@ -1334,15 +1552,15 @@ impl std::fmt::Debug for PublishedContextSelection {
 
 fn project_for_config<'a>(
     published: &'a PublishedRoot,
-    config: &verter_semantic::resolver_core::IdeProjectConfig,
+    config: &verter_session_query::resolution::IdeProjectConfig,
 ) -> Option<&'a crate::workspace_snapshot::OwnershipProject> {
-    let root = verter_semantic::resolver_core::normalize_canonical_id(&config.root);
+    let root = verter_session_query::resolution::normalize_canonical_id(&config.root);
     let workspace_root =
-        verter_semantic::resolver_core::normalize_canonical_id(&config.workspace_root);
+        verter_session_query::resolution::normalize_canonical_id(&config.workspace_root);
     let tsconfig = config
         .tsconfig_path
         .as_deref()
-        .map(verter_semantic::resolver_core::normalize_canonical_id);
+        .map(verter_session_query::resolution::normalize_canonical_id);
     published.snapshot.projects.iter().find(|project| {
         if project.root.as_str() != root || project.workspace_root.as_str() != workspace_root {
             return false;
@@ -1446,18 +1664,18 @@ fn evaluate_selected_context(
 
 pub(crate) fn explicit_context(
     world: &ResolutionWorldRoot,
-    owner: &verter_semantic::resolver_core::ProjectOwnership,
+    owner: &verter_session_query::resolution::ProjectOwnership,
 ) -> Result<(ProjectIdentity, ResolveContextId), ContextProvenanceError> {
     let published = world
         .published
         .as_ref()
         .ok_or(ContextProvenanceError::NoPublishedRoot)?;
     let normalized_root =
-        verter_semantic::resolver_core::normalize_canonical_id(&owner.project_root);
+        verter_session_query::resolution::normalize_canonical_id(&owner.project_root);
     let normalized_tsconfig = owner
         .tsconfig_path
         .as_deref()
-        .map(verter_semantic::resolver_core::normalize_canonical_id);
+        .map(verter_session_query::resolution::normalize_canonical_id);
     let project = published
         .snapshot
         .projects
@@ -1672,7 +1890,12 @@ impl CapturedResolutionWorld {
                 }
                 if let Some(session) = self.session.as_ref() {
                     let version = session.facts.version(key);
-                    if version != ResolutionFactVersion::INITIAL {
+                    // A session derived node is the session root's alone:
+                    // the session graph advances it when a base fact it
+                    // depends on moves, and its base twin is another
+                    // population's decision. Reading the twin would tie the
+                    // node to the base root's own retirement floor.
+                    if version != ResolutionFactVersion::INITIAL || key.is_derived_node() {
                         return version;
                     }
                 }
@@ -1711,9 +1934,9 @@ impl FactVersionValidator for CapturedResolutionWorld {
             // the aggregate replaced. Every other domain's aggregate
             // belongs to a producer this world knows nothing about.
             FactVersionRef::DomainGeneration(aggregate) => {
-                aggregate.domain == crate::fact_cache::CompactionDomain::Resolution
+                aggregate.domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
                     && match aggregate.population {
-                        crate::fact_cache::AggregatePopulation::Resolution(population) => {
+                        verter_session_query::facts::fact_cache::AggregatePopulation::Resolution(population) => {
                             self.resolution_stamp(population) == Some(aggregate.stamp)
                         }
                         // A VIEW population is another producer's identity
@@ -1722,7 +1945,7 @@ impl FactVersionValidator for CapturedResolutionWorld {
                         // the resolution domain under one is malformed, and
                         // vouching for it would let a view-scoped claim be
                         // settled by a resolution-world stamp.
-                        crate::fact_cache::AggregatePopulation::View(_) => false,
+                        verter_session_query::facts::fact_cache::AggregatePopulation::View(_) => false,
                     }
             }
             // A consumed result's receipt holds exactly when every fact it
@@ -1802,7 +2025,7 @@ pub struct AdmittedResolution<T = ResolveResult> {
     /// for this result. A persistent sink roots its entry on THIS signature
     /// so the entry revalidates through the resolve-imports fact rail; it
     /// travels with the carrier and is never re-derivable from the result.
-    signature: crate::ReadSetSignature,
+    signature: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 impl<T> AdmittedResolution<T> {
@@ -1822,7 +2045,7 @@ impl<T> AdmittedResolution<T> {
     /// validate against a captured [`CapturedResolutionWorld`] through the
     /// existing `FactVersionRef::ResolveImports` rail.
     #[must_use]
-    pub fn signature(&self) -> &crate::ReadSetSignature {
+    pub fn signature(&self) -> &verter_session_query::facts::fact_cache::ReadSetSignature {
         &self.signature
     }
 
@@ -2312,7 +2535,7 @@ pub(crate) struct ResolutionTransaction {
     query: Option<ResolutionQueryKey>,
     /// Per-domain generations this transaction compacts against. Only the
     /// resolution domain is populated — see [`Self::new`].
-    aggregate_basis: crate::fact_cache::AggregateGenerations,
+    aggregate_basis: verter_session_query::facts::fact_cache::AggregateGenerations,
 }
 
 /// Resolver-facing reader that makes every filesystem/config observation enter
@@ -2381,7 +2604,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         match self.overlay.get(canonical_id) {
-            Some(Some(_)) => Some(verter_semantic::resolver_core::normalize_canonical_id(
+            Some(Some(_)) => Some(verter_session_query::resolution::normalize_canonical_id(
                 canonical_id,
             )),
             Some(None) => None,
@@ -2399,11 +2622,11 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::preflight_supported_resolution_inputs(
             keys,
@@ -2432,9 +2655,9 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                             directories,
                             ..
                         }) => Ok((*present, *raw_bytes, directories.clone())),
-                        _ => Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        _ => Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                             unresolved: vec![key.clone()],
-                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                            reason: verter_session_query::resolution::InputLoadIntegrityReason::KeySetMismatch,
                         }),
                     }
                 }
@@ -2447,7 +2670,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::load_supported_resolution_inputs(
             reservation,
@@ -2457,18 +2680,18 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
             {
                 Some(source) => {
                     if source.is_some() != expected_present {
-                        return Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        return Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::IncompleteBoundedCapture,
                             });
                     }
                     let Some(source) = source else {
                         return Ok(None);
                     };
                     if source.len() as u64 > reserved_raw_bytes {
-                        return Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        return Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
                             });
                     }
                     Ok(Some(self.overlay.parse_manifest(&source)))
@@ -2479,18 +2702,18 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                             .iter()
                             .find(|entry| entry.key() == key)
                             .cloned()
-                            .ok_or_else(|| verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            .ok_or_else(|| verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::KeySetMismatch,
                             })?;
                     let batch = crate::resolver::ResolutionInputReservationBatch::new(
                             vec![key.clone()],
                             reservation.basis(),
                             vec![entry],
                         )
-                        .ok_or_else(|| verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        .ok_or_else(|| verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                             unresolved: vec![key.clone()],
-                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                            reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
                         })?;
                     let loaded = self.inner.load_preflighted_resolution_inputs(&batch)?;
                     match loaded.entries().first() {
@@ -2498,9 +2721,9 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                                 value,
                                 ..
                             }) => Ok(value.as_deref().cloned()),
-                            _ => Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            _ => Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::KeySetMismatch,
                             }),
                         }
                 }
@@ -2526,6 +2749,10 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
         self.inner.last_content_transition_generation(canonical_id)
+    }
+
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        self.inner.freshness_readers()
     }
 
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
@@ -2639,19 +2866,19 @@ impl<'a> TransactionReader<'a> {
 
 pub(crate) fn resolution_basis_for_reader(
     reader: &dyn crate::traits::WorkspaceRead,
-) -> Option<verter_semantic::resolver_core::ResolutionBasis> {
-    let authority = verter_semantic::resolver_core::WorkspaceAuthorityId::from_raw(
+) -> Option<verter_session_query::resolution::ResolutionBasis> {
+    let authority = verter_session_query::resolution::WorkspaceAuthorityId::from_raw(
         reader.strict_self_root_authority_id()?,
     );
     let population = reader.resolution_population();
     let world = reader.capture_resolution_world()?;
-    let crate::fact_cache::AggregateStamp::ResolutionRoots { base, session } =
+    let verter_session_query::facts::fact_cache::AggregateStamp::ResolutionRoots { base, session } =
         world.resolution_stamp(population)?
     else {
         return None;
     };
-    Some(verter_semantic::resolver_core::ResolutionBasis::new(
-        verter_semantic::resolver_core::ResolutionWorldBasis::new(
+    Some(verter_session_query::resolution::ResolutionBasis::new(
+        verter_session_query::resolution::ResolutionWorldBasis::new(
             authority, population, base, session,
         ),
         None,
@@ -2695,7 +2922,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn note_input_resolution_budget_exhausted(
         &self,
-        _event: verter_semantic::resolver_core::InputResolutionBudgetExhaustion,
+        _event: verter_session_query::resolution::InputResolutionBudgetExhaustion,
     ) {
         self.transaction.lock().mark_budget_exhausted();
     }
@@ -2714,11 +2941,11 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         self.inner.preflight_resolution_inputs_bounded(keys, basis)
     }
@@ -2728,7 +2955,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         self.inner.load_preflighted_resolution_inputs(reservation)
     }
@@ -2794,6 +3021,10 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         self.inner.last_content_transition_generation(canonical_id)
     }
 
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        self.inner.freshness_readers()
+    }
+
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.inner.vfs_provenance_snapshot()
     }
@@ -2854,7 +3085,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn read_ambient_lib(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         self.inner.read_ambient_lib(stable_key, canonical_id)
@@ -2862,7 +3093,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn ambient_virtual_canonical_id(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Arc<str> {
         self.inner
@@ -2871,16 +3102,16 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn project_stable_key(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+        project_id: verter_session_query::resolution::ProjectId,
+    ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         self.inner.project_stable_key(project_id)
     }
 
     fn lookup_ambient_symbol(
         &self,
-        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
+        consumer_project: verter_session_query::resolution::ProjectStableKey,
         symbol: &str,
-    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
+    ) -> Option<verter_session_query::resolution::AmbientSymbolHit> {
         self.inner.lookup_ambient_symbol(consumer_project, symbol)
     }
 
@@ -2901,7 +3132,7 @@ impl ResolutionTransaction {
         // caller. Every other domain is left absent and stays precise.
         let resolution = root.resolution_stamp(root.population);
         Self {
-            aggregate_basis: crate::fact_cache::AggregateGenerations {
+            aggregate_basis: verter_session_query::facts::fact_cache::AggregateGenerations {
                 resolution,
                 ..Default::default()
             },
@@ -2949,7 +3180,7 @@ impl ResolutionTransaction {
 
     pub(crate) fn observe(&mut self, key: ResolutionFactKey) {
         if self.observed_keys.contains(&key) {
-            crate::probe_tally!(OBS_SUPPRESSED, 1);
+            verter_session_query::probe_tally!(OBS_SUPPRESSED, 1);
             return;
         }
         let version = self.root.fact_version(&key);
@@ -2987,7 +3218,10 @@ impl ResolutionTransaction {
     /// For a reuse with no decision node to root on: the facts are the ones
     /// the candidate observed, already validated against this attempt's
     /// world, so they carry exactly the versions this world reports.
-    pub(crate) fn adopt_witness(&mut self, witness: &crate::ReadSetSignature) {
+    pub(crate) fn adopt_witness(
+        &mut self,
+        witness: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    ) {
         for fact in witness.facts.iter() {
             if let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) =
                 fact
@@ -3057,7 +3291,7 @@ impl ResolutionTransaction {
     }
 
     pub(crate) fn observe_path(&mut self, canonical: &str, outcome: PathProbe) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.observe_canonical_path(&canonical, outcome);
     }
 
@@ -3087,7 +3321,7 @@ impl ResolutionTransaction {
     /// A manifest observed as ABSENT records `None` — that is a value, not
     /// an absence of one.
     pub(crate) fn observe_manifest(&mut self, canonical: &str, fingerprint: Option<[u8; 16]>) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.observe_canonical_manifest(&canonical, fingerprint);
     }
 
@@ -3102,8 +3336,8 @@ impl ResolutionTransaction {
     }
 
     pub(crate) fn observe_realpath(&mut self, requested: &str, resolved: Option<&str>) {
-        let requested = verter_semantic::resolver_core::normalize_canonical_id(requested);
-        let resolved = resolved.map(verter_semantic::resolver_core::normalize_canonical_id);
+        let requested = verter_session_query::resolution::normalize_canonical_id(requested);
+        let resolved = resolved.map(verter_session_query::resolution::normalize_canonical_id);
         self.observe_canonical_realpath(&requested, resolved.as_deref());
     }
 
@@ -3131,7 +3365,7 @@ impl ResolutionTransaction {
     pub(crate) fn observe_directory(&mut self, canonical: &str) {
         self.observe(ResolutionFactKey::DirectoryMembers {
             canonical: CanonicalResolutionId::new(
-                verter_semantic::resolver_core::normalize_canonical_id(canonical),
+                verter_session_query::resolution::normalize_canonical_id(canonical),
             ),
             population: self.population(),
         });
@@ -3168,11 +3402,11 @@ impl ResolutionTransaction {
         if let Some(reason) = self.non_admission {
             return SignatureAdmission::NonCacheable(reason);
         }
-        crate::probe_tally!(OBS_PRE_DEDUP, self.observations.len());
+        verter_session_query::probe_tally!(OBS_PRE_DEDUP, self.observations.len());
         let mut facts = FactReadSet::new();
         facts.set_aggregate_basis(self.aggregate_basis);
         {
-            crate::probe_scope!(FINISH_COLLECT);
+            verter_session_query::probe_scope!(FINISH_COLLECT);
             facts.observe_borrowed_signature(&self.observations);
         }
         SignatureAdmission::from_finalise(facts.finalise())
@@ -3282,12 +3516,12 @@ mod transaction_contract_tests {
         let raw_realpath = r"C:\repo\real\main.ts";
         let raw_manifest = r"C:\repo\node_modules\pkg\package.json";
         let raw_scope = r"C:\repo\src";
-        let canonical_path = verter_semantic::resolver_core::normalize_canonical_id(raw_path);
+        let canonical_path = verter_session_query::resolution::normalize_canonical_id(raw_path);
         let canonical_realpath =
-            verter_semantic::resolver_core::normalize_canonical_id(raw_realpath);
+            verter_session_query::resolution::normalize_canonical_id(raw_realpath);
         let canonical_manifest =
-            verter_semantic::resolver_core::normalize_canonical_id(raw_manifest);
-        let canonical_scope = verter_semantic::resolver_core::normalize_canonical_id(raw_scope);
+            verter_session_query::resolution::normalize_canonical_id(raw_manifest);
+        let canonical_scope = verter_session_query::resolution::normalize_canonical_id(raw_scope);
         let fingerprint = Some([0xA5; 16]);
 
         let mut raw = ResolutionTransaction::new(captured_world());
@@ -3362,7 +3596,7 @@ mod transaction_contract_tests {
     fn resolution_over_cap_single_domain_admits_instead_of_refusing() {
         let mut transaction = ResolutionTransaction::new(captured_world());
         transaction.set_query(query());
-        for index in 0..=crate::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3390,7 +3624,7 @@ mod transaction_contract_tests {
     fn resolution_over_cap_lifts_only_its_own_domain() {
         let mut transaction = ResolutionTransaction::new(captured_world());
         transaction.set_query(query());
-        for index in 0..=crate::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3421,11 +3655,13 @@ mod transaction_contract_tests {
         );
         assert_eq!(
             aggregates[0].domain,
-            crate::fact_cache::CompactionDomain::Resolution
+            verter_session_query::facts::fact_cache::CompactionDomain::Resolution
         );
         assert_eq!(
             aggregates[0].population,
-            crate::fact_cache::AggregatePopulation::Resolution(ResolutionPopulation::Base),
+            verter_session_query::facts::fact_cache::AggregatePopulation::Resolution(
+                ResolutionPopulation::Base
+            ),
             "the aggregate must carry the population of the bucket it replaced"
         );
         assert!(
@@ -3454,7 +3690,7 @@ mod transaction_contract_tests {
     fn a_lifted_resolution_domain_does_not_regrow() {
         let mut first = ResolutionTransaction::new(captured_world());
         first.set_query(query());
-        for index in 0..=crate::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             first.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3491,7 +3727,7 @@ mod transaction_contract_tests {
         assert!(matches!(
             &signature.facts[0],
             FactVersionRef::DomainGeneration(fact)
-                if fact.domain == crate::fact_cache::CompactionDomain::Resolution
+                if fact.domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
         ));
     }
 
@@ -3503,7 +3739,7 @@ mod transaction_contract_tests {
     /// for any session) — the cross-population assertions fail.
     #[test]
     fn resolution_aggregate_never_validates_across_populations() {
-        use crate::fact_cache::{
+        use verter_session_query::facts::fact_cache::{
             AggregatePopulation, CompactionDomain, DomainGenerationFact, FactVersionValidator,
         };
 
@@ -3561,7 +3797,7 @@ mod transaction_contract_tests {
     /// nothing else in the workspace suite does.
     #[test]
     fn a_view_population_aggregate_is_refused_by_the_resolution_world() {
-        use crate::fact_cache::{
+        use verter_session_query::facts::fact_cache::{
             AggregatePopulation, CompactionDomain, DomainGenerationFact, FactVersionValidator,
             SessionOverlayFingerprint, ViewPopulation,
         };
@@ -3599,7 +3835,9 @@ mod transaction_contract_tests {
         }
     }
 
-    fn finished_signature(transaction: ResolutionTransaction) -> crate::ReadSetSignature {
+    fn finished_signature(
+        transaction: ResolutionTransaction,
+    ) -> verter_session_query::facts::fact_cache::ReadSetSignature {
         match transaction.finish() {
             SignatureAdmission::Cacheable(signature) => signature,
             other => panic!("expected a cacheable witness, got {other:?}"),
@@ -4052,6 +4290,116 @@ mod root_graph_tests {
             "a reintroduced node keeps its tombstone version — a witness recorded before \
              the removal must never validate again"
         );
+    }
+
+    /// **Folding the retirement history keeps every live node's version
+    /// and gives every retired node one no witness holds.**
+    ///
+    /// Live nodes reading the floor are stored at it before it moves, so
+    /// their witnesses survive the fold; a retired node loses its stored
+    /// tombstone and reads the raised floor, which is neither its tombstone
+    /// nor `INITIAL`. Removing an owner's last decision takes its owner set
+    /// along.
+    ///
+    /// Mutation recipe: drop the loop in `retire_tombstones_if_due` that
+    /// stores the old floor for live nodes. The live node then reads the
+    /// raised floor and the first assertion after the fold fails.
+    #[test]
+    fn folding_retired_nodes_keeps_live_versions_and_never_revisits_a_retired_one() {
+        let mut mint = minter();
+        let mut root = ResolutionFactRoot::default();
+        let live = node("./live");
+        root.publish_derived(live.clone(), [leaf("/p/live.ts")]);
+        let owner_set = ResolutionFactKey::owner_resolution_set(
+            CanonicalResolutionId::new("/p/main.ts"),
+            ResolutionPopulation::Base,
+        );
+        root.publish_derived(owner_set.clone(), [live.clone()]);
+
+        let first_retired = node("./retired-0");
+        root.publish_derived(first_retired.clone(), [leaf("/p/retired.ts")]);
+        root.remove_derived(&first_retired, mint());
+        let tombstone = root.version(&first_retired);
+        let mut folded = false;
+        for index in 1..=TOMBSTONE_RETIREMENT_MINIMUM {
+            let retired = node(&format!("./retired-{index}"));
+            root.publish_derived(retired.clone(), [leaf("/p/retired.ts")]);
+            root.remove_derived(&retired, mint());
+            folded |= root.retire_tombstones_if_due(&mut mint);
+        }
+        assert!(
+            folded,
+            "fixture invariant: the history outgrew the live graph"
+        );
+
+        assert_eq!(
+            root.version(&live),
+            ResolutionFactVersion::INITIAL,
+            "a live node's witnesses survive the fold"
+        );
+        let floor = root.version(&first_retired);
+        assert_ne!(floor, tombstone, "the tombstone itself is gone");
+        assert_ne!(floor, ResolutionFactVersion::INITIAL);
+        assert!(root.residency().retired_nodes < TOMBSTONE_RETIREMENT_MINIMUM);
+
+        assert!(root.remove_derived(&live, mint()));
+        assert!(
+            root.direct_dependencies(&owner_set).is_none(),
+            "the owner set leaves with its last decision"
+        );
+        assert_eq!(root.residency().derived_nodes, 0);
+        assert_eq!(root.residency().edges, 0);
+        assert_eq!(root.residency().dependency_buckets, 0);
+    }
+
+    /// **A base root's retirement fold leaves every session decision's
+    /// version where it was.**
+    ///
+    /// A session decision node is the session root's alone; its base twin
+    /// is another population's decision, so the base root raising its
+    /// derived floor must not move what the session node reads.
+    ///
+    /// Mutation recipe: let a session derived node that reads `INITIAL`
+    /// fall through to its base twin again. After the base fold the twin
+    /// reads the raised floor and the session version moves.
+    #[test]
+    fn a_base_fold_leaves_session_decisions_where_they_were() {
+        let mut mint = minter();
+        let session_population = ResolutionPopulation::Session(SessionFingerprint::from_raw(7));
+        let session_node = node("./session").in_population(session_population);
+        let mut session = ResolutionSessionRoot::bootstrap(ResolutionWorldId::from_raw(2));
+        session
+            .facts
+            .publish_derived(session_node.clone(), [leaf("/p/session.ts")]);
+        let world = |base: ResolutionWorldRoot| CapturedResolutionWorld {
+            base: Arc::new(base),
+            session: Some(Arc::new(session.clone())),
+            population: session_population,
+            overlay: None,
+            overlay_values: None,
+        };
+
+        let mut base = ResolutionWorldRoot::bootstrap(ResolutionWorldId::from_raw(1));
+        let before = world(base.clone()).fact_version(&session_node);
+        let mut folded = false;
+        for index in 0..=TOMBSTONE_RETIREMENT_MINIMUM {
+            let retired = node(&format!("./retired-{index}"));
+            base.facts
+                .publish_derived(retired.clone(), [leaf("/p/retired.ts")]);
+            base.facts.remove_derived(&retired, mint());
+            folded |= base.facts.retire_tombstones_if_due(&mut mint);
+        }
+        assert!(
+            folded,
+            "fixture invariant: the base root folded its history"
+        );
+        assert_ne!(
+            base.facts
+                .version(&session_node.in_population(ResolutionPopulation::Base)),
+            ResolutionFactVersion::INITIAL,
+            "fixture invariant: the base twin now reads the raised floor"
+        );
+        assert_eq!(world(base).fact_version(&session_node), before);
     }
 
     /// **Propagation advances each reachable derived node exactly once

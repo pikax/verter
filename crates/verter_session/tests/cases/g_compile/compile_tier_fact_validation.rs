@@ -73,7 +73,9 @@ fn compile_slot_carries_fact_dep_signature_field_grep() {
         .join("types.rs");
     let src = std::fs::read_to_string(&path).expect("read types.rs");
     assert!(
-        src.contains("fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature"),
+        src.contains(
+            "fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature"
+        ),
         "R3/R26/R28: `CompileSlot.fact_dep_signature` MUST be declared as \
          `ReadSetSignature` in types.rs so overflow and empty are structurally \
          distinguishable at the carrier type"

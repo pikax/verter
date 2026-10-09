@@ -47,7 +47,7 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{CaptureToken, KeyFamily};
+use verter_type_engine::capture_token::{CaptureToken, KeyFamily};
 
 use super::harness::{build_hermetic_host, resolve_under_audit};
 

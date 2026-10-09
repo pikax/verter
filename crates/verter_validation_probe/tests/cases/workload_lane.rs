@@ -17,8 +17,8 @@ use verter_validation_probe::runner::{self, DriverCommand, PhaseDeadlines, Plann
 use verter_validation_probe::summary::{FrameworkSummary, Lane};
 use verter_validation_probe::Framework;
 
-/// Which lane this run drives. The workflow's smoke job leaves it unset; the
-/// main job sets it to `main`.
+/// Which lane this run drives. The workflow sets it to `main`; a local run
+/// that leaves it unset drives the bounded smoke slice.
 fn lane_from_env() -> Lane {
     match std::env::var("VALIDATION_PROBE_LANE").as_deref() {
         Ok("main") => Lane::Main,
@@ -325,6 +325,14 @@ fn every_checkout_is_at_the_pinned_revision() {
             "the {framework} checkout is at a different commit than the manifest pins",
         );
         lane::check_revision(&manifest).unwrap_or_else(|error| panic!("{error}"));
+        lane::check_inventory(&manifest).unwrap_or_else(|error| panic!("{error}"));
+        let selected = lane::selection(&manifest, Lane::Main);
+        let planned = lane::plan(&manifest, &selected).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            planned.len(),
+            selected.len(),
+            "every input's digest is checked"
+        );
     }
 }
 

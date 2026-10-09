@@ -69,7 +69,7 @@ The relevant code paths the investigation walked:
      `type SelfOmit = Omit<SelfOmit, 'gone'>`. Same termination
      sentinels, same expectation. The test currently passes.
 
-3. `crates/verter_session/src/capture_token.rs:839`
+3. `crates/verter_type_engine/src/capture_token.rs:839`
    - `assert_no_stack_overflow` runs the closure on a 256 KiB stack
      thread. On Linux/macOS the OS converts the SIGSEGV at the guard
      page into a thread-only panic that `JoinHandle::join` reports as
@@ -80,7 +80,7 @@ The relevant code paths the investigation walked:
      the guard is wrongly keyed and the policy walker chases an
      infinite chain, the 256 KiB stack catches it quickly.
 
-4. `crates/verter_session/src/resolver_core/fuses.rs:8`
+4. `crates/verter_type_engine/src/resolver_core/fuses.rs:8`
    - `FuseBudgets` carries the architecture rules for related
      traversal layers: `member_surface_recursion_depth: 10`,
      `projection_op_count: 2000`, `union_member_explosion: 100`. These
@@ -173,9 +173,9 @@ formal record of those sentinels).
   (`recursive_omit_self_referential_alias_terminates`)
 - `crates/verter_session/src/component_meta_resolution_policy_cycle_tests.rs:145-167`
   (`run_policy_with_overflow_check` harness)
-- `crates/verter_session/src/capture_token.rs:839-903`
+- `crates/verter_type_engine/src/capture_token.rs:839-903`
   (`assert_no_stack_overflow`)
-- `crates/verter_session/src/resolver_core/fuses.rs:8-38`
+- `crates/verter_type_engine/src/resolver_core/fuses.rs:8-38`
   (`FuseBudgets` defaults)
-- `crates/verter_session/src/semantic_query_memo/family.rs`
+- `crates/verter_type_engine/src/semantic_query_memo/family.rs`
   (semantic query memo — cycles never reach it from these shapes)

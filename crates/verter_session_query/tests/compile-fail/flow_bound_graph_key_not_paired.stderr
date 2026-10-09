@@ -1,0 +1,7 @@
+error[E0560]: struct `BoundFlowGraph` has no field named `key`
+ --> tests/compile-fail/flow_bound_graph_key_not_paired.rs:7:22
+  |
+7 |     BoundFlowGraph { key, bundle }
+  |                      ^^^ `BoundFlowGraph` does not have this field
+  |
+  = note: all struct fields are already assigned

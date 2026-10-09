@@ -47,7 +47,6 @@ mod frontier_engine;
 mod frontier_helpers;
 pub mod native_host_binding;
 mod route_surface;
-mod rune_ambient;
 mod virtual_file_pipeline;
 mod vue_macro_dependency_diagnostics;
 mod vue_script_extract;
@@ -61,18 +60,10 @@ pub(crate) use virtual_file_pipeline::vue_macro_output_matches_revision;
 // (frontier_tests / host_resolve_tests) or by external sibling modules
 // that name them via `crate::host_resolve::*`; the lint cannot see
 // through the cfg gate / sibling-path resolution.
-#[allow(unused_imports)]
-pub(crate) use rune_ambient::is_svelte_rune_module;
-#[allow(unused_imports)]
-pub(crate) use rune_ambient::{
-    merge_rune_ambient_into_env, merge_rune_ambient_inventory_into_env, rune_ambient_has_type,
-    rune_ambient_has_value, rune_ambient_type_decl, rune_ambient_value_decl,
-};
 #[cfg(test)]
 pub(crate) use vue_script_extract::extract_vue_script_content;
 pub(crate) use vue_script_extract::{
-    indexed_script_setup_type_params, ordered_sfc_structure_analysis,
-    populate_ordered_sfc_structure, sfc_script_setup_type_params, template_converter_inputs,
+    ordered_sfc_structure_analysis, sfc_script_setup_type_params, template_converter_inputs,
 };
 
 // Test-only knob: arm the compile-tier producer's fact-injection slot.
@@ -132,3 +123,6 @@ mod host_resolve_creo_tests;
 #[cfg(test)]
 #[path = "../frontier_tests.rs"]
 mod frontier_tests;
+
+#[cfg(test)]
+pub(crate) use vue_script_extract::populate_ordered_sfc_structure;

@@ -29,9 +29,9 @@ use std::sync::Arc;
 
 use verter_audit::payloads::tags::{CompileBackendTag, CompileProductSetTag};
 use verter_audit::{AuditCaptureState, AuditConfig, AuditConsumerFilter, CompilePayload};
-use verter_session::request_context::{RequestContext, RequestContextGuard};
 use verter_session::CompileTarget;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 const SFC: &str = "<script setup lang=\"ts\">\n\
                    import { ref } from 'vue';\n\

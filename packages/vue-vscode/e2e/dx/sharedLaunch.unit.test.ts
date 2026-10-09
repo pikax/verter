@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  acquireVscodeInChildProcess,
   applyWindowsCliPathFix,
   copyLspBinaryToTemp,
   findLspBinary,
   resolveVscodeExecutablePath,
   VSCODE_ACQUISITION_RETRY,
+  VSCODE_EXECUTABLE_MARKER,
 } from "../sharedLaunch";
 
 const tmps: string[] = [];
@@ -203,7 +205,9 @@ describe("resolveVscodeExecutablePath", () => {
         existsSync: () => true,
         retry: { attempts: 3, delayMs: 1, sleep: async () => undefined },
       }),
-    ).rejects.toThrow("download failed #3");
+    ).rejects.toThrow(
+      /Could not acquire VS Code stable after 3 attempt\(s\)\..*download failed #3/,
+    );
     expect(attempts).toBe(3);
   });
 
@@ -221,5 +225,48 @@ describe("resolveVscodeExecutablePath", () => {
       }),
     ).rejects.toThrow("never");
     expect(attempts).toBe(VSCODE_ACQUISITION_RETRY.attempts);
+  });
+});
+
+describe("acquireVscodeInChildProcess", () => {
+  function script(body: string): string {
+    const file = join(tmp("dx-acquire-"), "acquire.js");
+    writeFileSync(file, body);
+    return file;
+  }
+
+  it("returns the executable the acquisition process reports", async () => {
+    const scriptPath = script(
+      `console.log("progress");\nconsole.log(${JSON.stringify(VSCODE_EXECUTABLE_MARKER)} + "/opt/vscode/code-" + process.argv[2]);`,
+    );
+    await expect(acquireVscodeInChildProcess("1.135.0", { scriptPath })).resolves.toBe(
+      "/opt/vscode/code-1.135.0",
+    );
+  });
+
+  it("turns a download that crashes its process into an ordinary, retryable rejection", async () => {
+    // test-electron 2.5.x leaks a rejected promise when the archive stream is
+    // reset (ECONNRESET), which Node turns into an uncaught exception. In-process
+    // that killed the runner; out of process it is just a failed attempt.
+    const scriptPath = script(
+      `Promise.reject(Object.assign(new Error("aborted"), { code: "ECONNRESET" }));`,
+    );
+    await expect(acquireVscodeInChildProcess("1.135.0", { scriptPath })).rejects.toThrow(
+      "VS Code 1.135.0 acquisition process exited with code 1",
+    );
+  });
+
+  it("rejects a process that succeeds without reporting an executable", async () => {
+    const scriptPath = script(`console.log("nothing to see");`);
+    await expect(acquireVscodeInChildProcess("stable", { scriptPath })).rejects.toThrow(
+      "exited without reporting an executable",
+    );
+  });
+
+  it("kills and rejects a process that outlives its time cap", async () => {
+    const scriptPath = script(`setTimeout(() => {}, 60_000);`);
+    await expect(
+      acquireVscodeInChildProcess("stable", { scriptPath, timeoutMs: 200 }),
+    ).rejects.toThrow("timed out after 200ms");
   });
 });

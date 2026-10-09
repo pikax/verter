@@ -1,12 +1,14 @@
 mod analysis;
 mod diagnostics;
+mod foreground;
 mod guarded_host;
 pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
 #[cfg(test)]
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
-pub(crate) use diagnostics::DiagnosticPublication;
+pub(crate) use diagnostics::BackgroundPublication;
 pub(crate) use diagnostics::DiagnosticsRefresh;
+pub(crate) use foreground::{EditBearing, ForegroundRequest, ForegroundRoute, Settled};
 pub use guarded_host::{HostRef, SharedHost};
 pub mod carrier_structure;
 pub mod line_index;
@@ -41,10 +43,21 @@ pub struct DocumentRegistry {
     /// access goes through [`Self::host`], which holds a semantic-activity
     /// guard for the call (see [`guarded_host`]).
     host: SharedHost,
+    /// The host's language classifier, captured once: it is immutable for
+    /// the host's lifetime, so protocol paths classify under the host's
+    /// framework admission without borrowing the host per call.
+    language_classifier: verter_session::framework::HostLanguageClassifier,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
-    diagnostics_state: parking_lot::Mutex<diagnostics::DiagnosticsState>,
+    /// Shared with the outbound writer, which re-checks a publication's epoch
+    /// against it when it takes the payload.
+    diagnostics_state: Arc<parking_lot::Mutex<diagnostics::DiagnosticsState>>,
     diagnostics_refresh_tx: tokio::sync::broadcast::Sender<DiagnosticsRefresh>,
+    /// The bounded replacement lane every diagnostics publication reaches the
+    /// client through: the transport writer pulls from it, so a slow client
+    /// retains at most one pending payload per document and never receives a
+    /// superseded or cancelled one.
+    diagnostics_outbound: crate::outbound::ReplaceableLane,
     next_open_incarnation: std::sync::atomic::AtomicU64,
     /// Default compile profile for TSX generation (LSP mode).
     pub(crate) tsx_profile: Arc<RwLock<CompileProfile>>,
@@ -59,6 +72,14 @@ pub struct DocumentRegistry {
     /// captures the current snapshot set under a fence and maps a returned offset
     /// only against the exact generation it captured.
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
+    /// The ONE per-document provider-sync lane registry. Owned here for the
+    /// same reason [`Self::provider_surfaces`] is: the registry already reaches
+    /// every writer — the server, the debounced coordinator, the background
+    /// drain free functions and the workspace scanner all hold this same
+    /// `Arc<DocumentRegistry>` — so every transaction that delivers or commits
+    /// an open document's provider surface serializes on ONE lane per document.
+    /// See [`crate::document_sync_lane`] for the lock order.
+    document_lanes: Arc<crate::document_sync_lane::DocumentSyncLanes>,
     /// Signalled on every document registration (a request racing `did_open` waits on it).
     pub(crate) registration: registration_signal::RegistrationSignal,
     /// Full Verter semantic enrichment is deliberately isolated from the
@@ -183,13 +204,18 @@ pub(crate) struct SourceFeatureDocumentCapture {
     pub(crate) document: DocumentState,
     identity: DocumentSnapshotIdentity,
     expected_host_revision: Option<HostSourceRevisionToken>,
+    /// The committed content hash of the source at capture, when the capture
+    /// is paired with a projection revision: what an answer computed from the
+    /// capture is checked against once computed, so an eviction re-committing
+    /// the same bytes never withdraws it.
+    expected_source_hash: Option<verter_session::CommittedSourceContent>,
     semantic_generation: u64,
 }
 
 #[derive(Clone)]
 pub(crate) struct ProgressiveSourceAnalysis {
     source: Arc<str>,
-    analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    analysis: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
     prop_owner_witnesses: Arc<[ProgressivePropOwnerWitness]>,
 }
 
@@ -198,13 +224,15 @@ impl ProgressiveSourceAnalysis {
         &self.source
     }
 
-    pub(crate) fn analysis(&self) -> &verter_session::FileAnalysisSnapshot {
+    pub(crate) fn analysis(
+        &self,
+    ) -> &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
         &self.analysis
     }
 
     fn prop_owner_witness_for(
         &self,
-        prop: &verter_semantic::analysis::AnalyzedPropDefinition,
+        prop: &verter_session_query::analysis::template::AnalyzedPropDefinition,
     ) -> Option<&ProgressivePropOwnerWitness> {
         self.prop_owner_witnesses
             .iter()
@@ -244,7 +272,7 @@ fn progressive_prop_owner_witness_is_current(
 }
 
 fn exact_svelte_prop_owner_witnesses(
-    analysis: &verter_session::FileAnalysisSnapshot,
+    analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
         verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
     >,
@@ -324,7 +352,7 @@ fn exact_svelte_evidence_reproves_callable_role(
 }
 
 fn merge_stable_progressive_prop_definitions(
-    fresh: &mut verter_session::FileAnalysisSnapshot,
+    fresh: &mut verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     carried: &ProgressiveSourceAnalysis,
     fresh_source: &str,
     fresh_svelte_evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
@@ -423,7 +451,7 @@ pub struct SemanticAnalysisEnvelope {
     semantic_generation: u64,
     semantic_host_revision: HostSourceRevisionToken,
     structure: RegisteredFileStructure,
-    analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    analysis: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
 }
 
 impl SemanticAnalysisEnvelope {
@@ -439,7 +467,9 @@ impl SemanticAnalysisEnvelope {
         &self.structure
     }
 
-    pub fn analysis(&self) -> &Arc<verter_session::FileAnalysisSnapshot> {
+    pub fn analysis(
+        &self,
+    ) -> &Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         &self.analysis
     }
 }
@@ -511,6 +541,18 @@ pub(crate) struct DocumentSnapshotIdentity {
     source: Arc<str>,
 }
 
+impl DocumentSnapshotIdentity {
+    /// The open revision's bytes.
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether both identities name the same open revision.
+    pub(crate) fn same_revision(&self, other: &Self) -> bool {
+        self.version == other.version && self.revision == other.revision
+    }
+}
+
 impl DocumentRegistry {
     fn next_document_revision(&self) -> DocumentRevisionId {
         DocumentRevisionId::opened(
@@ -519,14 +561,41 @@ impl DocumentRegistry {
         )
     }
 
+    /// A registry whose diagnostics go to a lane of its own. Nothing is
+    /// delivered until a transport writer pulls from that lane.
     pub fn new(host: Arc<VerterHost>) -> Self {
+        Self::with_diagnostics_lane(
+            host,
+            crate::outbound::ReplaceableLane::new(
+                crate::outbound::OutboundBudget::DEFAULT.replaceable,
+            ),
+        )
+    }
+
+    /// The lane this registry publishes diagnostics through.
+    #[cfg(test)]
+    pub(crate) fn diagnostics_lane(&self) -> crate::outbound::ReplaceableLane {
+        self.diagnostics_outbound.clone()
+    }
+
+    /// A registry publishing diagnostics through `diagnostics_outbound`, the
+    /// replaceable lane of the server's outbound transport.
+    pub fn with_diagnostics_lane(
+        host: Arc<VerterHost>,
+        diagnostics_outbound: crate::outbound::ReplaceableLane,
+    ) -> Self {
         let (semantic_ready_tx, _) = tokio::sync::broadcast::channel(64);
         let (diagnostics_refresh_tx, _) = tokio::sync::broadcast::channel(64);
+        let language_classifier = host.language_classifier().clone();
         Self {
             host: SharedHost::new(host),
+            language_classifier,
             documents: DashMap::new(),
-            diagnostics_state: parking_lot::Mutex::new(diagnostics::DiagnosticsState::default()),
+            diagnostics_state: Arc::new(parking_lot::Mutex::new(
+                diagnostics::DiagnosticsState::default(),
+            )),
             diagnostics_refresh_tx,
+            diagnostics_outbound,
             next_open_incarnation: std::sync::atomic::AtomicU64::new(1),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,
@@ -536,6 +605,7 @@ impl DocumentRegistry {
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
+            document_lanes: Arc::new(crate::document_sync_lane::DocumentSyncLanes::default()),
             registration: registration_signal::RegistrationSignal::default(),
             semantic_host: RwLock::new(None),
             semantic_workspace: RwLock::new(None),
@@ -677,6 +747,79 @@ impl DocumentRegistry {
         &self.provider_surfaces
     }
 
+    /// The shared per-document sync-lane registry — the single owner of the
+    /// lane every provider-sync transaction of an open document takes.
+    pub(crate) fn document_lanes(&self) -> &Arc<crate::document_sync_lane::DocumentSyncLanes> {
+        &self.document_lanes
+    }
+
+    /// Join the registered document's generation, including a document opened
+    /// before its first interactive repair established the lane.
+    pub(crate) fn try_delivery_lane(
+        &self,
+        canonical_id: &str,
+    ) -> crate::document_sync_lane::DeliveryLane {
+        if self
+            .document_lanes
+            .try_establish_open_generation(canonical_id, || self.is_registered(canonical_id))
+            == crate::document_sync_lane::EstablishedGeneration::Busy
+        {
+            return crate::document_sync_lane::DeliveryLane::Busy;
+        }
+        self.document_lanes.try_delivery_lane(canonical_id)
+    }
+
+    /// Ask for the delivery lane in `mode`; see
+    /// [`crate::document_sync_lane::LaneAcquire`].
+    pub(crate) async fn delivery_lane(
+        &self,
+        canonical_id: &str,
+        mode: crate::document_sync_lane::LaneAcquire,
+    ) -> crate::document_sync_lane::DeliveryLane {
+        match mode {
+            crate::document_sync_lane::LaneAcquire::Try => self.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::LaneAcquire::Wait => {
+                self.document_lanes
+                    .wait_establish_open_generation(canonical_id, || {
+                        self.is_registered(canonical_id)
+                    })
+                    .await;
+                self.document_lanes.wait_delivery_lane(canonical_id).await
+            }
+        }
+    }
+
+    /// The open generation of a registered document, established under its
+    /// lifecycle lane when no open minted one yet (a document registered
+    /// directly through this registry). Waits for an open or close in flight.
+    pub(crate) async fn establish_open_generation(&self, canonical_id: &str) -> Option<u64> {
+        self.document_lanes
+            .wait_establish_open_generation(canonical_id, || self.is_registered(canonical_id))
+            .await
+    }
+
+    fn is_registered(&self, canonical_id: &str) -> bool {
+        self.canonical_id_to_uri(canonical_id).is_some()
+    }
+
+    /// Whether the open-document revision a transaction pinned before it
+    /// compiled is still the live one — evaluated at the point of delivery.
+    ///
+    /// A transaction with no pin started while its document was closed. It is
+    /// current only while the document STAYS closed: an open that lands before
+    /// delivery belongs to the open document's own lane, so the closed-start
+    /// writer must yield rather than write disk-compiled bytes beneath it.
+    pub(crate) fn compile_pin_is_current(
+        &self,
+        canonical_id: &str,
+        open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
+    ) -> bool {
+        match open_pin {
+            Some((uri, identity)) => self.snapshot_identity_is_current(uri, identity),
+            None => !self.is_registered(canonical_id),
+        }
+    }
+
     /// Set the negotiated position encoding. Called once during `initialize()`,
     /// before any documents are opened.
     pub fn set_encoding(&self, encoding: PositionEncodingKind) {
@@ -720,6 +863,7 @@ impl DocumentRegistry {
     /// shift for every position; the rewrite column shifts refine import lines
     /// once the resolver lands.
     fn build_self_file_projection(
+        classifier: &verter_session::framework::HostLanguageClassifier,
         canonical_id: &str,
         source: &str,
         replacements: &[(usize, usize, String)],
@@ -728,7 +872,7 @@ impl DocumentRegistry {
         // Path-gated: the registry extension table is the authority, so an
         // unknown extension (which the host classifier's catch-all would
         // report as a TS script) builds NO projection.
-        let file_language = crate::server::self_file_language_for(canonical_id)?;
+        let file_language = crate::server::self_file_language_for(classifier, canonical_id)?;
         let built = verter_session::framework::self_file_provider_content(&file_language, source)?;
         let mapper =
             SelfFileProviderMapper::new(built.prelude_line_count, replacements, line_index);
@@ -742,20 +886,23 @@ impl DocumentRegistry {
 
     /// Resolve the [`FileLanguage`] row for an editor document.
     ///
-    /// The client's `language_id` is authoritative for a framework CARRIER
-    /// (an in-memory carrier document may not carry its `.vue` / `.svelte`
-    /// path); every other document classifies by canonical path through the
-    /// host's language classifier — the same authority the workspace-scan
-    /// ingress uses, so one file resolves one `FileLanguage` row regardless of
-    /// which ingress loaded it. The carrier mapping is REGISTRY-driven
-    /// (`carrier_for_editor_language_id`), not a hardcoded `== "vue"` branch:
-    /// any registered carrier (`vue`, `svelte`, …) resolves to its framework
-    /// row here and the host upsert parses it through the registered carrier —
-    /// never silently as a plain script.
+    /// The client's `language_id` is authoritative for an ADMITTED framework
+    /// CARRIER (an in-memory carrier document may not carry its `.vue` /
+    /// `.svelte` path); every other document classifies by canonical path.
+    /// Both halves read the host's language classifier — the same authority
+    /// the workspace-scan ingress uses, composed under the host's framework
+    /// admission — so one file resolves one `FileLanguage` row regardless of
+    /// which ingress loaded it, and a `language_id` naming a carrier this host
+    /// does not admit never reaches that carrier. The carrier mapping is
+    /// REGISTRY-driven (`carrier_for_editor_language_id`), not a hardcoded
+    /// `== "vue"` branch: any admitted carrier (`vue`, `svelte`, …) resolves
+    /// to its framework row here and the host upsert parses it through the
+    /// registered carrier.
     fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
-        verter_session::LanguageRegistry::global()
+        let classifier = self.language_classifier();
+        classifier
             .carrier_for_editor_language_id(language_id)
-            .unwrap_or_else(|| self.host().language_classifier().classify(canonical_id))
+            .unwrap_or_else(|| classifier.classify(canonical_id))
     }
 
     /// Re-establish the host/VFS overlay for `canonical_id` from the OPEN
@@ -895,7 +1042,13 @@ impl DocumentRegistry {
                 .and_then(|tsx| PositionMapper::from_json(tsx.source_map.as_ref()?).ok())
                 .map(DocumentProviderProjection::carrier_ide)
         } else {
-            Self::build_self_file_projection(&canonical_id, &source, &[], line_index.as_ref())
+            Self::build_self_file_projection(
+                self.language_classifier(),
+                &canonical_id,
+                &source,
+                &[],
+                line_index.as_ref(),
+            )
         };
         if let Some(outcome) = &carrier_compile {
             self.account_carrier_ide_content_verdict(
@@ -1050,7 +1203,7 @@ impl DocumentRegistry {
         // A document commit owes the document's TEXT. It does not owe the IDE
         // TSX, and it must not pay for it per keystroke.
         //
-        // `tower-lsp-server` does not spawn a task per notification: `Server::serve`
+        // The serve loop does not spawn a task per notification: `outbound::serve`
         // queues handler futures and polls them INLINE on the serve thread (see
         // `crate::SERVE_THREAD_STACK_BYTES`), and `handle_did_change` runs from
         // entry through this commit without ever pending — an uncontended
@@ -1121,7 +1274,13 @@ impl DocumentRegistry {
             // extension → `None`). The prelude offset is content-independent;
             // rebuild it whole-line (rewrite segments get refined by the
             // server once the resolver is ready).
-            Self::build_self_file_projection(&canonical_id, &source, &[], new_line_index.as_ref())
+            Self::build_self_file_projection(
+                self.language_classifier(),
+                &canonical_id,
+                &source,
+                &[],
+                new_line_index.as_ref(),
+            )
         };
 
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
@@ -1428,6 +1587,20 @@ impl DocumentRegistry {
         None
     }
 
+    /// The open document's URI for `path` under filesystem identity
+    /// ([`verter_span::path::fs_paths_equal`]): a spelling of the file that
+    /// differs in case from the client's `didOpen` URI still names the open
+    /// document on a case-insensitive host. An exact canonical-id match wins.
+    pub(crate) fn open_uri_for_fs_path(&self, path: &str) -> Option<Uri> {
+        self.canonical_id_to_uri(path).or_else(|| {
+            self.documents.iter().find_map(|entry| {
+                verter_span::path::fs_paths_equal(&entry.value().canonical_id, path)
+                    .then(|| entry.key().parse().ok())
+                    .flatten()
+            })
+        })
+    }
+
     /// Get the IDE output (TSX or JSX) for a document.
     ///
     /// If compile_slots were cleared (e.g., by dependency invalidation via `did_open`
@@ -1663,9 +1836,13 @@ impl DocumentRegistry {
         let canonical_id = entry.canonical_id.clone();
         let source = entry.source.clone();
         let line_index = entry.line_index.clone();
-        if let Some(projection) =
-            Self::build_self_file_projection(&canonical_id, &source, replacements, &line_index)
-        {
+        if let Some(projection) = Self::build_self_file_projection(
+            self.language_classifier(),
+            &canonical_id,
+            &source,
+            replacements,
+            &line_index,
+        ) {
             entry.projection = Some(projection);
         }
     }
@@ -1835,6 +2012,12 @@ impl DocumentRegistry {
     /// (see [`guarded_host`]).
     pub fn host(&self) -> HostRef<'_> {
         self.host.host()
+    }
+
+    /// The serving host's language classifier — the admission-aware
+    /// authority every protocol-level carrier decision reads.
+    pub fn language_classifier(&self) -> &verter_session::framework::HostLanguageClassifier {
+        &self.language_classifier
     }
 
     /// A shareable host handle for work that outlives this borrow (a blocking

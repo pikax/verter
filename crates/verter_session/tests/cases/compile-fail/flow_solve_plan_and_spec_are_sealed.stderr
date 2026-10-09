@@ -30,7 +30,7 @@ error[E0616]: field `resources` of struct `FlowExecutionSelection` is private
    |
 help: a method `resources` also exists, call it with parentheses
    |
-29 |     let _ = &selection.resources();
+30 |     let _ = &selection.resources();
    |                                 ++
 
 error[E0599]: no method named `obligation_specs_mut` found for mutable reference `&mut FlowDemandPlan` in the current scope
@@ -41,8 +41,8 @@ error[E0599]: no method named `obligation_specs_mut` found for mutable reference
    |
 help: there is a method `obligation_specs` with a similar name
    |
-35 -     let _: &mut [_] = plan.obligation_specs_mut();
-35 +     let _: &mut [_] = plan.obligation_specs();
+36 -     let _: &mut [_] = plan.obligation_specs_mut();
+36 +     let _: &mut [_] = plan.obligation_specs();
    |
 
 error[E0599]: no method named `work_order_mut` found for mutable reference `&mut FlowDemandPlan` in the current scope
@@ -53,8 +53,8 @@ error[E0599]: no method named `work_order_mut` found for mutable reference `&mut
    |
 help: there is a method `work_order` with a similar name
    |
-36 -     let _: &mut [_] = plan.work_order_mut();
-36 +     let _: &mut [_] = plan.work_order();
+37 -     let _: &mut [_] = plan.work_order_mut();
+37 +     let _: &mut [_] = plan.work_order();
    |
 
 error[E0624]: associated function `new` is private
@@ -63,7 +63,7 @@ error[E0624]: associated function `new` is private
   |       let _ = FlowObligationSpec::new(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());
   |                                   ^^^ private associated function
   |
- ::: $WORKSPACE/crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs
+ ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/dispatch_txn.rs
   |
   | /         pub(in crate::project_semantic_dispatch) fn new(
   | |             id: FlowObligationId, requirement: FlowRequirement,
@@ -93,7 +93,7 @@ error[E0616]: field `expected_suboperations` of struct `FlowObligationSpec` is p
    |
 help: a method `expected_suboperations` also exists, call it with parentheses
    |
-49 |     let _ = &spec.expected_suboperations();
+50 |     let _ = &spec.expected_suboperations();
    |                                         ++
 
 error[E0277]: the trait bound `SealedFlowCompletion: Clone` is not satisfied

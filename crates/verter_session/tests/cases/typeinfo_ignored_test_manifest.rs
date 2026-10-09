@@ -86,7 +86,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use verter_session::semantic_query::SemanticQueryKeyTag;
+use verter_type_engine::semantic_query::SemanticQueryKeyTag;
 
 fn workspace_root() -> PathBuf {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -378,7 +378,7 @@ macro_rules! semantic_query_names {
         /// The live `SemanticQueryKey` variant set, mirrored as a name-only
         /// closed enum (the U0 ledger keys queries by NAME — no payloads).
         /// Kept in sync — variant-for-variant — with the live
-        /// [`verter_session::semantic_query::SemanticQueryKeyTag`] discriminant
+        /// [`verter_type_engine::semantic_query::SemanticQueryKeyTag`] discriminant
         /// set (`SemanticQueryKeyTag::ALL`). The
         /// `semantic_query_name_mirror_matches_live_tag_set` guard FAILS if this
         /// mirror omits (or invents) any live tag, so the mirror can never
@@ -2495,9 +2495,9 @@ fn semantic_query_name_from_str(s: &str) -> Option<SemanticQueryName> {
 /// Map a registry projection-mode spec onto the resolver's `ProjectionMode`.
 fn registry_mode_to_resolver(
     mode: oracle_registry::ProjectionModeSpec,
-) -> verter_session::ProjectionMode {
+) -> verter_type_engine::semantic_query::ProjectionMode {
     use oracle_registry::ProjectionModeSpec as S;
-    use verter_session::ProjectionMode as P;
+    use verter_type_engine::semantic_query::ProjectionMode as P;
     match mode {
         S::Shallow => P::Shallow,
         S::Navigate => P::Navigate,
@@ -5291,7 +5291,7 @@ static INTEGRATION_LIVE_GUARD_BINDINGS: &[LiveGuardBinding] = &[
     live_guard!(SessionOverlayAugmentationIsolatedFromBaseMeta => crate::cases::g_session::session_overlay_augmentation_isolation::session_overlay_augmentation_isolated_from_base_meta),
     live_guard!(CacheCandidateCapIsPerFamilyNotUniform => crate::cases::g_family::family_slots_multi_candidate::cache_candidate_cap_is_per_family_not_uniform),
     live_guard!(FamilyEvictionPrefersInvalidThenLruValidHit => crate::cases::g_family::family_slots_multi_candidate::family_eviction_prefers_invalid_then_lru_valid_hit),
-    live_guard!(ExternalCorpusPathsNotPresentOutsideGatedTests => crate::cases::architecture_guards::foundations_guards::external_corpus_paths_not_present_outside_gated_tests),
+    live_guard!(ExternalCorpusPathsNotPresentOutsideGatedTests => crate::cases::architecture_guards::foundations_guards::hermeticity::external_corpus_paths_not_present_outside_gated_tests),
     live_guard!(NoDepthSentinelOnFlowReturnPath => crate::cases::g_misc0::no_depth_sentinel_on_flow_return_path::no_depth_sentinel_on_flow_return_path),
 ];
 

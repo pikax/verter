@@ -15,10 +15,10 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const DIAMOND_TS: &str = r#"
 export type Shared = { value: string; flag: boolean };
@@ -51,7 +51,7 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             canonical_id: Arc::from("/diamond.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -69,16 +69,16 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         base: ab_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("a"),
                 )),
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("left"),
                 )),
             ]
             .into_boxed_slice(),
         ),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -101,16 +101,16 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         base: ab_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("b"),
                 )),
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("right"),
                 )),
             ]
             .into_boxed_slice(),
         ),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -175,16 +175,16 @@ fn type_resolution_audit_diamond_intra_request_interning() {
         base: ab_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("a"),
                 )),
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("left"),
                 )),
             ]
             .into_boxed_slice(),
         ),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };

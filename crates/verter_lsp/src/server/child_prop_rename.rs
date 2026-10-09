@@ -268,7 +268,7 @@ impl VerterLanguageServer {
 
             let child_canonical = uri_to_canonical_id(&child.uri);
             let child_carrier_api_path =
-                verter_semantic::resolver_core::carrier_api_provider_path(&child_canonical);
+                verter_session_query::resolution::carrier_api_provider_path(&child_canonical);
 
             return ChildPropUsageClass::Resolved(Box::new(ResolvedChildPropUsage {
                 usage: ChildPropUsage {
@@ -534,9 +534,7 @@ impl VerterLanguageServer {
         // The current-request mapper context (the parent's IDE TSX). A foreign
         // carrier surface routes through its own context via the external resolver.
         let ctx = self.type_provider_context_for_path(parent_tsx_path)?;
-        let source_reader = |p: &str| {
-            block_in_place_if_available(|| self.documents.host().workspace_read().read_file(p))
-        };
+        let source_reader = |p: &str| block_in_place_if_available(|| self.target_source(p));
 
         // ONE merge over the WHOLE location set (not per-location): its cross-candidate
         // dedup + non-carrier preference apply, and the full mapped set is preserved so
@@ -599,9 +597,7 @@ impl VerterLanguageServer {
         use crate::server::handler_guard::block_in_place_if_available;
 
         let canonical = uri_to_canonical_id(uri);
-        let Some(source) = block_in_place_if_available(|| {
-            self.documents.host().workspace_read().read_file(&canonical)
-        }) else {
+        let Some(source) = block_in_place_if_available(|| self.target_source(&canonical)) else {
             return false;
         };
         let encoding = self.position_encoding.read().clone();

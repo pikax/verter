@@ -20,6 +20,7 @@ path = "src/bin/verter_type_runtime_fake_engine.rs"
 required-features = ["test-fake-engine"]
 
 [dependencies]
+futures-util = "0.3.32"
 verter_debug_assert = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -40,6 +41,7 @@ verter_workspace = { path = "../verter_workspace" }
 
 [dev-dependencies]
 blake3 = { workspace = true }
+verter_session_query = { workspace = true }
 verter_test_support = { path = "../verter_test_support" }
 # Self dev-dependency: enables `test-fake-engine` for THIS crate's test builds
 # only, so the fake-engine shim bin exists for `cargo test` (CARGO_BIN_EXE_)

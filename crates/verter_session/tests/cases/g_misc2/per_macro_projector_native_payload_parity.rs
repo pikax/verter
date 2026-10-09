@@ -21,7 +21,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -104,7 +104,7 @@ fn getcomponentmeta_native_payload_unchanged_after_decomposition() {
     // `accepted_surface_completeness` is an enum
     // (`Exact`/`LowerBound`); when populated, it characterises the
     // fallthrough resolver state for the published metadata.
-    use verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness;
+    use verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness;
     let _completeness: AcceptedSurfaceCompleteness = meta.accepted_surface_completeness;
 }
 

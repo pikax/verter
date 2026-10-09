@@ -16,8 +16,8 @@ state has tells you when it may change and who may observe it:
 | -------------------- | ------------------------------------------------------------- | -------- |
 | `session`            | lives as long as the host/session                             | `Scheduler.nodes`, `Scheduler.dag`, the `SemanticGraphStore` memo |
 | `snapshot-epoch`     | MVCC epoch; readers capture an O(1) view and never see it move | `Scheduler.source_root` (`crates/verter_scheduler/src/source_root.rs`) |
-| `content-version`    | re-planned once per file content version                      | `FunctionFlowGraph`, `FlowSliceIR`, stable keys (`crates/verter_session/src/semantic_query/stable_key.rs`) |
-| `dispatch-transaction` | transient per-obligation-root cold-compute frame            | `CheckerDispatchTransaction` (`crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs`) |
+| `content-version`    | re-planned once per file content version                      | `FunctionFlowGraph`, `FlowSliceIR`, stable keys (`crates/verter_type_engine/src/semantic_query/stable_key.rs`) |
+| `dispatch-transaction` | transient per-obligation-root cold-compute frame            | `CheckerDispatchTransaction` (`crates/verter_type_engine/src/project_semantic_dispatch/dispatch_txn.rs`) |
 | `request`            | exists for one query/request only, never cached               | parse-snapshot leases, admission budget outcomes, cancellation tokens, scoped cache flights |
 
 Two rules follow. First: `request`-lifetime state is never a cache entry —
@@ -28,9 +28,9 @@ never key a content-version artifact by request identity.
 
 ## The memo: identity is semantic meaning
 
-`crates/verter_session/src/semantic_query.rs` defines the query envelope
+`crates/verter_type_engine/src/semantic_query.rs` defines the query envelope
 (`SemanticQueryKey` and friends); the host-owned memo is the
-`SemanticGraphStore` in `crates/verter_session/src/semantic_query_memo/mod.rs`,
+`SemanticGraphStore` in `crates/verter_type_engine/src/semantic_query_memo/mod.rs`,
 dispatched through `ProjectSemanticDispatch`. Its founding rule: memo
 identity is semantic meaning, not request identity. Two different callers
 asking the same question share one entry; the same caller asking after an
@@ -38,7 +38,7 @@ edit gets a different answer because the key's content-free identity is
 pinned by a versioned value inside the entry, not by who asked.
 
 Cache admission is decided in exactly one place —
-`crates/verter_session/src/semantic_query/admit.rs` (`admit_decision`) —
+`crates/verter_type_engine/src/semantic_query/admit.rs` (`admit_decision`) —
 and is typed: `Unknown`, budget-exhausted, cancelled and superseded
 results route through `ReturnOnly`, which never publishes an entry, never
 registers reverse-index metadata, and never becomes a persistent artifact.

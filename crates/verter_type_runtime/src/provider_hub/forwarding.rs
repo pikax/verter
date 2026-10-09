@@ -7,10 +7,132 @@ use super::*;
 use crate::protocol::*;
 use crate::traits::ProviderFuture;
 
+fn receipt_disposition(receipt: &AppliedReceipt) -> crate::traits::FileLoadDisposition {
+    receipt.disposition
+}
+
+impl<P> ProviderHub<P>
+where
+    P: TypeProvider + ?Sized + Send + Sync + 'static,
+{
+    /// Install the workspace fact source once. It never authorizes a write;
+    /// the hub revalidates its proof at execution, replay, and settlement.
+    pub fn set_generated_unit_resolver(
+        &self,
+        resolver: Arc<GeneratedUnitResolver>,
+    ) -> Result<(), AdmissionRefusal> {
+        if let Some(existing) = self.state.shared.generated_unit_resolver.get() {
+            return if Arc::ptr_eq(existing, &resolver) {
+                Ok(())
+            } else {
+                Err(AdmissionRefusal::StaleBasis)
+            };
+        }
+        if let Some(serving) = self.state.shared.serving() {
+            serving
+                .provider
+                .set_generated_unit_resolver(Arc::clone(&resolver))?;
+        }
+        if self
+            .state
+            .shared
+            .generated_unit_resolver
+            .set(Arc::clone(&resolver))
+            .is_err()
+        {
+            return Err(AdmissionRefusal::StaleBasis);
+        }
+        Ok(())
+    }
+    fn mutation_disposition<'a>(
+        &'a self,
+        mutation: DesiredMutation,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        Box::pin(async move {
+            let lane = match priority {
+                OverlayPriority::Foreground => Lane::Foreground,
+                OverlayPriority::Normal => Lane::Normal,
+                OverlayPriority::Background => Lane::Background,
+            };
+            let receipt = self.submit_mutation(mutation, lane).await?;
+            Ok(receipt_disposition(&receipt))
+        })
+    }
+}
+
 impl<P> TypeProvider for ProviderHub<P>
 where
     P: TypeProvider + ?Sized + Send + Sync + 'static,
 {
+    fn set_generated_unit_resolver(
+        &self,
+        resolver: Arc<GeneratedUnitResolver>,
+    ) -> Result<(), AdmissionRefusal> {
+        Self::set_generated_unit_resolver(self, resolver)
+    }
+    fn load_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Load {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+
+    fn open_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Open {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+
+    fn update_file_with_disposition<'a>(
+        &'a self,
+        path: &'a str,
+        content: &'a str,
+        priority: OverlayPriority,
+    ) -> ProviderFuture<'a, crate::traits::FileLoadDisposition> {
+        self.mutation_disposition(
+            DesiredMutation::Update {
+                path: path.into(),
+                content: content.into(),
+            },
+            priority,
+        )
+    }
+    fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
+        let Some(serving) = self.state.shared.serving() else {
+            return crate::traits::AppliedContent::NotApplied;
+        };
+        let applied = self
+            .state
+            .shared
+            .applied_files
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        match (applied.get(path), serving.provider.applied_content(path)) {
+            (Some(content), crate::traits::AppliedContent::Applied(bytes)) if *content == bytes => {
+                crate::traits::AppliedContent::Applied(bytes)
+            }
+            _ => crate::traits::AppliedContent::NotApplied,
+        }
+    }
+
     fn provider_id(&self) -> &'static str {
         // The engine identity is tier-accurate while an incarnation serves.
         // Between incarnations the LAST serving tier is the truthful identity:

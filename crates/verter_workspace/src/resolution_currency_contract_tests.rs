@@ -13,7 +13,7 @@ use crate::resolution_currency::{
 };
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge, VfsProvenanceSnapshot};
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     normalize_canonical_id, AttemptFailure, IdeProjectConfig, PathProbe as ProbeOutcome,
     ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind, ResolveResult,
     SessionFingerprint, WorkspaceAlias,
@@ -120,8 +120,8 @@ impl ContractReader {
 impl WorkspaceRead for ContractReader {
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
         crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
     }
@@ -238,7 +238,8 @@ fn engine_with_fallback_project(root: &str) -> Engine {
             extensions: vec![".ts".to_string()],
             workspace_root: root.to_string(),
             workspace_aliases: Vec::new(),
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: Vec::new(),
             membership: crate::membership::configured_membership_match_all_under_root(
                 &crate::CanonicalPath::new(root),
@@ -391,7 +392,9 @@ fn directory_enumeration_inside_probe_enters_the_transaction_signature() {
     reader.insert("/p/dep.ts", "export const value = 1");
 
     let outcome = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
-    let crate::SignatureAdmission::Cacheable(_) = &outcome.admission else {
+    let verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_) =
+        &outcome.admission
+    else {
         panic!("a fully tracked resolver read must remain cacheable");
     };
     let directory_fact = ResolutionFactKey::DirectoryMembers {
@@ -746,13 +749,17 @@ fn resolution_outcome_uses_the_shared_resolve_imports_signature_rail() {
     reader.insert("/p/dep.ts", "export const value = 1");
 
     let outcome = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
-    let crate::SignatureAdmission::Cacheable(signature) = &outcome.admission else {
+    let verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(signature) =
+        &outcome.admission
+    else {
         panic!("a fully tracked resolution must produce the shared cacheable admission");
     };
     assert!(!signature.facts.is_empty());
     assert!(signature.facts.iter().all(|fact| matches!(
         fact,
-        crate::FactVersionRef::ResolveImports(crate::ResolveImportsFactRef::Resolution(_))
+        verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+            verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(_)
+        )
     )));
 
     // Mutation recipe: reintroduce a resolution-only signature/admission carrier
@@ -869,7 +876,7 @@ fn every_closed_resolution_fact_family_has_a_live_mutation_rail() {
     );
     assert!(matches!(
         outcome.admission,
-        crate::SignatureAdmission::Cacheable(_)
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
     ));
     let decision_key = engine
         .cached_resolution_query_for_test("/p/main.ts", "./dep", CONTEXT, resolve_population)
@@ -2104,22 +2111,28 @@ fn decision_node(
         .map(ResolutionFactKey::decision)
 }
 
-fn resolution_facts(signature: &crate::ReadSetSignature) -> Vec<ResolutionFactKey> {
+fn resolution_facts(
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+) -> Vec<ResolutionFactKey> {
     signature
         .facts
         .iter()
         .filter_map(|fact| match fact {
-            crate::FactVersionRef::ResolveImports(crate::ResolveImportsFactRef::Resolution(
-                fact,
-            )) => Some(fact.key.clone()),
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(fact),
+            ) => Some(fact.key.clone()),
             _ => None,
         })
         .collect()
 }
 
-fn cacheable_signature(outcome: &crate::ResolutionOutcome) -> crate::ReadSetSignature {
+fn cacheable_signature(
+    outcome: &crate::ResolutionOutcome,
+) -> verter_session_query::facts::fact_cache::ReadSetSignature {
     match &outcome.admission {
-        crate::SignatureAdmission::Cacheable(signature) => signature.clone(),
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(signature) => {
+            signature.clone()
+        }
         other => panic!("expected a cacheable resolution, got {other:?}"),
     }
 }
@@ -2212,7 +2225,7 @@ fn resolution_decision_records_only_direct_dependencies() {
     let cold = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
     assert!(matches!(
         cold.admission,
-        crate::SignatureAdmission::Cacheable(_)
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
     ));
     let node = decision_node(&engine, "/p/main.ts", "./dep", base).expect("published decision");
 
@@ -2423,7 +2436,7 @@ fn resolution_decision_overlay_never_validates_as_base() {
     );
     assert!(matches!(
         session_outcome.admission,
-        crate::SignatureAdmission::Cacheable(_)
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
     ));
 
     let session_node = decision_node(engine, "/p/main.ts", "./dep", population)
@@ -3192,7 +3205,7 @@ fn owner_set_key(owner: &str, population: ResolutionPopulation) -> ResolutionFac
 fn owner_set_fact(
     workspace: &crate::memory::MemoryWorkspace,
     owner: &str,
-) -> Option<crate::FactVersionRef> {
+) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
     WorkspaceAccess::publish_owner_resolution_set(workspace, owner)
 }
 
@@ -3261,7 +3274,7 @@ fn owner_resolution_set_advances_with_any_child_decision() {
     resolve_in(&workspace, owner, "./dep");
     resolve_in(&workspace, owner, "./other");
     let fact = owner_set_fact(&workspace, owner).expect("published owner set");
-    let witness = crate::ReadSetSignature::new(Arc::from([fact]));
+    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([fact]));
     assert!(witness.validates(
         engine
             .capture_published_resolution_world(population)
@@ -3300,7 +3313,7 @@ fn owner_resolution_set_unchanged_for_unrelated_decision() {
 
     resolve_in(&workspace, owner, "./dep");
     let fact = owner_set_fact(&workspace, owner).expect("published owner set");
-    let witness = crate::ReadSetSignature::new(Arc::from([fact]));
+    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([fact]));
 
     // A second owner, in its own directory, with its own decision.
     workspace.inject_file("/q/far.ts".to_string(), Arc::from("export const far = 1"));
@@ -3787,13 +3800,13 @@ fn engine_with_chain_tail(len: usize, specifier: &str, tail_references: Vec<Stri
                 )]
             };
             let compiler_options = if index + 1 == len {
-                verter_semantic::resolver_core::IdeProjectCompilerOptions {
+                verter_session_query::resolution::IdeProjectCompilerOptions {
                     base_url: Some(format!("{root}/src")),
                     paths: vec![(specifier.to_string(), vec!["index".to_string()])],
                     ..Default::default()
                 }
             } else {
-                verter_semantic::resolver_core::IdeProjectCompilerOptions::default()
+                verter_session_query::resolution::IdeProjectCompilerOptions::default()
             };
             crate::project_graph::VfsProjectConfig {
                 root: root.clone(),

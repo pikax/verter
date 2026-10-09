@@ -4,10 +4,11 @@
 //! snapshot.
 
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::RouteLookup;
 
 use rustc_hash::FxHashMap;
 
-use crate::resolver_core::{CanonicalCompletionOverlay, ResolverContext, SessionResolverContext};
+use crate::resolver_core::{CanonicalCompletionOverlay, SessionResolverContext};
 use crate::resolver_store::HostStoreView;
 use crate::session_view::OverlaidViewRef;
 use crate::{HostConfig, UpsertRequest, VerterHost};
@@ -63,7 +64,7 @@ fn with_session_under<T>(
         sources.insert((*canonical).to_string(), Arc::from(*source));
         hashes.insert(
             (*canonical).to_string(),
-            crate::hash::hash_16(source.as_bytes()),
+            verter_semantic_source::source_hash::hash_16(source.as_bytes()),
         );
     }
     let deleted: std::collections::HashSet<String> = tombstones
@@ -238,8 +239,8 @@ fn the_overlay_type_route_normalizes_an_esm_fallback_like_the_workspace_one() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "runtimedep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
             possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
         }],
@@ -410,8 +411,8 @@ fn an_exact_resolution_change_reaches_the_session() {
     ]);
     let exact = |target: &str| verter_workspace::ExactResolution {
         specifier: "dep".to_string(),
-        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
         resolved_canonical_id: Some(target.to_string()),
         possible_canonical_ids: vec![target.to_string()],
     };
@@ -487,7 +488,7 @@ fn a_pinned_session_request_outlives_overlay_churn() {
     let mut hashes = FxHashMap::default();
     hashes.insert(
         HELPER.to_string(),
-        crate::hash::hash_16(HELPER_SOURCE.as_bytes()),
+        verter_semantic_source::source_hash::hash_16(HELPER_SOURCE.as_bytes()),
     );
     let deleted = std::collections::HashSet::new();
     let view = OverlaidViewRef::new(&host, &sources, &hashes, &deleted);
@@ -675,18 +676,22 @@ impl Drop for CountingCharge {
     }
 }
 
-impl verter_workspace::ResolutionRetentionAccount for CountingAccount {
+impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+    for CountingAccount
+{
     fn reserve_retained(
         &self,
         bytes: usize,
-    ) -> Option<verter_workspace::ResolutionRetentionCharge> {
+    ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge> {
         self.0.fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
-        Some(verter_workspace::ResolutionRetentionCharge::new(
-            CountingCharge {
-                bytes,
-                charged: Arc::clone(&self.0),
-            },
-        ))
+        Some(
+            verter_session_query::retention::resolution_charge::ResolutionRetentionCharge::new(
+                CountingCharge {
+                    bytes,
+                    charged: Arc::clone(&self.0),
+                },
+            ),
+        )
     }
 }
 

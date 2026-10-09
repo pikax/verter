@@ -23,46 +23,28 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedField, ExpansionDiagnostic, ExpansionExactness,
     ExpansionExecutionStatus, ExpansionStopReason,
 };
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta::ResolvedMacroMeta;
 use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
-use crate::resolver_core::ResolverContext;
-
-/// Fact-tracer emission helper for dispatch reads in this file.
-///
-/// The slot-binding-graph traversal has no result cache of its own, so its
-/// dispatch reads contribute evidence directly to the request-level tracer
-/// that owns the reusable component-meta signature. The local counter lets
-/// behavioral tests prove this traversal contributed evidence.
-fn emit_slot_binding_graph_dispatch_facts(
-    ctx: &dyn ResolverContext,
-    sig: &crate::semantic_query::DepSignature,
-) {
-    use std::sync::atomic::Ordering::Relaxed;
-    if !sig.is_empty() {
-        crate::host_manage::record_dep_signature_merge();
-    }
-
-    let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
-    crate::fact_signature_helpers::observe_fact_signature(&bridged);
-    if let Some(prov) = ctx.project_type_store().semantic_graph().provenance() {
-        prov.slot_binding_graph_fact_tracer_emissions
-            .fetch_add(1, Relaxed);
-    }
-}
-use crate::semantic_query::{
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::project_semantic_dispatch::symbolic_root::{
+    emit_slot_binding_graph_dispatch_facts, slot_param_root_is_symbolic_only,
+};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{
     DeclIdentity, DepSignature, DepVersion, PathSegment, ProjectionMode, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
-use crate::types::FileAnalysisSnapshot;
 
 /// Identifies a single `defineSlots` (or peer macro) invocation by
 /// `(owner_canonical, macro_index, type_args)`. Used as the primary key
@@ -139,12 +121,15 @@ pub(crate) struct ResolvedSlotBinding {
 /// (or OR away) the claim at the publication sink.
 #[derive(Debug, Default)]
 pub(crate) struct SuppressionLedger {
-    reasons: Option<crate::typeinfo::surface_resolution::NonEmptyReasons>,
+    reasons: Option<verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons>,
 }
 
 impl SuppressionLedger {
     /// Record a typed suppression reason (unions with any prior record).
-    fn suppress(&mut self, reasons: crate::typeinfo::surface_resolution::NonEmptyReasons) {
+    fn suppress(
+        &mut self,
+        reasons: verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons,
+    ) {
         self.reasons = Some(match self.reasons {
             Some(acc) => acc.union(reasons),
             None => reasons,
@@ -157,10 +142,14 @@ impl SuppressionLedger {
     /// checked conversion states the (unreachable) empty-classification
     /// policy explicitly as the downstream `Propagated` class rather than
     /// normalizing silently inside the claim type.
-    fn suppress_partial_read(&mut self, classes: crate::semantic_query::PartialReasonSet) {
-        use crate::typeinfo::surface_resolution::NonEmptyReasons;
-        self.suppress(NonEmptyReasons::new(classes).unwrap_or_else(|| {
-            NonEmptyReasons::of(crate::semantic_query::PartialReason::Propagated)
+    fn suppress_partial_read(
+        &mut self,
+        claims: &verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority,
+        classes: verter_type_engine::semantic_query::PartialReasonSet,
+    ) {
+        use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+        self.suppress(claims.non_empty_reasons(classes).unwrap_or_else(|| {
+            NonEmptyReasons::of(verter_type_engine::semantic_query::PartialReason::Propagated)
         }));
     }
 
@@ -183,7 +172,7 @@ pub(crate) enum SynthesisCompleteness {
     Complete,
     /// A fatal / partial read suppressed warm promotion, with the typed
     /// non-empty reasons the walk recorded.
-    Suppressed(crate::typeinfo::surface_resolution::NonEmptyReasons),
+    Suppressed(verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons),
 }
 
 /// Result of [`resolve_slot_bindings_graph_native`].
@@ -241,7 +230,7 @@ const SFC_SCRIPT_SETUP_DECL_NAME: &str = "<sfc-script-setup>";
 
 /// Build the owner [`DeclIdentity`] for an SFC's macro queries.
 fn build_owner_decl_identity(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
 ) -> DeclIdentity {
@@ -364,7 +353,10 @@ fn macro_expansion_for_budget_exceeded(
 /// referential lowered shape (e.g. `type R = { next: R }` in Navigate
 /// mode) terminates after the first visit.
 fn accumulate_lowered_node_carrier_deps(
-    ctx: &dyn ResolverContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     owner_canonical: &str,
 ) {
@@ -375,7 +367,9 @@ fn accumulate_lowered_node_carrier_deps(
         if !visited.insert(current) {
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, current) else {
+        let Some(data) =
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), current)
+        else {
             continue;
         };
         match data.as_ref() {
@@ -459,246 +453,7 @@ fn accumulate_lowered_node_carrier_deps(
         .map(|(canonical, hash)| (canonical, DepVersion::WholeHash(hash)))
         .collect();
     let signature: DepSignature = Arc::from(entries.into_boxed_slice());
-    emit_slot_binding_graph_dispatch_facts(ctx, &signature);
-}
-
-/// Read the [`SurfaceView`] members backing `node`, if `node` resolves
-/// to a `SemanticNodeData::Object` shell. Empty for any other variant
-/// — callers treat the empty surface as "no enumerable members".
-/// Returns `true` when the slot-param's underlying shape is one that
-/// the synthesis must NOT enumerate as a concrete object surface,
-/// because the shape's binding identity depends on a generic /
-/// indexed / mapped / conditional context that has not been resolved.
-///
-/// Walks through `Alias` and `InstantiationRef` (Skeleton-instantiated
-/// body) hops to reach an effective root. Returns `true` for:
-///
-/// - `Conditional` (open or deferred — branch identity is undetermined
-///   so neither branch's bindings are authoritative)
-/// - `IndexedAccess` (e.g. `T["slot-name"]` — the indexed root has
-///   not been resolved to a concrete shape)
-/// - `Mapped`, `KeyOf`, `TemplateLiteral` (key-space transformations
-///   with symbolic source)
-/// - `TypeParam`, `Infer` (open generics)
-///
-/// Returns `false` for `Object`, `Function`, `Primitive`, `Literal`,
-/// `Union`, `Intersection`, `Tuple`, `Array`, etc. — these are
-/// directly enumerable by the empty-path Shallow walker.
-///
-/// The root is read one successor at a time — an alias's target, a concrete
-/// conditional's reduction, an instantiated carrier's body — however long
-/// the chain; a chain that returns to a node it passed is enumerable.
-///
-/// `pub(crate)` so the DTO slot-binding extractor
-/// (`typeinfo::framework_surface::vue_exec::binding_fields_from_param_node` via
-/// `VerterHost::project_shallow_surface_from_base`) can apply the SAME
-/// open-vs-concrete gate before materialising a slot-param object surface —
-/// otherwise an open generic slot param (`SlotProps<M>` in a `generic="M"`
-/// component) would reduce to a committed branch and the DTO path would invent a
-/// phantom binding that the graph-native path correctly declined.
-pub(crate) fn slot_param_root_is_symbolic_only(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    root: SemanticNodeId,
-) -> bool {
-    let mut node = root;
-    let mut passed: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    while passed.insert(node) {
-        match slot_param_root_step(dispatch, node) {
-            SlotRootStep::Symbolic(symbolic) => return symbolic,
-            SlotRootStep::Next(next) => node = next,
-        }
-    }
-    false
-}
-
-/// One read of [`slot_param_root_is_symbolic_only`]: the node's own
-/// answer, or the node it stands for.
-enum SlotRootStep {
-    Symbolic(bool),
-    Next(SemanticNodeId),
-}
-
-fn slot_param_root_step(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> SlotRootStep {
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
-        return SlotRootStep::Symbolic(false);
-    };
-    SlotRootStep::Symbolic(match data.as_ref() {
-        SemanticNodeData::Alias(inner) => return SlotRootStep::Next(*inner),
-        // A Conditional is symbolic-only ONLY when it is genuinely OPEN — i.e.
-        // its CHECK still contains a free `TypeParam` / `Infer` shell, so the
-        // branch identity is undetermined. The distinction:
-        //
-        // - FREE generic (`[M] extends ['hover']` in a `generic="M extends Mode"`
-        //   component): the check carries the free `TypeParam` `M`, so the
-        //   conditional is OPEN. Neither branch's bindings are authoritative —
-        //   classify symbolic. (A `Published(Shallow)` reduction WOULD commit to
-        //   a branch here via `M`'s constraint, inventing a phantom binding —
-        //   which is exactly the bug this guard prevents.)
-        // - CONCRETE substitution (`{ id: string } extends { id: infer U }`): the
-        //   check is fully concrete (no free `TypeParam`), so the conditional is
-        //   DECIDABLE. Reduce it through an empty-path `Published(Shallow)`
-        //   `ProjectPath` (the projection walker applies inference-binding +
-        //   decidable-conditional reduction that a bare `SemanticQueryKey::
-        //   Conditional` dispatch leaves deferred for an `infer`-bearing extends
-        //   clause) and classify the reduced terminal.
-        SemanticNodeData::Conditional { check, .. } => {
-            use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-            let check = *check;
-            drop(data);
-            // Open check (free TypeParam / Infer) → genuinely symbolic.
-            if node_contains_free_type_param(dispatch, check) {
-                return SlotRootStep::Symbolic(true);
-            }
-            // Concrete check → reduce the conditional and classify the result.
-            let empty_path: Arc<[crate::semantic_query::PathSegment]> =
-                Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice());
-            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-                base: node,
-                path: empty_path,
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Shallow,
-                ),
-            });
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
-            match read.value {
-                // Decidable: reduced to a concrete terminal — classify it (a
-                // concrete branch root is enumerable, not symbolic).
-                QueryResult::Value(reduced) if reduced != node => {
-                    return SlotRootStep::Next(reduced)
-                }
-                // Stayed the deferred conditional shell (open / undecidable) —
-                // genuinely symbolic-only.
-                _ => true,
-            }
-        }
-        SemanticNodeData::IndexedAccess { .. }
-        | SemanticNodeData::Mapped { .. }
-        | SemanticNodeData::KeyOf { .. }
-        | SemanticNodeData::TemplateLiteral { .. }
-        | SemanticNodeData::TypeParam { .. }
-        | SemanticNodeData::Infer { .. }
-        | SemanticNodeData::InferRef { .. } => true,
-        SemanticNodeData::InstantiationRef { base, args } => {
-            // Skeleton-instantiate the carrier under its OWN `(base, args)` so the
-            // substitution actually binds — but unbound parameters become
-            // `TypeParam` SHELLS, never their declared DEFAULT. This is the
-            // distinction the generic slot-param gate turns on:
-            //
-            // - CONCRETE substitution (`SlotProps<{ id: string }>`): the args
-            //   bind, so the body's Conditional / Mapped check is concrete and
-            //   the Conditional arm below reduces it to a concrete root (bindings
-            //   enumerated). The earlier EMPTY-args instantiation erased the
-            //   substitution and left every such body an OPEN Conditional, so the
-            //   rows were silently dropped.
-            // - FREE generic (`SlotProps<M>` in a `generic="M extends Mode"`
-            //   component): `M` stays a `TypeParam` shell (Skeleton does NOT
-            //   apply the `= Mode` default), so the body's Conditional check is
-            //   open and the recursion classifies it symbolic — declining to
-            //   invent bindings from an undetermined generic context. (A
-            //   `Published(Shallow)` projection of the carrier WOULD apply the
-            //   default and wrongly commit to a branch — hence Skeleton, not
-            //   ProjectPath, on the carrier.)
-            use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(
-                    Arc::clone(&base.canonical_id),
-                    base.owner,
-                    Arc::clone(&base.decl_name),
-                ),
-                Arc::clone(args),
-                dispatch.instantiate_context_for(
-                    &base.canonical_id,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        ProjectionMode::Skeleton,
-                    ),
-                ),
-            ));
-            let read = dispatch.execute_read(key);
-            // Dual-emit: legacy accumulator + fact-tracer fan-out.
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &read.dep_signature);
-            match read.value {
-                QueryResult::Value(body_id) if body_id != node => {
-                    return SlotRootStep::Next(body_id)
-                }
-                // Did not instantiate past the carrier shell (or errored) —
-                // an unresolvable carrier has no concrete enumerable root.
-                _ => true,
-            }
-        }
-        _ => false,
-    })
-}
-
-/// Returns `true` when `node`'s structure still contains a FREE `TypeParam` or
-/// `Infer` shell — i.e. the type is NOT fully concrete. Used by the slot-param
-/// gate to decide whether a Conditional's check is decidable: a check carrying
-/// a free type parameter (`[M] extends ['hover']` in a generic component) is
-/// OPEN and must stay symbolic, while a fully-concrete check
-/// (`{ id: string } extends { id: infer U }`) is decidable and may reduce.
-///
-/// Walks the compound shapes a substituted check can take (Tuple / Array /
-/// Union / Intersection / Object members / KeyOf / IndexedAccess), resolving
-/// one-level `Alias` hops, and descends the `type_args` of the structural
-/// carriers (`BareRef` / `TypeOf` / `ImportType`) — a free `TypeParam` inside a
-/// carrier's applied arguments keeps the check open. `Infer` shells inside the
-/// conditional's EXTENDS clause are intentionally NOT inspected here (this
-/// predicate is applied to the CHECK only) — an `infer U` in `extends` is the
-/// binding mechanism, not an open check parameter. The lazy declaration carriers
-/// (`DeclRef` / `InstantiationRef`) are treated as NOT-free (they are concrete
-/// declaration references, resolved elsewhere). Every node is read once,
-/// whatever the nesting.
-fn node_contains_free_type_param(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> bool {
-    use crate::graph_walk::Reach;
-    crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
-            return Reach::Parts(Vec::new());
-        };
-        Reach::Parts(match data.as_ref() {
-            SemanticNodeData::TypeParam { .. }
-            | SemanticNodeData::Infer { .. }
-            | SemanticNodeData::InferRef { .. } => return Reach::Hit,
-            SemanticNodeData::Alias(inner) => vec![*inner],
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                composite
-                    .composite_members()
-                    .expect("composite arm")
-                    .iter()
-                    .copied()
-                    .collect()
-            }
-            SemanticNodeData::Array { element, .. } => vec![*element],
-            SemanticNodeData::Tuple { elements, .. } => {
-                elements.iter().map(|element| element.value).collect()
-            }
-            SemanticNodeData::Object(view) => view
-                .positive_members()
-                .iter()
-                .map(|member| member.value)
-                .collect(),
-            SemanticNodeData::KeyOf { base } => vec![*base],
-            SemanticNodeData::IndexedAccess { object, .. } => vec![*object],
-            // A `BareRef` / `TypeOf` / `ImportType` carrier applies its
-            // arguments at the reference site; a free `TypeParam` inside
-            // those args makes the node contain a free param (the check
-            // stays open). Descend the args via the shared accessor
-            // (args-only; the carrier head is not resolved).
-            SemanticNodeData::BareRef(_)
-            | SemanticNodeData::TypeOf(_)
-            | SemanticNodeData::TypeOfNominal(_)
-            | SemanticNodeData::ImportType(_) => data.carrier_type_args().to_vec(),
-            // Primitives, literals, functions, opaque, etc. carry no free
-            // open parameter on the check path.
-            _ => Vec::new(),
-        })
-    })
+    emit_slot_binding_graph_dispatch_facts(dispatch, &signature);
 }
 
 /// Compute the exactness flag for a synthesised binding's value node.
@@ -709,7 +464,7 @@ fn node_contains_free_type_param(
 /// alias-unwrap + closed-object semantics. See the `exactness` module
 /// docs for the full predicate.
 pub(crate) fn compute_exactness_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> ExpansionExactness {
     super::exactness::classify_node(dispatch, node)
@@ -743,7 +498,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     // `RequestContext::synthesis_expanded_instantiate_calls`). The eagerness
     // guard asserts that synthesis-scoped count is zero — synthesis drives
     // the carrier walk in Navigate / Skeleton, never Expanded.
-    let _synthesis_scope = crate::request_context::SynthesisScopeGuard::enter();
+    let _synthesis_scope = verter_type_engine::request_context::SynthesisScopeGuard::enter();
     // Synthesis-entry info event. Per the audit contract the synthesis layer
     // emits at `info` level; the `tracing::info!` here uses the
     // module-path target so subscribers filtered to `verter_session`
@@ -757,7 +512,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     );
 
     let mut ledger = SuppressionLedger::default();
-    let dispatch = ProjectSemanticDispatch::new(ctx.ctx);
+    let dispatch = ctx.dispatch;
     // Synthesis-step budget. Production code leaves
     // `synthesis_steps` `None` so the synthesis runs at full
     // budget. Tests use a small override to drive the budget-
@@ -769,8 +524,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     // `ExpansionStopReason::BudgetExceeded` and marks the run for
     // suppression so the result is not promoted into the final
     // `ComponentMetaResultDb` cache.
-    let synthesis_step_budget: Option<u32> =
-        ctx.ctx.config().recursion_budget_overrides.synthesis_steps;
+    let synthesis_step_budget: Option<u32> = dispatch.policy.synthesis_steps;
     let mut synthesis_steps_executed: u32 = 0;
     // Returns `true` when consuming a step exhausted the budget. The
     // closure increments the counter unconditionally so successive
@@ -827,9 +581,11 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // producer). The carrier stays a lazy shell — the shallow walker
         // materialises the surface when the dispatch reads it downstream.
         if consume_synthesis_step(&mut synthesis_steps_executed) {
-            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                crate::semantic_query::PartialReason::BudgetExceeded,
-            ));
+            ledger.suppress(
+                verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
+                    verter_type_engine::semantic_query::PartialReason::BudgetExceeded,
+                ),
+            );
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -841,11 +597,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             break 'macro_loop;
         }
         let type_args: Arc<[SemanticNodeId]> =
-            match crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                ctx.ctx,
-                owner_canonical,
-                macro_index,
-            ) {
+            match dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) {
                 Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
                 None => continue,
             };
@@ -861,14 +613,16 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // carrier does not invalidate the warm cache through the
         // dep-signature validator.
         for arg in type_args.iter() {
-            accumulate_lowered_node_carrier_deps(ctx.ctx, *arg, owner_canonical);
+            accumulate_lowered_node_carrier_deps(dispatch, *arg, owner_canonical);
         }
 
         // Step 2: ResolveMacroPayload. USE execute_read; ACCUMULATE deps.
         if consume_synthesis_step(&mut synthesis_steps_executed) {
-            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                crate::semantic_query::PartialReason::BudgetExceeded,
-            ));
+            ledger.suppress(
+                verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
+                    verter_type_engine::semantic_query::PartialReason::BudgetExceeded,
+                ),
+            );
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -892,8 +646,10 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 .macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
-        crate::request_context::observe_component_meta_read_suppress(&macro_payload_read);
-        emit_slot_binding_graph_dispatch_facts(dispatch.ctx, &macro_payload_read.dep_signature);
+        verter_type_engine::request_context::observe_component_meta_read_suppress(
+            &macro_payload_read,
+        );
+        emit_slot_binding_graph_dispatch_facts(dispatch, &macro_payload_read.dep_signature);
         if !macro_payload_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
                 &macro_payload_read.walker_diagnostics,
@@ -906,7 +662,10 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // PARTIAL signal, not on inner-memo non-cacheability. A benign
         // non-cacheable nested read must NOT suppress a complete result.
         if macro_payload_read.result_is_partial {
-            ledger.suppress_partial_read(macro_payload_read.partial_reason_classes());
+            ledger.suppress_partial_read(
+                dispatch.host_attachment().surface_claims(),
+                macro_payload_read.partial_reason_classes(),
+            );
         }
 
         let macro_payload_node = match macro_payload_read.value {
@@ -922,7 +681,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             QueryResult::Error(e) => {
                 if is_fatal_query_error(&e) {
                     ledger.suppress(
-                        crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -936,7 +695,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 
         // Step 3: enumerate slots via empty-path Shallow.
         let bindings = compute_bindings_via_graph(
-            &dispatch,
+            dispatch,
             ctx.ctx,
             macro_payload_node,
             SlotMacroIdentity {
@@ -1008,7 +767,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         ctx.ctx,
         owner_canonical,
         snapshot,
-        &dispatch,
+        dispatch,
         &graph_native_bindings,
         resolved_macros,
         expanded,
@@ -1034,8 +793,8 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 /// branch records its typed reason so the caller skips
 /// publication.
 pub(crate) fn compute_bindings_via_graph(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     macro_payload_node: SemanticNodeId,
     owner_macro: SlotMacroIdentity,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
@@ -1055,9 +814,11 @@ pub(crate) fn compute_bindings_via_graph(
 
     // Step 3: empty-path Shallow surface for slot names.
     if consume_step(synthesis_steps_executed) {
-        ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-            crate::semantic_query::PartialReason::BudgetExceeded,
-        ));
+        ledger.suppress(
+            verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
+                verter_type_engine::semantic_query::PartialReason::BudgetExceeded,
+            ),
+        );
         diag_sink.push(macro_expansion_for_budget_exceeded(
             owner_macro.macro_index,
             MacroExpansionKind::DefineSlots,
@@ -1071,13 +832,13 @@ pub(crate) fn compute_bindings_via_graph(
     let slot_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: macro_payload_node,
         path: empty_path.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Shallow,
         ),
     });
     // Dual-emit: legacy accumulator + fact-tracer fan-out.
-    crate::request_context::observe_component_meta_read_suppress(&slot_surface_read);
-    emit_slot_binding_graph_dispatch_facts(ctx, &slot_surface_read.dep_signature);
+    verter_type_engine::request_context::observe_component_meta_read_suppress(&slot_surface_read);
+    emit_slot_binding_graph_dispatch_facts(dispatch, &slot_surface_read.dep_signature);
     if !slot_surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
             &slot_surface_read.walker_diagnostics,
@@ -1088,7 +849,10 @@ pub(crate) fn compute_bindings_via_graph(
     }
     // A2 signal split: key the warm gate on the PARTIAL signal only.
     if slot_surface_read.result_is_partial {
-        ledger.suppress_partial_read(slot_surface_read.partial_reason_classes());
+        ledger.suppress_partial_read(
+            dispatch.host_attachment().surface_claims(),
+            slot_surface_read.partial_reason_classes(),
+        );
     }
     let slot_surface = match slot_surface_read.value {
         QueryResult::Value(id) => id,
@@ -1103,7 +867,9 @@ pub(crate) fn compute_bindings_via_graph(
         QueryResult::Error(e) => {
             if is_fatal_query_error(&e) {
                 ledger.suppress(
-                    crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                    verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(
+                        &e,
+                    ),
                 );
             }
             diag_sink.push(macro_expansion_for_query_error(
@@ -1114,27 +880,36 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members = match super::projectors::read_positive_surface_members(ctx, slot_surface) {
-        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
-            members.into_inner()
-        }
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
-        // An unresolvable slot-surface member read suppresses warm promotion
-        // and records its typed reason; the usable subset still publishes.
-        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-            ledger.suppress(incomplete.non_empty_reasons());
-            diag_sink.push(macro_expansion_for_query_error(
-                owner_macro.macro_index,
-                MacroExpansionKind::DefineSlots,
-                format!(
-                    "slot-surface-members-unresolved::{:?}",
-                    incomplete.reasons()
-                ),
-            ));
-            incomplete.into_recorded_partial().unwrap_or_default()
-        }
-    };
+    let slot_members =
+        match verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            ctx,
+            dispatch,
+            slot_surface,
+        ) {
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(members)
+            | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(members) => {
+                members.into_inner()
+            }
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                Vec::new()
+            }
+            // An unresolvable slot-surface member read suppresses warm promotion
+            // and records its typed reason; the usable subset still publishes.
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                incomplete,
+            ) => {
+                ledger.suppress(incomplete.non_empty_reasons());
+                diag_sink.push(macro_expansion_for_query_error(
+                    owner_macro.macro_index,
+                    MacroExpansionKind::DefineSlots,
+                    format!(
+                        "slot-surface-members-unresolved::{:?}",
+                        incomplete.reasons()
+                    ),
+                ));
+                incomplete.into_recorded_partial().unwrap_or_default()
+            }
+        };
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -1151,7 +926,7 @@ pub(crate) fn compute_bindings_via_graph(
         // carry a non-Function shell (Alias / Conditional /
         // InstantiationRef / DeclRef carriers) that the publication
         // terminal `Published(Shallow)` chose not to reduce.
-        // [`crate::meta_resolve::dispatch_helpers::realize_callable_member`]
+        // [`verter_type_engine::project_semantic_dispatch::callable_view::realize_callable_member`]
         // normalises through the carrier chain (relation-engine
         // Conditional reduction, transit-mode Instantiate,
         // ResolveDecl unwrap) so a decidable callable surfaces as a
@@ -1161,49 +936,58 @@ pub(crate) fn compute_bindings_via_graph(
         // miss, a failed decl resolve mid-chain) suppresses warm promotion
         // and records its typed reason — the missing binding row is then
         // partial, never byte-identical to a genuinely non-callable member.
-        let realized = match crate::meta_resolve::dispatch_helpers::realize_callable_member(
-            dispatch,
-            slot_member.value,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
-        ) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
-                id.into_inner()
-            }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
-                slot_member.value
-            }
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                ledger.suppress(incomplete.non_empty_reasons());
-                diag_sink.push(macro_expansion_for_query_error(
-                    owner_macro.macro_index,
-                    MacroExpansionKind::DefineSlots,
-                    format!(
-                        "slot-callable-unresolved::{slot_name}::{:?}",
-                        incomplete.reasons()
-                    ),
-                ));
-                let _ = incomplete.into_recorded_partial();
-                continue;
-            }
-        };
+        let realized =
+            match verter_type_engine::project_semantic_dispatch::callable_view::realize_callable_member(
+                dispatch,
+                slot_member.value,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Shallow,
+                ),
+            ) {
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
+                | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                    id.into_inner()
+                }
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                    slot_member.value
+                }
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                    incomplete,
+                ) => {
+                    ledger.suppress(incomplete.non_empty_reasons());
+                    diag_sink.push(macro_expansion_for_query_error(
+                        owner_macro.macro_index,
+                        MacroExpansionKind::DefineSlots,
+                        format!(
+                            "slot-callable-unresolved::{slot_name}::{:?}",
+                            incomplete.reasons()
+                        ),
+                    ));
+                    let _ = incomplete.into_recorded_partial();
+                    continue;
+                }
+            };
 
         // Step 4: read Function.params[0].ty. CALL kind only — a construct
         // signature is not a callable slot shape and synthesizes no
         // bindings (the realize fallback above hands back the raw member
         // value, so the kind must be re-asserted here).
-        let param0_ty =
-            match crate::project_semantic_dispatch::node_data_for(ctx, realized).as_deref() {
-                Some(SemanticNodeData::Signature {
-                    kind: crate::semantic_query::SignatureKind::Call,
-                    params,
-                    ..
-                }) => match params.first() {
-                    Some(p) => p.ty,
-                    None => continue,
-                },
-                _ => continue,
-            };
+        let param0_ty = match verter_type_engine::project_semantic_dispatch::node_data_for(
+            dispatch.graph(),
+            realized,
+        )
+        .as_deref()
+        {
+            Some(SemanticNodeData::Signature {
+                kind: verter_type_engine::semantic_query::SignatureKind::Call,
+                params,
+                ..
+            }) => match params.first() {
+                Some(p) => p.ty,
+                None => continue,
+            },
+            _ => continue,
+        };
 
         // Skip slots whose binding parameter has a symbolic-only root
         // shape (Conditional/IndexedAccess/Mapped/KeyOf/TypeParam/etc.).
@@ -1226,9 +1010,11 @@ pub(crate) fn compute_bindings_via_graph(
 
         // Empty-path Shallow on param0_ty.
         if consume_step(synthesis_steps_executed) {
-            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                crate::semantic_query::PartialReason::BudgetExceeded,
-            ));
+            ledger.suppress(
+                verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
+                    verter_type_engine::semantic_query::PartialReason::BudgetExceeded,
+                ),
+            );
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -1242,13 +1028,15 @@ pub(crate) fn compute_bindings_via_graph(
         let param_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: empty_path.clone(),
-            context: crate::semantic_query::ProjectionReductionContext::published(
+            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Shallow,
             ),
         });
         // Dual-emit: legacy accumulator + fact-tracer fan-out.
-        crate::request_context::observe_component_meta_read_suppress(&param_surface_read);
-        emit_slot_binding_graph_dispatch_facts(ctx, &param_surface_read.dep_signature);
+        verter_type_engine::request_context::observe_component_meta_read_suppress(
+            &param_surface_read,
+        );
+        emit_slot_binding_graph_dispatch_facts(dispatch, &param_surface_read.dep_signature);
         if !param_surface_read.walker_diagnostics.is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
                 &param_surface_read.walker_diagnostics,
@@ -1259,7 +1047,10 @@ pub(crate) fn compute_bindings_via_graph(
         }
         // A2 signal split: key the warm gate on the PARTIAL signal only.
         if param_surface_read.result_is_partial {
-            ledger.suppress_partial_read(param_surface_read.partial_reason_classes());
+            ledger.suppress_partial_read(
+                dispatch.host_attachment().surface_claims(),
+                param_surface_read.partial_reason_classes(),
+            );
         }
         let param_surface = match param_surface_read.value {
             QueryResult::Value(id) => id,
@@ -1274,7 +1065,7 @@ pub(crate) fn compute_bindings_via_graph(
             QueryResult::Error(e) => {
                 if is_fatal_query_error(&e) {
                     ledger.suppress(
-                        crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -1286,15 +1077,23 @@ pub(crate) fn compute_bindings_via_graph(
             }
         };
         let binding_members =
-            match super::projectors::read_positive_surface_members(ctx, param_surface) {
-                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
-                    members.into_inner()
+            match verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+                ctx,
+                dispatch,
+                param_surface,
+            ) {
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(members)
+                | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
+                    members,
+                ) => members.into_inner(),
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                    Vec::new()
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
                 // An unresolvable binding-surface read suppresses warm promotion
                 // and records its typed reason; the usable subset still publishes.
-                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                    incomplete,
+                ) => {
                     ledger.suppress(incomplete.non_empty_reasons());
                     diag_sink.push(macro_expansion_for_query_error(
                         owner_macro.macro_index,
@@ -1327,8 +1126,8 @@ pub(crate) fn compute_bindings_via_graph(
             // body; non-carrier values take no read at all, so no
             // unrelated file is ever walked. A carrier that does not
             // resolve keeps the original node (fail-closed shallow).
-            let value_node = match crate::project_semantic_dispatch::node_data_for(
-                ctx,
+            let value_node = match verter_type_engine::project_semantic_dispatch::node_data_for(
+                dispatch.graph(),
                 binding.value,
             )
             .as_deref()
@@ -1337,15 +1136,20 @@ pub(crate) fn compute_bindings_via_graph(
                     let value_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
                         base: binding.value,
                         path: empty_path.clone(),
-                        context: crate::semantic_query::ProjectionReductionContext::published(
+                        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Navigate,
                         ),
                     });
                     // Dual-emit: legacy accumulator + fact-tracer fan-out.
-                    crate::request_context::observe_component_meta_read_suppress(&value_read);
-                    emit_slot_binding_graph_dispatch_facts(ctx, &value_read.dep_signature);
+                    verter_type_engine::request_context::observe_component_meta_read_suppress(
+                        &value_read,
+                    );
+                    emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature);
                     if value_read.result_is_partial {
-                        ledger.suppress_partial_read(value_read.partial_reason_classes());
+                        ledger.suppress_partial_read(
+                            dispatch.host_attachment().surface_claims(),
+                            value_read.partial_reason_classes(),
+                        );
                     }
                     match value_read.value {
                         QueryResult::Value(id) => id,
@@ -1403,14 +1207,21 @@ pub(crate) fn compute_bindings_via_graph(
 /// content — a `publish_merged_bindings` slot read in an overlay session no
 /// longer leaks the base host's slot bindings.
 fn typeinfo_macro_dtos(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
-    macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
 ) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
     let read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
+        dispatch,
         &crate::typeinfo::types::VueMacroSurfaceRequest {
             owner_canonical: std::sync::Arc::from(owner_canonical),
             macro_index,
@@ -1418,7 +1229,8 @@ fn typeinfo_macro_dtos(
             root_identity,
             level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
         },
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     // Fold a genuine partial surface into the request-result completeness so
     // the enclosing component-meta result's warm promotion is refused.
     read.observe_partial();
@@ -1463,13 +1275,16 @@ fn typeinfo_macro_dtos(
 /// re-resolves in the owner scope on demand. `None` for every non-reference
 /// value shape (the caller falls through to the synthetic carrier).
 fn named_reference_carrier_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     let mut current = value_node;
     // Peel aliases (bounded).
     for _ in 0..16 {
-        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+            dispatch.graph(),
+            current,
+        )?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::DeclRef { identity } => {
@@ -1513,7 +1328,7 @@ fn named_reference_carrier_source(
 /// as the synthetic carrier instead would render the binding's own NAME
 /// as its type on every consumer surface.
 fn closed_leaf_fact_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     use verter_type_expr::facts::{ClosedTypeFact, FactOrLocator, SemanticTypeSource};
@@ -1559,13 +1374,14 @@ fn closed_leaf_fact_source(
 /// (`{ meta: meta; }`) — the same name-as-type defect the leaf arm
 /// corrects, one level in.
 fn closed_leaf_object_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     use verter_type_expr::facts::{ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact};
     use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value_node)?;
+    let data =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value_node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };
@@ -1610,11 +1426,11 @@ fn closed_leaf_object_source(
 }
 
 fn closed_member_path_route_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
-    use crate::semantic_query::IndexKey;
+    use verter_type_engine::semantic_query::IndexKey;
 
     // Index keys collect outer-to-inner; the fact's `index_path` is
     // inner-to-outer, so reverse on emit.
@@ -1623,7 +1439,10 @@ fn closed_member_path_route_source(
     // Bounded: an authored indexed-access chain is short; the cap only
     // guards against pathological graph shapes.
     for _ in 0..64 {
-        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+            dispatch.graph(),
+            current,
+        )?;
         match &*data {
             SemanticNodeData::Alias(inner) => {
                 current = *inner;
@@ -1649,7 +1468,7 @@ fn closed_member_path_route_source(
                 drop(data);
                 let resolved = dispatch.resolve_carrier_subject_node(
                     current,
-                    crate::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 );
@@ -1710,7 +1529,7 @@ fn closed_member_path_route_source(
 /// (slow path / synthetic) when the root has no prepared decl, the
 /// member is absent, or the annotation cannot raise.
 fn owner_local_member_reaches_non_owner_ref(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     identity: &DeclIdentity,
     member_name: &str,
@@ -1731,7 +1550,7 @@ fn owner_local_member_reaches_non_owner_ref(
     let Some(member_node) = dispatch
         .raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
             ),
         )
@@ -1749,13 +1568,15 @@ fn owner_local_member_reaches_non_owner_ref(
 /// fail-closed keeps the slow path). Every node is read once, whatever the
 /// nesting.
 fn node_reaches_non_owner_ref(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     node: SemanticNodeId,
 ) -> bool {
-    use crate::graph_walk::Reach;
-    crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+    use verter_type_engine::graph_walk::Reach;
+    verter_type_engine::graph_walk::reaches(node, |node| {
+        let Some(data) =
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        else {
             return Reach::Parts(Vec::new());
         };
         let hit = |hit: bool| {
@@ -1786,7 +1607,7 @@ fn node_reaches_non_owner_ref(
                 drop(data);
                 let resolved = dispatch.resolve_carrier_subject_node(
                     node,
-                    crate::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 );
@@ -1801,7 +1622,7 @@ fn node_reaches_non_owner_ref(
             SemanticNodeData::KeyOf { base } => vec![*base],
             SemanticNodeData::IndexedAccess { object, index } => {
                 let mut parts = vec![*object];
-                if let crate::semantic_query::IndexKey::Computed(inner) = index {
+                if let verter_type_engine::semantic_query::IndexKey::Computed(inner) = index {
                     parts.push(*inner);
                 }
                 parts
@@ -1869,8 +1690,10 @@ fn node_reaches_non_owner_ref(
 /// a lookup can never join a graph-native row with parser metadata from a
 /// different invocation. A fallback publication (the parser-only loop
 /// below) reads the real owner straight off the key.
-type ParserBindingIndex<'a> =
-    FxHashMap<SlotBindingJoinKey, &'a verter_semantic::analysis::AnalyzedSlotFieldBinding>;
+type ParserBindingIndex<'a> = FxHashMap<
+    SlotBindingJoinKey,
+    &'a verter_session_query::analysis::types::AnalyzedSlotFieldBinding,
+>;
 
 /// Build the parser-path binding index from every `defineSlots` macro's own
 /// `(owner, macro_index, slot fields)` triple. Owner and macro_index ride
@@ -1881,7 +1704,7 @@ fn build_parser_binding_index<'a>(
     slot_field_sets: &'a [(
         verter_type_expr::TopLevelOwnerId,
         usize,
-        Vec<verter_semantic::analysis::AnalyzedSlotField>,
+        Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
     )],
 ) -> ParserBindingIndex<'a> {
     let mut parser_index: ParserBindingIndex<'_> = FxHashMap::default();
@@ -1907,7 +1730,7 @@ fn build_parser_binding_index<'a>(
 mod parser_binding_index_tests {
     use super::build_parser_binding_index;
     use std::sync::Arc;
-    use verter_semantic::analysis::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
+    use verter_session_query::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
     use verter_type_expr::TopLevelOwnerId;
 
     fn binding(name: &str) -> AnalyzedSlotFieldBinding {
@@ -2027,16 +1850,16 @@ mod parser_binding_index_tests {
 #[cfg(test)]
 mod publish_order_tests {
     use super::*;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+
     use crate::resolver_core::component_meta::ResolvedMacroMeta;
-    use crate::resolver_core::{
-        with_bare_host_ctx_for_test, ResolvedDeclarationKind, ResolvedTypeDeclaration,
-    };
-    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+    use crate::resolver_core::with_bare_host_ctx_for_test;
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use rustc_hash::FxHashSet;
-    use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+    use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
+    use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+    use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+    use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
     use verter_type_expr::facts::SemanticTypeSource;
     use verter_type_expr::TopLevelOwnerId;
 
@@ -2114,6 +1937,9 @@ defineSlots<{ default(props: { item: string }): any }>()
         );
 
         with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             let indexed = ctx
                 .ensure_indexed_ready_serve(OWNER)
                 .expect("owner is indexed")
@@ -2140,10 +1966,20 @@ defineSlots<{ default(props: { item: string }): any }>()
                 "mixed-source discriminator is same-owner"
             );
 
-            let first_dtos =
-                typeinfo_macro_dtos(ctx, OWNER, first_index, AnalyzedMacroKind::DefineSlots);
-            let second_dtos =
-                typeinfo_macro_dtos(ctx, OWNER, second_index, AnalyzedMacroKind::DefineSlots);
+            let first_dtos = typeinfo_macro_dtos(
+                ctx,
+                dispatch,
+                OWNER,
+                first_index,
+                AnalyzedMacroKind::DefineSlots,
+            );
+            let second_dtos = typeinfo_macro_dtos(
+                ctx,
+                dispatch,
+                OWNER,
+                second_index,
+                AnalyzedMacroKind::DefineSlots,
+            );
             assert_eq!(
                 binding_annotation(&first_dtos, "default", "item"),
                 Some("number"),
@@ -2155,10 +1991,8 @@ defineSlots<{ default(props: { item: string }): any }>()
                 "macro 1 parser metadata must carry item: string"
             );
 
-            let dispatch = ProjectSemanticDispatch::new(ctx);
-            let string_node = ctx
-                .project_type_store()
-                .semantic_graph()
+            let string_node = dispatch
+                .graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
             let graph_native = vec![(
                 (
@@ -2193,7 +2027,7 @@ defineSlots<{ default(props: { item: string }): any }>()
                 ctx,
                 OWNER,
                 snapshot.as_ref(),
-                &dispatch,
+                dispatch,
                 &graph_native,
                 &resolved_macros,
                 &mut expanded,
@@ -2260,6 +2094,9 @@ defineSlots<{ default(props: { item: string }): any }>()
         );
 
         with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             let indexed = ctx
                 .ensure_indexed_ready_serve(OWNER)
                 .expect("owner is indexed")
@@ -2292,15 +2129,19 @@ defineSlots<{ default(props: { item: string }): any }>()
                  second=({second_index},{second_owner:?})"
             );
 
-            let first_dtos =
-                typeinfo_macro_dtos(ctx, OWNER, first_index, AnalyzedMacroKind::DefineSlots);
+            let first_dtos = typeinfo_macro_dtos(
+                ctx,
+                dispatch,
+                OWNER,
+                first_index,
+                AnalyzedMacroKind::DefineSlots,
+            );
             assert_eq!(
                 binding_annotation(&first_dtos, "default", "item"),
                 Some("number"),
                 "the earlier macro's parser metadata must carry item: number"
             );
 
-            let dispatch = ProjectSemanticDispatch::new(ctx);
             let resolved_macros = vec![
                 dummy_slots_meta(first_index, first_owner),
                 dummy_slots_meta(second_index, second_owner),
@@ -2311,7 +2152,7 @@ defineSlots<{ default(props: { item: string }): any }>()
                 ctx,
                 OWNER,
                 snapshot.as_ref(),
-                &dispatch,
+                dispatch,
                 &[],
                 &resolved_macros,
                 &mut expanded,
@@ -2348,10 +2189,10 @@ defineSlots<{ default(props: { item: string }): any }>()
 }
 
 pub(crate) fn publish_merged_bindings(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     graph_native: &[GraphNativeBindingEntry],
     resolved_macros: &[ResolvedMacroMeta],
     expanded: &mut ExpandedComponentTypes,
@@ -2368,7 +2209,7 @@ pub(crate) fn publish_merged_bindings(
     let slot_field_sets: Vec<(
         verter_type_expr::TopLevelOwnerId,
         usize,
-        Vec<verter_semantic::analysis::AnalyzedSlotField>,
+        Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
     )> = resolved_macros
         .iter()
         .filter(|r| r.macro_kind == AnalyzedMacroKind::DefineSlots)
@@ -2392,6 +2233,7 @@ pub(crate) fn publish_merged_bindings(
                 resolved.macro_index,
                 typeinfo_macro_dtos(
                     ctx,
+                    dispatch,
                     owner_canonical,
                     resolved.macro_index,
                     AnalyzedMacroKind::DefineSlots,
@@ -2723,7 +2565,7 @@ mod synthesis_claim_tests {
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+    use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
 
     const OWNER: &str = "/src/Comp.vue";
 
@@ -2745,12 +2587,15 @@ mod synthesis_claim_tests {
         let host = host_with_vue(src);
         let mut claim = None;
         with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+
             let indexed = ctx
                 .ensure_indexed_ready_serve(OWNER)
                 .expect("owner is indexed")
                 .indexed;
             let snapshot = Arc::clone(&indexed.snapshot);
-            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
             let mut expanded = ExpandedComponentTypes::default();
             let mut diags = Vec::new();
             let result = resolve_slot_bindings_graph_native(
@@ -2786,9 +2631,9 @@ defineSlots<{ default: Missing }>()
         );
         match claim {
             SynthesisCompleteness::Suppressed(reasons) => assert!(
-                reasons
-                    .get()
-                    .contains(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY),
+                reasons.get().contains(
+                    verter_type_engine::semantic_query::PartialReasonSet::MISSING_DEPENDENCY
+                ),
                 "the unresolvable slot value's suppression names the missing \
                  dependency; got {:?}",
                 reasons.get()

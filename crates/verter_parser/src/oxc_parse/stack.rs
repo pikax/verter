@@ -95,24 +95,35 @@ pub fn with_stack<R>(
     purpose: Reservation,
     work: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
-    if remaining().is_some_and(|left| left >= needed) {
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    let forced = faults::forcing(purpose, needed);
+    #[cfg(not(any(test, feature = "stack-fault-injection")))]
+    let forced = false;
+    if !forced && remaining().is_some_and(|left| left >= needed) {
         return Ok(work());
     }
-    match LEASE.with(Cell::get) {
-        Some(lease) if lease.bytes >= needed => match lease.region {
-            // On the lease's region already, or on the stack the lease found
-            // large enough: the lease's size covers the walk.
-            None => Ok(work()),
-            Some(region) if ON_REGION.with(Cell::get) == region => Ok(work()),
-            // SAFETY: a lease's region lives until the lease ends, and the
-            // lease is this thread's, active for the whole of this call.
-            Some(region) => match unsafe { &*region } {
-                region if !region.busy.get() => Ok(region.run(work)),
-                // Work on the region is suspended under a region reserved
-                // past the lease: this walk gets one of its own.
-                _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
-            },
-        },
+    // A forced purpose takes no lease at all, one holding a region included:
+    // the lease's region would run the work with no reservation of its own,
+    // so a fault injected at [`Region::reserve`] would not be this call's to
+    // refuse, and the armed fault would reach the next reservation instead.
+    let lease = if forced { None } else { LEASE.with(Cell::get) };
+    match lease {
+        Some(lease) if lease.bytes >= needed => {
+            match lease.region {
+                // On the lease's region already, or on the stack the lease found
+                // large enough: the lease's size covers the walk.
+                None => Ok(work()),
+                Some(region) if ON_REGION.with(Cell::get) == region => Ok(work()),
+                // SAFETY: a lease's region lives until the lease ends, and the
+                // lease is this thread's, active for the whole of this call.
+                Some(region) => match unsafe { &*region } {
+                    region if !region.busy.get() => Ok(region.run(work)),
+                    // Work on the region is suspended under a region reserved
+                    // past the lease: this walk gets one of its own.
+                    _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
+                },
+            }
+        }
         _ => Ok(reserve_past_lease(needed, purpose)?.run(work)),
     }
 }
@@ -138,13 +149,18 @@ pub fn with_walk_stack_lease<R>(
     needed: usize,
     operation: impl FnOnce() -> R,
 ) -> Result<R, StackUnavailable> {
-    if LEASE
-        .with(Cell::get)
-        .is_some_and(|lease| lease.bytes >= needed)
+    #[cfg(any(test, feature = "stack-fault-injection"))]
+    let forced = faults::forcing(Reservation::Lease, needed);
+    #[cfg(not(any(test, feature = "stack-fault-injection")))]
+    let forced = false;
+    if !forced
+        && LEASE
+            .with(Cell::get)
+            .is_some_and(|lease| lease.bytes >= needed)
     {
         return Ok(operation());
     }
-    let region = if remaining().is_some_and(|left| left >= needed) {
+    let region = if !forced && remaining().is_some_and(|left| left >= needed) {
         None
     } else {
         match Region::reserve(needed, Reservation::Lease) {
@@ -315,6 +331,127 @@ pub mod faults {
 
     /// Every reservation on any thread so far, by purpose and bytes.
     static MADE: Mutex<Vec<(Reservation, usize, usize)>> = Mutex::new(Vec::new());
+
+    /// A forcing of purposes onto the region path, however large the stack
+    /// the thread runs on is: the parse length shortcut, the thread's own
+    /// stack, and the walk-stack lease's are all bypassed — a lease holding a
+    /// region included, for the lease's region would run the work with no
+    /// reservation of its own to refuse — so a fault injected at
+    /// [`Region::reserve`] fires wherever the reservation is made.
+    ///
+    /// A forcing names the reservations it reaches on two axes, and one of
+    /// them is never left open: a test holding a forcing changes no other
+    /// test's work. The size is what reaches a scheduler worker, whose
+    /// reservations no thread-local scope could, and the tests in one binary
+    /// that force a purpose give it sizes no other of them parses — the
+    /// `stack_bytes` of a scan depth, so a distinct depth is a distinct size.
+    /// The thread is what reaches a worker's when the sizes collide, for the
+    /// work that runs on the thread the test itself established.
+    struct Force {
+        id: u64,
+        /// The thread the forcing reaches, or `None` for every thread.
+        thread: Option<std::thread::ThreadId>,
+        purposes: Vec<Reservation>,
+        /// The bytes the forcing reaches, or `None` for a reservation of any
+        /// size on `thread`.
+        needed: Option<usize>,
+    }
+
+    static FORCED: Mutex<Vec<Force>> = Mutex::new(Vec::new());
+
+    static NEXT_FORCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Make every reservation of each purpose in `purposes` that is exactly
+    /// `needed` bytes take the region path, on whichever thread makes it: the
+    /// work a scheduler worker does is included, which no thread-scoped
+    /// forcing reaches, and the reservations of every other size are left to
+    /// the thread's own stack, as in production.
+    ///
+    /// `needed` is the bytes a forced reservation is sized from — the syntax
+    /// scan, [`crate::oxc_parse::parse_stack_bytes`] — so a test that names
+    /// its source's own size forces that source's reservation alone. The
+    /// returned guard restores the forcings in force when it was taken, on
+    /// drop and on unwind alike.
+    pub fn force_reservations(purposes: &[Reservation], needed: usize) -> ForcedRegions {
+        establish(Force {
+            id: NEXT_FORCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            thread: None,
+            purposes: purposes.to_vec(),
+            needed: Some(needed),
+        })
+    }
+
+    /// [`force_reservations`] for the work that runs on this thread, of any
+    /// reservation size: the forcing reaches this thread's reservations
+    /// alone, so it is the scoping for a test that enumerates every
+    /// reservation its work makes (a compile's leases over sources of
+    /// several sizes) rather than one it can name the size of.
+    pub fn force_reservations_here(purposes: &[Reservation]) -> ForcedRegions {
+        establish(Force {
+            id: NEXT_FORCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            thread: Some(std::thread::current().id()),
+            purposes: purposes.to_vec(),
+            needed: None,
+        })
+    }
+
+    fn establish(force: Force) -> ForcedRegions {
+        let id = force.id;
+        FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(force);
+        ForcedRegions(id)
+    }
+
+    /// Whether a reservation of `purpose` of `needed` bytes is forced onto a
+    /// region, by a forcing of another purpose, another size or another
+    /// thread excluded.
+    pub(in crate::oxc_parse) fn forcing(purpose: Reservation, needed: usize) -> bool {
+        forced_by(purpose, Some(needed))
+    }
+
+    /// Whether any forcing of `purpose` is held, whatever size it names: the
+    /// entry points that size their reservation from the length rather than
+    /// the scan take no shortcut while one is, so a forced reservation is
+    /// sized from the scan ([`forcing`] then admits the sizes its forcing
+    /// reaches and leaves the rest to run in place).
+    pub(in crate::oxc_parse) fn forcing_any(purpose: Reservation) -> bool {
+        forced_by(purpose, None)
+    }
+
+    /// Whether a forcing of `purpose` reaches the reservation this thread is
+    /// about to make. `needed` is that reservation's size, or `None` where
+    /// the caller is only asking whether any forcing of the purpose is held
+    /// and has not sized its reservation yet.
+    fn forced_by(purpose: Reservation, needed: Option<usize>) -> bool {
+        let thread = std::thread::current().id();
+        FORCED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|force| {
+                force.purposes.contains(&purpose)
+                    && force.thread.is_none_or(|held| held == thread)
+                    // A forcing that names no size reaches every size on the
+                    // thread it is scoped to; one that names a size reaches
+                    // only that one, and the caller's asking whether any
+                    // forcing is held reaches them all.
+                    && needed.is_none_or(|needed| force.needed.is_none_or(|held| held == needed))
+            })
+    }
+
+    /// The forcing [`force_reservations`] established, restored on drop.
+    pub struct ForcedRegions(u64);
+
+    impl Drop for ForcedRegions {
+        fn drop(&mut self) {
+            FORCED
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|force| force.id != self.0);
+        }
+    }
 
     /// The call sites of the walks, on any thread, whose stack refusal no
     /// operation would report: a walk no walk-stack lease covered, which can

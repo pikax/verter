@@ -23,10 +23,10 @@ use verter_session::for_tests::{
     dispatch_relation_nominal_identity_for_tests, dispatch_resolve_type_decl_for_tests,
     relate_query_key_for_tests, RelateVerdictForTests,
 };
-use verter_session::semantic_query::{
+use verter_session::{AnalysisLevel, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     AuthoredPropertyKey, PrimitiveKind, ProjectionReductionContext, RelationKind, SemanticNodeData,
 };
-use verter_session::{AnalysisLevel, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{
     ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TupleElement, TypeExpr, ValueRef,
 };
@@ -1416,7 +1416,7 @@ fn qualified_typeof_key_does_not_truncate_trailing_segments() {
             .node_data(*projected_node)
             .as_deref(),
         Some(&SemanticNodeData::Opaque(
-            verter_session::semantic_query::QueryError::Miss
+            verter_type_engine::semantic_query::QueryError::Miss
         )),
         "the trailing `.description` projection is an exact interned node: {projected_key:?}"
     );
@@ -1459,7 +1459,7 @@ fn nominal_carrier_with_pending_segment_widens_and_projects() {
             .node_data(lowered)
             .as_deref(),
         Some(&SemanticNodeData::Opaque(
-            verter_session::semantic_query::QueryError::Miss
+            verter_type_engine::semantic_query::QueryError::Miss
         )),
         "`TOKEN.description` widens and projects the `Symbol` interface member"
     );
@@ -1597,17 +1597,21 @@ fn path_walker_pending_segment_over_nominal_carrier_widens() {
     );
     let walked = dispatch_execute_type_node_for_tests(
         &host,
-        verter_session::semantic_query::SemanticQueryKey::ProjectPath {
+        verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: carrier,
-            path: Arc::from(vec![verter_session::semantic_query::PathSegment::Member(
-                verter_session::semantic_query::PropertyKey::identifier(Arc::from("description")),
-            )]),
+            path: Arc::from(vec![
+                verter_type_engine::semantic_query::PathSegment::Member(
+                    verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                        "description",
+                    )),
+                ),
+            ]),
             context: ProjectionReductionContext::structural_transit(),
         },
     );
     let walked = match walked {
-        verter_session::semantic_query::QueryResult::Value(
-            verter_session::semantic_query::SemanticQueryOutput { value, .. },
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value, .. },
         ) => value,
         other => panic!("pending-segment projection must produce a node: {other:?}"),
     };
@@ -1621,7 +1625,7 @@ fn path_walker_pending_segment_over_nominal_carrier_widens() {
             .node_data(walked)
             .as_deref(),
         Some(&SemanticNodeData::Opaque(
-            verter_session::semantic_query::QueryError::Miss
+            verter_type_engine::semantic_query::QueryError::Miss
         )),
         "no TS lib: the Symbol interface member is an interned miss, not the carrier"
     );
@@ -2143,7 +2147,7 @@ fn exposed_unique_symbol_reference_stays_in_scope_in_the_generated_surface() {
 #[test]
 fn vue_publication_keeps_a_nominal_typeof_carrier_complete() {
     use verter_session::for_tests::dispatch_vue_publication_keyof_partial_reasons_for_tests;
-    use verter_session::semantic_query::PartialReasonSet;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_audit_host();
     upsert(

@@ -456,13 +456,19 @@ fn output_failure_audited_entry_returns_the_real_stored_record_not_a_fabricated_
     // regression guards against.
     let base_host = host.inner.project.host();
     assert!(
-        base_host.audit_records.is_empty(),
+        base_host
+            .host_audit_runtime()
+            .audit_records_store()
+            .is_empty(),
         "no orphan audit record may remain in the store after the \
          audited error return; {} record(s) left behind",
-        base_host.audit_records.len(),
+        base_host.host_audit_runtime().audit_records_store().len(),
     );
     assert!(
-        base_host.take_audit_record(record.request_id).is_none(),
+        base_host
+            .host_audit_runtime()
+            .take_record(record.request_id)
+            .is_none(),
         "the returned record was drained (a second take yields None)"
     );
 }
@@ -790,7 +796,10 @@ import Link from './Link.vue'
     let _store_view = host.host().resolver_store_view();
     let resolved = host
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Button.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("button resolved state should exist for the captured store view");
 
     host.upsert_base("/src/Link.vue", "<script setup lang=\"ts\"></script>")
@@ -810,7 +819,7 @@ import Link from './Link.vue'
     assert!(
         matches!(
             meta.fallthrough_surface,
-            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
+            verter_session_query::analysis::component_meta::FallthroughSurface::Branches { .. }
         ),
         "captured store views should keep child fallthrough resolution pinned to the resolved snapshot",
     );

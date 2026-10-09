@@ -50,15 +50,15 @@ use verter_audit::{
 use super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport};
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
-use crate::instant::Instant;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{
+use crate::types::UpsertRequest;
+use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{
     ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey, SemanticQueryOutput,
 };
-use crate::types::UpsertRequest;
-use crate::VerterHost;
 
 /// Name of the synthetic alias produced by the scratch file. The
 /// expression body is wrapped as `type <NAME> = <expression>;` and
@@ -122,7 +122,7 @@ impl VerterHost {
         req: EvaluateTypeExpressionRequest,
     ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
@@ -153,7 +153,7 @@ impl VerterHost {
 
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
         verter_debug_assert!(ctx.audit_registration.get().is_none());
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         let request_start = Instant::now();
         let scratch_uri = compute_scratch_uri(&req.scope, &req.expression, &req.extra_imports);
@@ -419,7 +419,7 @@ fn evaluate_inner(
         remove_scratch(host, scratch_uri);
         return (Ok(None), false);
     };
-    let scope_node = crate::semantic_query::NodeScopeId::File {
+    let scope_node = verter_type_engine::semantic_query::NodeScopeId::File {
         canonical_id: Arc::clone(&scratch_canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
@@ -432,12 +432,12 @@ fn evaluate_inner(
         Arc::from(SCRATCH_ALIAS_NAME),
     );
     let instantiate_key =
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             base,
             Arc::from(Vec::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 &scratch_canonical,
-                crate::semantic_query::ProjectionReductionContext::published(req.mode),
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(req.mode),
             ),
         ));
     let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
@@ -460,7 +460,7 @@ fn evaluate_inner(
                     canonical_id: Arc::clone(&scratch_canonical),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
-                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },

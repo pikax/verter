@@ -1,0 +1,39 @@
+error[E0559]: variant `SliceExpr::FrameShadowed` has no field named `inner`
+ --> tests/compile-fail/flow_shadow_wrapper_named_variant_removed.rs:7:9
+  |
+7 |         inner: Box::new(expr.inner().clone()),
+  |         ^^^^^ field does not exist
+  |
+ ::: src/flow/slice.rs
+  |
+  |     FrameShadowed(FrameShadowedExpr),
+  |     ------------- `SliceExpr::FrameShadowed` defined here
+  |
+help: `SliceExpr::FrameShadowed` is a tuple variant, use the appropriate syntax
+  |
+6 -     SliceExpr::FrameShadowed {
+7 -         inner: Box::new(expr.inner().clone()),
+8 -         shadowed: Vec::new().into(),
+9 -     }
+6 +     SliceExpr::FrameShadowed(/* FrameShadowedExpr */)
+  |
+
+error[E0559]: variant `SliceExpr::FrameShadowed` has no field named `shadowed`
+ --> tests/compile-fail/flow_shadow_wrapper_named_variant_removed.rs:8:9
+  |
+8 |         shadowed: Vec::new().into(),
+  |         ^^^^^^^^ field does not exist
+  |
+ ::: src/flow/slice.rs
+  |
+  |     FrameShadowed(FrameShadowedExpr),
+  |     ------------- `SliceExpr::FrameShadowed` defined here
+  |
+help: `SliceExpr::FrameShadowed` is a tuple variant, use the appropriate syntax
+  |
+6 -     SliceExpr::FrameShadowed {
+7 -         inner: Box::new(expr.inner().clone()),
+8 -         shadowed: Vec::new().into(),
+9 -     }
+6 +     SliceExpr::FrameShadowed(/* FrameShadowedExpr */)
+  |

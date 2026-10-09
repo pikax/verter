@@ -21,12 +21,12 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::ReadSetSignature;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
     PrimitiveKind, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     StructuralReduceContext,
 };
-use verter_session::{HostConfig, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())

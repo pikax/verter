@@ -317,6 +317,22 @@ fn has_cfg_test(attrs: &[Attribute]) -> bool {
     })
 }
 
+/// Production files of the session crate and of the type engine it builds
+/// on. Caches live in both crates, so both are in scope.
+fn session_and_engine_production_rs_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let crate_root = workspace_root().join(krate);
+        assert!(
+            crate_root.is_dir(),
+            "production source root {} is missing",
+            crate_root.display()
+        );
+        files.extend(walk_production_rs_files(&crate_root));
+    }
+    files
+}
+
 fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
@@ -391,9 +407,8 @@ fn format_violations(violations: &[Violation]) -> String {
 ///   lifecycle reset entry point.
 #[test]
 fn no_bulk_invalidation_outside_reset_methods() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut violations = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    for file in session_and_engine_production_rs_files() {
         scan_file(&file, &mut violations);
     }
     assert!(

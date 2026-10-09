@@ -18,7 +18,7 @@ fn lowering_step_drops_oxc_arena_at_boundary() {
     // and this test would fail to compile.
     //
     // The test discriminates the lowering boundary contract: pre-1A
-    // the borrowed `crate::ParsedEvalProgram` self-cell holds the OXC
+    // the borrowed `verter_semantic_source::parsed_eval_program::ParsedEvalProgram` self-cell holds the OXC
     // arena alive across cache lifetimes; post-1A the lowering
     // produces `OwnedEvalProgram` and the arena drops at the boundary.
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}

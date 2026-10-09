@@ -27,8 +27,8 @@ use crate::VerterHost;
 /// was computed FROM the superseded surface, an entry the read-side
 /// fact rail cannot reject.
 #[derive(Clone)]
-pub(crate) struct RoutedShallowServe {
-    pub(crate) state: Arc<crate::resolver_core::ShallowFileState>,
+pub(crate) struct RoutedShallowServe<T = crate::resolver_core::ShallowFileState> {
+    pub(crate) state: Arc<T>,
     pub(crate) store_published: bool,
 }
 
@@ -44,32 +44,39 @@ pub(crate) struct RoutedShallowServe {
 /// persisted). Every serve exit in `route_shallow_state_serve` records
 /// itself here, including the edge-stale rebuild arm that bypasses the
 /// memo, so the accumulator cannot under-report.
-#[derive(Default)]
-pub(crate) struct RouteShallowStateCache {
-    states: rustc_hash::FxHashMap<String, RoutedShallowServe>,
+pub(crate) struct RouteShallowStateCache<T = crate::resolver_core::ShallowFileState> {
+    states: rustc_hash::FxHashMap<String, RoutedShallowServe<T>>,
     fenced_serve_observed: bool,
 }
 
-impl RouteShallowStateCache {
-    pub(crate) fn get(&self, canonical: &str) -> Option<&RoutedShallowServe> {
+impl<T> Default for RouteShallowStateCache<T> {
+    fn default() -> Self {
+        Self {
+            states: Default::default(),
+            fenced_serve_observed: false,
+        }
+    }
+}
+impl<T> RouteShallowStateCache<T> {
+    pub(crate) fn get(&self, canonical: &str) -> Option<&RoutedShallowServe<T>> {
         let cached = self.states.get(canonical)?;
         if !cached.store_published {
             // A memoized FENCED serve consumed by a traced cold compute
             // that opened AFTER the original serve was recorded would
             // otherwise miss the chokepoint flag — re-flag on every
             // memo read so the by-value rail cannot under-report.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
         Some(cached)
     }
 
-    pub(crate) fn insert(&mut self, canonical: String, serve: RoutedShallowServe) {
+    pub(crate) fn insert(&mut self, canonical: String, serve: RoutedShallowServe<T>) {
         self.states.insert(canonical, serve);
     }
 
-    pub(crate) fn observe_serve(&mut self, serve: &RoutedShallowServe) {
+    pub(crate) fn observe_serve(&mut self, serve: &RoutedShallowServe<T>) {
         self.fenced_serve_observed |= !serve.store_published;
     }
 
@@ -91,7 +98,7 @@ impl crate::resolver_core::DeclarationMetadataResolver
         _dep_canonical: &str,
         _dep_owner: verter_type_expr::TopLevelOwnerId,
         _requested_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         None
     }
 
@@ -108,7 +115,7 @@ impl crate::resolver_core::DeclarationMetadataResolver
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         (owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
             .then(|| {
                 self.host
@@ -130,21 +137,26 @@ impl crate::resolver_core::DeclarationMetadataResolver
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata> {
         let state = self.host.shallow_file_state(canonical_source)?;
         let (symbol_kind, span) = state.type_symbol_metadata_in(owner, resolved_name)?;
         let kind = match symbol_kind {
-            verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
-                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
+            verter_session_query::declarations::TypeDeclKind::Alias => {
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
-                crate::resolver_core::ResolvedDeclarationKind::Interface
+            verter_session_query::declarations::TypeDeclKind::Interface => {
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
-                crate::resolver_core::ResolvedDeclarationKind::Class
+            verter_session_query::declarations::TypeDeclKind::Class => {
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Class
             }
         };
-        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata { kind, span })
+        Some(
+            verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata {
+                kind,
+                span,
+            },
+        )
     }
 }
 
@@ -199,7 +211,7 @@ pub(crate) fn wildcard_source_stem_for_matching(path: &str) -> Option<String> {
 
 pub(crate) fn wildcard_match_score(
     exported_name: &str,
-    wildcard: &crate::resolver_core::WildcardReexport,
+    wildcard: &verter_session_query::inputs::shallow::WildcardReexport,
 ) -> usize {
     let Some(stem) = wildcard_source_stem_for_matching(wildcard.source_specifier.as_str()) else {
         return 0;
@@ -212,7 +224,7 @@ pub(crate) fn wildcard_match_score(
 }
 
 pub(crate) fn ordered_wildcard_indices_for_exported_name(
-    wildcards: &[crate::resolver_core::WildcardReexport],
+    wildcards: &[verter_session_query::inputs::shallow::WildcardReexport],
     exported_name: &str,
 ) -> Vec<usize> {
     let mut scored = wildcards

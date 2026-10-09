@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::executor::{StageError, StageExecutor};
+use crate::execution::executor::{StageError, StageExecutor};
 use crate::node::{FileNode, SourceSnapshot};
 use crate::scheduler::{Request, Scheduler, SchedulerConfig};
 use crate::source_loader::MemorySourceLoader;
@@ -49,6 +49,7 @@ impl StageExecutor for HashingExecutor {
         _file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
+        _incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         // FNV-1a over the content, splatted into both hash slots. Only
         // distinguishability matters here, not the production digest.
@@ -65,6 +66,7 @@ impl StageExecutor for HashingExecutor {
             whole_hash: whole,
             semantic_hash: whole,
             generation,
+            incarnation: 0,
             data: Arc::new(crate::node::EmptyData),
         })
     }

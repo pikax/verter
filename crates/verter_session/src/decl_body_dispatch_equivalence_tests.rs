@@ -24,9 +24,9 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -60,7 +60,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
 /// the dispatch hands the consumer (carrier or resolved body).
 fn node_data(
     host: &VerterHost,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Arc<SemanticNodeData> {
     host.project_type_store()
         .semantic_graph()
@@ -153,7 +153,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
 /// Debug-substring) per the Typed-IR-Only rule.
 #[test]
 fn imported_alias_decl_body_lowers_to_an_import_carrier_reference() {
-    use verter_semantic::analysis::type_eval::TypeDeclBody;
+    use verter_session_query::declarations::TypeDeclBody;
 
     let host = make_host();
     upsert_ts(&host, "/m.ts", "export type G = { g: number };\n");
@@ -356,7 +356,7 @@ fn c2_typeof_alias_cycle_terminates_identically_in_oracle_and_graph_native() {
     );
     assert_eq!(
         oracle,
-        crate::resolver_core::ValueDeclIdentity {
+        verter_session_query::declarations::metadata::ValueDeclIdentity {
             canonical_id: "/cyc.ts".to_string(),
             owner,
             name: "a".to_string(),

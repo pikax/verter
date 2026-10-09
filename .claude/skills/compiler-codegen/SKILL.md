@@ -58,6 +58,7 @@ script/
 template/
 +-- oxc/                  # OXC expression parsing for template bindings
 |   +-- mod.rs            # parse_template_expressions()
+|   +-- scope.rs          # LexicalScopes frames, LexicalScopeId handles, ActiveScope
 |   +-- types.rs          # OxcParsedAst, OxcParsedElement, OxcParsedExpression
 +-- code_gen/             # Render function codegen
     +-- mod.rs            # generate_template() entry point
@@ -71,10 +72,10 @@ ide/                      # IDE codegen: TSX or JSX+JSDoc (for LSP/TSGO type che
 +-- mod.rs                # generate_ide_template() -- Vue template -> valid JSX; IdeScriptOptions, IdeTemplateOptions
 +-- script.rs             # generate_ide_script() -- script block -> TS or JS+JSDoc wrapper
 +-- script_recover.rs     # Token scanner for macro binding recovery from broken script tails
-+-- condition.rs          # v-if/v-else-if/v-else condition chain codegen
 +-- template/
     +-- mod.rs            # walk_element/walk_node, cached directive removal, ref conversion
-    +-- directives.rs     # v-if -> ternary, v-for -> .map(), v-show -> style
+    +-- flow.rs           # condition narrowing: invoked chain/frame blocks, callback snapshots
+    +-- directives.rs     # v-if -> invoked if-chain, v-for -> invoked frame, v-show -> style
     +-- props.rs          # :prop -> prop={}, @event -> onEvent={}, v-bind spread
 style_planner.rs          # Vue authored-v-bind, CSS Modules, and plain-CSS scoping stages
 css/
@@ -119,6 +120,33 @@ pub struct AstNode {
 - `children_flag`: Bitset of children characteristics (has text, elements, v-if, etc.)
 - `children_mode`: Enum for codegen branching (Empty, TextOnly, SingleElement, Mixed, etc.)
 - Cached directives: `v_condition`, `v_for`, `v_slot`, `v_once`, `v_ref`
+
+## Template Lexical Scopes (`template/oxc/scope.rs`)
+
+`parse_template_expressions` is the ONE producer of template lexical scope, built
+in its existing forward pass over the node arena:
+
+- Each `v-for` alias list and each `v-slot` parameter list opens one persistent
+  frame in `OxcParsedAst::scopes` (`LexicalScopes`) holding ONLY the names that
+  list declares, linked to its enclosing frame. A list that declares nothing
+  opens no frame.
+- Every node gets a `LexicalScopeId` handle: `OxcParsedAst::children_scope(id)`
+  is what the node's children see; `scope_of(id, ast)` (the parent's children
+  scope) is what the node itself sits in; `OxcParsedElement::props_scope` is the
+  element's props / dynamic slot name / `v-slot` value scope (own `v-for` aliases
+  visible, own slot params NOT). `ide_recovery_scope` on a broken IDE expression
+  is a handle too.
+- While parsing, expressions resolve names through `ActiveScope`, a multiset the
+  pass moves between frames incrementally (leave/enter only the frames that
+  differ). `BindingContext::within` and the `v-for` / `v-slot` binding helpers
+  read it in place through `verter_parser`'s `EnclosingScope` trait.
+
+Receiving rules: query names through a handle (`LexicalScopes::declares`,
+`declares_completion_of`, `own_names`) or the shared `EnclosingScope`; never
+flatten a handle's inherited names into a per-element / per-expression list, never
+copy a parent's aliases into a nested `v-for` scope, and never walk ancestors to
+rediscover a node's scope. Exact lexical identity and order are the frames'
+(source order within a frame, innermost frame first along a chain).
 
 ## CodeTransform (Deferred Mutations)
 
@@ -348,7 +376,7 @@ Guards: `vmrs_boundary_missing_runtime_semantic_bundle_fails_closed`,
 
 ## IDE Prefixed-Expression Emit Substrate (`ide/template/emit.rs`)
 
-IDE template codegen emits a Vue binding value as JSX through the typed `EmitOp` vocabulary so the user expression keeps an exact source-map mapping while synthetic JSX scaffolding stays unmapped. `EmitText` (`Static`/`Borrowed`/`Owned`) is the text payload; `EmitOp` variants: `InsertUnmapped` (order-preserving unmapped insert, lowers via `prepend_ordered_unmapped`), `InsertMapped` (`InsertedMapped` chunk, mapped at `source_start`+`content_offset`), `PreserveOriginal` (pure no-op — bytes stay an `Original` 1:1 chunk), `OverwriteSyntheticBoundary` (delete + unmapped insert; NEVER a mapped `out.overwrite`), `MoveOriginal`. `emit_op` is the single lowering point. `emit_jsx_binding_value` emits a `JsxBindingValue` (`source_expr`/`prefix`/`suffix`/`occurrences`/`bindings`) `occurrences` times for RELOCATED emission (native `v-model` emits the expression 2-3x); in-place sites (v-html, v-text, `:[key]`, `.foo=`, `v-bind="obj"`, static `:prop`) preserve the bytes and emit `OverwriteSyntheticBoundary` + `collect_binding_patches` around them. A function-typed `:prop` under a v-if scope (e.g. `<div v-if="ok" :onX="() => handle()">`) gets a type-narrowing guard: `compute_function_guard_injection` (props.rs) locates the injection point in SOURCE coordinates from the OXC AST (arrow-EXPRESSION body start → ternary `!((cond))?undefined:`; arrow-BLOCK / `function` body `{`+1 → block `if(!((cond))) return;`), then the value is kept IN PLACE (boundary split + `collect_binding_patches`) and the guard is an UNMAPPED `prepend_alloc` spliced into the middle — emitted BEFORE `collect_binding_patches` so an arrow-expr body identifier at the injection offset stable-sorts as `<guard><accessor-prefix><identifier>`. The guard is never baked into a mapped overwrite. The v-on inline-handler guard (von.rs) is likewise a synthetic PREFIX inside `out.overwrite(prop.start, trimmed_vs, …)` with the handler body preserved in place — it never bakes the resolved value, so it is not migrated.
+IDE template codegen emits a Vue binding value as JSX through the typed `EmitOp` vocabulary so the user expression keeps an exact source-map mapping while synthetic JSX scaffolding stays unmapped. `EmitText` (`Static`/`Borrowed`/`Owned`) is the text payload; `EmitOp` variants: `InsertUnmapped` (order-preserving unmapped insert, lowers via `prepend_ordered_unmapped`), `InsertMapped` (`InsertedMapped` chunk, mapped at `source_start`+`content_offset`), `PreserveOriginal` (pure no-op — bytes stay an `Original` 1:1 chunk), `OverwriteSyntheticBoundary` (delete + unmapped insert; NEVER a mapped `out.overwrite`), `MoveOriginal`. `emit_op` is the single lowering point. `emit_jsx_binding_value` emits a `JsxBindingValue` (`source_expr`/`prefix`/`suffix`/`occurrences`/`bindings`) `occurrences` times for RELOCATED emission (native `v-model` emits the expression 2-3x); in-place sites (v-html, v-text, `:[key]`, `.foo=`, `v-bind="obj"`, static `:prop`) preserve the bytes and emit `OverwriteSyntheticBoundary` + `collect_binding_patches` around them. A callback value under a condition (a function-typed `:prop`, an authored `@event` function, or the wrapper around an inline `@event` statement) gets a re-narrowing guard from `FlowNarrowing::callback_guard` (see "Condition Narrowing" below): the injection point is located in SOURCE coordinates from the OXC AST (arrow-EXPRESSION body → the body becomes `{ <guard> return <body>; }`, its close emitted after the body's own prepends; arrow-BLOCK / `function` body `{`+1 → `<guard>`; wrapped inline statement → its body start), the value is kept IN PLACE (boundary split + the in-place expression plan) and the guard is an UNMAPPED `prepend_alloc` emitted BEFORE the plan so a body identifier at the injection offset stable-sorts as `<guard><accessor-prefix><identifier>`. The guard is never baked into a mapped overwrite.
 
 Bug this replaces: baking `prefix + identifier` into one `out.overwrite(prop.start, prop_end, &format!(...))` produced a `Chunk::Overwritten` mapping the whole run back to the prop start (identifier hover/go-to-definition landed on the prop name). The flat-string IDE producers `resolve_prefixed_expr`/`resolve_prefixed_dynamic_arg` were deleted; wrapped/transformed flat-string consumers (v-on spreads, dynamic event-name keys, v-show) call the shared `build_prefixed_expr` directly. Guard: `crates/verter_compiler/tests/cases/ide_no_baked_prefix_overwrite.rs` — scans `ide/template/**` for both the INLINE bake (`out.overwrite(.., &format!(..<resolver-var>..))`) and the `let`-INDIRECTION (`let v = …format!(..<resolver-var>..)… / build_prefixed_expr(..) / resolve_simple_expr(..); out.overwrite(.., &v)`), EXCLUDING self-anchored overwrites (`out.overwrite(base + node.start, base + node.end, &v)` replaces one node's own span → navigable; partial-interpolation recovery path is the canonical example). The allowlist is EMPTY.
 
@@ -358,6 +386,33 @@ Three backends implement the `TemplateCodeGen` trait, called by `walker::walk_te
 
 - **VDOM** (`vdom/`): In-place source overwrites producing `_createElementVNode()` calls
 - **Vapor** (`vapor/`): Replaces entire template block with direct DOM manipulation code
+
+## Condition Narrowing (`ide/template/flow.rs`)
+
+The IDE emitter narrows template conditions exactly, without a term cap, in generated size linear in the template. TypeScript narrows a reference only along one function's control flow, and every non-immediately-invoked function starts its flow from the declared type of each property-access reference (`checker.ts` `getFlowTypeOfReference`, the `FlowStart` arm). So the emitter keeps conditions in one flow and re-narrows only where a real callback starts a new one:
+
+- **Chains.** A `v-if` / `v-else-if` / `v-else` chain is one immediately invoked block, `{(()=>{if(A){…}else if(B){…}else{…}})()}` (`directives::emit_v_if_open` / `emit_v_if_close`, `CHAIN_CLOSE`). Each authored condition is resolved and emitted once; a nested chain or element inherits every enclosing positive and predecessor negation through flow. A chain whose members carry `v-for` stays a lifted ternary (`cond ? … : …`).
+- **Frames.** A `v-for` is an immediately invoked frame like the scoped-slot frame: `{(() => { const ___VERTER___vN = (<source>); { const <aliases> = ___VERTER___flowEachK(___VERTER___vN); return (…); } })()}`. The source is evaluated before the aliases' block, so an alias never shadows a name its source reads (`node in node.children`). `flowEach1/2/3` type the aliases as Vue's `renderList` iterates (arrays, iterables, numbers, objects, `null`/`undefined` sources).
+- **Callbacks.** An authored callback (or the wrapper around an inline `@event` statement) under a condition reads its outer references (`outer_refs`: free reference chains in the body's own flow, prefixes first, `x++`/`x += 1` targets included, nested functions excluded) from snapshots: the innermost statement scope (branch block, frame body, or a lifted branch wrapped as `(() => { … return (…); })()` only when it needs one) declares `const ___VERTER___oN = <ref>;` in the narrowed flow, and the body opens with `if (!___VERTER___flowNarrow(ref, oN) || ___VERTER___flowExcluded(oN)(ref)) throw 0;` per reference — `flowNarrow` re-narrows to the snapshot type, `flowExcluded` removes constituents re-admitted only as subtypes of kept ones. The callback stays an ordinary contextually typed function (generic component inference is unaffected), its return type is unchanged, and a return-type error still lands on the authored body. Mutations and nested authored closures lose narrowing exactly as TypeScript decides for the same code.
+- **Placement.** Snapshot declarations fill a prepend reserved when their scope opened (`CodeGenOutput::reserve_ordered_unmapped` / `fill_reserved`), so they are produced by the same `CodeTransform` pass and stay unmapped; authored bytes stay in place and keep their mappings.
+- **Bound.** Generated bytes are helpers + a constant per branch, frame, lifted branch and callback + the resolved authored text + three copies of each outer-reference chain a callback reads (dedup per scope). Construction work is one visit per chain member, scope and callback plus the callback's own body. The condition path's depth never appears.
+- **Helpers.** `flowNarrow` / `flowExcluded` / `flowBranch` / `flowEach1..3` live beside the other IDE helpers in every `@verter/types` copy (ambient module, standalone `.d.ts`, `packages/types`, the LSP and TypeScript-plugin stubs), imported only by files whose template has a condition or a `v-for`. The script-side component functions (`ide/script/comp_emit.rs`) guard element (and `<component :is>`) functions with the constant `if(!___VERTER___flowBranch) return null;`, whose body reads nothing a condition narrows.
+- **Component functions.** A component function's tag and props read narrowed values, so `comp_emit::ComponentFlow` emits every chain enclosing one ONCE, in the same flow representation: the outermost chain is a function `___VERTER___Flow<offset>()`, a nested chain an immediately invoked block inside its parent branch (built from the parser's `v_if_chains`), and each branch evaluates its components' tag and props in the narrowed flow (`const ___VERTER___s<offset> = { t, p }`, wrapped in an invoked block when slot or `v-for` bindings must be declared first) and returns `{ b: <index>, c<offset>: () => ___VERTER___instantiateComponent(s.t, s.p), f<nested>: … } as const`. Each live branch has one constant-size navigator `___VERTER___R<offset>()` reading its parent's, and `___VERTER___Comp<offset>()` returns `r === null ? null : r.c<offset>()` — still `<instance> | null`. The deferred call keeps a branch record's type independent of what its components instantiate, so a component whose props read another one's template ref does not make the chain's inferred type circular. Chains holding no component function are not emitted.
+- **Telemetry.** `FlowWork` counters (conditions, chain members, scopes, callbacks, outer references, snapshots, component-flow branches and functions) are compiled only under `cfg(any(test, feature = "semantic-observe"))` and read with `take_flow_work`.
+
+**Checks.**
+- Compiler: `cargo test -p verter_compiler --lib ide::template::flow_tests` — component functions counted once per chain member, navigator and function with no condition-path guard (`component_functions_read_one_flow_of_every_branch`); every contract fixture guarded once per callback and condition, carriers parse, 128/256/512/1024 flat, nested and component-chain matrices grow ≤ 2.2× per doubling in bytes and construction work (with exact callback/condition coverage), each condition emitted once, authored mappings exact and scaffolding unmapped (a perturbed mapping fails), and the same growth oracle rejecting the reference generator's predecessor replay.
+- Providers (fixture `packages/vue-vscode/e2e/fixtures/flow-narrowing`): `cargo test -p verter_lsp --lib real_provider_tests::flow_narrowing -- --test-threads=1`, run per lane by `node scripts/provider-ci.mjs run tsserver` and `run tsgo`. Each SFC from `flow_check::ide_fixtures` goes through the real language server; the mapped error set must equal the fixture's exact `(code, authored span)` set (valid callbacks clean, invalid twins exactly their planted errors, a dropped essential condition exactly the reads it guarded; `component_ref_narrowing` plants a script error only a template ref's precisely narrowed component-function type reports, so a component function that loses its distant narrowing fails), contextual parameters hover with their contract types, and every callback of the broken matrices reports once.
+
+### Reference generator (`ide/template/flow_check/`)
+
+The executable reference of the representation, compiled only under `cfg(any(test, feature = "test-support"))` (re-exported as `verter_compiler::flow_check`): one check function per template generated from a typed `seam::CheckPlan` (`generator::generate`, `builder::build_plan` from a real parse, contracts supplied per directive key), with `GuardStrategy::ReplayPath` reproducing path replay as the growth oracle's negative control. It shares the production outer-reference analysis (`flow::outer_refs`). Its contract fixtures (`fixtures`) and the production SFC fixtures (`ide_fixtures`) live beside it.
+
+**Boundary.** `crates/verter_compiler/tests/cases/flow_check_boundary.rs` compiles `seam.rs` + `generator.rs` in the integration binary against the public `CodeTransform` only and checks via `cargo metadata` that no production edge, default feature or forwarding feature activates `verter_compiler/test-support`.
+
+**Checks.** `cargo test -p verter_compiler --lib flow_check`, `cargo test -p verter_compiler --test main flow_check_boundary`, and the providers' `real_provider_tests::flow_check` (fixture `flow-check`).
+
+**Known limits.** The reference builder refuses multi-statement inline handlers (`BuildError::MultiStatementHandler`); the production emitter guards them from the statement list the template parse keeps (`OxcParsedExpression::statements`). TypeScript's binder overflows the Node stack near 2k nested AST levels, so the nested matrices nest N/4 levels of four-branch chains.
 
 ## Two Template Codegen Paths (CRITICAL)
 
@@ -623,7 +678,7 @@ That merge is equivalent to running the stages one after the other only while no
 
 ## TypeExpr Lowering To The Semantic Graph (session boundary)
 
-The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (and worker-local OXC AST) ONLY — they never emit a session semantic-graph node (`SemanticNodeData` / `SemanticNodeId` / `HotTypeRef`); that crate barrier (`verter_semantic` never depends on `verter_session`) is locked from the worker side by the `oxc_worker_emits_no_session_graph_node` guard. Downstream, a session-owned, query-free **structural lowerer** (`crates/verter_session/src/structural_carrier_producer/lower.rs`, entry `lower_type_expr_structural`) consumes that owned `TypeExpr` and emits the dormant semantic-graph carriers (`BareRef` / `ImportType` / `RawFallback` / `SyntheticBinding`, with a construct-signature type lowered to `Signature { kind: Construct }` and tuple rest preserved on `TupleElement.rest`) plus the structural shells, NodeScopeId-rooted, performing NO name / import / type resolution: `Foo<Arg>` becomes a `BareRef` whose `type_args` are structurally lowered (never an `InstantiationRef`), and `keyof` / indexed-access / conditional / mapped / `typeof` stay deferred shells even where the eager path would reduce them. It is intern-only — it makes no host / dispatch query (`session_graph_lowerer_makes_no_query`) and never materializes a carrier back to `TypeExpr` during emission (`unresolved_carriers_not_materialized_during_emission`). It stays dormant / demand-time (never pulled into publish or indexing). Carrier RESOLUTION is a separate demand-time engine — see the type-resolution skill.
+The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (and worker-local OXC AST) ONLY — they never emit a session semantic-graph node (`SemanticNodeData` / `SemanticNodeId` / `HotTypeRef`); that crate barrier (`verter_semantic` never depends on `verter_session`) is locked from the worker side by the `oxc_worker_emits_no_session_graph_node` guard. Downstream, an engine-owned, query-free **structural lowerer** (`crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs`, entry `lower_type_expr_structural`) consumes that owned `TypeExpr` and emits the dormant semantic-graph carriers (`BareRef` / `ImportType` / `RawFallback` / `SyntheticBinding`, with a construct-signature type lowered to `Signature { kind: Construct }` and tuple rest preserved on `TupleElement.rest`) plus the structural shells, NodeScopeId-rooted, performing NO name / import / type resolution: `Foo<Arg>` becomes a `BareRef` whose `type_args` are structurally lowered (never an `InstantiationRef`), and `keyof` / indexed-access / conditional / mapped / `typeof` stay deferred shells even where the eager path would reduce them. It is intern-only — it makes no host / dispatch query (`session_graph_lowerer_makes_no_query`) and never materializes a carrier back to `TypeExpr` during emission (`unresolved_carriers_not_materialized_during_emission`). It stays dormant / demand-time (never pulled into publish or indexing). Carrier RESOLUTION is a separate demand-time engine — see the type-resolution skill.
 
 ## Key Files
 
@@ -642,9 +697,11 @@ The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (an
 | `crates/verter_compiler/src/ide/mod.rs` | IDE codegen entry: TSX (TS SFCs) or JSX+JSDoc (JS SFCs) |
 | `crates/verter_compiler/src/ide/script.rs` | IDE script codegen: TS annotations or JSDoc equivalents |
 | `crates/verter_compiler/src/ide/script_recover.rs` | Token scanner for macro binding recovery from broken tails |
-| `crates/verter_compiler/src/ide/condition.rs` | v-if/v-else-if/v-else condition chain codegen |
+| `crates/verter_compiler/src/ide/script/comp_emit.rs` | Script-side `___VERTER___Comp<offset>` functions, `getRootComponent`, and the component-function flow (`ComponentFlow`) |
+| `crates/verter_compiler/src/ide/template/flow.rs` | IDE condition narrowing: invoked chain/frame blocks, callback snapshot guards, outer-reference analysis |
+| `crates/verter_compiler/src/ide/template/flow_check/` | Reference generator, contract fixtures and oracles of the callback check (test-support only) |
 | `crates/verter_compiler/src/ide/template/mod.rs` | IDE template codegen: Vue -> JSX, StrictSlotEntry, emit_strict_slot_checks |
-| `crates/verter_compiler/src/ide/template/directives.rs` | IDE: v-if -> ternary, v-for -> .map(), v-show -> style |
+| `crates/verter_compiler/src/ide/template/directives.rs` | IDE: v-if -> invoked if-chain, v-for -> invoked frame, v-show -> style |
 | `crates/verter_compiler/src/ide/template/props.rs` | IDE: :prop -> prop={}, @event -> onEvent={} |
 | `crates/verter_compiler/src/ide/template/emit.rs` | IDE typed prefixed-expression emit substrate (`EmitOp`, `emit_jsx_binding_value`) |
 | `crates/verter_compiler/src/style_planner.rs` | Typed Vue stage-1/stage-2 planners over shared style IR |

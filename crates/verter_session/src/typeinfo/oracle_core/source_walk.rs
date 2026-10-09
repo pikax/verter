@@ -57,7 +57,8 @@ use rustc_hash::FxHashSet;
 use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-use crate::resolver_core::{ExportTarget, ResolverContext};
+use verter_session_query::inputs::shallow::ExportTarget;
+use verter_type_engine::resolver_core::ResolverContext;
 
 use super::admission::{SourceContributor, SourceWalkResult};
 
@@ -84,7 +85,7 @@ const MAX_IMPORT_HOPS: usize = 64;
 /// cycle guard. The returned [`SourceWalkResult`] feeds
 /// [`super::admission::admit_source_walk`] directly.
 #[allow(dead_code)]
-pub(crate) fn resolve_source_declarations<C: ResolverContext>(
+pub(crate) fn resolve_source_declarations<C: crate::resolver_core::HostRequestContext>(
     ctx: &C,
     locator: &SourceLocator,
 ) -> SourceWalkResult {
@@ -106,7 +107,7 @@ enum WalkOutcome {
     Cycle,
 }
 
-fn walk<C: ResolverContext>(
+fn walk<C: crate::resolver_core::HostRequestContext>(
     ctx: &C,
     locator: &SourceLocator,
     visited: &mut FxHashSet<(String, String, SymbolSpace)>,
@@ -144,16 +145,27 @@ fn walk<C: ResolverContext>(
 
     // 4. Enumerate the contributor surface(s): the lowered body / value, paired
     //    by ordinal with the parse-time raw-fact contributor vector.
-    let surfaces = shallow
-        .decl_bodies()
-        .raw_surfaces_for(&def_name, locator.symbol_space);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let Some(surfaces) = ctx.raw_source_surfaces(&shallow, owner, &def_name, locator.symbol_space)
+    else {
+        return WalkOutcome::Unresolved;
+    };
     let lowered_bodies: Vec<TypeExpr> = match locator.symbol_space {
         SymbolSpace::Type => {
             // The fenced output-side contributor read for the typeinfo oracle —
             // a header miss returns `Unresolved` exactly as the direct
             // `type_decl` miss did.
-            let Some(contributors) = shallow.compat_type_contributors_for_typeinfo(&def_name)
-            else {
+            let contributors = ctx
+                .lowered_type_decl(&shallow, owner, &def_name)
+                .and_then(
+                    |_| match ctx.transient_type_parts(&shallow, owner, &def_name) {
+                        verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => {
+                            Some(parts.bodies.clone())
+                        }
+                        _ => None,
+                    },
+                );
+            let Some(contributors) = contributors else {
                 return WalkOutcome::Unresolved;
             };
             contributors
@@ -224,13 +236,10 @@ fn walk<C: ResolverContext>(
             Some(((root_canonical, root_name), space)) => {
                 let root_surfaces = ctx
                     .shallow_file_state(&root_canonical)
-                    .map(|root_shallow| {
-                        root_shallow
-                            .decl_bodies()
-                            .raw_surfaces_for(&root_name, space)
-                            .as_ref()
-                            .clone()
+                    .and_then(|root_shallow| {
+                        ctx.raw_source_surfaces(&root_shallow, owner, &root_name, space)
                     })
+                    .map(|surfaces| surfaces.as_ref().clone())
                     .unwrap_or_default();
                 if space == SymbolSpace::Value
                     && !root_surfaces.is_empty()
@@ -284,7 +293,7 @@ fn walk<C: ResolverContext>(
 /// `canonical`. Returns `None` when the name does not bind to a defining
 /// declaration in the controlled fixture set (an unresolved import, a missing
 /// leaf, an export with no backing declaration).
-fn resolve_defining<C: ResolverContext>(
+fn resolve_defining<C: ResolverContext<crate::resolver_core::HostCapabilities>>(
     ctx: &C,
     canonical: &str,
     name: &str,

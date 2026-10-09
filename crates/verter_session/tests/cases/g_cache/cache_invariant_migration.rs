@@ -29,7 +29,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -358,7 +358,7 @@ fn materialize_macro_shape_member_type_expr_cycle_short_circuits() {
 // The retired `RefCycleResultDb` was intentionally OUT of the cohort — it cached
 // booleans / cycle identities only. Confirm the absence by inspection.
 
-use verter_session::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VERSION};
+use verter_type_engine::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VERSION};
 
 /// Reused across every schema-cohort fixture.
 const STALE_SCHEMA_VERSION: u32 = CACHE_CLUSTER_SCHEMA_VERSION - 1;
@@ -593,7 +593,7 @@ fn schema_bump_evicts_component_meta_result_db_stale_entries() {
 
 #[test]
 fn schema_bump_evicts_imported_registry_db_stale_entries() {
-    use verter_session::component_meta_caches::ImportedRegistryDb;
+    use verter_type_engine::component_meta_caches::ImportedRegistryDb;
 
     let db = ImportedRegistryDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
     db.insert_synthetic_for_schema_test("/workspace/synthetic-imported.ts");
@@ -608,7 +608,7 @@ fn schema_bump_evicts_imported_registry_db_stale_entries() {
 
 #[test]
 fn schema_bump_evicts_shape_cache_db_stale_entries() {
-    use verter_session::component_meta_caches::ShapeCacheDb;
+    use verter_type_engine::component_meta_caches::ShapeCacheDb;
 
     let db = ShapeCacheDb::new_with_schema_version_for_test(STALE_SCHEMA_VERSION);
     db.insert_synthetic_for_schema_test("/workspace/synthetic-shape-cache.ts");

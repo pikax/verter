@@ -19,9 +19,9 @@ use verter_audit::{RequestKind, RequestKindPayload};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolKind};
-use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -55,9 +55,12 @@ fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
 /// directly to discriminate `Err` from `Ok(None)`. The audit record is
 /// always present.
 fn parts<E>(
-    carrier: verter_audit::AuditedResult<Option<crate::semantic_query::SemanticNodeId>, E>,
+    carrier: verter_audit::AuditedResult<
+        Option<verter_type_engine::semantic_query::SemanticNodeId>,
+        E,
+    >,
 ) -> (
-    Option<crate::semantic_query::SemanticNodeId>,
+    Option<verter_type_engine::semantic_query::SemanticNodeId>,
     verter_audit::RequestAuditRecord,
 ) {
     let (outcome, record) = carrier.into_parts();
@@ -509,7 +512,7 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/single.ts", "export type T = number;\n");
 
-    let baseline = host.audit_records.len();
+    let baseline = host.host_audit_runtime().audit_records_store().len();
     let (_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/single.ts",
         "T",
@@ -517,7 +520,7 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     ));
     // record is always present now (carrier `audit` field is mandatory).
     let _ = &record;
-    let after = host.audit_records.len();
+    let after = host.host_audit_runtime().audit_records_store().len();
     // EXACTLY one new record was inserted — discriminating
     // assertion against any "internal sub-query bumped the count"
     // regression.
@@ -653,7 +656,7 @@ export type Foo = { foo: number };
     let is_object = matches!(data.as_ref(), SemanticNodeData::Object(_));
     let is_miss = matches!(
         data.as_ref(),
-        SemanticNodeData::Opaque(crate::semantic_query::QueryError::Miss)
+        SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::Miss)
     );
     assert!(
         is_object || !is_miss,
@@ -749,7 +752,7 @@ fn evaluate_skips_cache_when_cacheable_false() {
 #[test]
 fn evaluate_evicts_oldest_at_cache_limit() {
     use super::scratch_cache::{ScratchCache, DEFAULT_CAPACITY};
-    use crate::semantic_query::SemanticNodeId;
+    use verter_type_engine::semantic_query::SemanticNodeId;
     // Pure-cache eviction discrimination — fills the cache to the
     // default 64 with synthetic node ids, then proves a 65th
     // insertion drops the OLDEST URI (entry 0). Bypasses the
@@ -792,7 +795,7 @@ fn evaluate_with_audit_emits_one_record() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/scope.ts", "export type Anchor = number;\n");
 
-    let baseline = host.audit_records.len();
+    let baseline = host.host_audit_runtime().audit_records_store().len();
     let req = EvaluateTypeExpressionRequest {
         scope: "/scope.ts".to_string(),
         expression: "string".to_string(),
@@ -803,7 +806,7 @@ fn evaluate_with_audit_emits_one_record() {
     let (_node, record) = parts(host.evaluate_type_expression_with_audit(req));
     // record is always present now (carrier `audit` field is mandatory).
     let _ = &record;
-    let after = host.audit_records.len();
+    let after = host.host_audit_runtime().audit_records_store().len();
     assert_eq!(
         after - baseline,
         1,
@@ -930,8 +933,8 @@ fn wire_lowering_miss_reports_computed_default_effective_mode() {
 /// `Union` arms. An `Opaque` arm contributes the sentinel `"<opaque-miss>"`
 /// so a collapsed heritage carrier is observable in the assertion.
 fn collect_surface_member_names(
-    store: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
+    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     out: &mut Vec<String>,
 ) {
     match store.node_data(node).as_deref() {
@@ -990,36 +993,37 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 
     // (1) Direct dispatch: `Instantiate(Published(Expanded))` of the
     //     non-generic `ColorModeSelectProps`.
-    use crate::semantic_query::SemanticQueryApi;
+    use verter_type_engine::semantic_query::SemanticQueryApi;
     let store = host.project_type_store().semantic_graph();
     let _shallow = host
         .shallow_file_state("/types.ts")
         .expect("shallow state for /types.ts");
-    let key = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from("/types.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("ColorModeSelectProps"),
     );
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let node =
-        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+        match dispatch.execute_type_node(verter_type_engine::semantic_query::SemanticQueryKey::Instantiate(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 key,
                 Arc::from(Vec::new().into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         )) {
-            crate::semantic_query::QueryResult::Value(
-                crate::semantic_query::SemanticQueryOutput { value: n, .. },
+            verter_type_engine::semantic_query::QueryResult::Value(
+                verter_type_engine::semantic_query::SemanticQueryOutput { value: n, .. },
             ) => n,
-            crate::semantic_query::QueryResult::Recursive(n) => n,
-            crate::semantic_query::QueryResult::Error(e) => {
+            verter_type_engine::semantic_query::QueryResult::Recursive(n) => n,
+            verter_type_engine::semantic_query::QueryResult::Error(e) => {
                 panic!("Instantiate(ColorModeSelectProps, Expanded) errored: {e:?}")
             }
         };
@@ -1094,9 +1098,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 // ---------------------------------------------------------------------------
 
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
-use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
-use crate::semantic_query::QueryError;
 use crate::typeinfo::resolve_named_symbol::classify_dispatch_error;
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+use verter_type_engine::semantic_query::QueryError;
 
 fn sample_budget_failure() -> BudgetExceededFailure {
     BudgetExceededFailure {
@@ -1228,10 +1232,10 @@ fn evaluate_type_expression_unresolvable_rides_ok_not_err() {
 
 #[test]
 fn nested_materialization_hard_fault_rides_err_not_degraded_ok() {
-    use crate::semantic_query::{QueryResult, SemanticNodeId};
     use crate::typeinfo::resolve_named_symbol::{
         classify_materialization_step, MaterializationStep,
     };
+    use verter_type_engine::semantic_query::{QueryResult, SemanticNodeId};
 
     // Discriminating guard for the nested-materialization fault hop.
     //
@@ -1289,10 +1293,10 @@ fn nested_materialization_hard_fault_rides_err_not_degraded_ok() {
 
 #[test]
 fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
-    use crate::semantic_query::{LiteralValue, QueryResult};
     use crate::typeinfo::resolve_named_symbol::{
         classify_operator_reduction_step, MaterializationStep,
     };
+    use verter_type_engine::semantic_query::{LiteralValue, QueryResult};
 
     // Discriminating guard for the operator-reduction step's FAULT axis.
     //
@@ -1373,8 +1377,8 @@ fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
 
 #[test]
 fn keyof_base_surfacing_propagates_fault_not_swallows_to_base() {
-    use crate::semantic_query::{QueryResult, SemanticNodeId};
     use crate::typeinfo::resolve_named_symbol::classify_base_surfacing;
+    use verter_type_engine::semantic_query::{QueryResult, SemanticNodeId};
 
     // Discriminating guard for the keyof base-surfacing step's FAULT axis.
     //

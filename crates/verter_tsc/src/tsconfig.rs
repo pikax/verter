@@ -480,7 +480,7 @@ fn load_raw_tsconfig(path: &Path) -> Result<RawTsConfig, String> {
 
 fn classify_file(path: &Path, vue_files: &mut Vec<PathBuf>, ts_files: &mut Vec<PathBuf>) {
     let as_str = path.to_string_lossy().replace('\\', "/");
-    if verter_semantic::resolver_core::path_is_carrier(&as_str) {
+    if verter_session_query::resolution::path_is_carrier(&as_str) {
         vue_files.push(path.to_path_buf());
         return;
     }

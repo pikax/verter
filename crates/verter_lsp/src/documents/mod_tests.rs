@@ -579,6 +579,75 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
     }
 }
 
+/// A server constructed under a narrowed framework admission keeps the
+/// unadmitted vertical out of BOTH document ingress paths: an editor
+/// document whose `languageId` names an unadmitted carrier classifies
+/// through the host's admission-aware classifier — never as that carrier
+/// from a process-global registry — and the isolated semantic-enrichment
+/// host is composed under the SAME admission as the projection host, so
+/// it cannot analyse a vertical the projection host refuses.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowed_admission_governs_both_document_ingress_paths() {
+    let vue_only = verter_session::framework::FrameworkOptions::admitting_names(["vue"])
+        .expect("the Vue vertical is composed");
+    let projection_host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::IMPORTS),
+            framework: vue_only.clone(),
+            ..verter_session::HostConfig::default()
+        },
+    ));
+    let registry = Arc::new(DocumentRegistry::new(projection_host));
+    registry.set_semantic_analysis_enabled(true);
+
+    let uri: Uri = "file:///workspace/Box.svelte".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<script lang=\"ts\">\nconst count = 1;\n</script>\n<p>{count}</p>".to_string(),
+    });
+    let canonical_id = uri_to_canonical_id(&uri);
+    assert!(
+        !registry
+            .document_file_language("svelte", &canonical_id)
+            .is_framework_carrier(),
+        "an unadmitted carrier's editor languageId must not resolve to its carrier row"
+    );
+    assert!(
+        registry.get_projection(&uri).is_none(),
+        "an unadmitted carrier must not project as an own-path self-file provider buffer"
+    );
+    assert!(
+        registry
+            .document_file_language("vue", "/workspace/App.vue")
+            .is_framework_carrier(),
+        "the admitted vertical keeps its carrier row"
+    );
+
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("enabled enrichment spawns a semantic task")
+        .await
+        .expect("the semantic task completes");
+    let semantic_host = registry
+        .semantic_host
+        .read()
+        .clone()
+        .expect("the enrichment task constructed the semantic host");
+    assert_eq!(
+        semantic_host.host().framework_options(),
+        &vue_only,
+        "the semantic-enrichment host admits exactly what the projection host admits"
+    );
+    assert!(
+        registry
+            .get_analysis(&uri)
+            .is_none_or(|analysis| analysis.template.is_none()),
+        "no carrier template analysis may be published for an unadmitted vertical"
+    );
+}
+
 /// A native feature read must follow the document-revision-stamped snapshot,
 /// not depend exclusively on the secondary canonical-id lookup. Dependency
 /// publication can invalidate/rebuild that lookup while an unchanged parent
@@ -1254,4 +1323,163 @@ fn reestablish_host_overlay_from_open_buffer_restores_the_live_buffer_over_disk(
     // A closed canonical id has no buffer to re-establish from — a no-op.
     let closed_id = format!("{workspace_root}/src/NotOpen.vue");
     assert!(!registry.reestablish_host_overlay_from_open_buffer(&closed_id));
+}
+
+/// A reopened carrier is published again by the projection host while its
+/// semantic enrichment is queued: `did_close` hands the file back to the
+/// scheduler, whose disk reload can land after the reopen and re-register the
+/// SAME bytes under a new artifact. The enrichment belongs to the revision the
+/// editor opened, so it must still be published; otherwise the document's
+/// diagnostics are never certified, and nothing re-arms them until an edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn semantic_enrichment_publishes_when_the_projection_re_registers_unchanged_bytes() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/Reopen.vue".parse().unwrap();
+    let canonical = uri_to_canonical_id(&uri);
+    let open = || {
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 13,
+            text: SEMANTIC_REVISION_A.to_string(),
+        });
+    };
+    open();
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    assert!(
+        registry
+            .feature_snapshot(&uri)
+            .expect("feature snapshot")
+            .analysis()
+            .is_some(),
+        "precondition: the first open publishes its enrichment"
+    );
+
+    // Close exactly as `did_close` does, then reopen the same bytes and version.
+    registry.did_close(&uri);
+    registry.host().evict(&canonical);
+    registry.host().scheduler().close_file(&canonical);
+    open();
+    let opened = registry
+        .feature_snapshot(&uri)
+        .expect("reopened feature snapshot")
+        .structure()
+        .artifact_id()
+        .clone();
+
+    // The scheduler's reload of the closed file lands after the reopen.
+    let _ = registry.host().upsert(verter_session::UpsertRequest {
+        canonical_id: Some(canonical.clone()),
+        input_id: canonical.clone(),
+        source: Arc::from(SEMANTIC_REVISION_A),
+        file_language: registry.document_file_language("vue", &canonical),
+        aliases: vec![],
+    });
+    let reloaded = registry
+        .host()
+        .registered_file_structure(&canonical)
+        .expect("the reload registers the file")
+        .artifact_id()
+        .clone();
+    assert_ne!(
+        reloaded, opened,
+        "precondition: the reload registers the unchanged bytes under a new artifact"
+    );
+
+    registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task")
+        .await
+        .expect("semantic task joins");
+    let feature = registry.feature_snapshot(&uri).expect("feature snapshot");
+    assert_eq!(feature.structure().artifact_id(), &opened);
+    assert!(
+        feature.analysis().is_some(),
+        "the reopened revision's enrichment must publish against the structure it was opened with"
+    );
+}
+
+#[test]
+fn a_delivery_probe_joins_a_registered_document_before_its_first_interactive_repair() {
+    let host = Arc::new(VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let registry = DocumentRegistry::new(host);
+    let uri: Uri = "file:///workspace/Lane.vue".parse().unwrap();
+    let id = uri_to_canonical_id(&uri);
+    let _ = registry.did_open(&TextDocumentItem {
+        uri,
+        language_id: "vue".into(),
+        version: 1,
+        text: "<template><div /></template>".into(),
+    });
+    assert!(registry.document_lanes().open_generation(&id).is_none());
+    let crate::document_sync_lane::DeliveryLane::Acquired(guard) = registry.try_delivery_lane(&id)
+    else {
+        panic!("a registered open document must join its generation's lane");
+    };
+    let generation = registry.document_lanes().open_generation(&id).unwrap();
+    assert!(matches!(
+        registry.try_delivery_lane(&id),
+        crate::document_sync_lane::DeliveryLane::Busy
+    ));
+    assert_eq!(
+        registry.document_lanes().open_generation(&id),
+        Some(generation)
+    );
+    assert!(matches!(
+        registry.try_delivery_lane("/workspace/Closed.vue"),
+        crate::document_sync_lane::DeliveryLane::Closed
+    ));
+    drop(guard);
+    assert!(matches!(
+        registry.try_delivery_lane(&id),
+        crate::document_sync_lane::DeliveryLane::Acquired(_)
+    ));
+}
+
+/// `did_open` registers the document and only then mints its generation, both
+/// under the lifecycle lane. A background writer probing between the two must
+/// yield to the open, never mint its own generation and run on a second lane
+/// object beside the open's eager repair.
+#[tokio::test]
+async fn a_delivery_probe_during_an_open_yields_to_the_open() {
+    let host = Arc::new(VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let registry = DocumentRegistry::new(host);
+    let uri: Uri = "file:///workspace/Opening.vue".parse().unwrap();
+    let id = uri_to_canonical_id(&uri);
+    let open = registry.document_lanes().lifecycle_lease(&id);
+    let opening = open.lock().await;
+    let _ = registry.did_open(&TextDocumentItem {
+        uri,
+        language_id: "vue".into(),
+        version: 1,
+        text: "<template><div /></template>".into(),
+    });
+    assert!(matches!(
+        registry.try_delivery_lane(&id),
+        crate::document_sync_lane::DeliveryLane::Busy
+    ));
+    assert!(
+        registry.document_lanes().open_generation(&id).is_none(),
+        "only the open mints the generation"
+    );
+    registry
+        .document_lanes()
+        .begin_open_generation(&id, open.lane());
+    drop(opening);
+    let crate::document_sync_lane::DeliveryLane::Acquired(_guard) = registry.try_delivery_lane(&id)
+    else {
+        panic!("the finished open's lane is free");
+    };
+    assert!(
+        open.try_lock().is_none(),
+        "the writer holds the lane the open minted, not a second one"
+    );
 }

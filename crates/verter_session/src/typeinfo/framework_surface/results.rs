@@ -19,12 +19,12 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::type_expand::ExpandedIndexSignature;
+use verter_session_query::analysis::types::{
     AnalyzedDefaultValue, AnalyzedExposeField, AnalyzedPropField, AnalyzedSlotField,
 };
 
-use crate::resolver_core::ResolvedTypeDeclaration;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 /// The resolved `defineProps` surface: named prop fields plus index signatures.
 ///
@@ -168,7 +168,7 @@ pub struct ResolvedEmitOccurrence {
     /// Authored producer description.
     pub description: Option<String>,
     /// Authored producer JSDoc tags.
-    pub tags: Vec<verter_semantic::analysis::types::JsdocTag>,
+    pub tags: Vec<verter_session_query::analysis::types::JsdocTag>,
     /// The payload's published source position.
     pub payload_source: verter_type_expr::facts::SourcePosition,
     /// Atomic payload authority, exactness, degradation, provenance, and
@@ -431,9 +431,9 @@ impl NamedTypeMemberOutput {
     /// Convert the graph-native raised-shape classifier into the wire-facing
     /// shallow vocabulary. No reverse materialization occurs on this path.
     pub(crate) fn from_raised_shallow(
-        raised: crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
+        raised: verter_type_engine::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
     ) -> Self {
-        use crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
+        use verter_type_engine::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
 
         match raised {
             RaisedShallowMemberOutput::Primitive(name) => Self::Primitive(name),
@@ -463,9 +463,9 @@ impl NamedTypeMemberOutput {
 
 impl NamedTypeLeaf {
     fn from_raised_shallow(
-        raised: crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
+        raised: verter_type_engine::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
     ) -> Self {
-        use crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
+        use verter_type_engine::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
         match raised {
             RaisedShallowMemberOutput::Primitive(name) => Self::Primitive(name),
             RaisedShallowMemberOutput::Literal(lit) => Self::Literal(lit),
@@ -480,9 +480,9 @@ impl NamedTypeLeaf {
 
 impl NamedParamType {
     fn from_raised_shallow(
-        raised: crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
+        raised: verter_type_engine::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
     ) -> Self {
-        use crate::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
+        use verter_type_engine::project_semantic_dispatch::raise::RaisedShallowMemberOutput;
         match raised {
             RaisedShallowMemberOutput::Object { properties } => Self::Object {
                 properties: properties
@@ -658,6 +658,33 @@ impl crate::framework::surface_store::FrameworkSurfaceDtoBundle for MacroSurface
     }
 }
 
+/// Why a `.vue` macro DTO demand was refused before any DTO was computed.
+///
+/// A refusal is never a surface: it is not cached and never reads as a
+/// complete empty bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroDtosRefusal {
+    /// The host's framework options do not admit the Vue adapter, so it has
+    /// no Vue surface store.
+    VueNotAdmitted,
+    /// The owner file is a carrier (or adapter module) of another framework.
+    IncompatibleCarrier,
+}
+
+impl MacroDtosRefusal {
+    /// The refusal as a read an in-request consumer folds: an empty bundle
+    /// marked PARTIAL, so the enclosing result is never admitted as complete.
+    #[must_use]
+    pub fn into_partial_read(self) -> MacroDtosRead {
+        MacroDtosRead {
+            dtos: std::sync::Arc::new(MacroSurfaceDtos::default()),
+            completeness: verter_type_engine::semantic_query::ResultCompleteness::partial(
+                verter_type_engine::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            ),
+        }
+    }
+}
+
 /// A resolved macro DTO bundle PLUS the per-result completeness the cold
 /// compute observed.
 ///
@@ -669,7 +696,7 @@ impl crate::framework::surface_store::FrameworkSurfaceDtoBundle for MacroSurface
 /// admitted into the host's `vue_surface_store` — a partial surface in the
 /// store would launder a warm complete replay on the next request (the
 /// no-poison invariant). Consumers fold `completeness` via
-/// [`crate::request_context::mark_request_result_partial`]
+/// [`verter_type_engine::request_context::mark_request_result_partial`]
 /// (see [`Self::observe_partial`]) so the enclosing component-meta result's
 /// warm promotion is refused too.
 #[derive(Debug, Clone)]
@@ -679,7 +706,7 @@ pub struct MacroDtosRead {
     /// The completeness of the cold compute that produced `dtos`. `Complete`
     /// when the bundle was served from a warm store hit (only `Complete`
     /// bundles ever enter the store) or resolved without tripping a fuse.
-    pub completeness: crate::semantic_query::ResultCompleteness,
+    pub completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 
 impl MacroDtosRead {
@@ -701,7 +728,7 @@ impl MacroDtosRead {
     /// producer's classes the whole time.
     pub fn observe_partial(&self) {
         if self.completeness.is_partial() {
-            crate::request_context::mark_request_result_partial_from_read_with(
+            verter_type_engine::request_context::mark_request_result_partial_from_read_with(
                 self.completeness.reasons(),
             );
         }

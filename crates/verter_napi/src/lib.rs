@@ -1023,6 +1023,14 @@ pub struct NapiHostConfig {
     /// the runtime opt-in — previously that feature had to be compiled
     /// in; now it is a per-host construction choice.
     pub metricsEnabled: Option<bool>,
+    /// Framework verticals this host admits, by the exact names the
+    /// composed capability catalog spells (`"vue"`, `"svelte"`).
+    /// `None`/absent admits every composed vertical. An unknown,
+    /// duplicated, or empty list rejects construction with the
+    /// actionable diagnostic — the same validator the language-server
+    /// and WebAssembly carriers use, so an invalid combination cannot
+    /// reach a request.
+    pub frameworks: Option<Vec<String>>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -1041,6 +1049,26 @@ impl From<NapiHostConfig> for FfiHostConfig {
             metrics_enabled: n.metricsEnabled,
         }
     }
+}
+
+/// Apply the NAPI framework-admission option onto a converted host
+/// config — the typed-options half of this carrier's construction.
+///
+/// `None` keeps the default admission (every composed vertical). `Some`
+/// validates through the ONE shared session validator
+/// ([`host::framework::FrameworkOptions::admitting_names`]) and maps a
+/// rejection to the carrier error with the diagnostic verbatim, so the
+/// NAPI surface accepts exactly the names, defaults, and rejections the
+/// other carriers do.
+fn apply_framework_options(
+    host_config: &mut host::HostConfig,
+    frameworks: Option<&[String]>,
+) -> Result<()> {
+    if let Some(names) = frameworks {
+        host_config.framework =
+            host::framework::FrameworkOptions::admitting_names(names).map_err(ffi_err)?;
+    }
+    Ok(())
 }
 
 fn scheduler_config_from_napi(
@@ -1772,53 +1800,69 @@ fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
 }
 
 fn host_module_reference_syntax_to_str(
-    syntax: verter_semantic::analysis::ModuleReferenceSyntax,
+    syntax: verter_session_query::analysis::types::ModuleReferenceSyntax,
 ) -> &'static str {
     match syntax {
-        verter_semantic::analysis::ModuleReferenceSyntax::StaticImport => "staticImport",
-        verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom => "exportFrom",
-        verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport => "dynamicImport",
-        verter_semantic::analysis::ModuleReferenceSyntax::RequireCall => "requireCall",
+        verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport => {
+            "staticImport"
+        }
+        verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom => "exportFrom",
+        verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport => {
+            "dynamicImport"
+        }
+        verter_session_query::analysis::types::ModuleReferenceSyntax::RequireCall => "requireCall",
     }
 }
 
 fn host_module_reference_semantics_to_str(
-    semantics: verter_semantic::analysis::ModuleReferenceSemantics,
+    semantics: verter_session_query::analysis::types::ModuleReferenceSemantics,
 ) -> &'static str {
     match semantics {
-        verter_semantic::analysis::ModuleReferenceSemantics::Import => "import",
-        verter_semantic::analysis::ModuleReferenceSemantics::Require => "require",
+        verter_session_query::analysis::types::ModuleReferenceSemantics::Import => "import",
+        verter_session_query::analysis::types::ModuleReferenceSemantics::Require => "require",
     }
 }
 
 fn host_module_reference_analyzability_to_str(
-    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
 ) -> &'static str {
     match analyzability {
-        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact => "exact",
-        verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet => "finiteSet",
-        verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic => "unknownDynamic",
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact => "exact",
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet => {
+            "finiteSet"
+        }
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic => {
+            "unknownDynamic"
+        }
     }
 }
 
 fn napi_module_reference_syntax_from_str(
     syntax: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSyntax> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSyntax> {
     match syntax {
-        "staticImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::StaticImport),
-        "exportFrom" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom),
-        "dynamicImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport),
-        "requireCall" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::RequireCall),
+        "staticImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport)
+        }
+        "exportFrom" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom)
+        }
+        "dynamicImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport)
+        }
+        "requireCall" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::RequireCall)
+        }
         other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
     }
 }
 
 fn napi_module_reference_semantics_from_str(
     semantics: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSemantics> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSemantics> {
     match semantics {
-        "import" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Import),
-        "require" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Require),
+        "import" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Require),
         other => Err(ffi_err(format!(
             "unknown module reference semantics: {other}"
         ))),
@@ -1827,12 +1871,14 @@ fn napi_module_reference_semantics_from_str(
 
 fn napi_module_reference_analyzability_from_str(
     analyzability: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceAnalyzability> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceAnalyzability> {
     match analyzability {
-        "exact" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::Exact),
-        "finiteSet" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "exact" => Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet)
+        }
         "unknownDynamic" => {
-            Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic)
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic)
         }
         other => Err(ffi_err(format!(
             "unknown module reference analyzability: {other}"
@@ -1842,35 +1888,21 @@ fn napi_module_reference_analyzability_from_str(
 
 fn napi_module_reference_to_analysis(
     input: NapiModuleReference,
-) -> Result<verter_semantic::analysis::AnalyzedModuleReference> {
-    Ok(verter_semantic::analysis::AnalyzedModuleReference {
-        syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
-        semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
-        is_type_only: input.isTypeOnly,
-        span: verter_span::Span::new(input.spanStart, input.spanEnd),
-        expr_span: verter_span::Span::new(input.exprSpanStart, input.exprSpanEnd),
-        raw_text: input.rawText,
-        literal_specifier: input.literalSpecifier,
-        finite_specifiers: input.finiteSpecifiers,
-        static_prefix: input.staticPrefix,
-        analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
-    })
-}
-
-fn default_known_dependency_extensions() -> Vec<String> {
-    vec![
-        "".to_string(),
-        ".ts".to_string(),
-        ".tsx".to_string(),
-        ".js".to_string(),
-        ".jsx".to_string(),
-        ".mts".to_string(),
-        ".mjs".to_string(),
-        ".cts".to_string(),
-        ".cjs".to_string(),
-        ".vue".to_string(),
-        ".svelte".to_string(),
-    ]
+) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference> {
+    Ok(
+        verter_session_query::analysis::types::AnalyzedModuleReference {
+            syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
+            semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
+            is_type_only: input.isTypeOnly,
+            span: verter_span::Span::new(input.spanStart, input.spanEnd),
+            expr_span: verter_span::Span::new(input.exprSpanStart, input.exprSpanEnd),
+            raw_text: input.rawText,
+            literal_specifier: input.literalSpecifier,
+            finite_specifiers: input.finiteSpecifiers,
+            static_prefix: input.staticPrefix,
+            analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
+        },
+    )
 }
 
 fn host_module_reference_to_napi(input: host::ScriptModuleReference) -> NapiModuleReference {
@@ -2033,7 +2065,7 @@ fn host_virtual_file_to_napi(
 
 fn napi_project_config_to_ide(
     config: NapiIdeProjectConfig,
-) -> verter_semantic::resolver_core::IdeProjectConfig {
+) -> verter_session_query::resolution::IdeProjectConfig {
     let mut ide = verter_workspace::ide_project_config(
         config.root.clone(),
         config.workspaceRoot,
@@ -2045,7 +2077,7 @@ fn napi_project_config_to_ide(
     if let Some(aliases) = config.workspaceAliases {
         ide.workspace_aliases = aliases
             .into_iter()
-            .map(|a| verter_semantic::resolver_core::WorkspaceAlias {
+            .map(|a| verter_session_query::resolution::WorkspaceAlias {
                 find: a.find,
                 replacement: a.replacement,
             })
@@ -2276,16 +2308,16 @@ impl NapiWorkspace {
     ) -> Result<Option<String>> {
         use verter_workspace::WorkspaceRead;
         let phase = match phase.as_deref() {
-            Some("provider") => verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
-            _ => verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            Some("provider") => verter_session_query::resolution::ResolvePhase::ProviderGraph,
+            _ => verter_session_query::resolution::ResolvePhase::CodegenBlocker,
         };
         let kind = match kind.as_deref() {
-            Some("type") => verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
-            Some("require") => verter_semantic::resolver_core::ResolveRequestKind::RequireCall,
-            Some("src") => verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
-            _ => verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            Some("type") => verter_session_query::resolution::ResolveRequestKind::TypeImport,
+            Some("require") => verter_session_query::resolution::ResolveRequestKind::RequireCall,
+            Some("src") => verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
+            _ => verter_session_query::resolution::ResolveRequestKind::EsmImport,
         };
-        let ctx = verter_semantic::resolver_core::ResolutionContext { phase, kind };
+        let ctx = verter_session_query::resolution::ResolutionContext { phase, kind };
         Ok(self
             .inner
             .resolve_import(&importer, &specifier, ctx)
@@ -2297,7 +2329,7 @@ impl NapiWorkspace {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+            let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
                 .map(napi_project_config_to_ide)
                 .collect();
@@ -2357,10 +2389,13 @@ impl NapiVerterHost {
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
         let config = config.unwrap_or_default();
         let scheduler_config = scheduler_config_from_napi(&config);
+        let frameworks = config.frameworks.clone();
         let ffi_config: FfiHostConfig = config.into();
+        let mut host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+        apply_framework_options(&mut host_config, frameworks.as_deref())?;
         Ok(Self {
             inner: std::sync::Arc::new(host::VerterHost::new_standalone_with_scheduler_config(
-                ffi_config_to_host(ffi_config).map_err(ffi_err)?,
+                host_config,
                 scheduler_config,
             )),
         })
@@ -2378,8 +2413,10 @@ impl NapiVerterHost {
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
         let scheduler_config = scheduler_config_from_napi(&config);
+        let frameworks = config.frameworks.clone();
         let ffi_config: FfiHostConfig = config.into();
-        let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+        let mut host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
+        apply_framework_options(&mut host_config, frameworks.as_deref())?;
         Ok(Self {
             inner: std::sync::Arc::new(host::VerterHost::new_with_scheduler_config(
                 host_config,
@@ -3169,11 +3206,7 @@ impl NapiVerterHost {
             .into_iter()
             .map(napi_module_reference_to_analysis)
             .collect::<Result<Vec<_>>>()?;
-        Ok(
-            verter_semantic::resolver_core::collect_resolvable_module_reference_specifiers(
-                &module_references,
-            ),
-        )
+        Ok(verter_resolution::collect_resolvable_module_reference_specifiers(&module_references))
     }
 
     /// Resolves exact and finite module reference candidates against a caller-provided
@@ -3190,9 +3223,9 @@ impl NapiVerterHost {
             .into_iter()
             .map(napi_module_reference_to_analysis)
             .collect::<Result<Vec<_>>>()?;
-        let extensions = extensions.unwrap_or_else(default_known_dependency_extensions);
+        let extensions = extensions.unwrap_or_else(|| self.inner.known_dependency_extensions());
         Ok(
-            verter_semantic::resolver_core::resolve_known_module_reference_dependencies(
+            verter_resolution::resolve_known_module_reference_dependencies(
                 &owner_id,
                 &module_references,
                 &known_ids,
@@ -3239,7 +3272,7 @@ impl NapiVerterHost {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+            let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
                 .map(napi_project_config_to_ide)
                 .collect();
@@ -3457,10 +3490,15 @@ impl NapiVerterHost {
                 let mut seen = std::collections::HashSet::new();
                 actions.retain(|a| seen.insert(a.title.clone()));
 
-                actions
-                    .iter()
-                    .map(|a| code_action_to_ffi(a, source).into())
-                    .collect::<Vec<NapiCodeAction>>()
+                if actions.is_empty() {
+                    Vec::new()
+                } else {
+                    let index = verter_ffi::convert::OffsetIndex::new(source);
+                    actions
+                        .iter()
+                        .map(|a| code_action_to_ffi(a, &index).into())
+                        .collect::<Vec<NapiCodeAction>>()
+                }
             }
             _ => Vec::new(),
         };
@@ -3741,7 +3779,7 @@ impl NapiVerterHost {
         canonical_id: String,
         decl_name: String,
     ) -> Result<Option<Buffer>> {
-        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+        use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -4127,15 +4165,15 @@ impl NapiVerterHost {
 /// Extracts all script-related fields, preserving `vue_api_calls` and
 /// `dom_query_calls` from the snapshot.
 fn build_script_snapshot(
-    snapshot: &host::FileAnalysisSnapshot,
-) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
-    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
+    verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
         module_references: snapshot.module_references.to_vec(),
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.to_vec(),
         macro_type_deps: snapshot.macro_type_deps.to_vec(),
-        flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+        flags: verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
             snapshot.script_flags,
         ),
         exported_functions: Vec::new(),
@@ -4161,11 +4199,6 @@ fn utf16_to_byte_offset(source: &str, utf16_offset: u32) -> u32 {
     verter_ffi::convert::utf16_to_byte_offset(source, utf16_offset)
 }
 
-/// Safe UTF-16 conversion that handles 0 as identity.
-fn byte_offset_to_utf16_safe(source: &str, byte_offset: u32) -> u32 {
-    verter_ffi::convert::byte_offset_to_utf16(source, byte_offset)
-}
-
 /// Monaco SymbolKind constants (subset used for document symbols).
 mod symbol_kind {
     pub const MODULE: u32 = 1;
@@ -4179,9 +4212,11 @@ mod symbol_kind {
 
 /// Build document symbols from analysis data.
 fn build_document_symbols_from_analysis(
-    snapshot: &host::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiDocumentSymbol> {
+    // One index per source, shared by every symbol span.
+    let index = verter_ffi::convert::OffsetIndex::new(source);
     let mut symbols = Vec::new();
 
     if !snapshot.bindings.is_empty() || !snapshot.imports.is_empty() || !snapshot.macros.is_empty()
@@ -4207,21 +4242,23 @@ fn build_document_symbols_from_analysis(
 
         for binding in &snapshot.bindings {
             let kind = match binding.kind {
-                verter_semantic::analysis::AnalyzedBindingKind::Function
-                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function
+                | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
                     symbol_kind::FUNCTION
                 }
-                verter_semantic::analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    symbol_kind::CLASS
+                }
                 _ => symbol_kind::VARIABLE,
             };
             children.push(FfiDocumentSymbol {
                 name: binding.name.clone(),
                 detail: binding.type_annotation.clone(),
                 kind,
-                span_start: byte_offset_to_utf16_safe(source, binding.span.start),
-                span_end: byte_offset_to_utf16_safe(source, binding.span.end),
-                selection_start: byte_offset_to_utf16_safe(source, binding.span.start),
-                selection_end: byte_offset_to_utf16_safe(source, binding.span.end),
+                span_start: index.to_utf16(binding.span.start),
+                span_end: index.to_utf16(binding.span.end),
+                selection_start: index.to_utf16(binding.span.start),
+                selection_end: index.to_utf16(binding.span.end),
                 children: Vec::new(),
             });
         }
@@ -4267,10 +4304,10 @@ fn build_document_symbols_from_analysis(
                 name: comp.name.clone(),
                 detail: Some(format!("{} prop(s)", comp.props.len())),
                 kind: symbol_kind::CLASS,
-                span_start: byte_offset_to_utf16_safe(source, comp.span.start),
-                span_end: byte_offset_to_utf16_safe(source, comp.span.end),
-                selection_start: byte_offset_to_utf16_safe(source, comp.span.start),
-                selection_end: byte_offset_to_utf16_safe(source, comp.span.end),
+                span_start: index.to_utf16(comp.span.start),
+                span_end: index.to_utf16(comp.span.end),
+                selection_start: index.to_utf16(comp.span.start),
+                selection_end: index.to_utf16(comp.span.end),
                 children: Vec::new(),
             });
         }
@@ -4280,7 +4317,7 @@ fn build_document_symbols_from_analysis(
             detail: Some(format!("{} component(s)", template.components.len())),
             kind: symbol_kind::STRUCT,
             span_start: 0,
-            span_end: source.encode_utf16().count() as u32,
+            span_end: index.to_utf16(source.len() as u32),
             selection_start: 0,
             selection_end: 0,
             children,
@@ -4296,10 +4333,10 @@ fn build_document_symbols_from_analysis(
                     name: format!(".{}", class.name),
                     detail: None,
                     kind: symbol_kind::PROPERTY,
-                    span_start: byte_offset_to_utf16_safe(source, class.span.start),
-                    span_end: byte_offset_to_utf16_safe(source, class.span.end),
-                    selection_start: byte_offset_to_utf16_safe(source, class.span.start),
-                    selection_end: byte_offset_to_utf16_safe(source, class.span.end),
+                    span_start: index.to_utf16(class.span.start),
+                    span_end: index.to_utf16(class.span.end),
+                    selection_start: index.to_utf16(class.span.start),
+                    selection_end: index.to_utf16(class.span.end),
                     children: Vec::new(),
                 });
             }
@@ -4330,7 +4367,7 @@ fn build_document_symbols_from_analysis(
 
 /// Build CSS selector match results for visualization.
 fn build_selector_match_results(
-    snapshot: &host::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiSelectorMatchResult> {
     let template = match &snapshot.template {
@@ -4338,6 +4375,8 @@ fn build_selector_match_results(
         None => return Vec::new(),
     };
 
+    // One index per source, shared by every selector and element span.
+    let index = verter_ffi::convert::OffsetIndex::new(source);
     let mut results = Vec::new();
 
     for style in snapshot.styles.iter() {
@@ -4361,8 +4400,8 @@ fn build_selector_match_results(
                 );
                 matches.push(FfiElementMatch {
                     tag: element.tag.clone(),
-                    span_start: byte_offset_to_utf16_safe(source, element.span.start),
-                    span_end: byte_offset_to_utf16_safe(source, element.span.end),
+                    span_start: index.to_utf16(element.span.start),
+                    span_end: index.to_utf16(element.span.end),
                     result: match result {
                         verter_semantic::analysis::selector_match::MatchResult::Matches => {
                             "match".to_string()
@@ -4379,8 +4418,8 @@ fn build_selector_match_results(
 
             results.push(FfiSelectorMatchResult {
                 selector_text: selector.text.clone(),
-                selector_start: byte_offset_to_utf16_safe(source, selector.span.start),
-                selector_end: byte_offset_to_utf16_safe(source, selector.span.end),
+                selector_start: index.to_utf16(selector.span.start),
+                selector_end: index.to_utf16(selector.span.end),
                 matches,
             });
         }
@@ -4788,18 +4827,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
-        let extensions = default_known_dependency_extensions();
-        assert_eq!(
-            extensions
-                .iter()
-                .filter(|ext| ext.as_str() == ".svelte")
-                .count(),
-            1
-        );
-    }
-
     /// The typed unsupported-language failure surfaces at the NAPI
     /// boundary in the SAME status family as the classify errors
     /// (`InvalidArg` — the request named a language the host cannot
@@ -4890,15 +4917,15 @@ mod tests {
         let result = host_update_to_napi(
             host::HostUpdateResult {
                 module_references: vec![host::ScriptModuleReference {
-                    syntax: verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport,
-                    semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
+                    syntax: verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport,
+                    semantics: verter_session_query::analysis::types::ModuleReferenceSemantics::Import,
                     is_type_only: false,
                     raw_text: "`./${name}.vue`".to_string(),
                     literal_specifier: None,
                     finite_specifiers: vec!["./Foo.vue".to_string()],
                     static_prefix: Some("./".to_string()),
                     analyzability:
-                        verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
+                        verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet,
                     span: verter_span::Span::new(4, 22),
                     expr_span: verter_span::Span::new(11, 21),
                 }],
@@ -5435,5 +5462,72 @@ defineProps<{ value: Unsafe }>()
             vec!["count".to_string(), "title".to_string()],
             "runtime-object defineProps members must publish through the NAPI wire round-trip, got: {names:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod framework_options_carrier_tests {
+    use super::*;
+
+    /// The NAPI carrier's `frameworks` option funnels through the ONE
+    /// shared session validator: a valid admission narrows the
+    /// constructed host, keeping the equivalent configuration
+    /// semantics of the native carrier.
+    #[test]
+    fn napi_frameworks_option_narrows_the_constructed_host() {
+        let carrier_extensions = NapiVerterHost::new(Some(NapiHostConfig {
+            frameworks: Some(vec!["vue".to_string()]),
+            ..NapiHostConfig::default()
+        }))
+        .map(|host| {
+            host.inner
+                .language_classifier()
+                .carrier_extensions()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .expect("the Vue vertical is a composed framework");
+        assert_eq!(
+            carrier_extensions,
+            vec!["vue".to_string()],
+            "the NAPI-constructed host narrows with the admitted set"
+        );
+    }
+
+    /// An invalid combination rejects construction with the shared
+    /// actionable diagnostic — the same message the other carriers
+    /// surface, naming the request and the supported set.
+    #[test]
+    fn napi_frameworks_option_rejects_unknown_names_with_the_shared_diagnostic() {
+        let message = match NapiVerterHost::new(Some(NapiHostConfig {
+            frameworks: Some(vec!["react".to_string()]),
+            ..NapiHostConfig::default()
+        })) {
+            Ok(_) => panic!("react is not a composed vertical — construction must reject it"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("'react'") && message.contains("svelte, vue"),
+            "the carrier surfaces the shared diagnostic verbatim: {message}"
+        );
+    }
+
+    /// Absent frameworks keeps the default admission (every composed
+    /// vertical) — the None case must not narrow or widen anything.
+    #[test]
+    fn napi_frameworks_option_absent_keeps_the_default_admission() {
+        let mut extensions = NapiVerterHost::new(None)
+            .map(|host| {
+                host.inner
+                    .language_classifier()
+                    .carrier_extensions()
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .expect("default construction");
+        extensions.sort_unstable();
+        assert_eq!(extensions, vec!["svelte", "vue"]);
     }
 }

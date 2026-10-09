@@ -23,7 +23,7 @@ use crate::waits::WaitAudit;
 
 /// 128-bit content / semantic hash, byte array form. Defined here so
 /// the substrate has zero cross-crate type dependencies; existing
-/// `verter_session::types::Hash16` re-exports this alias.
+/// `verter_session_query::analysis::types::Hash16` re-exports this alias.
 pub type Hash16 = [u8; 16];
 
 /// Identity of the single document targeted by an audit record.

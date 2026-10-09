@@ -47,7 +47,12 @@ mod live_generation {
         }
 
         pub(super) fn advance(&self, _publication: &SourcePublication) -> u64 {
-            self.raw.fetch_add(1, Ordering::AcqRel) + 1
+            self.raw
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+                    generation.checked_add(1)
+                })
+                .expect("file generation identity space exhausted")
+                + 1
         }
     }
 }
@@ -83,6 +88,10 @@ pub struct SourceSnapshot {
     pub semantic_hash: [u8; 16],
     /// Generation this snapshot was produced at.
     pub generation: u64,
+    /// Incarnation of the [`FileNode`] object that committed this snapshot.
+    /// The scheduler stamps it at commit; an executor-supplied value is
+    /// overwritten. See [`SourceVersion`].
+    pub incarnation: u64,
     /// Host-specific data (parse results, descriptors, etc.).
     pub data: Arc<dyn SnapshotData>,
 }
@@ -94,6 +103,7 @@ impl Clone for SourceSnapshot {
             whole_hash: self.whole_hash,
             semantic_hash: self.semantic_hash,
             generation: self.generation,
+            incarnation: self.incarnation,
             data: Arc::clone(&self.data),
         }
     }
@@ -103,6 +113,7 @@ impl std::fmt::Debug for SourceSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourceSnapshot")
             .field("generation", &self.generation)
+            .field("incarnation", &self.incarnation)
             .field("source_len", &self.source.len())
             .finish()
     }
@@ -116,7 +127,16 @@ impl SourceSnapshot {
             whole_hash: [0; 16],
             semantic_hash: [0; 16],
             generation,
+            incarnation: 0,
             data: Arc::new(EmptyData),
+        }
+    }
+
+    /// The node object and generation this snapshot was committed at.
+    pub fn version(&self) -> SourceVersion {
+        SourceVersion {
+            incarnation: self.incarnation,
+            generation: self.generation,
         }
     }
 
@@ -126,10 +146,79 @@ impl SourceSnapshot {
     }
 }
 
+/// Identity of one committed version of a file: the [`FileNode`] object
+/// that committed it and the generation it was committed at.
+///
+/// A generation alone names a version only within one node object: a
+/// removal, reset or re-home publishes a fresh object that starts its own
+/// generation sequence and may reach a generation an earlier object
+/// already used. The incarnation is process-unique, never reused, and
+/// allocated in increasing order, so a successor object always carries a
+/// larger incarnation than the object it replaces. The derived ordering
+/// (incarnation first, then generation) is therefore monotonic across
+/// replacements, and equality never aliases a retired object's version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceVersion {
+    pub incarnation: u64,
+    pub generation: u64,
+}
+
+/// Scheduler-captured identity of the [`FileNode`] object and generation a
+/// [`SourceSnapshot`] was handed out from.
+///
+/// Minted only by [`crate::scheduler::Scheduler::try_get_witnessed_source`],
+/// so a holder cannot forge one. A generation alone cannot fence external
+/// publication: a delete/re-add or reset publishes a fresh node object that
+/// may reach the same generation with the same content. The incarnation
+/// names the node object itself and is never reused, so a witness whose node
+/// was retired can never authorize publication or cleanup on its successor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceWitness {
+    canonical: Arc<str>,
+    incarnation: u64,
+    generation: u64,
+}
+
+impl SourceWitness {
+    pub(crate) fn capture(node: &FileNode, snapshot: &SourceSnapshot) -> Self {
+        Self {
+            canonical: Arc::from(node.canonical_id.as_str()),
+            incarnation: node.incarnation_id(),
+            generation: snapshot.generation,
+        }
+    }
+
+    /// Canonical file the witnessed snapshot belongs to.
+    pub fn canonical(&self) -> &str {
+        &self.canonical
+    }
+
+    /// Process-unique incarnation of the node the snapshot was read from.
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// Generation of the witnessed snapshot.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// A source snapshot together with the witness of where it was read from.
+#[derive(Clone, Debug)]
+pub struct WitnessedSource {
+    pub snapshot: Arc<SourceSnapshot>,
+    pub witness: SourceWitness,
+}
+
 /// Immutable analysis snapshot — committed after Analysis stage.
 pub struct AnalysisSnapshot {
     /// Generation this snapshot was produced at.
     pub generation: u64,
+    /// Incarnation of the [`FileNode`] object that committed this snapshot.
+    /// The scheduler stamps it at commit; an executor-supplied value is
+    /// overwritten. See [`SourceVersion`].
+    pub incarnation: u64,
     /// Host-specific analysis data (script analysis, exports, styles, etc.).
     pub data: Arc<dyn SnapshotData>,
 }
@@ -138,6 +227,7 @@ impl Clone for AnalysisSnapshot {
     fn clone(&self) -> Self {
         Self {
             generation: self.generation,
+            incarnation: self.incarnation,
             data: Arc::clone(&self.data),
         }
     }
@@ -147,6 +237,7 @@ impl std::fmt::Debug for AnalysisSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnalysisSnapshot")
             .field("generation", &self.generation)
+            .field("incarnation", &self.incarnation)
             .finish()
     }
 }
@@ -156,7 +247,16 @@ impl AnalysisSnapshot {
     pub fn new_empty(generation: u64) -> Self {
         Self {
             generation,
+            incarnation: 0,
             data: Arc::new(EmptyData),
+        }
+    }
+
+    /// The node object and generation this snapshot was committed at.
+    pub fn version(&self) -> SourceVersion {
+        SourceVersion {
+            incarnation: self.incarnation,
+            generation: self.generation,
         }
     }
 
@@ -242,8 +342,8 @@ pub struct FileNode {
     /// The generation identifies a version of a file's content; the
     /// incarnation identifies the node OBJECT serving it. Two different
     /// nodes for the same canonical can coexist at the SAME generation
-    /// (a replacement publishes a fresh node starting at generation 0/
-    /// floor), so a generation comparison alone cannot tell a dispatched
+    /// (a replacement publishes a fresh node starting its own generation
+    /// sequence), so a generation comparison alone cannot tell a dispatched
     /// node from its replacement. Work carries this id from dispatch so
     /// its completion can prove it is still publishing for the
     /// incarnation it actually ran against.
@@ -251,6 +351,13 @@ pub struct FileNode {
     /// Monotonic and never reused, so it cannot ABA the way a reclaimed
     /// pointer address can.
     incarnation_id: u64,
+    /// Submission lifetime survives language re-home and ends on removal/reset.
+    submission_lifetime: u64,
+    /// Distinguishes a queued Source at the current generation from a terminal producer.
+    source_admitted: AtomicBool,
+    /// Object-lifetime admission fence. Retired objects held by delayed work
+    /// cannot authorize any new DAG admission, even at a reused generation.
+    retired: AtomicBool,
 }
 
 /// Source of process-unique [`FileNode::incarnation_id`] values.
@@ -265,7 +372,7 @@ impl FileNode {
     /// Create a file node whose generation is assigned at construction.
     ///
     /// Use this for unpublished nodes (first insertion, replacement
-    /// incarnation, generation-floor restart). Live generation advances
+    /// incarnation, language re-home). Live generation advances
     /// on an already-published node must go through
     /// [`crate::source_root::SourcePublication::bump_node_generation`].
     pub(crate) fn new_at(
@@ -273,6 +380,9 @@ impl FileNode {
         file_language: FileLanguage,
         generation: u64,
     ) -> Self {
+        let incarnation_id = NEXT_INCARNATION_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("file incarnation identity space exhausted");
         Self {
             canonical_id,
             file_language,
@@ -283,7 +393,10 @@ impl FileNode {
             analysis: ArcSwap::new(Arc::new(None)),
             artifacts: DashMap::new(),
             pending_source: ArcSwap::new(Arc::new(None)),
-            incarnation_id: NEXT_INCARNATION_ID.fetch_add(1, Ordering::Relaxed),
+            incarnation_id,
+            submission_lifetime: incarnation_id,
+            source_admitted: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
         }
     }
 
@@ -291,6 +404,42 @@ impl FileNode {
     /// [`FileNode::incarnation_id`].
     pub fn incarnation_id(&self) -> u64 {
         self.incarnation_id
+    }
+
+    pub(crate) fn submission_lifetime(&self) -> u64 {
+        self.submission_lifetime
+    }
+
+    pub(crate) fn rehome(&self, language: FileLanguage, generation: u64) -> Self {
+        let mut replacement = Self::new_at(self.canonical_id.clone(), language, generation);
+        replacement.submission_lifetime = self.submission_lifetime;
+        replacement
+    }
+
+    pub(crate) fn source_admission_pending(&self) -> bool {
+        !self.source_admitted.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_source_admitted(&self) {
+        self.source_admitted.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn retire(&self, _lifecycle: &mut crate::dag::SchedulerDag) {
+        self.retired.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn admits_work(&self, incarnation: u64, generation: u64) -> bool {
+        !self.retired.load(Ordering::Acquire)
+            && self.incarnation_id == incarnation
+            && self.generation() == generation
+    }
+
+    /// Whether `witness` was captured from this live, unretired node object.
+    /// The generation is not compared: callers apply their own generation rule.
+    pub(crate) fn carries_witness(&self, witness: &SourceWitness) -> bool {
+        !self.retired.load(Ordering::Acquire)
+            && self.incarnation_id == witness.incarnation
+            && *self.canonical_id == *witness.canonical
     }
 
     /// Current generation (acquire ordering for cross-thread visibility).
@@ -306,6 +455,7 @@ impl FileNode {
     pub(crate) fn bump_generation(&self, proof: &crate::source_root::SourcePublication) -> u64 {
         self.source_integration_ready
             .store(false, Ordering::Release);
+        self.source_admitted.store(false, Ordering::Release);
         self.generation.advance(proof)
     }
 

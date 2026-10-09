@@ -12,8 +12,8 @@
 use oxc_ast::ast::{ArrowFunctionExpression, Expression, Function, PropertyKey, Statement};
 use oxc_ast_visit::{walk, Visit};
 
-use crate::analysis::function_program::FunctionParamRecord;
-use crate::analysis::types::{hash_16, Hash16};
+use verter_session_query::analysis::types::{hash_16, Hash16};
+use verter_session_query::function_program::FunctionParamRecord;
 
 // ---------------------------------------------------------------------------
 // Whole-function stable hash
@@ -48,7 +48,9 @@ pub(super) type NestedHashes = rustc_hash::FxHashMap<(u32, u32), NestedHash>;
 
 /// Hash one function: its stable hash, and its part in the hash of the
 /// function around it. The functions nested directly in it are folded from
-/// `nested`; one missing there is folded in place.
+/// `nested`; one missing there is folded in place. Every class the fold
+/// walks is recorded in `classes`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn hash_function_body(
     walks: &verter_parser::oxc_parse::ProgramWalkStack<'_>,
     source: &str,
@@ -57,11 +59,12 @@ pub(super) fn hash_function_body(
     function_start: u32,
     node: crate::analysis::function_program::FunctionNode<'_>,
     nested: &NestedHashes,
+    classes: &mut crate::analysis::class_index::ClassCollector,
 ) -> (Hash16, NestedHash) {
     // Folding walks the function: its signature's types, its parameters'
     // initializers and its body.
     let hash = walks.with_node_stack(node.span(), || {
-        fold_function_body(source, body, params, function_start, node, nested)
+        fold_function_body(source, body, params, function_start, node, nested, classes)
     });
     let mut stable = Vec::with_capacity(64);
     stable.extend_from_slice(HASH_SALT);
@@ -83,6 +86,7 @@ fn fold_function_body(
     function_start: u32,
     node: crate::analysis::function_program::FunctionNode<'_>,
     nested: &NestedHashes,
+    classes: &mut crate::analysis::class_index::ClassCollector,
 ) -> NestedHash {
     let mut visitor = HashVisitor {
         buf: Vec::with_capacity(512),
@@ -91,6 +95,7 @@ fn fold_function_body(
         free: Vec::new(),
         free_slots: rustc_hash::FxHashMap::default(),
         nested,
+        classes,
     };
     visitor.buf.extend_from_slice(HASH_SALT);
     visitor.tag(HASH_SEP);
@@ -167,7 +172,7 @@ fn fold_function_body(
 /// observable — node kinds in order, operators, literals, property keys
 /// (shorthand / keyed / computed), calls, writes, control, annotations,
 /// template text — enters the fold.
-struct HashVisitor<'n> {
+struct HashVisitor<'n, 'c> {
     buf: Vec<u8>,
     scopes: Vec<rustc_hash::FxHashMap<String, u32>>,
     next_ordinal: u32,
@@ -176,9 +181,12 @@ struct HashVisitor<'n> {
     free_slots: rustc_hash::FxHashMap<String, u32>,
     /// The nested functions folded from their [`NestedHash`].
     nested: &'n NestedHashes,
+    /// Records every class the fold walks: the fold is the one walk of the
+    /// function's syntax.
+    classes: &'c mut crate::analysis::class_index::ClassCollector,
 }
 
-impl HashVisitor<'_> {
+impl HashVisitor<'_, '_> {
     /// An arrow's expression body, hashed as the one expression statement
     /// oxc's AST carried it as before 0.151.
     fn visit_expression_body(&mut self, expression: &Expression<'_>) {
@@ -310,7 +318,10 @@ impl HashVisitor<'_> {
     /// non-JSDoc comments are cosmetic and never enter the fold.
     fn fold_type_affecting_jsdoc(&mut self, source: &str, function_start: u32) {
         let Some((start, end)) =
-            crate::analysis::jsdoc::find_leading_jsdoc_block_offsets(source, function_start)
+            verter_session_query::analysis::jsdoc_spans::find_leading_jsdoc_block_offsets(
+                source,
+                function_start,
+            )
         else {
             self.fold_u8(0);
             return;
@@ -411,7 +422,7 @@ fn type_affecting_jsdoc_tag_payloads(block: &str) -> Vec<(&str, &str)> {
     out
 }
 
-impl<'a> Visit<'a> for HashVisitor<'_> {
+impl<'a> Visit<'a> for HashVisitor<'_, '_> {
     fn visit_statement(&mut self, it: &Statement<'a>) {
         let tag = match it {
             Statement::BlockStatement(_) => 0x10,
@@ -639,7 +650,11 @@ impl<'a> Visit<'a> for HashVisitor<'_> {
         if let Some(id) = it.id.as_ref() {
             self.bind(id.name.as_str());
         }
+        // A function folded in place is one no entry serves.
+        self.classes
+            .enter_frame(crate::analysis::class_index::ClassFrame::Unserved);
         walk::walk_function(self, it, flags);
+        self.classes.exit_frame();
         self.pop_scope();
     }
 
@@ -648,8 +663,21 @@ impl<'a> Visit<'a> for HashVisitor<'_> {
             return;
         }
         self.push_scope();
+        self.classes
+            .enter_frame(crate::analysis::class_index::ClassFrame::Unserved);
         walk::walk_arrow_function_expression(self, it);
+        self.classes.exit_frame();
         self.pop_scope();
+    }
+
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        self.classes.record(it);
+        walk::walk_class(self, it);
+    }
+
+    fn visit_variable_declaration(&mut self, it: &oxc_ast::ast::VariableDeclaration<'a>) {
+        self.classes.note_variable_declaration(it);
+        walk::walk_variable_declaration(self, it);
     }
 
     fn visit_arrow_function_body(&mut self, it: &oxc_ast::ast::ArrowFunctionBody<'a>) {

@@ -35,13 +35,13 @@
       "id": "time-instant",
       "native": "std::time::Instant",
       "wasm": "web_time::Instant",
-      "evidence": ["crates/verter_session/src/instant.rs"]
+      "evidence": ["crates/verter_type_engine/src/instant.rs"]
     },
     {
       "id": "randomness",
       "native": "getrandom OS backend; uuid rng-getrandom",
       "wasm": "getrandom wasm_js backend (.cargo/config.toml getrandom_backend=\"wasm_js\"; verter_wasm declares the wasm_js feature) plus uuid js feature (WebCrypto)",
-      "evidence": [".cargo/config.toml", "crates/verter_wasm/Cargo.toml", "crates/verter_session/Cargo.toml"]
+      "evidence": [".cargo/config.toml", "crates/verter_wasm/Cargo.toml", "crates/verter_session/Cargo.toml", "crates/verter_type_engine/Cargo.toml"]
     },
     {
       "id": "scheduling-sync",

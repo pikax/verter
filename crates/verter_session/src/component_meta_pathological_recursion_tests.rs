@@ -28,12 +28,12 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-};
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+};
 
 /// Build a hermetic [`VerterHost`] backed by a [`MemoryWorkspace`]
 /// and the given files. Audit + footprint capture stays disabled
@@ -147,7 +147,7 @@ fn pathological_self_shadowing_userland_pick() {
             let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let pick_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+            let pick_identity = verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/A.vue"),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("Pick"),
@@ -157,21 +157,21 @@ fn pathological_self_shadowing_userland_pick() {
             // arg shapes because `build_instantiate` looks up the
             // body via `decl_canonical + decl_name` only.
             let graph = host_for_thread.project_type_store().semantic_graph();
-            let arg_t = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-                crate::semantic_query::PrimitiveKind::String,
+            let arg_t = graph.intern_node(verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
-            let arg_k = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-                crate::semantic_query::PrimitiveKind::String,
+            let arg_k = graph.intern_node(verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 pick_identity,
                 Arc::from(vec![arg_t, arg_k].into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ));
             dispatch.execute_type_node(key)
@@ -278,20 +278,20 @@ fn pathological_exclude_self_recursive() {
             let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+            let r_identity = verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/A.vue"),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("R"),
             );
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 r_identity,
-                Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                Arc::from(Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ));
             dispatch.execute_type_node(key)
@@ -496,20 +496,20 @@ fn pathological_template_literal_key_recursion() {
             let _ = host_for_thread
                 .shallow_file_state("/A.vue")
                 .expect("/A.vue must have shallow file state");
-            let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+            let r_identity = verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/A.vue"),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("R"),
             );
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 r_identity,
-                Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                Arc::from(Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ));
             dispatch.execute_type_node(key)

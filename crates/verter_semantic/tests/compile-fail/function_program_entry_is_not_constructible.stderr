@@ -1,0 +1,17 @@
+error[E0451]: fields `key`, `span`, `body_span`, `locator`, `params`, `bindings`, `unmodeled_bindings`, `references`, `source_type_queries`, `type_queries`, `return_sites`, `writes`, `descendant_writes`, `descendant_assignments`, `unserved_assignments`, `parameter_callable_references`, `parameter_callable_captures`, `effects`, `call_sites`, `control`, `direct_calls`, `type_parameters`, `lexical_parent`, `class_member`, `nested_declaration_name`, `captures`, `flow_body_stable_hash` and `flow_body_exact_hash` of struct `FunctionProgramEntry` are private
+  --> tests/compile-fail/function_program_entry_is_not_constructible.rs:12:9
+   |
+11 |     FunctionProgramEntry {
+   |     -------------------- in this type
+12 |         flow_body_exact_hash: None,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+13 |         ..entry.clone()
+   |           ^^^^^^^^^^^^^ fields `key`, `span`, `body_span`, `locator`, `params`, `bindings`, `unmodeled_bindings`, `references`, `source_type_queries`, `type_queries`, `return_sites`, `writes`, `descendant_writes`, `descendant_assignments`, `unserved_assignments`, `parameter_callable_references`, `parameter_callable_captures`, `effects`, `call_sites`, `control`, `direct_calls`, `type_parameters`, `lexical_parent`, `class_member`, `nested_declaration_name`, `captures` and `flow_body_stable_hash` are private
+
+error[E0451]: fields `index` and `ordinal` of struct `FunctionProgramMatch` are private
+  --> tests/compile-fail/function_program_entry_is_not_constructible.rs:18:28
+   |
+18 |     FunctionProgramMatch { index, ordinal: 0 }
+   |                            ^^^^^  ^^^^^^^ private field
+   |                            |
+   |                            private field

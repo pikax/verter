@@ -30,14 +30,14 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::{
-    install_fact_tracer, with_cacheability_scope, FactTracerBasisSource,
-};
 use crate::resolved_import_facts::{ResolvedImportFacts, ResolvedImportFactsKey};
 use crate::resolver_core::with_bare_host_ctx_for_test;
-use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
+use verter_type_engine::fact_signature_helpers::{
+    install_fact_tracer, with_cacheability_scope, FactTracerBasisSource,
+};
 
 fn host_with_a_file() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -154,7 +154,7 @@ fn a_scope_with_a_basis_and_no_domain_advance_still_admits() {
             assert_scope_has_a_basis(&host);
             // Observe something so the signature is non-empty, but move no
             // domain.
-            crate::resolver_core::resolver_context::observe_fan_out(
+            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                 FactVersionRef::FileWholeHash {
                     canonical_id: "/proj/a.ts".to_string(),
                     hash: [1_u8; 16],
@@ -181,11 +181,13 @@ fn a_scope_with_a_basis_and_no_domain_advance_still_admits() {
 fn a_scope_with_no_basis_is_unaffected_by_a_domain_advance() {
     let host = host_with_a_file();
 
-    let (_, finalise) = install_fact_tracer(&FactTracerBasisSource::unbound(&host), || {
-        crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::FileWholeHash {
-            canonical_id: "/proj/a.ts".to_string(),
-            hash: [1_u8; 16],
-        });
+    let (_, finalise) = install_fact_tracer(&FactTracerBasisSource::unbound(&*host), || {
+        verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/proj/a.ts".to_string(),
+                hash: [1_u8; 16],
+            },
+        );
         advance_semantic_imports(&host);
     });
 
@@ -428,7 +430,7 @@ fn an_unbound_scope_reads_no_store_view_either() {
         .store_view_from_host_reads
         .load(std::sync::atomic::Ordering::Relaxed);
     let (_, non_cacheable) =
-        with_cacheability_scope(&FactTracerBasisSource::unbound(&host), |probe| {
+        with_cacheability_scope(&FactTracerBasisSource::unbound(&*host), |probe| {
             assert!(
                 !host
                     .current_fact_tracer()
@@ -475,7 +477,7 @@ fn an_unbound_scope_reads_no_store_view_either() {
 /// test fails while the mintable Content movement control stays green.
 #[test]
 fn movement_outside_the_scopes_domain_participation_leaves_it_admissible() {
-    use verter_workspace::CompactionDomain;
+    use verter_session_query::facts::fact_cache::CompactionDomain;
 
     let host = host_with_a_file();
 

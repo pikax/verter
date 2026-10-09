@@ -39,13 +39,13 @@ use std::time::Instant;
 
 use verter_scheduler::stage::Priority;
 
-use crate::hash::hash_16;
 use crate::types::{
     CompileCacheMode, CompileProfile, CompileRequestFailure, CompileRequestResponse,
     DiagnosticsSnapshot, DowngradeReason, HostDiagnostic, HostError, HostSeverity, UpsertRequest,
     VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
+use verter_semantic_source::source_hash::hash_16;
 
 /// Test-only sentinel: any input with this canonical id panics inside
 /// the batch worker body of BOTH batch routes, so the panic unwinds

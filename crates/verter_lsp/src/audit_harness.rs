@@ -149,12 +149,41 @@ where
 ///
 /// Audit never changes request semantics. In particular, enabling audit cannot
 /// introduce a provider or feature timeout that is absent in normal operation.
-pub async fn run_with_audit<T, F, P>(
-    host: &SharedHost,
+///
+/// The handler future is heap-allocated before it enters the wrapper. Every
+/// request future above this point (protocol trace, trait method, test
+/// drivers) then carries a pointer instead of embedding the handler's whole
+/// state machine, which unoptimized builds otherwise copy into each enclosing
+/// layer and each enclosing poll frame — enough to overflow a 2 MiB thread
+/// stack on a deep request.
+pub fn run_with_audit<'a, T, F, P>(
+    host: &'a SharedHost,
     method: LspMethodTag,
     target_identity: RequestTargetIdentity,
     position: Option<Position>,
     body: F,
+    populate: P,
+) -> impl std::future::Future<Output = tower_lsp_server::jsonrpc::Result<T>> + use<'a, T, F, P>
+where
+    F: std::future::Future<Output = tower_lsp_server::jsonrpc::Result<T>>,
+    P: FnOnce(&mut LspRequestPayload, &T),
+{
+    run_boxed_with_audit(
+        host,
+        method,
+        target_identity,
+        position,
+        Box::pin(body),
+        populate,
+    )
+}
+
+async fn run_boxed_with_audit<T, F, P>(
+    host: &SharedHost,
+    method: LspMethodTag,
+    target_identity: RequestTargetIdentity,
+    position: Option<Position>,
+    body: std::pin::Pin<Box<F>>,
     populate: P,
 ) -> tower_lsp_server::jsonrpc::Result<T>
 where

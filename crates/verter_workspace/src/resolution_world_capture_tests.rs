@@ -12,11 +12,13 @@
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::resolution_currency::CapturedResolutionWorld;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::{ReadSetSignature, ResolutionPublication};
-use verter_semantic::resolver_core::{
+use crate::ResolutionPublication;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::resolution::{
     ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind, SessionFingerprint,
 };
 
@@ -26,6 +28,10 @@ const CONTEXT: ResolutionContext = ResolutionContext {
 };
 
 const OWNER: &str = "/p/main.ts";
+
+/// Bounds every channel wait so a broken interleaving fails instead of
+/// hanging; no correct run comes near it.
+const WAIT: Duration = Duration::from_secs(30);
 
 fn workspace() -> MemoryWorkspace {
     let workspace = MemoryWorkspace::new(MemoryOptions::default());
@@ -69,37 +75,61 @@ fn capture_population(
         .expect("a settled world is capturable for any population")
 }
 
-#[test]
-fn stable_capture_waits_for_a_short_publication_window_without_spending_a_retry() {
-    let workspace = Arc::new(workspace());
+/// A world writer held inside its publication window until the test
+/// releases it, and the sender that releases it.
+fn hold_publication_window(
+    workspace: &Arc<MemoryWorkspace>,
+) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let writer_workspace = Arc::clone(&workspace);
+    let writer_workspace = Arc::clone(workspace);
     let writer = std::thread::spawn(move || {
         writer_workspace.engine.mutate_resolution_world(|_world| {
             entered_tx.send(()).expect("capture test is listening");
             release_rx
-                .recv()
+                .recv_timeout(WAIT)
                 .expect("publication window must be released");
             ((), false)
         });
     });
     entered_rx
-        .recv()
+        .recv_timeout(WAIT)
         .expect("writer must enter its odd-epoch publication window");
+    (release_tx, writer)
+}
 
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(20));
-        release_tx.send(()).expect("writer is still waiting");
-    });
+#[test]
+fn stable_capture_waits_for_a_publication_window_without_spending_a_retry() {
+    let workspace = Arc::new(workspace());
+    let (release_tx, writer) = hold_publication_window(&workspace);
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let capturer = {
+        let workspace = Arc::clone(&workspace);
+        std::thread::spawn(move || {
+            resolution_test_hooks::with_hook(
+                ResolutionPhase::PublicationGateWait,
+                move || waiting_tx.send(()).expect("capture test is listening"),
+                || {
+                    let _captured = workspace.engine.capture_stable_resolution_world(
+                        workspace.engine.default_resolution_population(),
+                    );
+                },
+            )
+        })
+    };
+    waiting_rx
+        .recv_timeout(WAIT)
+        .expect("the capture waits on the gate the held writer owns");
+    assert!(
+        !capturer.is_finished(),
+        "the capture cannot finish while the writer holds its window"
+    );
+
+    release_tx.send(()).expect("writer is still waiting");
+    writer.join().expect("writer must not panic");
     // The capture waits the window out however long it lasts: it returns a
     // world, never a refusal.
-    let _captured = workspace
-        .engine
-        .capture_stable_resolution_world(workspace.engine.default_resolution_population());
-
-    releaser.join().expect("releaser must not panic");
-    writer.join().expect("writer must not panic");
+    capturer.join().expect("capture must not panic");
 }
 
 /// A resolution that begins while a world writer is descheduled inside its
@@ -113,30 +143,25 @@ fn a_resolution_during_a_long_publication_window_is_admitted_with_its_answer() {
         "/p/dep.ts".to_string(),
         Arc::from("export const value = 1\n"),
     );
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let writer_workspace = Arc::clone(&workspace);
-    let writer = std::thread::spawn(move || {
-        writer_workspace.engine.mutate_resolution_world(|_world| {
-            entered_tx.send(()).expect("capture test is listening");
-            release_rx
-                .recv()
-                .expect("publication window must be released");
-            ((), false)
-        });
-    });
-    entered_rx
-        .recv()
-        .expect("writer must enter its odd-epoch publication window");
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        release_tx.send(()).expect("writer is still waiting");
-    });
+    let (release_tx, writer) = hold_publication_window(&workspace);
+    let (waiting_tx, waiting_rx) = mpsc::channel();
+    let resolver = {
+        let workspace = Arc::clone(&workspace);
+        std::thread::spawn(move || {
+            resolution_test_hooks::with_hook(
+                ResolutionPhase::PublicationGateWait,
+                move || waiting_tx.send(()).expect("capture test is listening"),
+                || admitted_signature(&workspace, "./dep"),
+            )
+        })
+    };
+    waiting_rx
+        .recv_timeout(WAIT)
+        .expect("the resolution waits on the gate the held writer owns");
 
-    let (target, _witness) = admitted_signature(&workspace, "./dep");
-
-    releaser.join().expect("releaser must not panic");
+    release_tx.send(()).expect("writer is still waiting");
     writer.join().expect("writer must not panic");
+    let (target, _witness) = resolver.join().expect("resolution must not panic");
     assert_eq!(target.as_deref(), Some("/p/dep.ts"));
 }
 

@@ -3,8 +3,21 @@ use crate::documents::carrier_structure::{
     project_carrier_blocks, test_carrier_blocks, test_structure,
 };
 use verter_language::parse_artifact::carrier_inventory::{MarkupElementKind, MarkupNodeKind};
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_semantic::analysis::*;
+use verter_session_query::analysis::template::AnalyzedPropDefinition;
+use verter_session_query::analysis::template::SnippetDefinition;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateComponentUsage;
+use verter_session_query::analysis::template::TemplateElement;
+use verter_session_query::analysis::types::AnalyzedBinding;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImportBinding;
+use verter_session_query::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::ReactivityKind;
+use verter_session_query::analysis::types::TypeResolutionSource;
+use verter_session_query::analysis::types::VueApiClassification;
 
 fn svelte_snippet_role() -> verter_type_expr::PropCallableRole {
     verter_type_expr::PropCallableRole::SvelteSnippet {
@@ -61,6 +74,7 @@ fn test_template_completions_include_bindings() {
         character: 5,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -109,6 +123,7 @@ fn test_script_completions_include_imports() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -154,6 +169,7 @@ fn test_filters_internal_symbols() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -182,6 +198,7 @@ fn test_style_returns_css_completions() {
         character: 5,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -234,6 +251,7 @@ fn test_template_excludes_type_only_imports() {
         character: 3,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -264,7 +282,7 @@ fn test_class_completions_in_static_class() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![make_element_for_completion("div", &["fo"], None, source)],
                 ..Default::default()
             })
@@ -277,6 +295,7 @@ fn test_class_completions_in_static_class() {
     let cursor = source.find("fo\"").unwrap() + 2; // after "fo"
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -319,7 +338,7 @@ fn test_no_class_completions_outside_class_attr() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![make_element_for_completion("div", &[], Some("app"), source)],
                 ..Default::default()
             })
@@ -331,6 +350,7 @@ fn test_no_class_completions_outside_class_attr() {
     let cursor = source.find("app").unwrap() + 1;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -356,7 +376,7 @@ fn test_class_completions_no_style_block() {
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![make_element_for_completion("div", &["foo"], None, source)],
                 ..Default::default()
             })
@@ -368,6 +388,7 @@ fn test_class_completions_no_style_block() {
     let cursor = source.find("foo").unwrap() + 1;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -393,7 +414,7 @@ fn make_element_for_completion(
     classes: &[&str],
     id: Option<&str>,
     source: &str,
-) -> verter_semantic::analysis::TemplateElement {
+) -> verter_session_query::analysis::template::TemplateElement {
     // Find the element's span in source for accurate positioning
     let tag_pattern = format!("<{}", tag);
     let span_start = source.find(&tag_pattern).unwrap_or(0) as u32;
@@ -422,14 +443,16 @@ fn make_element_for_completion(
         // value_span is the content inside the quotes
         let val_start = attr_start + "class=\"".len() as u32;
         let val_end = val_start + class_val.len() as u32;
-        attrs.push(verter_semantic::analysis::TemplateAttribute {
-            name: "class".into(),
-            value: Some(class_val),
-            is_dynamic: false,
-            span: verter_span::Span::new(attr_start, attr_end),
-            name_end: attr_start + "class".len() as u32,
-            value_span: Some(verter_span::Span::new(val_start, val_end)),
-        });
+        attrs.push(
+            verter_session_query::analysis::template::TemplateAttribute {
+                name: "class".into(),
+                value: Some(class_val),
+                is_dynamic: false,
+                span: verter_span::Span::new(attr_start, attr_end),
+                name_end: attr_start + "class".len() as u32,
+                value_span: Some(verter_span::Span::new(val_start, val_end)),
+            },
+        );
     }
     if let Some(id_val) = id {
         let id_pattern = format!("id=\"{}\"", id_val);
@@ -437,20 +460,22 @@ fn make_element_for_completion(
         let attr_end = attr_start + id_pattern.len() as u32;
         let val_start = attr_start + "id=\"".len() as u32;
         let val_end = val_start + id_val.len() as u32;
-        attrs.push(verter_semantic::analysis::TemplateAttribute {
-            name: "id".into(),
-            value: Some(id_val.into()),
-            is_dynamic: false,
-            span: verter_span::Span::new(attr_start, attr_end),
-            name_end: attr_start + "id".len() as u32,
-            value_span: Some(verter_span::Span::new(val_start, val_end)),
-        });
+        attrs.push(
+            verter_session_query::analysis::template::TemplateAttribute {
+                name: "id".into(),
+                value: Some(id_val.into()),
+                is_dynamic: false,
+                span: verter_span::Span::new(attr_start, attr_end),
+                name_end: attr_start + "id".len() as u32,
+                value_span: Some(verter_span::Span::new(val_start, val_end)),
+            },
+        );
     }
-    verter_semantic::analysis::TemplateElement {
+    verter_session_query::analysis::template::TemplateElement {
         tag: tag.into(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_semantic::analysis::ElementNamespace::Html,
+        namespace: verter_session_query::analysis::template::ElementNamespace::Html,
         attributes: attrs,
         directives: vec![],
         v_for: None,
@@ -487,8 +512,8 @@ fn test_class_completions_in_dynamic_class() {
     let class_pattern = ":class=\"{ 'btn': active }\"";
     let attr_start = source.find(class_pattern).unwrap_or(0) as u32;
     let attr_end = attr_start + class_pattern.len() as u32;
-    el.attributes
-        .push(verter_semantic::analysis::TemplateAttribute {
+    el.attributes.push(
+        verter_session_query::analysis::template::TemplateAttribute {
             name: "class".into(),
             value: Some("{ 'btn': active }".into()),
             is_dynamic: true,
@@ -498,12 +523,13 @@ fn test_class_completions_in_dynamic_class() {
                 attr_start + ":class=\"".len() as u32,
                 attr_end - 1, // exclude closing quote
             )),
-        });
+        },
+    );
 
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -516,6 +542,7 @@ fn test_class_completions_in_dynamic_class() {
     let btn_offset = source.find("'btn'").unwrap() + 2; // inside the string
     let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -557,20 +584,21 @@ fn test_no_class_completions_outside_dynamic_string() {
     let class_pattern = ":class=\"{ btn: active }\"";
     let attr_start = source.find(class_pattern).unwrap_or(0) as u32;
     let attr_end = attr_start + class_pattern.len() as u32;
-    el.attributes
-        .push(verter_semantic::analysis::TemplateAttribute {
+    el.attributes.push(
+        verter_session_query::analysis::template::TemplateAttribute {
             name: "class".into(),
             value: Some("{ btn: active }".into()),
             is_dynamic: true,
             span: verter_span::Span::new(attr_start, attr_end),
             name_end: 0,
             value_span: None,
-        });
+        },
+    );
 
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -583,6 +611,7 @@ fn test_no_class_completions_outside_dynamic_string() {
     let btn_offset = source.find("btn:").unwrap() + 1;
     let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -622,6 +651,7 @@ fn test_event_modifier_completions_click() {
     let dot_pos = source.find("@click.").unwrap() + 7;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -669,6 +699,7 @@ fn test_event_modifier_completions_keyup() {
     let dot_pos = source.find("@keyup.").unwrap() + 7;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -711,6 +742,7 @@ fn test_event_modifier_completions_mouse() {
     let dot_pos = source.find("@mousedown.").unwrap() + 11;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -749,6 +781,7 @@ fn test_no_event_modifier_in_text() {
     let dot_pos = source.find("text.").unwrap() + 5;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -781,6 +814,7 @@ fn test_event_modifier_completions_chained() {
     let second_dot = source.find(".stop.").unwrap() + 6;
     let pos = line_index.offset_to_position(second_dot as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -854,7 +888,7 @@ fn make_event_directive_analysis(
 
     let name_end = dir_start + raw_name.split('.').next().unwrap_or(raw_name).len() as u32;
 
-    let dir = verter_semantic::analysis::template::TemplateDirective {
+    let dir = verter_session_query::analysis::template::TemplateDirective {
         name: "on".to_string(),
         raw_name: raw_name.to_string(),
         argument: Some(event_name.to_string()),
@@ -867,11 +901,11 @@ fn make_event_directive_analysis(
         modifier_spans,
     };
 
-    let el = verter_semantic::analysis::TemplateElement {
+    let el = verter_session_query::analysis::template::TemplateElement {
         tag: tag.to_string(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_semantic::analysis::ElementNamespace::Html,
+        namespace: verter_session_query::analysis::template::ElementNamespace::Html,
         attributes: vec![],
         directives: vec![dir],
         span: verter_span::Span::new(span_start, span_end),
@@ -882,7 +916,7 @@ fn make_event_directive_analysis(
 
     FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -933,7 +967,7 @@ fn make_vmodel_directive_analysis(
         }
     }
 
-    let dir = verter_semantic::analysis::template::TemplateDirective {
+    let dir = verter_session_query::analysis::template::TemplateDirective {
         name: "model".to_string(),
         raw_name: raw_name.to_string(),
         argument: None,
@@ -946,11 +980,11 @@ fn make_vmodel_directive_analysis(
         modifier_spans,
     };
 
-    let el = verter_semantic::analysis::TemplateElement {
+    let el = verter_session_query::analysis::template::TemplateElement {
         tag: tag.to_string(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_semantic::analysis::ElementNamespace::Html,
+        namespace: verter_session_query::analysis::template::ElementNamespace::Html,
         attributes: vec![],
         directives: vec![dir],
         span: verter_span::Span::new(span_start, span_end),
@@ -961,7 +995,7 @@ fn make_vmodel_directive_analysis(
 
     FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -974,7 +1008,7 @@ fn make_vmodel_directive_analysis(
 fn build_style(
     source: &str,
     blocks: &[CarrierBlockView],
-) -> verter_semantic::analysis::StyleBlockAnalysis {
+) -> verter_session_query::analysis::style::StyleBlockAnalysis {
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
@@ -1008,6 +1042,7 @@ fn test_root_completions_empty_file() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1053,6 +1088,7 @@ fn test_root_completions_with_existing_blocks() {
         .offset_to_position(blocks[0].close_tag_end)
         .unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1095,6 +1131,7 @@ fn svelte_root_whitespace_never_emits_vue_sfc_scaffolds() {
         .expect("root position");
 
     let labels = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -1132,6 +1169,7 @@ fn test_attribute_completions_script() {
     // Position inside opening tag (on the space after "script")
     let pos = line_index.offset_to_position(8).unwrap(); // after "<script " before ">"
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1167,6 +1205,7 @@ fn test_attribute_completions_script_existing_attrs_filtered() {
     // Position inside opening tag
     let pos = line_index.offset_to_position(22).unwrap(); // before ">"
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1206,6 +1245,7 @@ fn test_attribute_completions_style() {
 
     let pos = line_index.offset_to_position(7).unwrap(); // space before ">"
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1242,6 +1282,7 @@ fn test_no_completions_on_closing_tag() {
         .offset_to_position(blocks[0].close_tag_start + 2)
         .unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1266,12 +1307,12 @@ fn test_no_completions_on_closing_tag() {
 /// Helper to build analysis with a binding and template component list.
 fn make_analysis_with_template(
     bindings: Vec<AnalyzedBinding>,
-    components: Vec<verter_semantic::analysis::template::TemplateComponentUsage>,
+    components: Vec<verter_session_query::analysis::template::TemplateComponentUsage>,
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         bindings,
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 components,
                 ..Default::default()
             })
@@ -1307,6 +1348,7 @@ fn test_tag_name_no_script_bindings() {
     let cursor = source.find("  <\n").unwrap() + 3; // right after `<`
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1342,6 +1384,7 @@ fn test_tag_name_includes_html_elements() {
     let cursor = source.find("  <\n").unwrap() + 3;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1382,7 +1425,7 @@ fn test_tag_name_includes_components() {
     let analysis = make_analysis_with_template(
         vec![],
         vec![
-            verter_semantic::analysis::template::TemplateComponentUsage {
+            verter_session_query::analysis::template::TemplateComponentUsage {
                 name: "MyComp".to_string(),
                 import_source: Some("./MyComp.vue".to_string()),
                 is_dynamic: false,
@@ -1403,6 +1446,7 @@ fn test_tag_name_includes_components() {
     let cursor = source.find("  <\n").unwrap() + 3;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1673,6 +1717,7 @@ fn test_tag_name_includes_vue_builtins() {
     let cursor = source.find("  <\n").unwrap() + 3;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1741,6 +1786,7 @@ fn test_attr_name_no_script_bindings() {
     let cursor = source.find("<div >").unwrap() + 5; // space before >
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1775,6 +1821,7 @@ fn test_attr_name_includes_directives() {
     let cursor = source.find("<div >").unwrap() + 5;
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1842,6 +1889,7 @@ fn test_text_content_no_bindings() {
     let cursor = source.find("some text").unwrap() + 4; // inside text
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1891,6 +1939,7 @@ fn test_mustache_shows_bindings() {
     let cursor = source.find("{{ }}").unwrap() + 3; // inside {{ }}
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -1945,25 +1994,27 @@ fn test_attr_value_shows_bindings() {
             used_in_style: false,
         }],
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
-                elements: vec![verter_semantic::analysis::TemplateElement {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![verter_session_query::analysis::template::TemplateElement {
                     tag: "div".to_string(),
                     is_component: false,
                     is_self_closing: false,
-                    namespace: verter_semantic::analysis::ElementNamespace::Html,
+                    namespace: verter_session_query::analysis::template::ElementNamespace::Html,
                     attributes: vec![],
-                    directives: vec![verter_semantic::analysis::template::TemplateDirective {
-                        name: "bind".to_string(),
-                        raw_name: ":foo".to_string(),
-                        argument: Some("foo".to_string()),
-                        modifiers: vec![],
-                        expression: Some(String::new()),
-                        span: verter_span::Span::new(dir_start, dir_end),
-                        name_end: dir_start + ":foo".len() as u32,
-                        arg_span: None,
-                        expression_span: Some(verter_span::Span::new(expr_start, expr_end)),
-                        modifier_spans: vec![],
-                    }],
+                    directives: vec![
+                        verter_session_query::analysis::template::TemplateDirective {
+                            name: "bind".to_string(),
+                            raw_name: ":foo".to_string(),
+                            argument: Some("foo".to_string()),
+                            modifiers: vec![],
+                            expression: Some(String::new()),
+                            span: verter_span::Span::new(dir_start, dir_end),
+                            name_end: dir_start + ":foo".len() as u32,
+                            arg_span: None,
+                            expression_span: Some(verter_span::Span::new(expr_start, expr_end)),
+                            modifier_spans: vec![],
+                        },
+                    ],
                     span: verter_span::Span::new(el_start, el_end),
                     tag_span_end: el_open_end,
                     content_end: close_start,
@@ -1979,6 +2030,7 @@ fn test_attr_value_shows_bindings() {
     let cursor = source.find(":foo=\"\"").unwrap() + 6; // between the quotes
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2013,6 +2065,7 @@ fn test_vmodel_modifier_completions() {
     let dot_pos = source.find("v-model.").unwrap() + 8;
     let pos = line_index.offset_to_position(dot_pos as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2066,6 +2119,7 @@ const msg = ref('hello')
         character: col as u32 + 10, // Inside the value
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2103,6 +2157,7 @@ const msg = ref('hello')
         character: col as u32 + 5, // Inside the value
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2140,6 +2195,7 @@ const msg = ref('hello')
         character: pos as u32,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2201,6 +2257,7 @@ fn test_script_completions_have_sort_text() {
         character: 0,
     };
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -2460,7 +2517,7 @@ fn test_no_member_access_standalone_identifier_not_dot() {
 
 #[test]
 fn test_template_completions_include_vfor_variables() {
-    use verter_semantic::analysis::template::{
+    use verter_session_query::analysis::template::{
         TemplateAnalysisSnapshot, TemplateElement, VForDirective,
     };
 
@@ -2521,7 +2578,7 @@ fn test_template_completions_include_vfor_variables() {
 
 #[test]
 fn test_template_completions_vfor_not_included_outside_scope() {
-    use verter_semantic::analysis::template::{
+    use verter_session_query::analysis::template::{
         TemplateAnalysisSnapshot, TemplateElement, VForDirective,
     };
 
@@ -2562,7 +2619,7 @@ fn test_template_completions_vfor_not_included_outside_scope() {
 
 #[test]
 fn test_template_completions_vfor_destructured_pattern() {
-    use verter_semantic::analysis::template::{
+    use verter_session_query::analysis::template::{
         TemplateAnalysisSnapshot, TemplateElement, VForDirective,
     };
 
@@ -2636,9 +2693,9 @@ fn test_component_prop_completions_from_macros() {
             used_in_style: false,
         }],
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 components: vec![
-                    verter_semantic::analysis::template::TemplateComponentUsage {
+                    verter_session_query::analysis::template::TemplateComponentUsage {
                         name: "MyChild".to_string(),
                         import_source: Some("./MyChild.vue".to_string()),
                         is_dynamic: false,
@@ -2675,7 +2732,7 @@ fn test_component_prop_completions_from_macros() {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![
-                    verter_semantic::analysis::AnalyzedPropField {
+                    verter_session_query::analysis::types::AnalyzedPropField {
                         name: "foo".to_string(),
                         span: verter_span::Span::new(0, 3),
                         type_annotation: None,
@@ -2689,7 +2746,7 @@ fn test_component_prop_completions_from_macros() {
                         declared_in_macro_type_arg: false,
                         constructor_bindings: Vec::new(),
                     },
-                    verter_semantic::analysis::AnalyzedPropField {
+                    verter_session_query::analysis::types::AnalyzedPropField {
                         name: "barBaz".to_string(),
                         span: verter_span::Span::new(10, 16),
                         type_annotation: None,
@@ -2724,7 +2781,7 @@ fn test_component_prop_completions_from_macros() {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
-                emit_fields: vec![verter_semantic::analysis::AnalyzedEmitField {
+                emit_fields: vec![verter_session_query::analysis::types::AnalyzedEmitField {
                     name: "custom".to_string(),
                     span: verter_span::Span::new(0, 6),
                     call_signature_span: None,
@@ -2744,7 +2801,9 @@ fn test_component_prop_completions_from_macros() {
                 span: verter_span::Span::new(0, 0),
             },
         ]),
-        template: Some((verter_semantic::analysis::TemplateAnalysisSnapshot::default()).into()),
+        template: Some(
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot::default()).into(),
+        ),
         ..Default::default()
     };
 
@@ -2762,6 +2821,7 @@ fn test_component_prop_completions_from_macros() {
         });
 
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -2891,6 +2951,7 @@ fn incomplete_component_opening_uses_import_and_committed_child_analysis() {
         let resolve = |_: &str, _: Option<&str>| Some(child.clone());
 
         let result = completions_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             source,
             &blocks,
@@ -2915,6 +2976,7 @@ fn incomplete_component_opening_uses_import_and_committed_child_analysis() {
 
         let cold = |_: &str, _: Option<&str>| None;
         let cold_labels: Vec<String> = completions_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             source,
             &blocks,
@@ -2973,6 +3035,7 @@ fn svelte_unclosed_text_does_not_fabricate_component_attribute_authority() {
         };
         assert!(
             completions_at_position(
+                &verter_session::framework::HostLanguageClassifier::default(),
                 &position,
                 source,
                 &project_carrier_blocks(&structure),
@@ -3031,6 +3094,7 @@ fn unclosed_post_attribute_gaps_do_not_capture_the_component_resolver() {
         };
 
         let _ = completions_at_position(
+            &verter_session::framework::HostLanguageClassifier::default(),
             &position,
             &source,
             &project_carrier_blocks(&structure),
@@ -3057,9 +3121,9 @@ fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
     let line_index = LineIndex::new_utf16(source);
     let parent_analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 components: vec![
-                    verter_semantic::analysis::template::TemplateComponentUsage {
+                    verter_session_query::analysis::template::TemplateComponentUsage {
                         name: "Child".to_string(),
                         import_source: Some(import_source.to_string()),
                         is_dynamic: false,
@@ -3083,18 +3147,20 @@ fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
     };
     let child_analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
-                prop_definitions: vec![verter_semantic::analysis::AnalyzedPropDefinition {
-                    name: "camelCaseProp".to_string(),
-                    callable_role: verter_type_expr::PropCallableRole::Other,
-                    type_annotation: Some("string".to_string()),
-                    has_default: false,
-                    is_required: true,
-                    is_boolean: false,
-                    used_in_template: false,
-                    used_in_script: false,
-                    span: verter_span::Span::new(0, 0),
-                }],
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
+                prop_definitions: vec![
+                    verter_session_query::analysis::template::AnalyzedPropDefinition {
+                        name: "camelCaseProp".to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::Other,
+                        type_annotation: Some("string".to_string()),
+                        has_default: false,
+                        is_required: true,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    },
+                ],
                 ..Default::default()
             })
             .into(),
@@ -3109,6 +3175,7 @@ fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
     };
 
     let items = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &position,
         source,
         &blocks,
@@ -3233,8 +3300,8 @@ fn d5_component(
 fn d5_slot_field(
     name: &str,
     bindings: Vec<(&str, &str)>,
-) -> verter_semantic::analysis::types::AnalyzedSlotField {
-    verter_semantic::analysis::types::AnalyzedSlotField {
+) -> verter_session_query::analysis::types::AnalyzedSlotField {
+    verter_session_query::analysis::types::AnalyzedSlotField {
         props_anchor: Default::default(),
         name: name.to_string(),
         is_required: false,
@@ -3242,7 +3309,7 @@ fn d5_slot_field(
         bindings: bindings
             .into_iter()
             .map(
-                |(name, ty)| verter_semantic::analysis::types::AnalyzedSlotFieldBinding {
+                |(name, ty)| verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
                     name: name.to_string(),
                     type_annotation: Some(ty.to_string()),
                     payload: None,
@@ -3260,7 +3327,7 @@ fn d5_slot_field(
 }
 
 fn d5_child_with_slots(
-    fields: Vec<verter_semantic::analysis::types::AnalyzedSlotField>,
+    fields: Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
 ) -> FileAnalysisSnapshot {
     let mac = AnalyzedMacro {
         edit_anchors: Default::default(),
@@ -3299,6 +3366,7 @@ fn d5_slot_completions(
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
         Box::new(move |_, _| child.clone());
     completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3476,6 +3544,7 @@ fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
         Box::new(move |_, _| Some(child.clone()));
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3574,6 +3643,7 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
     let cursor = source.find("{@render ").unwrap() + "{@render ".len();
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,
@@ -3656,7 +3726,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
             ),
         ],
         defined_slots: vec![
-            verter_semantic::analysis::template::DefinedSlot {
+            verter_session_query::analysis::template::DefinedSlot {
                 name: "header".to_string(),
                 has_bindings: false,
                 binding_names: Vec::new(),
@@ -3665,7 +3735,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
                 has_fallback_content: false,
                 span: verter_span::Span::new(0, 0),
             },
-            verter_semantic::analysis::template::DefinedSlot {
+            verter_session_query::analysis::template::DefinedSlot {
                 name: "footer".to_string(),
                 has_bindings: false,
                 binding_names: Vec::new(),
@@ -3674,7 +3744,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
                 has_fallback_content: false,
                 span: verter_span::Span::new(0, 0),
             },
-            verter_semantic::analysis::template::DefinedSlot {
+            verter_session_query::analysis::template::DefinedSlot {
                 name: "usedPublic".to_string(),
                 has_bindings: false,
                 binding_names: Vec::new(),
@@ -3698,6 +3768,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
     let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
         Box::new(move |_, _| Some(child.clone()));
     let result = completions_at_position(
+        &verter_session::framework::HostLanguageClassifier::default(),
         &pos,
         source,
         &blocks,

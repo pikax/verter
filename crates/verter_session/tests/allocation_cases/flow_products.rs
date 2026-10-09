@@ -2,11 +2,15 @@ use std::sync::Arc;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::InputBasisId;
 use verter_session::for_tests::*;
-use verter_session::semantic_query::{
+use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
+use verter_type_engine::project_semantic_dispatch::flow_products::*;
+use verter_type_engine::project_semantic_dispatch::flow_solve::*;
+use verter_type_engine::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, NullabilityPolicy, PrimitiveKind, ResolvedDeclSlotIdentity,
-    ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
+    FlowReturnKey, PrimitiveKind, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
+    SemanticNodeData, SemanticQueryKey,
 };
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 struct Basis(u8);
 impl CanonicalEncode for Basis {
@@ -38,7 +42,7 @@ fn request(basis: u8) -> FlowDemandRequest {
                 type_env_hash: [0; 16],
                 lib_env_hash: [0; 16],
                 project_identity: [0; 16],
-                result_evaluation: verter_session::semantic_query::CONTEXT_FREE_EVALUATION,
+                result_evaluation: verter_type_engine::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {
                     nullability: NullabilityPolicy::Strict,

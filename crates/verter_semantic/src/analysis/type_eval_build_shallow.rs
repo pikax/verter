@@ -94,7 +94,7 @@ trait Frame<'a>: Sized {
         &mut self,
         delivered: Option<Value>,
         source: &str,
-        budget: &mut InferenceBudget,
+        budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>>;
 }
 
@@ -103,7 +103,7 @@ trait Frame<'a>: Sized {
 pub(super) fn run<'a>(
     first: Task<'a>,
     source: &str,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
     mut read_root: Option<&mut IndexedValueReadRoot>,
 ) -> InferenceResult<Value> {
     let mut tasks = vec![first];
@@ -111,7 +111,7 @@ pub(super) fn run<'a>(
     while let Some(task) = tasks.pop() {
         match task {
             Task::Declaration(expr, policy) => {
-                declaration(expr, policy, source, budget, &mut tasks)?;
+                declaration(expr, policy, source, &mut tasks);
             }
             Task::Value(expr, policy) => {
                 value(
@@ -225,7 +225,7 @@ fn resume<'a, F: Frame<'a>>(
     mut frame: F,
     wrap: fn(F) -> Task<'a>,
     source: &str,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
     tasks: &mut Vec<Task<'a>>,
     values: &mut Vec<Value>,
 ) -> InferenceResult<()> {
@@ -251,13 +251,11 @@ fn declaration<'a>(
     expr: &'a Expression<'a>,
     policy: TopLevelLiteralPolicy,
     source: &str,
-    budget: &mut InferenceBudget,
     tasks: &mut Vec<Task<'a>>,
-) -> InferenceResult<()> {
-    budget.visit()?;
+) {
     if expr_is_const_asserted(expr, source) {
         tasks.push(Task::Value(expr, MemberLiteralPolicy::Widen));
-        return Ok(());
+        return;
     }
     match expr {
         Expression::TSAsExpression(_) | Expression::TSTypeAssertion(_) => {
@@ -284,7 +282,6 @@ fn declaration<'a>(
             tasks.push(Task::Value(expr, MemberLiteralPolicy::Widen));
         }
     }
-    Ok(())
 }
 
 /// A value expression under the member-literal `policy`: its type pushed
@@ -297,12 +294,11 @@ fn value<'a>(
     policy: MemberLiteralPolicy,
     root: bool,
     source: &str,
-    budget: &mut InferenceBudget,
+    budget: &mut InferenceState,
     read_root: Option<&mut IndexedValueReadRoot>,
     tasks: &mut Vec<Task<'a>>,
     values: &mut Vec<Value>,
 ) -> InferenceResult<()> {
-    budget.visit()?;
     let same_chain = |expr: &'a Expression<'a>, policy: MemberLiteralPolicy| {
         if root {
             Task::RootValue(expr, policy)
@@ -355,7 +351,10 @@ fn value<'a>(
         }
         Expression::Identifier(ident) => {
             if let Some(read_root) = read_root {
-                *read_root = IndexedValueReadRoot::Identifier(ident.span.into());
+                *read_root = IndexedValueReadRoot::Identifier(verter_span::Span::new(
+                    ident.span.start,
+                    ident.span.end,
+                ));
             }
             TypeExpr::TypeOf(ValueRef {
                 path: vec![ident.name.as_str().to_string()],
@@ -433,9 +432,7 @@ fn value<'a>(
             return Ok(());
         }
         Expression::ObjectExpression(object) => {
-            tasks.push(Task::Object(ObjectFrame::new(
-                object, policy, true, budget,
-            )?));
+            tasks.push(Task::Object(ObjectFrame::new(object, policy, true)));
             return Ok(());
         }
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
@@ -455,13 +452,13 @@ fn value<'a>(
         }
         Expression::TemplateLiteral(_) => TypeExpr::Primitive(PrimitiveName::String),
         Expression::ArrowFunctionExpression(arrow) => {
-            tasks.push(Task::Arrow(ArrowFrame::new(arrow, true, budget)?));
+            tasks.push(Task::Arrow(ArrowFrame::new(arrow, true)));
             return Ok(());
         }
         Expression::StaticMemberExpression(member) => {
             // obj.foo → typeof obj.foo (build a dotted path)
             let mut path = Vec::new();
-            collect_static_member_path_with_budget(member, &mut path, budget)?;
+            collect_static_member_path(member, &mut path);
             if path.is_empty() {
                 budget.used_unmodeled_fallback = true;
                 TypeExpr::Primitive(PrimitiveName::Any)
@@ -536,7 +533,7 @@ impl<'a> Frame<'a> for DeclarationArrayFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         _source: &str,
-        budget: &mut InferenceBudget,
+        budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         if let Some(delivered) = delivered {
             let ty = delivered.into_type();
@@ -624,7 +621,7 @@ impl<'a> ValueArrayFrame<'a> {
     fn new(
         array: &'a oxc_ast::ast::ArrayExpression<'a>,
         policy: MemberLiteralPolicy,
-        budget: &InferenceBudget,
+        budget: &InferenceState,
     ) -> Self {
         let positional = !array.elements.iter().any(|element| {
             matches!(
@@ -656,7 +653,7 @@ impl<'a> Frame<'a> for ValueArrayFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         _source: &str,
-        _budget: &mut InferenceBudget,
+        _budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         if let Some(readonly) = self.tuple {
             if let Some(delivered) = delivered {
@@ -766,7 +763,7 @@ impl<'a> Frame<'a> for TemplateFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         _source: &str,
-        _budget: &mut InferenceBudget,
+        _budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         if let Some(delivered) = delivered {
             self.awaiting = false;
@@ -836,17 +833,15 @@ impl<'a> ObjectFrame<'a> {
         object: &'a ObjectExpression<'a>,
         policy: MemberLiteralPolicy,
         as_type: bool,
-        budget: &mut InferenceBudget,
-    ) -> InferenceResult<Self> {
-        budget.visit()?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             object,
             policy,
             as_type,
             next: 0,
             members: Vec::new(),
             awaiting: None,
-        })
+        }
     }
 }
 
@@ -859,8 +854,14 @@ fn data_member(
     readonly: bool,
 ) -> ObjectMember {
     let spans = MemberSpans {
-        declaration: Some(property.span.into()),
-        name: Some(property.key.span().into()),
+        declaration: Some(verter_span::Span::new(
+            property.span.start,
+            property.span.end,
+        )),
+        name: Some(verter_span::Span::new(
+            property.key.span().start,
+            property.key.span().end,
+        )),
         // Value-inferred property: there is no source type annotation to
         // anchor.
         type_annotation: None,
@@ -879,8 +880,14 @@ fn method_member(
     signature: LoweredSignatureParts,
 ) -> ObjectMember {
     let spans = MemberSpans {
-        declaration: Some(property.span.into()),
-        name: Some(property.key.span().into()),
+        declaration: Some(verter_span::Span::new(
+            property.span.start,
+            property.span.end,
+        )),
+        name: Some(verter_span::Span::new(
+            property.key.span().start,
+            property.key.span().end,
+        )),
         type_annotation: None,
     };
     let mut method = MethodSignature::with_key_spans_public(
@@ -890,11 +897,16 @@ fn method_member(
             signature.return_type.map(Arc::new),
             signature.type_parameters,
             FunctionSpans {
-                signature: Some(function.span.into()),
-                return_type: function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| return_type.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(
+                    function.span.start,
+                    function.span.end,
+                )),
+                return_type: function.return_type.as_ref().map(|return_type| {
+                    verter_span::Span::new(
+                        return_type.type_annotation.span().start,
+                        return_type.type_annotation.span().end,
+                    )
+                }),
             },
         )
         .with_predicate(signature.predicate),
@@ -920,7 +932,7 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         source: &str,
-        budget: &mut InferenceBudget,
+        budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         if let Some(delivered) = delivered {
             let member = match self
@@ -958,9 +970,7 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                             property,
                             function,
                         });
-                        return Ok(Step::Descend(Task::Function(FunctionFrame::new(
-                            function, budget,
-                        )?)));
+                        return Ok(Step::Descend(Task::Function(FunctionFrame::new(function))));
                     }
                     // `readonly` comes ONLY from a WHOLE-OBJECT `as const`
                     // (the enclosing policy). A per-property `as const`
@@ -976,7 +986,6 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                     if budget.nested_nullish == NestedNullishLiterals::WidenToAny
                         && expr_is_widening_nullish(value)
                     {
-                        budget.visit()?;
                         self.members.push(data_member(
                             key,
                             property,
@@ -1035,15 +1044,11 @@ pub(super) struct FunctionFrame<'a> {
 }
 
 impl<'a> FunctionFrame<'a> {
-    pub(super) fn new(
-        function: &'a Function<'a>,
-        budget: &mut InferenceBudget,
-    ) -> InferenceResult<Self> {
-        budget.visit()?;
-        Ok(Self {
+    pub(super) fn new(function: &'a Function<'a>) -> Self {
+        Self {
             function,
             awaiting: false,
-        })
+        }
     }
 }
 
@@ -1056,7 +1061,7 @@ impl<'a> Frame<'a> for FunctionFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         source: &str,
-        budget: &mut InferenceBudget,
+        _budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         let function = self.function;
         let Some(delivered) = delivered else {
@@ -1065,8 +1070,7 @@ impl<'a> Frame<'a> for FunctionFrame<'a> {
                 &function.params,
                 function.this_param.as_deref(),
                 source,
-                budget,
-            )?)));
+            ))));
         };
         let (return_type, predicate) = match function.return_type.as_ref() {
             Some(return_type) => {
@@ -1107,18 +1111,13 @@ pub(super) struct ArrowFrame<'a> {
 }
 
 impl<'a> ArrowFrame<'a> {
-    pub(super) fn new(
-        arrow: &'a ArrowFunctionExpression<'a>,
-        as_type: bool,
-        budget: &mut InferenceBudget,
-    ) -> InferenceResult<Self> {
-        budget.visit()?;
-        Ok(Self {
+    pub(super) fn new(arrow: &'a ArrowFunctionExpression<'a>, as_type: bool) -> Self {
+        Self {
             arrow,
             as_type,
             parameters: None,
             awaiting: false,
-        })
+        }
     }
 
     /// The arrow's value, its body inferred to `body_type` (`None` for an
@@ -1155,11 +1154,13 @@ impl<'a> ArrowFrame<'a> {
             return Value::Signature(signature);
         }
         let spans = FunctionSpans {
-            signature: Some(arrow.span.into()),
-            return_type: arrow
-                .return_type
-                .as_ref()
-                .map(|rt| rt.type_annotation.span().into()),
+            signature: Some(verter_span::Span::new(arrow.span.start, arrow.span.end)),
+            return_type: arrow.return_type.as_ref().map(|rt| {
+                verter_span::Span::new(
+                    rt.type_annotation.span().start,
+                    rt.type_annotation.span().end,
+                )
+            }),
         };
         Value::Type(TypeExpr::Function(Arc::new(
             FunctionExpr::with_spans(
@@ -1182,7 +1183,7 @@ impl<'a> Frame<'a> for ArrowFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         source: &str,
-        budget: &mut InferenceBudget,
+        _budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         self.awaiting = false;
         let Some(delivered) = delivered else {
@@ -1191,8 +1192,7 @@ impl<'a> Frame<'a> for ArrowFrame<'a> {
                 &self.arrow.params,
                 None,
                 source,
-                budget,
-            )?)));
+            ))));
         };
         if self.parameters.is_some() {
             // The expression body's type.
@@ -1234,9 +1234,7 @@ impl<'a> ParamsFrame<'a> {
         params: &'a FormalParameters<'a>,
         this_param: Option<&TSThisParameter<'_>>,
         source: &str,
-        budget: &mut InferenceBudget,
-    ) -> InferenceResult<Self> {
-        budget.visit()?;
+    ) -> Self {
         let mut lowered = Vec::with_capacity(
             params.items.len()
                 + usize::from(params.rest.is_some())
@@ -1245,12 +1243,12 @@ impl<'a> ParamsFrame<'a> {
         if let Some(this) = this_param {
             lowered.push(lower_this_param(this, source));
         }
-        Ok(Self {
+        Self {
             params,
             next: 0,
             lowered,
             awaiting: None,
-        })
+        }
     }
 
     fn push(
@@ -1269,7 +1267,7 @@ impl<'a> ParamsFrame<'a> {
             ty,
             param.optional || param.initializer.is_some(),
             false,
-            Some(param.span.into()),
+            Some(verter_span::Span::new(param.span.start, param.span.end)),
             param.type_annotation.is_some(),
         );
         lowered.is_parameter_property =
@@ -1287,7 +1285,7 @@ impl<'a> Frame<'a> for ParamsFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         source: &str,
-        budget: &mut InferenceBudget,
+        _budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         if let Some(delivered) = delivered {
             let ParamAwait { param, name } = self
@@ -1298,7 +1296,6 @@ impl<'a> Frame<'a> for ParamsFrame<'a> {
         }
         while let Some(param) = self.params.items.get(self.next) {
             self.next += 1;
-            budget.visit()?;
             let name = match &param.pattern {
                 BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
                 _ => None,
@@ -1317,7 +1314,6 @@ impl<'a> Frame<'a> for ParamsFrame<'a> {
             self.push(param, name, ty);
         }
         if let Some(rest) = &self.params.rest {
-            budget.visit()?;
             let name = match &rest.rest.argument {
                 BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
                 _ => None,
@@ -1332,7 +1328,7 @@ impl<'a> Frame<'a> for ParamsFrame<'a> {
                 ty,
                 false,
                 true,
-                Some(rest.span.into()),
+                Some(verter_span::Span::new(rest.span.start, rest.span.end)),
                 rest.type_annotation.is_some(),
             ));
         }
@@ -1352,17 +1348,13 @@ enum Widening {
 /// unions, intersections, arrays, tuples, object members and function
 /// results — from a work list, so a type nested any number of levels deep
 /// costs no native level per level.
-pub(super) fn widen_literal_type(
-    ty: TypeExpr,
-    budget: &mut InferenceBudget,
-) -> InferenceResult<TypeExpr> {
+pub(super) fn widen_literal_type(ty: TypeExpr) -> TypeExpr {
     let mut tasks = vec![Widening::Visit(ty)];
     let mut values: Vec<TypeExpr> = Vec::new();
     while let Some(task) = tasks.pop() {
         match task {
             Widening::Visit(ty) => {
-                budget.visit()?;
-                let Some(parts) = widening_parts(&ty, budget)? else {
+                let Some(parts) = widening_parts(&ty) else {
                     values.push(widened_leaf(ty));
                     continue;
                 };
@@ -1378,7 +1370,7 @@ pub(super) fn widen_literal_type(
             }
         }
     }
-    Ok(values.pop().expect("the widened type"))
+    values.pop().expect("the widened type")
 }
 
 /// A type with no parts to widen, widened: a fresh literal is its
@@ -1403,14 +1395,10 @@ fn widened_leaf(ty: TypeExpr) -> TypeExpr {
 
 /// The parts of `ty` whose literals widen, in the order
 /// [`rebuild_widened`] reads them back; `None` for a type with no parts.
-/// Each object member charges the budget as one more visit.
-fn widening_parts(
-    ty: &TypeExpr,
-    budget: &mut InferenceBudget,
-) -> InferenceResult<Option<Vec<TypeExpr>>> {
+fn widening_parts(ty: &TypeExpr) -> Option<Vec<TypeExpr>> {
     let return_type =
         |function: &FunctionExpr| function.return_type.as_deref().cloned().into_iter();
-    Ok(Some(match ty {
+    Some(match ty {
         TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
             members.iter().cloned().collect()
         }
@@ -1421,7 +1409,6 @@ fn widening_parts(
         TypeExpr::Object(object) => {
             let mut parts = Vec::with_capacity(object.properties.len());
             for member in &object.properties {
-                budget.visit()?;
                 match member {
                     ObjectMember::Property(property) => parts.push(property.ty.clone()),
                     ObjectMember::Spread(spread) => parts.push(spread.ty.clone()),
@@ -1440,8 +1427,8 @@ fn widening_parts(
         TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
             return_type(function).collect()
         }
-        _ => return Ok(None),
-    }))
+        _ => return None,
+    })
 }
 
 /// `ty` rebuilt from its parts' `widened` types, in [`widening_parts`]'

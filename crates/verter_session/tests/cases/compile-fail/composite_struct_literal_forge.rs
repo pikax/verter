@@ -7,8 +7,8 @@
 //! trybuild would turn red.
 
 use std::sync::Arc;
-use verter_session::semantic_query::composite::{CompositeList, CompositeMembers, UnionKind};
-use verter_session::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query::composite::{CompositeList, CompositeMembers, UnionKind};
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 fn forge_core(members: Arc<[SemanticNodeId]>) -> CompositeMembers {
     CompositeMembers { members }

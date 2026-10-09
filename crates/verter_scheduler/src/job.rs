@@ -27,7 +27,7 @@ pub enum SchedulerError {
     /// behind it (a known-but-unsupported framework language). Typed so
     /// consumers distinguish it structurally — never by parsing a
     /// message string. Produced when a stage executor returns
-    /// [`crate::executor::StageErrorKind::UnsupportedLanguage`].
+    /// [`crate::execution::executor::StageErrorKind::UnsupportedLanguage`].
     UnsupportedLanguage {
         file_id: String,
         adapter_id: verter_language::FrameworkAdapterId,
@@ -36,7 +36,7 @@ pub enum SchedulerError {
     /// its parse, or the walk-stack lease of its program's walks, was
     /// refused, and nothing was published for it. Typed operational
     /// incompleteness, produced when a stage executor returns
-    /// [`crate::executor::StageErrorKind::StackUnavailable`].
+    /// [`crate::execution::executor::StageErrorKind::StackUnavailable`].
     StackUnavailable { file_id: String, needed: usize },
     /// File not found in scheduler or via source loader.
     FileNotFound { file_id: String },
@@ -535,6 +535,7 @@ mod tests {
         let outer = SchedulerError::DependencyFailed {
             dep_key: DepKey::FileStage {
                 canonical: std::sync::Arc::from("/dep.ts"),
+                incarnation: 1,
                 generation: 1,
                 stage: FileStageKey::Analysis,
             },
@@ -620,6 +621,7 @@ mod tests {
         assert!(handle.target().is_none(), "fresh handle exposes no target",);
         let id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 3,
             stage: crate::dag::FileStageKey::Analysis,
         };

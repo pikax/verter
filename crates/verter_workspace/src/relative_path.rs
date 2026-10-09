@@ -13,7 +13,7 @@
 /// are retained byte-for-byte.
 ///
 /// `\` is a path separator in module specifiers (TS `normalizeSlashes` — the
-/// same `pathIsRelative` class the resolver's [`verter_semantic::resolver_core::join_paths`]
+/// same `pathIsRelative` class the resolver's [`verter_session_query::resolution::join_paths`]
 /// route normalizes via `normalize_canonical_id`), so `'..\index'` joins
 /// byte-identically to `'../index'`. Without the rewrite a backslash segment
 /// survives verbatim and the joined path can never match a canonical id
@@ -21,7 +21,7 @@
 /// backslash spelling would be probed at a path that cannot exist.
 ///
 /// The rewrite is gated on the shared
-/// [`verter_semantic::resolver_core::is_relative_specifier`] predicate: a dot-prefixed
+/// [`verter_session_query::resolution::is_relative_specifier`] predicate: a dot-prefixed
 /// specifier OUTSIDE the TS `pathIsRelative` class (`.alias\types` — TS:
 /// package-ish, a resolution error) keeps its bytes, so its backslash
 /// segment stays verbatim and the joined path stays unmatchable
@@ -38,7 +38,7 @@ pub fn join_relative(importer_id: &str, specifier: &str) -> String {
         "join_relative expects a relative specifier (starts with '.'); got {specifier:?}",
     );
     let specifier: std::borrow::Cow<'_, str> = if specifier.contains('\\')
-        && verter_semantic::resolver_core::is_relative_specifier(specifier)
+        && verter_session_query::resolution::is_relative_specifier(specifier)
     {
         std::borrow::Cow::Owned(specifier.replace('\\', "/"))
     } else {

@@ -25,9 +25,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use verter_diagnostics::{LintConfig, Linter};
-use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
 use verter_session::component_meta_host::ComponentMetaHost;
-use verter_session::{FileAnalysisSnapshot, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalysisFlags;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 // ─────────────────────────── stats ───────────────────────────
@@ -220,14 +222,20 @@ fn counters_of(host: &VerterHost) -> Counters {
                 p.indexed_ready_scheduler_snapshot_reuse.load(Relaxed),
             ),
             ("shallow_state_builds", p.shallow_state_builds.load(Relaxed)),
-            ("eval_env_builds", p.eval_env_builds.load(Relaxed)),
+            (
+                "eval_env_builds",
+                p.decl_lowering.eval_env_builds.load(Relaxed),
+            ),
             ("sfc_parses", p.sfc_parses.load(Relaxed)),
             ("carrier_parses", p.carrier_parses.load(Relaxed)),
             (
                 "vue_script_snapshot_parses",
                 p.vue_script_snapshot_parses.load(Relaxed),
             ),
-            ("decl_bodies_lowered", p.decl_bodies_lowered.load(Relaxed)),
+            (
+                "decl_bodies_lowered",
+                p.decl_lowering.decl_bodies_lowered.load(Relaxed),
+            ),
             ("dep_resolution_calls", p.dep_resolution_calls.load(Relaxed)),
             (
                 "import_resolution_cache_hit_count",
@@ -297,7 +305,7 @@ fn print_counters(label: &str, c: &Counters, per: usize) {
 
 #[cfg(feature = "currency_probe")]
 fn print_probe(per: usize) {
-    let snap = verter_workspace::currency_probe::snapshot();
+    let snap = verter_session_query::currency_probe::snapshot();
     if snap.is_empty() {
         return;
     }
@@ -334,7 +342,7 @@ fn print_probe(_per: usize) {}
 
 #[cfg(feature = "currency_probe")]
 fn reset_probe() {
-    verter_workspace::currency_probe::reset();
+    verter_session_query::currency_probe::reset();
 }
 
 #[cfg(not(feature = "currency_probe"))]
@@ -657,7 +665,8 @@ fn run_meta_mode() {
             &ViteConfigOptions::default(),
         );
         ws.set_project_graph(graph.graph);
-        let meta_host = ComponentMetaHost::new(HostConfig::default(), Arc::new(ws));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), Arc::new(ws)));
+        let meta_host = ComponentMetaHost::new_shared_host(Arc::clone(&host));
         let session = meta_host.open_session().unwrap();
         let c_ms = ms(t0.elapsed());
 
@@ -678,7 +687,7 @@ fn run_meta_mode() {
         }
         let r_ms = ms(t0.elapsed());
 
-        let c = counters_of(meta_host.host());
+        let c = counters_of(&host);
 
         let t0 = Instant::now();
         drop(session);

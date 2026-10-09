@@ -13,7 +13,7 @@
 //! If the two variants ever shared one payload type again, this fixture
 //! would COMPILE and trybuild would turn red.
 
-use verter_session::semantic_query::SemanticNodeData;
+use verter_type_engine::semantic_query::SemanticNodeData;
 
 fn replay(data: SemanticNodeData) -> SemanticNodeData {
     match data {

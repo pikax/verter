@@ -10,7 +10,7 @@
 //! objects the reducer cannot resolve.
 
 use super::support::*;
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticQueryApi,
     SemanticQueryKey, SemanticQueryOutput,
 };
@@ -235,7 +235,8 @@ fn skeleton_structural_transit_instantiate_preserves_operator_carriers() {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
 
     let canonical: Arc<str> = Arc::from("/fixtures/index_signatures.ts");
     let base = dispatch.type_slot_for(
@@ -243,17 +244,21 @@ fn skeleton_structural_transit_instantiate_preserves_operator_carriers() {
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("NumericLookup"),
     );
-    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        base,
-        Arc::from(Vec::new().into_boxed_slice()),
-        dispatch.instantiate_context_for(
-            &canonical,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Skeleton),
-        ),
-    ));
+    let key =
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            base,
+            Arc::from(Vec::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                &canonical,
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Skeleton),
+            ),
+        ));
     let node = match dispatch.execute_type_node(key) {
-        crate::semantic_query::QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-        crate::semantic_query::QueryResult::Recursive(value) => value,
+        verter_type_engine::semantic_query::QueryResult::Value(SemanticQueryOutput {
+            value,
+            ..
+        }) => value,
+        verter_type_engine::semantic_query::QueryResult::Recursive(value) => value,
         other => panic!("structural-transit Skeleton Instantiate failed: {other:?}"),
     };
     let graph = host.project_type_store().semantic_graph();

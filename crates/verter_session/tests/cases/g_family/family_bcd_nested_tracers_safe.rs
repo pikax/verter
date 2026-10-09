@@ -19,8 +19,8 @@ use std::sync::Arc;
 use verter_session::for_tests::{
     app_config_no_override_proof_get_or_compute_for_tests, install_fact_tracer_for_tests,
 };
-use verter_session::resolver_core::FactReadSetFinalise;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 fn make_host_with_file(canonical: &str, source: &str) -> Arc<VerterHost> {
@@ -79,7 +79,7 @@ fn install_nests_safely_outer_observes_inner_cold_facts() {
             assert!(
                 outer_sig.iter().any(|f| matches!(
                     f,
-                    verter_session::resolver_core::FactVersionRef::FileWholeHash {
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                         canonical_id, ..
                     } if canonical_id == canonical
                 )),

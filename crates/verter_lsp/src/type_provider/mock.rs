@@ -10,6 +10,7 @@ pub use inner::*;
 mod inner {
     use std::sync::{Arc, Mutex};
 
+    use crate::server::test_support::{RequestBarrier, RequestBarriers};
     use crate::type_provider::protocol::*;
     use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 
@@ -159,6 +160,28 @@ mod inner {
     /// Shared state for the mock provider.
     #[derive(Default)]
     struct MockState {
+        carrier_batch_observer: Option<std::sync::Arc<tokio::sync::Notify>>,
+        carrier_batch_block: Option<(
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// One-shot pause for the next `activate_carrier_member`: `(arrived,
+        /// release)`, as [`MockTypeProvider::block_next_carrier_activation`].
+        carrier_activation_block: Option<(
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// Bytes this engine accepted. Absent means not applied.
+        applied: std::collections::HashMap<String, Arc<str>>,
+        /// The serving engine incarnation: replacing the engine advances it.
+        /// A query answer is bound to the incarnation that selected it, and a
+        /// file write to the incarnation it was issued to.
+        incarnation: Arc<std::sync::atomic::AtomicU64>,
+        /// For each interactive query, in order: its path, the bytes the
+        /// engine held there at the moment it selected the answer — the bytes
+        /// the answer was evaluated against — and the incarnation that held
+        /// them.
+        evaluations: Vec<(String, Option<Arc<str>>, u64)>,
         calls: Vec<MockCall>,
         /// When `true`, the file-op methods (`open_file`/`load_file`/
         /// `update_file`/`close_file`) RECORD their call and then return
@@ -191,6 +214,13 @@ mod inner {
         fail_next_definitions: usize,
         /// As `fail_next_definitions`, for `get_type_definition`.
         fail_next_type_definitions: usize,
+        /// As `fail_next_hovers`, for `get_completions`: while > 0, each call
+        /// RECORDS itself and returns `Err` (a transient provider/transport
+        /// failure), decrementing the counter. The ONLY way a completion
+        /// request reaches its bounded-recovery resync — and therefore the
+        /// only way the production recovery arm's document-lane discipline is
+        /// observable at all — so the lane-fence proofs drive it.
+        fail_next_completions: usize,
         /// When `true`, `get_definition` RECORDS its call and then returns a
         /// future that NEVER resolves, simulating a wedged type provider (a
         /// managed tsgo stuck in a busy dispatch loop). Drives the handler
@@ -245,6 +275,10 @@ mod inner {
             std::sync::Arc<tokio::sync::Notify>,
             std::sync::Arc<tokio::sync::Notify>,
         )>,
+        /// The ambient request deadline each `open_file` / `update_file` was
+        /// issued under, in call order: the bound the engine would apply to
+        /// that write.
+        write_deadlines: Vec<(String, Option<tokio::time::Instant>)>,
         /// Test seam matching `close_block`, but for a one-shot `update_file`.
         /// It lets concurrency tests pause an edit after the document registry
         /// has accepted new source while the provider refresh is still in flight.
@@ -324,6 +358,17 @@ mod inner {
         restart_pulse: Option<std::sync::Arc<tokio::sync::Notify>>,
     }
 
+    impl MockState {
+        /// Record that a query at `path` is evaluated now, against the bytes
+        /// the engine holds there at this instant.
+        fn note_evaluation(&mut self, path: &str) {
+            let bytes = self.applied.get(path).cloned();
+            let incarnation = self.incarnation.load(std::sync::atomic::Ordering::SeqCst);
+            self.evaluations
+                .push((path.to_string(), bytes, incarnation));
+        }
+    }
+
     /// A mock `TypeProvider` for testing.
     ///
     /// All methods record their calls and return configured responses.
@@ -332,6 +377,16 @@ mod inner {
     pub struct MockTypeProvider {
         state: Arc<Mutex<MockState>>,
         call_recorded: Arc<tokio::sync::Notify>,
+        /// Request barriers every interactive query reaches: dispatch before
+        /// the answer is produced, decode after. Kept outside `state`, whose
+        /// lock several query methods hold while building their future.
+        request_barriers: Arc<Mutex<Option<Arc<RequestBarriers>>>>,
+        /// Interactive queries still owed a scripted delivery failure, for
+        /// every query kind alike.
+        failed_deliveries: Arc<std::sync::atomic::AtomicUsize>,
+        /// The serving engine incarnation, shared with `state` and readable
+        /// without its lock.
+        incarnation: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl Default for MockTypeProvider {
@@ -342,10 +397,72 @@ mod inner {
 
     impl MockTypeProvider {
         pub fn new() -> Self {
+            let state = MockState::default();
+            let incarnation = Arc::clone(&state.incarnation);
             Self {
-                state: Arc::new(Mutex::new(MockState::default())),
+                state: Arc::new(Mutex::new(state)),
                 call_recorded: Arc::new(tokio::sync::Notify::new()),
+                request_barriers: Arc::new(Mutex::new(None)),
+                failed_deliveries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                incarnation,
             }
+        }
+
+        /// Make every interactive query reach `barriers` at provider dispatch
+        /// and at provider-response decode.
+        pub(crate) fn set_request_barriers(&self, barriers: Arc<RequestBarriers>) {
+            *self.request_barriers.lock().unwrap() = Some(barriers);
+        }
+
+        /// Fail the next `count` interactive queries of any kind after their
+        /// dispatch, as a provider whose response never decodes.
+        pub fn fail_next_deliveries(&self, count: usize) {
+            self.failed_deliveries
+                .store(count, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn barriered<'a, T: Send + 'a>(
+            &self,
+            answer: ProviderFuture<'a, T>,
+        ) -> ProviderFuture<'a, T> {
+            let barriers = self.request_barriers.lock().unwrap().clone();
+            let failed_deliveries = Arc::clone(&self.failed_deliveries);
+            // The answer was selected by the incarnation serving now. Like the
+            // provider hub's retired-result fence, an answer whose engine was
+            // replaced before it settled is refused.
+            let incarnation = Arc::clone(&self.incarnation);
+            let selected_by = incarnation.load(std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if let Some(barriers) = &barriers {
+                    barriers.reach(RequestBarrier::ProviderDispatch).await;
+                }
+                let fail = failed_deliveries
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |owed| owed.checked_sub(1),
+                    )
+                    .is_ok();
+                let result = if fail {
+                    Err(TypeProviderError::new(
+                        "scripted provider delivery failure".to_string(),
+                    ))
+                } else {
+                    answer.await
+                };
+                let result = if incarnation.load(std::sync::atomic::Ordering::SeqCst) == selected_by
+                {
+                    result
+                } else {
+                    Err(TypeProviderError::new(
+                        "the engine incarnation that evaluated this query was retired".to_string(),
+                    ))
+                };
+                if let Some(barriers) = &barriers {
+                    barriers.reach(RequestBarrier::ProviderDecode).await;
+                }
+                result
+            })
         }
 
         fn note_recorded(&self) {
@@ -401,6 +518,15 @@ mod inner {
         pub fn fail_next_type_definitions(&self, count: usize) {
             let mut state = self.state.lock().unwrap();
             state.fail_next_type_definitions = count;
+        }
+
+        /// Script the next `count` `get_completions` calls to fail with `Err`
+        /// (transient provider/transport failure) before normal responses
+        /// resume. This is the seam that makes completion's bounded recovery
+        /// (the resync arm that republishes the open carrier) reachable.
+        pub fn fail_next_completions(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_completions = count;
         }
 
         /// Make every subsequent `get_definition` RECORD its call and then hang
@@ -595,9 +721,114 @@ mod inner {
             self.state.lock().unwrap().on_query = Some((path.to_string(), callback));
         }
 
+        pub fn observe_carrier_batch(&self) -> std::sync::Arc<tokio::sync::Notify> {
+            let observer = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_batch_observer = Some(observer.clone());
+            observer
+        }
+
+        /// Pause the next `activate_carrier_members` until `release` is signalled.
+        /// `arrived` fires once the engine has entered the batch.
+        pub fn block_next_carrier_batch(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_batch_block =
+                Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// Pause the next `activate_carrier_member` until `release` is
+        /// signalled. `arrived` fires once the engine has entered it.
+        pub fn block_next_carrier_activation(
+            &self,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_activation_block =
+                Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// The incarnation a file write issued now is delivered to.
+        fn serving_incarnation(&self) -> u64 {
+            self.incarnation.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Accept `content` at `path` for a write issued to `issued_to`. A
+        /// write issued to a retired incarnation reaches nothing the
+        /// replacement holds.
+        fn accept_applied(&self, path: &str, content: &str, issued_to: u64) {
+            let mut state = self.state.lock().unwrap();
+            if self.serving_incarnation() != issued_to {
+                return;
+            }
+            state.applied.insert(path.to_string(), Arc::from(content));
+        }
+
+        fn drop_applied(&self, path: &str) {
+            self.state.lock().unwrap().applied.remove(path);
+        }
+
+        /// Model an engine restart: the new incarnation holds none of the bytes
+        /// the previous one accepted, so no earlier delivery is still applied.
+        pub fn forget_applied_content(&self) {
+            self.state.lock().unwrap().applied.clear();
+        }
+
+        /// Model the serving engine retiring and a replacement incarnation
+        /// taking over: the replacement holds none of the bytes the retired
+        /// engine accepted, an answer the retired engine selected never
+        /// settles, and a write issued to the retired engine never reaches the
+        /// replacement.
+        pub fn replace_engine(&self) {
+            let mut state = self.state.lock().unwrap();
+            self.incarnation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            state.applied.clear();
+        }
+
+        /// The serving engine incarnation.
+        pub(crate) fn incarnation(&self) -> u64 {
+            self.serving_incarnation()
+        }
+
+        /// Model a delivery of `path` the engine lost: it no longer holds the
+        /// bytes it accepted there.
+        pub fn lose_delivery(&self, path: &str) {
+            self.drop_applied(path);
+        }
+
+        /// Model a delivery of `content` under `path` that reached the engine
+        /// through another writer, before any surface describing it was
+        /// recorded: the engine now holds those bytes.
+        pub fn accept_unrecorded_delivery(&self, path: &str, content: &str) {
+            self.accept_applied(path, content, self.serving_incarnation());
+        }
+
         /// Get all recorded calls.
         pub fn calls(&self) -> Vec<MockCall> {
             self.state.lock().unwrap().calls.clone()
+        }
+
+        /// The ambient request deadline every `open_file` / `update_file` of
+        /// `path` was issued under, in call order.
+        pub fn write_deadlines(&self, path: &str) -> Vec<Option<tokio::time::Instant>> {
+            self.state
+                .lock()
+                .unwrap()
+                .write_deadlines
+                .iter()
+                .filter(|(written, _)| written == path)
+                .map(|(_, deadline)| *deadline)
+                .collect()
         }
 
         /// Get only file sync calls (open/load/update/close).
@@ -619,7 +850,36 @@ mod inner {
 
         /// Clear all recorded calls.
         pub fn clear_calls(&self) {
-            self.state.lock().unwrap().calls.clear();
+            let mut state = self.state.lock().unwrap();
+            state.calls.clear();
+            state.evaluations.clear();
+        }
+
+        /// The bytes the engine held at `path` when it evaluated the most
+        /// recent interactive query there: `None` when no query reached it,
+        /// `Some(None)` when the engine held nothing at the path.
+        pub(crate) fn last_evaluated_bytes(&self, path: &str) -> Option<Option<Arc<str>>> {
+            self.state
+                .lock()
+                .unwrap()
+                .evaluations
+                .iter()
+                .rev()
+                .find(|(evaluated, _, _)| evaluated == path)
+                .map(|(_, bytes, _)| bytes.clone())
+        }
+
+        /// The engine incarnation that evaluated the most recent interactive
+        /// query at `path`, if any reached it.
+        pub(crate) fn last_evaluating_incarnation(&self, path: &str) -> Option<u64> {
+            self.state
+                .lock()
+                .unwrap()
+                .evaluations
+                .iter()
+                .rev()
+                .find(|(evaluated, _, _)| evaluated == path)
+                .map(|(_, _, incarnation)| *incarnation)
         }
 
         /// Make every subsequent file-op (`open_file`/`load_file`/
@@ -965,6 +1225,14 @@ mod inner {
     }
 
     impl TypeProvider for MockTypeProvider {
+        fn applied_content(&self, path: &str) -> verter_type_runtime::traits::AppliedContent {
+            use verter_type_runtime::traits::AppliedContent;
+            match self.state.lock().unwrap().applied.get(path) {
+                Some(bytes) => AppliedContent::Applied(Arc::clone(bytes)),
+                None => AppliedContent::NotApplied,
+            }
+        }
+
         fn provider_id(&self) -> &'static str {
             self.state.lock().unwrap().provider_id.unwrap_or("tsgo")
         }
@@ -990,6 +1258,9 @@ mod inner {
             // even returned, which is the realistic mid-pass ordering.
             let (fail, on_open, block) = {
                 let mut state = self.state.lock().unwrap();
+                state
+                    .write_deadlines
+                    .push((path.to_string(), verter_type_runtime::deadline::current()));
                 state.calls.push(MockCall::OpenFile {
                     path: path.to_string(),
                     content: content.to_string(),
@@ -1016,12 +1287,18 @@ mod inner {
             if let Some(callback) = on_open {
                 callback();
             }
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
-                fail_or_ok(fail, "open_file")
+                fail_or_ok(fail, "open_file")?;
+                this.accept_applied(&path_owned, &content_owned, issued_to);
+                Ok(())
             })
         }
 
@@ -1049,7 +1326,15 @@ mod inner {
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
             drop(state);
             self.note_recorded();
-            Box::pin(async move { fail_or_ok(fail, "load_file") })
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
+            Box::pin(async move {
+                fail_or_ok(fail, "load_file")?;
+                this.accept_applied(&path_owned, &content_owned, issued_to);
+                Ok(())
+            })
         }
 
         /// Recorded as its OWN call so a caller's priority lane is observable. The
@@ -1062,9 +1347,28 @@ mod inner {
                 content: content.to_string(),
             });
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            let block = match &state.open_block {
+                Some((armed_path, _, _)) if armed_path.is_empty() || armed_path == path => state
+                    .open_block
+                    .take()
+                    .map(|(_, arrived, release)| (arrived, release)),
+                _ => None,
+            };
             drop(state);
             self.note_recorded();
-            Box::pin(async move { fail_or_ok(fail, "open_file_background") })
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                fail_or_ok(fail, "open_file_background")?;
+                this.accept_applied(&path_owned, &content_owned, issued_to);
+                Ok(())
+            })
         }
 
         fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -1074,6 +1378,9 @@ mod inner {
                     path: path.to_string(),
                     content: content.to_string(),
                 });
+                state
+                    .write_deadlines
+                    .push((path.to_string(), verter_type_runtime::deadline::current()));
                 let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
                 let block = match &state.update_block {
                     Some((armed_path, _, _)) if armed_path == path => state
@@ -1085,12 +1392,18 @@ mod inner {
                 (fail, block)
             };
             self.note_recorded();
+            let this = self.clone();
+            let path_owned = path.to_string();
+            let content_owned = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
-                fail_or_ok(fail, "update_file")
+                fail_or_ok(fail, "update_file")?;
+                this.accept_applied(&path_owned, &content_owned, issued_to);
+                Ok(())
             })
         }
 
@@ -1118,6 +1431,8 @@ mod inner {
                 };
                 (fail, block)
             };
+            let this = self.clone();
+            let path_owned = path.to_string();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     // Signal the test that the close has been reached (the closing
@@ -1125,7 +1440,9 @@ mod inner {
                     arrived.notify_one();
                     release.notified().await;
                 }
-                fail_or_ok(fail, "close_file")
+                fail_or_ok(fail, "close_file")?;
+                this.drop_applied(&path_owned);
+                Ok(())
             })
         }
 
@@ -1172,10 +1489,15 @@ mod inner {
                     .filter(|(blocked_path, _)| blocked_path == companion_path)
                     .map(|(_, gate)| gate.clone())
             };
+            let this = self.clone();
+            let companion = companion_path.to_string();
+            let bytes = content.to_string();
+            let issued_to = self.serving_incarnation();
             Box::pin(async move {
                 if let Some(gate) = block {
                     gate.notified().await;
                 }
+                this.accept_applied(&companion, &bytes, issued_to);
                 Ok(())
             })
         }
@@ -1213,31 +1535,49 @@ mod inner {
             project_file_name: &str,
             script_kind: verter_type_runtime::CarrierScriptKind,
         ) -> ProviderFuture<'_, ()> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(MockCall::ActivateCarrierMember {
+            let block = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::ActivateCarrierMember {
                     source_path: source_path.to_string(),
                     companion_path: companion_path.to_string(),
                     project_file_name: project_file_name.to_string(),
                     script_kind,
                 });
-            Box::pin(async { Ok(()) })
+                state.carrier_activation_block.take()
+            };
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
         }
 
         fn activate_carrier_members<'a>(
             &'a self,
             members: &'a [verter_type_runtime::CarrierActivation],
         ) -> ProviderFuture<'a, ()> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(MockCall::ActivateCarrierMembers {
+            let block = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::ActivateCarrierMembers {
                     members: members.to_vec(),
                 });
-            Box::pin(async { Ok(()) })
+                let observer = state.carrier_batch_observer.clone();
+                let block = state.carrier_batch_block.take();
+                (observer, block)
+            };
+            if let Some(observer) = block.0 {
+                observer.notify_one();
+            }
+            let block = block.1;
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            })
         }
 
         fn get_completions(
@@ -1246,12 +1586,13 @@ mod inner {
             offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
-            let (items, on_query, block) = {
+            let (items, on_query, block, fail) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetCompletions {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let items = state
                     .completion_responses
                     .iter()
@@ -1271,23 +1612,34 @@ mod inner {
                         .map(|(_, arrived, release)| (arrived, release)),
                     _ => None,
                 };
-                (items, on_query, block)
+                let fail = if state.fail_next_completions > 0 {
+                    state.fail_next_completions -= 1;
+                    true
+                } else {
+                    false
+                };
+                (items, on_query, block, fail)
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
+                }
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient completion failure".to_string(),
+                    ));
                 }
                 Ok(CompletionResult {
                     items,
                     is_incomplete: false,
                 })
-            })
+            }))
         }
 
         fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
@@ -1297,6 +1649,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let fail = if state.fail_next_hovers > 0 {
                     state.fail_next_hovers -= 1;
                     true
@@ -1326,14 +1679,14 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient hover failure".to_string(),
                     ));
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
@@ -1388,6 +1741,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let fail = if state.fail_next_definitions > 0 {
                     state.fail_next_definitions -= 1;
                     true
@@ -1418,14 +1772,14 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient definition failure".to_string(),
                     ));
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_type_definition(
@@ -1438,6 +1792,7 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            state.note_evaluation(path);
             let fail = if state.fail_next_type_definitions > 0 {
                 state.fail_next_type_definitions -= 1;
                 true
@@ -1450,14 +1805,14 @@ mod inner {
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, locs)| locs.clone())
                 .unwrap_or_default();
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient type-definition failure".to_string(),
                     ));
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
@@ -1467,6 +1822,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .reference_responses
                     .iter()
@@ -1486,7 +1842,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_rename_locations(
@@ -1500,6 +1856,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .rename_responses
                     .iter()
@@ -1515,13 +1872,13 @@ mod inner {
                 };
                 (result, block)
             };
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_signature_help(
@@ -1535,6 +1892,7 @@ mod inner {
                     path: path.to_string(),
                     offset,
                 });
+                state.note_evaluation(path);
                 let result = state
                     .signature_help_responses
                     .iter()
@@ -1558,7 +1916,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_code_actions(
@@ -1575,13 +1933,14 @@ mod inner {
                 end_offset,
                 diagnostics: diagnostics.to_vec(),
             });
+            state.note_evaluation(path);
             let result = state
                 .code_action_responses
                 .iter()
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, actions)| actions.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
@@ -1589,13 +1948,14 @@ mod inner {
             state.calls.push(MockCall::GetSemanticTokens {
                 path: path.to_string(),
             });
+            state.note_evaluation(path);
             let result = state
                 .semantic_token_responses
                 .iter()
                 .find(|(p, _)| p == path)
                 .map(|(_, tokens)| tokens.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_document_highlights(
@@ -1608,13 +1968,14 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            state.note_evaluation(path);
             let result = state
                 .highlight_responses
                 .iter()
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, hl)| hl.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_inlay_hints(
@@ -1629,13 +1990,14 @@ mod inner {
                 start_offset,
                 end_offset,
             });
+            state.note_evaluation(path);
             let result = state
                 .inlay_hint_responses
                 .iter()
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, hints)| hints.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn resolve_completion(
@@ -1648,12 +2010,13 @@ mod inner {
                 path: path.to_string(),
                 data: data.clone(),
             });
+            state.note_evaluation(path);
             let result = state
                 .resolve_completion_responses
                 .iter()
                 .find(|(p, candidate, _)| p == path && *candidate == data)
                 .and_then(|(_, _, resolved)| resolved.clone());
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn configure_paths(

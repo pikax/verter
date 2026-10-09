@@ -15,7 +15,7 @@ use crate::canonical_path::CanonicalPath;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 
 const STUB_LIB_ES5: &str = r#"
     interface Pick<T, K extends keyof T> { /* */ }
@@ -96,7 +96,7 @@ fn register_ambient_lib_visible_to_read_ambient_lib_only() {
     ws.register_ambient_lib(lib_spec("lib.es5.d.ts", STUB_LIB_ES5))
         .unwrap();
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     assert!(
         ws.read_file("lib.es5.d.ts").is_none(),
@@ -115,15 +115,15 @@ fn register_ambient_lib_per_project_isolation() {
         make_project("/ws", "/ws/b", Some("/ws/b/tsconfig.json")),
     ]));
     let key_a = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     let key_b = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(1))
+        .project_stable_key(verter_session_query::resolution::ProjectId(1))
         .unwrap();
     assert_ne!(key_a, key_b);
 
     ws.register_ambient_lib(AmbientLibSpec {
-        project_id: Some(crate::workspace_snapshot::ProjectId(0)),
+        project_id: Some(verter_session_query::resolution::ProjectId(0)),
         canonical_id: Arc::from("lib.es5.d.ts"),
         source: Arc::from(STUB_LIB_ES5),
     })
@@ -144,10 +144,10 @@ fn register_ambient_lib_sibling_tsconfigs_distinct() {
         make_project("/ws", "/ws", Some("/ws/tsconfig.vitest.json")),
     ]));
     let app = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     let test = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(1))
+        .project_stable_key(verter_session_query::resolution::ProjectId(1))
         .unwrap();
     assert_ne!(
         app, test,
@@ -160,7 +160,7 @@ fn register_ambient_lib_sibling_tsconfigs_distinct() {
 fn register_ambient_lib_concurrent_cas_serialise() {
     use std::thread;
     let ws = ws_with_single_project("/ws", "/ws/tsconfig.json");
-    let pid = crate::workspace_snapshot::ProjectId(0);
+    let pid = verter_session_query::resolution::ProjectId(0);
     let mut handles = Vec::new();
     for i in 0..4 {
         let ws_c = Arc::clone(&ws);
@@ -214,7 +214,7 @@ fn register_ambient_lib_unknown_or_ambiguous_project() {
     // Unknown project_id -> error.
     let err = ws
         .register_ambient_lib(AmbientLibSpec {
-            project_id: Some(crate::workspace_snapshot::ProjectId(99)),
+            project_id: Some(verter_session_query::resolution::ProjectId(99)),
             canonical_id: Arc::from("lib.es5.d.ts"),
             source: Arc::from(STUB_LIB_ES5),
         })
@@ -229,7 +229,7 @@ fn register_ambient_lib_user_wins_shadowing_immediate() {
     ws.register_ambient_lib(lib_spec("lib.es5.d.ts", STUB_LIB_ES5))
         .unwrap();
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     assert!(ws.read_ambient_lib(key, "lib.es5.d.ts").is_some());
     // Inject a user file at the same canonical_id — read_ambient_lib must
@@ -251,7 +251,7 @@ fn register_ambient_lib_project_rebuild_stable_identity() {
         Some("/ws/a/tsconfig.json"),
     )]));
     let initial_key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     ws.register_ambient_lib(lib_spec("lib.es5.d.ts", STUB_LIB_ES5))
         .unwrap();
@@ -287,7 +287,7 @@ fn register_ambient_lib_project_rebuild_stable_identity() {
 fn register_ambient_lib_canonical_id_normalization() {
     let ws = ws_with_single_project("/ws", "/ws/tsconfig.json");
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
 
     // Register via "/lib.es5.d.ts".
@@ -331,10 +331,10 @@ fn register_ambient_lib_multi_root_no_collision() {
         Some("/b/tsconfig.json"),
     )]));
     let key_a = ws_a
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     let key_b = ws_b
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     assert_ne!(
         key_a, key_b,
@@ -349,7 +349,7 @@ fn register_ambient_lib_symbol_index_lookup() {
     ws.register_ambient_lib(lib_spec("lib.es5.d.ts", STUB_LIB_ES5))
         .unwrap();
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
 
     let pick = ws
@@ -371,7 +371,7 @@ fn register_ambient_lib_symbol_index_lookup() {
 fn register_ambient_lib_lib_order_precedence() {
     let ws = ws_with_single_project("/ws", "/ws/tsconfig.json");
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
 
     // Register two libs both exposing `Promise`. First one in MUST win
@@ -404,7 +404,7 @@ fn register_ambient_lib_lib_order_precedence() {
 fn register_ambient_lib_idempotent_per_a1_contract() {
     let ws = ws_with_single_project("/ws", "/ws/tsconfig.json");
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
 
     // First registration: content_generation bumps.
@@ -447,7 +447,7 @@ fn register_ambient_lib_idempotent_per_a1_contract() {
 fn vfs_shadowing_overlay_wins() {
     let ws = ws_with_single_project("/ws", "/ws/tsconfig.json");
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
 
     // Register ambient lib first.
@@ -496,7 +496,7 @@ fn read_file_does_not_serve_ambient_lib_through_snapshot() {
 fn unregister_ambient_lib_evicts_entry_and_symbol_index() {
     let ws = ws_with_single_project("/ws", "/ws/tsconfig.json");
     let key = ws
-        .project_stable_key(crate::workspace_snapshot::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .unwrap();
     ws.register_ambient_lib(lib_spec("lib.es5.d.ts", STUB_LIB_ES5))
         .unwrap();

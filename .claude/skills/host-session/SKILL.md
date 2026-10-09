@@ -25,7 +25,87 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 
 Host view: resolver-path helpers receive `&HostStoreView` directly as result-DB fence authority; `IndexedReady` is the single canonical post-parse artifact (former `ModuleFactsDb` deleted). Validated-cache writes record a `ReadSetSignature.facts` fact signature; warm hits revalidate it against the live `StoreView` before returning. Full store-view contract: "Host Store View" + "Store-View Token, Lane Identity, and Singleflight" below.
 
-**Resolver-context seal:** resolver-path code does NOT take `&VerterHost` directly. It takes `ctx: &'a dyn ResolverContext` — a `pub(crate)` sealed super-trait at `crates/verter_session/src/resolver_core/resolver_context.rs`. Only `VerterHost` implements `ResolverContext` (`sealed::Sealed` marker closed at trait definition). Guard `no_concrete_verter_host_in_seal_scope` mechanically forbids re-introducing `&VerterHost` parameters under the resolver_core/meta_resolve/host_manage/component_meta_query_engine seal scope. New trait-surface methods are an architectural decision; widen with care.
+**Resolver-context seal:** `ResolverContext` is a method-free sealed composition
+of five request-bound ports: `IndexedInputs`, `OwnedLowering`, `RouteLookup`,
+`FactValidation`, and `ExecutionSubmission`. The reads the engine makes once per
+semantic node or more — cancellation, the project generation and the live
+aggregate clocks — are not port methods: they are handles on the engine-owned
+`RequestSnapshot` (`resolver_core/resolver_context.rs`) that each request
+lifecycle captures once at admission (`VerterHost::capture_request_snapshot`)
+and serves through `LiveFactValidation::request_snapshot` /
+`FactValidation::request_flags` at admission boundaries only;
+`ProjectSemanticDispatch` borrows it once at construction, threads its flag
+handles into every producer, memo and cache-runtime entry point below
+(`&RequestFlags` beside the context), and reads plain fields throughout. The snapshot holds handles only, so
+every read is live: a mid-request cancellation, project reset or workspace edit
+is observed by the next read. Per-method call counts of these ports, per lane,
+come from the default-off `semantic-observe` counter
+(`count_resolver_context_call!`, read by the `resolver_dispatch_profile`
+example in `verter_bench`). Production contexts
+are `HostResolverContext` and `SessionResolverContext`; the direct-host seam is
+compiled only for tests or explicit `test-support`. Ports return owned input
+records, typed source demands, validation answers, or an opaque engine binding.
+They expose no host, store, config, AST borrow, or second query driver. Private
+request lifecycle adapters retain source artifacts for the request so lowering
+an observed record keeps its original source identity across edits.
+
+`ProjectSemanticDispatch` owns graph/result capabilities and immutable
+`EnginePolicy`. Its static `FlowCx`, `RelationCx`, and `InferenceTxn` views use
+generic demand drivers and selected arena operations. Request-local `MemoRead`
+and `MemoPublish` coordinate fact validation and publication; durable storage
+does not invoke source services or evaluate types. The five request-bound ports in `resolver_core::request_ports` are the
+resolver-tier boundary: each returns owned records or typed demands and none
+returns a host, store or config handle, so only their implementations reach
+ambient host state. The
+session feature-variants compile-contract lane proves each actual port cannot
+expose ambient host/worker/store state. See the type-resolution
+[ownership reference](../type-resolution/references/relation-ownership.md).
+
+## Host Construction Root
+
+`VerterHost::new*` (`host_construction.rs`) is the one composition root. It
+builds each host service once and hands it to its consumers; nothing reaches
+back into the host for a service it was not given.
+
+- `EnginePolicy` is translated from `HostConfig` once (`VerterHost.engine_policy`);
+  request adapters clone it. The engine never reads `HostConfig`.
+- The root mints the one `verter_execution::TaskRegistry` and composes the
+  project store over it (`ProjectTypeStore::compose`). The store returns the
+  engine grants, the `OutputLease` and the `SurfaceClaimAuthority`, and keeps
+  neither. The root hands both to `SessionAttachment` alone. Scheduler adoption
+  of the same registry belongs to the parallel-execution work.
+- `WorkspaceServices` holds the resolve-extension policy. `WorkspaceServices::attach`
+  is the only route by which a workspace receives it, both at construction and on
+  `set_workspace`. Resident resolution state needs no service: every workspace
+  Engine binds the process-local `ResolutionRetention` account at its own
+  construction, and replacing it is a `test-support` seam only.
+- Known-file dependency resolution probes `VerterHost::known_dependency_extensions()`:
+  the bare specifier, then script extensions, then the admitted carriers. Carrier
+  MEMBERSHIP comes from the composed admission (an unadmitted vertical's
+  extension is never probed); carrier ORDER is each descriptor's declared
+  `carrier_probe_rank` (`FrameworkAdapterRegistry::carrier_probe_extensions`),
+  never the classifier's `carrier_extensions()` order — that is a
+  longest-suffix-first MATCHING order and would flip same-stem
+  `.vue`/`.svelte` resolution. The NAPI and WASM bindings default to it and
+  spell no framework list of their own.
+
+The charter boundary names map onto existing owners; there are no Rust types
+called `RequestSession` or `ProjectSession` (the TypeScript `ProjectSession` in
+`@verter/component-meta` is unrelated):
+
+| Boundary name | Rust owner | Lifetime |
+| --- | --- | --- |
+| `VerterHost` | `VerterHost` (`host_construction.rs`, `host_lifecycle.rs`) | One host; the composition root |
+| `HostServices` | `framework::HostServices` (`framework/registry.rs`): capability catalog, adapter registry, framework options | One host; composed once at construction |
+| `WorkspaceServices` | `host_construction::WorkspaceServices`: resolve-extension policy | One host; attached to each workspace through `WorkspaceServices::attach` |
+| `RequestSession` | `resolver_core::request_bound::RequestBoundAdapter<L>` over a `RequestBoundLifecycle` — `SessionRequestLifecycle<'a>` (`SessionResolverContext<'a>`) or `HostRequestLifecycle<'a>` (`HostResolverContext<'a>`) | One request; host, session view and request view are borrowed for `'a` |
+| `ProjectSession` | `meta::MetaProject` (project lifetime; terminal `shutdown`) plus `meta::MetaSession` (session lifetime; `close`, and close on drop) | Project until shutdown; session until close or drop |
+
+Session lifetimes are scoped. `MetaSession` lends three audited-lane operations
+(capture check, output-bearing resolution, record drain) and never hands out
+the host. Session views likewise expose no host accessor. LSP background
+admission waits on the owning server's `HandlerActivity`, held per server, not
+on process-global handler counters.
 
 ## Vue Macro Codegen Producer
 
@@ -144,9 +224,27 @@ that owns `Foo.vue` thereby admits `Foo.vue.tsx`), while a config whose
 `exclude` removes the unit's own form still refuses it. Warm same-basis requests reuse the hub admission, while an excluded,
 missing, stale or wrong-project proof refuses before a provider query or write.
 Generated writes use `apply_overlay`/`apply_overlay_batch` on the hub actor.
+The managed composite also requires a typed `Arc<ProviderHub<P>>`; a raw
+`TypeProvider` cannot fill that slot. It installs one `GeneratedUnitResolver`
+which supplies resolver-produced binding inputs and complete workspace proofs,
+never serving authority. The hub checks these facts before recording cold
+generated state, binds them to its actual provider/epoch before live writes and
+queries, and re-resolves them before replay into each fresh incarnation. Nested
+hubs receive the same fact source and bind to their own incarnation; the
+tsserver router keeps its existing per-project hub admission. Warm managed
+requests reuse only the hub's current capability. Cold state carries no applied
+receipt, and queued writes honor cancellation and expiry before recording or
+forwarding. Closes retain their cleanup semantics. An
+excluded unit's desired editor bytes remain held but cannot replay or appear
+applied; a later admissible incarnation can restore them. Discovery loads
+continue to preserve open editor overlays. `TypeProviderError.admission_refusal`
+is a typed internal refusal and is omitted from serialization.
 The SHARED editor-attach route (`tsgo/composite.rs`) binds through the same hub
-authority: its overlay owns a `ProviderHub<TsgoSharedProvider>` that establishes
-the attach through the re-arm door, and every per-carrier sweep write carries a
+authority: the composite holds a `ProviderHub<TsgoSharedProvider>` that establishes
+the attach through the re-arm door. The hub owns shared overlay content, per-carrier
+application gates and applied epochs in `provider_hub/overlay.rs`; the composite
+collects inputs and calls `ProviderHub::synchronize`. Receipts list only successful
+member writes with exact bytes and epoch. Every per-carrier sweep write carries a
 hub-issued `AdmittedRequest` forwarded by
 `ProviderHub::forward_admitted_file` — off the actor queue, because the sweep's
 writes are concurrent barrier-coalesced (the single-writer actor would serialize
@@ -157,6 +255,59 @@ hub-issued admission binds the serving epoch and basis, so a replacement
 re-admits fresh. No admission cache survives beside the hub (the per-composite
 `CarrierAdmissionCache` and per-sweep admitted-units memo are gone; warm lookups
 are `ProviderHub::bound_project` + the hub request cache).
+Background discovery uses `load_file_with_disposition`. Open and update use the
+same disposition. `Shadowed` preserves editor content and does not record a
+shared overlay or a `ProjectSync` mapper. `Held` records hub desired state for
+replay and does not enter the delivery ledger, and a coordinator does not mark
+that IDE kind synced. `AppliedContent::Uncertified` is not a receipt. After
+replay, `ProviderHub::applied_content` is the bytes the serving incarnation
+accepted, including a rejected close, which keeps the prior surface. A close
+is committed only after the engine accepts it. tsserver companion content
+opens stay suppressed; that membership path is not a second content authority.
+Document receipts require completed transport delivery. TSGO transfers its document
+ordering gate to the stdin writer until the complete frame is written and flushed;
+dropping the submitter cannot reorder the next mutation. Queued replacements revoke
+the prior receipt, and failed or closed transports cannot certify cached bytes.
+TSGO publication deduplicates against delivered bytes, never the load-only conversion
+cache. tsserver uses acknowledged `updateOpen` writes for file receipts; completed
+carrier registration refreshes certify carrier bytes. ProviderHub validates wrapped
+provider receipts both after forwarding and during install replay, and rechecks the
+live receipt on reads so transport failure cannot leave a cached hub certificate.
+Direct admitted writes use the same engine-receipt check as queued mutations;
+successful physical overlay withdrawal removes that receipt.
+Cache-only loads remain `Held` until the wrapped provider certifies matching bytes.
+When a background drain encounters a held IDE write, it calls
+`TypeProvider::synchronize_pending_file`: the shared composite resolves the current
+configured owner and drives the existing hub engagement/synchronization path.
+This runs outside the foreground publication budget and breaks the dependency
+between first query and first delivered surface. ProjectSync then certifies the
+matching bytes without rewriting its captured snapshot; concurrent edits remain
+protected. A lazy managed fallback staying `Held` cannot mask an applied shared
+receipt.
+Overlay close removes desired content immediately but retains an epoch-bound
+withdrawal from a committed injection receipt until transport close succeeds.
+A never-injected or shadow-vetoed carrier owns no transport document and creates
+no withdrawal; closing it preserves any real editor document at the same path.
+Synchronization drains withdrawals outside the editor-demand injection filter.
+Deadlines and cancellation retain
+ownership, successful reopen supersedes the pending close under the carrier gate,
+and retired-incarnation closes never target the replacement transport.
+A recovery drain also wakes the existing post-scan completion check. A scan that
+finished during an engine replacement can announce completion once its queued
+work settles, without reinitializing the workspace or polling readiness. The
+waiter retains only a weak server reference and rejects superseded generations.
+Independent hub groups activate concurrently. A held engine on one project
+does not block another project's group. An A/B/A activation across two project
+hubs keeps aliases in one ordered bulk call per delivery and sends nothing
+after withdrawal. That router seam counts hub bulk calls; live tsserver/tsgo
+process rebuild counters belong to the real-provider lane.
+Cancellation before a queued overlay reaches application prevents both the
+write and retained state. Once a direct or actor overlay write, or a withdrawal,
+has reached the engine, the hub owns its acknowledgement and settlement even if
+the issuer stops waiting. Issuer cancellation alone never restarts a healthy
+engine. A failed withdrawal still signals recovery, and a successful withdrawal
+still releases its applied receipt. The original absolute request deadline
+travels with detached application; dropping the issuer does not renew it.
 A basis drift observed AFTER a provider write landed splits on what drifted. A
 content-only drift (another document's edit while the engine was awaited) leaves
 the publication that decided membership unchanged, so the healthy engine holds
@@ -166,6 +317,17 @@ re-applies idempotently (the direct shared write additionally closes its one
 path). Only a replaced publication or project generation — where the engine may
 now hold an excluded unit — retires the epoch or arms its recovery. Restarting a
 project engine on every concurrent edit is the failure this split prevents.
+Replay re-admits a content-only drift once at each validation checkpoint against
+the same provider and epoch, without repeating provider writes. Before carrier
+activation and installation, all replay admissions are refreshed in one bounded
+pass. The final checkpoint requires unchanged membership and the exact replay
+incarnation; a later refresh's content-only edit cannot reject installation.
+Live writes and queries still require a current full-basis witness, so replay
+does not warm an earlier content binding. Changed membership fails installation.
+Managed non-close mutations whose caller deadline elapses return the typed
+`DeadlineElapsed` refusal; work still queued before application is discarded.
+Closes and mutations without a generated-unit resolver retain ordered queued
+delivery after the caller stops waiting.
 The tsserver router is the issuer that answers a basis drift with a fresh
 admission, bounded to two re-issues per operation: a query whose route expired
 `StaleBasis` while the engine answered discards that answer and is re-run under
@@ -192,7 +354,7 @@ completion unannounced forever.
 
 The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-level engine. A pnpm monorepo routinely installs no TypeScript at the workspace root while each package pins its own (5.8 next to 6.0); one workspace-root resolution walks past every real install onto whatever ancestor or configured `tsdk` answers — including a library-less copy whose Program has NO default libs, so valid code reports `Cannot find name 'Math'`.
 
-- **Engine identity** is `(owning tsconfig, real canonical `tsserver.js`)`. Two projects that resolve the same install share one process; two projects on different TypeScript versions never do.
+- **Engine identity** is `(owning tsconfig, real canonical tsserver.js)`. Alias routes to the same project and install share one process; distinct configured projects retain separate hubs even when they resolve the same install. Projects on different TypeScript versions never share a process.
 - **Every operation is project-bound.** A provider path maps to its authored carrier source (`classify_carrier_companion`, or the publish path's registered route), then through `resolve_carrier` (`PresentSnapshotAuthoritative`) → `ProjectBinding` → `TsserverEngineBackend::ensure_project` → `BoundProject`. Discovery runs from the OWNING project's directory (`resolve_tsserver(tsdk, Some(project_dir))`), so the pnpm `node_modules/typescript` symlink canonicalizes to the real `.pnpm/typescript@<v>` install (load-bearing: tsserver finds `lib.*.d.ts` relative to its own script path).
 - **Fail-closed per project.** `NotReady` / `NoProject` / `Ambiguous` / an unresolvable or TS7+ TypeScript is a DISTINCT refusal for THAT project carrying discovery's actionable install message. It never poisons a sibling project and never borrows a sibling's engine.
 - **Lazy + singleflight.** Construction starts no process. ONE `ProviderHub` per engine identity (`tsserver/resilient.rs::hub`, `HubPolicy::explicit`) collapses concurrent cold demands onto one establishment and owns that engine's crash recovery. A failed first spawn fails that demand closed and the NEXT demand retries through the same hub; a hub whose engine has already served keeps the project through recovery — it records lifecycle updates for the replacement and fails queries closed until one serves. `shutdown` / `resync_open_files` / `update_workspace_folders` fan out to every ALLOCATED hub, including one still establishing.
@@ -261,13 +423,19 @@ authorities:
 | **Placement** — where an insertion goes | an analyzer-minted `MacroAnchor`, SFC-absolute | `rfind`, brace-depth counting, `span.end ± N`, any offset not carried by an anchor |
 | **Revision** — may these anchors be applied to this buffer? | the **consumer boundary**, comparing `FileAnalysisSnapshot.anchor_revision` against `AnalysisSourceRevision::of_source(live_buffer)` | trusting `DocumentRegistry::get_analysis` to have matched (its host-fallback branch is gated on `AnalysisScope::BUILD` only, not on document version or content) |
 
-**Anchor vocabulary** (`verter_semantic::analysis::types`, re-exported from
-`analysis::mod`):
+**Anchor vocabulary** (`verter_session_query::analysis::types`):
 
-- `MemberListAnchor` — a private SFC-absolute `insert_offset` (the member list's
-  closing delimiter) plus `is_empty` (drives a consumer's separator choice).
-- `MacroAnchor::{Available(MemberListAnchor), Unsupported(MacroAnchorUnsupported)}`
-  — typed absence, never `Option<u32>`.
+- `MemberListAnchor` — the edit capability: a private SFC-absolute
+  `insert_offset` (the member list's closing delimiter) plus `is_empty` (drives a
+  consumer's separator choice). Serialize-only; `data()` returns its wire form.
+- `MemberListAnchorData { insert_offset, is_empty }` — the plain, public wire
+  record (Serialize + Deserialize). Decoding it yields no edit capability.
+- `MacroAnchor::{Available(MemberListAnchor), Decoded(MemberListAnchorData),
+  Unsupported(MacroAnchorUnsupported)}` — typed absence, never `Option<u32>`.
+  `Available` and `Decoded` encode to the same `available` wire arm, and
+  decoding always yields `Decoded`, so serialized analysis round-trips its bytes
+  but never its capability. `available()` / `is_available()` see only
+  `Available`; `data()` reads the position from either arm.
 - `MacroAnchorUnsupported::{NoTypeArgument, NotTypeBased, NamedTypeArgument,
   IntersectionTypeArgument, NoMemberList}` — one variant per authored shape;
   reasons never collapse. `NoTypeArgument` is the `Default`, so an anchor that
@@ -278,14 +446,14 @@ authorities:
   per-slot `AnalyzedSlotField.props_anchor` — structurally paired with the member
   it anchors, so no parallel-array ordinal can drift.
 
-Minted in `analysis/macros.rs` at the single `AnalyzedMacro` construction site
+Minted in `verter_semantic`'s `analysis/macros.rs` at the single `AnalyzedMacro` construction site
 from the OXC nodes already in scope (`type_argument_member_list_anchor`,
 `runtime_argument_array_anchor`) and inside `extract_slot_bindings_from_params`
 (`object_member_list_anchor`). Publication is a pure `match` — no traversal, no
 locator deref, no resolution, and no final-index stamping pass.
 
-`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (a newtype over
-`Hash16`) is stamped at every producer from the source node's own
+`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (both owned by
+`verter_session_query::analysis::file_analysis`; a newtype over `Hash16`) is stamped at every producer from the source node's own
 `ParseSnapshot::whole_hash` — already `hash_16` of the whole file, so no
 producer re-hashes. A torn generation join leaves it `Default` (unstamped), which
 matches no live buffer and therefore fails closed.
@@ -297,17 +465,22 @@ landed-scanner bar):
    `action_utils::LiveEditTarget`, whose only capability is
    `anchor_position(&MemberListAnchor) -> Option<Position>`. With no `&str` in
    scope a brace scan is a compile error, not a convention.
-2. `MemberListAnchor`'s offset field is private and its constructor is
-   `pub(crate)` to `verter_semantic`, so no `verter_lsp` path — production or
-   test — can synthesize one via the ctor or a struct literal (`E0624`/`E0451`;
-   witnessed by the `member_list_anchor_*` trybuild fixtures under
-   `verter_session/tests/cases/compile-fail/`). One cross-crate construction
-   path DOES exist by wire mandate: the type derives `Deserialize`, so
-   `serde_json` can materialise an anchor from arbitrary bytes — deliberate
-   (protocol row), and the reason `LiveEditTarget::anchor_position`'s bounds +
-   char-boundary checks stay load-bearing rather than decorative. LSP fixtures
-   obtain anchors by running the real analyzer over fixture source
-   (`features/macro_fixture.rs`).
+2. `MemberListAnchor`'s fields are private, its constructor
+   `MemberListAnchor::new(MemberListAnchorMint, ..)` demands the
+   `verter_analyzer_mint` authority, and it implements no `Default` or
+   `Deserialize`. The mint is reachable only through a direct dependency on
+   `verter_analyzer_mint`, held by `verter_semantic` (the production producer)
+   and `verter_session_query` (the record crate); the dependency set is pinned by
+   `workspace_dependency_layers::analyzer_mint_authority_is_reachable_only_by_its_sanctioned_dependents`.
+   So no `verter_lsp` path — production or test — can synthesize an anchor via
+   the ctor, a struct literal, inference, or wire decoding (witnessed by the
+   `member_list_anchor_*` trybuild fixtures under
+   `verter_session/tests/cases/compile-fail/`: `_forge` E0433, `_struct_literal`
+   E0451, `_mint_by_inference` E0277, `_wire_decode` E0277). This is restricted
+   constructor access, not proof of syntax-tree provenance: a mint holder can
+   pass any offset, which is why `LiveEditTarget::anchor_position`'s bounds +
+   char-boundary checks stay load-bearing. LSP fixtures obtain anchors by running
+   the real analyzer over fixture source (`features/macro_fixture.rs`).
 
 `LiveEditTarget::anchor_position` is the single conversion point and fails closed
 on BOTH an offset past the live source's end and an offset off a UTF-8 character
@@ -326,6 +499,8 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 **tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
 
 **Store-backed carrier refresh**: the plugin/store owns generated carrier membership and snapshots; protocol opens never carry generated bytes. `TsserverTypeProvider::register_carrier_member` hydrates local routing/position state and tracks the authored source in the explicit active working set. The first activation in a cold configured project uses one transient contentless companion open to instantiate the project/plugin, then immediately closes it; each editor-active authored source remains contentlessly open as the durable configured-project owner, matching the lifecycle official Volar/Svelte plugins receive from the editor. Workspace-discovered sources stay closed and enter project-scoped `getExternalFiles` lazily. Repeated activation is a no-op. Publishing advances the plugin's monotonic `carrierStoreRefreshToken`; a detached coalescing actor submits one background batch only after interactive traffic has been quiet for the grace window. That batch performs the constant-size `configurePlugin` refresh and one response-bearing no-op `configure` host-turn fence under a single background admission, so the project/plugin mutation queued for the next Node event-loop turn is visible before later interactive frames without paying the idle grace twice. An interactive carrier activation supersedes a running background refresh and republishes the newest working-set generation immediately. Any background refresh preempted by interactive traffic is requeued after the interactive lane becomes idle; retry is not conditional on the urgent-generation counter, because ordinary hover/completion may preempt without advancing it. The plugin compares manifest identities, reloads only changed source ScriptInfos, clears only the owning project's resolution cache, and reconciles ready authored-source roots through TypeScript's public `Project.addRoot` / `Project.removeFile` APIs. No generated file list, `updateOpen` payload, private whole-project filename reload, or per-file `projectInfo` probe is sent. Interactive requests preempt queued/running background diagnostics and refresh work through tsserver's cancellation pipe; creation of that out-of-band channel is a startup invariant, never a best-effort degradation to an unpreemptible session. Cancellation files are retained by exact request sequence until the matching response/`requestCompleted` acknowledgement (never reaped by age/count while an unbounded request may still be queued). Project-loading events suspend false hang strikes while retaining the absolute-silence backstop. The silence window begins at the later of the last engine message and the start of the current non-empty pending interval, so a request after a long idle receives the full health allowance.
+
+**Carrier store format.** The store the plugin reads is incremental, not one rewritten manifest: `head.json` names a generation (and the store instance), `snapshot-<g>.json` is that generation's compacted base, and `journal-<g>.log` holds one checksummed line per publication naming only the rows it changes (`carrier_publish_journal.rs`). `CarrierPublishStore` folds the state once and appends one record per commit under a cross-process `writer.lock`; it compacts when the journal holds `max(64, live rows)` records, retaining the previous generation for readers mid-load. The Node `DiskCarrierStoreReader` and the Rust `PublishedStoreReader` read the head, then only the journal bytes appended since their last read, so per-publication cost on both sides is proportional to the records written. A record is committed exactly when its whole line verifies; a torn tail is never applied and is truncated by the next writer. Strict test oracles read through `CarrierPublishStore::read_published` (an error, never an empty manifest, for a corrupt store).
 
 **`@verter/types` resolution**: generated carriers retain the public `@verter/types` import. A project-installed or project-host-resolved package is authoritative. When resolution misses, the tsserver plugin serves its bundled declaration at a virtual package path; managed tsgo rewrites only the provider buffer to an adjacent virtual declaration overlay. Neither fallback writes into the user's `node_modules`. The tsgo carrier and overlay are serialized as one lifecycle unit: load/open/update semantics match, the dependency is published before a rewritten carrier, a newly created dependency is rolled back if carrier publication fails, transition to an installed package closes the old overlay only after the unrewritten carrier succeeds, and close cleans both.
 
@@ -492,9 +667,22 @@ When a carrier script imports through a non-carrier barrel (for example `compone
 
 ### Diagnostic completion evidence
 
-`documents/diagnostics.rs` owns push ordering and completion receipts across coordinator, startup and request-side publishers. Completion pins the document incarnation/revision, host diagnostics generation captured before computation, pending-work epoch and queried provider surface stamp. Enqueue and semantic enrichment invalidate immediately; older in-flight work cannot restore readiness. Missing/stale provider surfaces and provider errors do not produce a completion receipt. The existing getStatistics response exposes per-URI version/readiness; editor-neutral and VS Code tests require a current receipt followed by the editor collection's quiet interval, and reject a deadline. A quiet native-only staging batch is not evidence that TypeScript checked the file. Dependency generation changes, surface retirement and close/reopen invalidate prior receipts.
+`documents/diagnostics.rs` owns push ordering and completion receipts across coordinator, startup and request-side publishers. `ReadinessBasis` pins the document incarnation/revision, host diagnostics generation captured before computation and the canonical `PublishedRoot` identity. Replacing a workspace with a repeated scalar generation still invalidates the basis. `BackgroundPublication` reserves its typed `PublicationEpoch` before capture; completion additionally requires the queried provider surface stamp. Enqueue and semantic enrichment invalidate immediately; older in-flight work cannot restore readiness. Missing/stale provider surfaces and provider errors do not produce a completion receipt. The existing getStatistics response exposes per-URI version/readiness and carries no document identity; a `$/verter/getAnalysis {uri}` request is demand for that open document (`VerterLanguageServer::demand_document`: the coordinator touch, a dependency-readiness capture that enqueues its import publication when its receipt is not current, and the scanner's priority signal for it and its imported carriers), which is how a restarted E2E suite's status poll — it awaits the entry's `getAnalysis` before reading the unchanged statistics — puts its asserted document, one VS Code still holds and only replays, ahead of every other replayed open without a fresh open; editor-neutral and VS Code tests require a current receipt followed by the editor collection's quiet interval, and reject a deadline. A quiet native-only staging batch is not evidence that TypeScript checked the file. Dependency generation changes, surface retirement and close/reopen invalidate prior receipts.
 
-If workspace compilation advances the host diagnostics generation during publication, the rejected writer reserves one refresh epoch and wakes the coordinator for a diagnostics-only replacement. The coordinator atomically claims that epoch before cancelling or invalidating anything: a delayed refresh cannot displace a newer publication or reopened document. This is driven by generation changes, not a timer that repeatedly retries unchanged failures. Post-scan and importer scheduling still own changes that happen after a publication has finished.
+**Foreground request settlement** (`documents/foreground.rs`). Every foreground route — the production `ForegroundRoute` enum: hover, signature help, definition, type definition, references, document highlight, prepare rename, rename, completion, completion resolve, code action, inlay hint, semantic tokens, and the custom `$/verter/getBindingTypes` provider route — is admitted once into a `ForegroundRequest` before any of its computation reads the document (`VerterLanguageServer::answer_foreground` admits → computes once → settles; `answer_repaired_foreground` runs the current-file repair inside the admitted request; completion resolve admits through `admit_foreground` and computes through `ForegroundRequest::compute`) and settled by its one disposition, `ForegroundRequest::settle`. Three questions are kept apart:
+
+- **Coherence.** The answer is computed once against the admission: the requested document's revision (`DocumentSnapshotIdentity` — open incarnation, edit generation, client version and source bytes) and the published root. Every provider answer inside it closes the provider-surface bracket before it is mapped: `provider_request_surface_still_valid` / `virtual_request_surface_still_valid` require the captured `ProviderSurfaceSnapshot`'s content epoch, incarnation, owner epoch and project owner to still be the path's current ones (`ProviderSurfaceStore::captured_surface_is_current`). The content epoch (`ProviderSurfaceStamp::content_epoch`) moves only when the provider bytes, carrier source or map identity change; the owner epoch (`owner_epoch`) moves whenever the recorded project owner changes; neither returns to an earlier value, so an identical re-record passes and a content or owner change that changes back (A→B→A) fails; the incarnation moves when a closed path is recorded again. The bracket also requires the surface to be DELIVERED (`ProviderSurfaceStore::delivery_of` → `SurfaceDelivery`): the serving provider must hold exactly the captured bytes, read locally — no provider round trip — through the delivery witness the server binds at construction (`ProviderSyncDeliveryWitness`: the engine's per-incarnation `applied_content` receipt, or, for the membership-only tsserver topology, the committed publication that attests the companion — the receipt-stamped `committed_ide_surface` for the IDE companion and the receipt-stamped `committed_api_surface` for the public-API companion, never path liveness alone). Only `Delivered` serves: a record is never evidence of its own delivery, so `Unwitnessed` (no provider bound, or an engine without an application ledger — the extension-hosted provider keeps one from the language service's acknowledgements), `AwaitingDelivery` (a record that ran ahead of its delivery), `EngineDiverged` (a delivery that ran ahead of its record, or a lagging engine) and `DeliveryLost` (restart, ownership exclusion, failed delivery) do not. The payload's one-byte acknowledgement (`DeliveryCell`) is set only from that serving-side evidence and is shared by identical re-records; it tells a never-delivered surface from a lost one and never vouches for currency on its own. The foreground capture (`classify_provider_request_surface`, typed `ProviderSurfaceUnavailable`: `NotRecorded` / `OwnershipExcluded` / `SourceMoved` / `Delivery(..)`) applies the same verdict, so a request-answering route repairs the requested file's surface before dispatch (`ensure_current_file_synced`) and a passive route answers without the provider. A failed decode bracket drops that provider contribution. A bracket that holds also records the surface in the request (`ForegroundRequest::bracket_decoded_surface`, through the task-scoped active request `ForegroundRequest::compute` installs), and `settle` re-checks every recorded surface, so a surface that moves after its decode — or two contributions decoded through different epochs of one surface — cannot settle. Foreign surfaces join the same bracket: a foreign carrier IDE location (`foreign_ide_context_from_captured`) maps only while its pinned surface is still current by the same epoch check — the content/map byte oracle is not enough, since it honors a change that changes back — and a vouching foreign IDE or public-API surface (`classify_captured_api_surface`) is recorded in the request, so a foreign target that moves after its decode supersedes the navigation or edit answer. Native contributions read from an imported child record that child's host source revision as dependency evidence (`ForegroundRequest::bracket_dependency`). `resolve_component_context` and `resolved_component_document` read the child through `read_child_at_one_revision`, which samples the revision on both sides of the analysis + source/structure reads so a re-registration between them never pairs one revision's analysis spans with another's geometry (a cold child registered by the read itself is read once more at its settled revision; a child that moves across that read too records its starting revision, so the request answers `ContentModified`). `cached_child_public_contract` and `cached_barrel_component_contract` also record the contract's `ComponentApiProjectionWitness` (`ForegroundRequest::bracket_contract_publication`), and `settle` re-validates each witness's producer read sets, so a change to anything the contract was derived from — an imported props type included — supersedes the answer even when no source the request read directly moved. Completion resolve captures the surface its provider path serves before the query and refuses (`ContentModified`, no provider query) when there is none; it brackets the captured surface after the answer and translates any returned import edit through it (`capture_resolve_surface` → `resolve_provider_auto_import_edits`), never through the surface current when the answer arrives. Diagnostics keep the byte oracle `captured_snapshot_still_honored`.
+
+  **Delivery evidence boundary.** `SurfaceDelivery::Delivered` attests byte equality at the local ledger observation (or exact content/map attestation by a committed membership publication). `DeliveryCell` remembers that a payload was acknowledged, without retaining an engine incarnation or delivery sequence. `ProviderSurfaceStamp::incarnation` identifies the path's close/reopen lifecycle. Recorded content/owner A→B→A changes are detected by store epochs; unrecorded delivery A→B→A between observations and same-byte restart replay are not distinguished by this evidence. The hub independently refuses results from retired engines at its settlement fence. Binding a query's evaluation and decoding to one delivery requires a runtime query capability beyond these endpoint checks.
+- **Applicability.** `settle` delivers an answer — an empty one included — only when the admitted revision is still the open document's, the host still answers under the request's captured `HostAuthorityView` (`VerterHost::capture_authority_view`: the published root's `WorkspaceAuthority` plus the store's project generation), and every recorded surface, dependency and captured target is current. Otherwise it answers `ContentModified`, and the original cursor is never re-run against a later revision — completion included. `verter_workspace` mints a process-unique `WorkspaceAuthority` for every published root and lets only an equivalent republication — the same `WorkspaceSnapshot` `Arc`, ownership readiness and env/identity tables, differing only in the LSP views — inherit the live one, under the publication gate; a publication that mints a new `WorkspaceSnapshot` (every project-graph, resolver and background-initialisation publication does) is an authority replacement even when its content and scalar generation repeat, and a replaced authority never returns. Cache eviction and cache-row removal are not authority changes: native dependency evidence (`bracket_dependency`, the child-read bracket, the published child-contract snapshots) is the source's committed whole hash (`registered_source_whole_hash`), which an eviction re-committing the same bytes leaves unchanged, never the scheduler revision token it advances; an already computed native answer is checked against the same content (`source_feature_document_is_current`), while the semantic generation only rejects obsolete native publications before they are read. `ForegroundRoute::class` names each route's `ResponseClass`, and the disposition branches on it:
+  - **Informational** (hover, signature help, document highlight, inlay hints, semantic tokens, binding types) captures no other document; only the request gate above applies.
+  - **Navigation** (definition, type definition, references). Every location in another document open in the client is decoded through the bytes of the revision the request captured for that document: a provider location in a non-carrier file through `ForegroundRequest::target_source` (the server's `target_source` reader), a foreign carrier IDE or public-API location through `foreign_ide_context_from_captured` / `classify_captured_api_surface` (which require the open revision to hold the surface's carrier bytes and record it), and a host export span through `ForegroundRequest::host_target_source` (an open target whose bytes differ from the host source the span was computed against marks the request incoherent). The first decode of a document captures its revision (`ForegroundRequest::bracket_target`); every later decode of it in the request reads that capture. **Defined outcome for a target changed between capture and delivery: the whole request fails with `ContentModified`** — for definition, type definition and references alike; no partial location set is delivered.
+  - **Edit** (rename, prepare rename, completion, completion resolve, code action) captures its targets the same way and fails the same way when a captured target moves before settlement. Edit-bearing answers that carry a `WorkspaceEdit` (rename, code action) settle through `answer_repaired_edit_foreground`, which binds the settled edit through `ForegroundRequest::bind_edits` → `action_utils::bind_workspace_edit`, the one LSP edit builder. The client's `workspace.workspaceEdit.documentChanges` capability is negotiated at `initialize` (`WorkspaceEditSupport::negotiate`, stored as `client_applies_versioned_edits`) and captured at admission. A `documentChanges` client receives every text edit as a `TextDocumentEdit` naming the version from the request snapshot — the admitted version for the requested document, the captured version for any other open target, `null` only for a target not open in the client — so a stale edit is rejected by the client rather than misapplied; `WorkspaceEdit.changes` is never delivered to it. A client without that capability receives only `WorkspaceEdit.changes`: `bind_workspace_edit` downgrades every `TextDocumentEdit` to it, and an edit carrying a resource operation (extract-component's `CreateFile`) is refused whole (`EditRefusal::ResourceOperation`), so that code action is withdrawn rather than offered without its creation step. For both, an edit targeting a document open in the client whose revision the request never captured is never delivered, in whole or in part: it refuses a rename with `ContentModified`, and withdraws that one code action while the other, independent actions are still offered (`EditBearing`). Completion and completion-resolve `additionalTextEdits` address only the requested document, so their version is the admitted one the request gate already validates; completion resolve and the native component auto-import place their edits only through the captured revision whose bytes the captured surface's map was built from, and otherwise mark the request incoherent.
+- **Publication freshness.** The diagnostics generation, `ReadinessBasis`, `PublicationEpoch` and `BackgroundPublication` serve diagnostics publication only. A diagnostics-generation move, an identical surface re-record or an equivalent root publication never re-dispatches the provider or answers `ContentModified`; there is no recompute loop and no recompute bound.
+
+Request routes (hover, definition, type definition, references, rename, prepare rename, signature help, code action) run their current-file repair after admission, inside the request; definition's native leg, its provider leg and every early native return settle through the one admission. Passive decorations (document highlights, semantic tokens, inlay hints) keep their cache-only policy and run no inline IDE repair. Completion waits (bounded, event-driven) for the document's registration when it races `did_open`, then admits once under the edit-commit fence (`answer_foreground_after_edit_commit`), so an edit queued ahead of it commits first and the request pins the revision it was sent against; an edit, close/reopen (including one that reuses the client version) or authority replacement before settlement answers `ContentModified`, and the client's next request is admitted against the new revision. Cancellation and provider failure are never `ContentModified`: a cancelled request drops its future and with it every request pin (document source, published root, recorded surfaces and dependencies); the current-file repair (`ensure_current_file_synced`) runs as its own task, so a request cancelled after its provider write reached the engine drops only its wait and the write still settles and records its surface. That task re-opens the caller's ambient request deadline (`verter_type_runtime::deadline::current` → `with_deadline_at`), so the repair's provider writes stay bounded by the request's instant and a managed write queued past it is refused by the hub rather than applied after the client gave up. A provider failure takes the bounded recovery and otherwise fails closed to the native answer. Live reads of the requested document still taken inside handlers — its native analysis, feature snapshots and registered structure — are revision-gated by the admission but are not yet request-owned views; the captured host-view work owns moving them behind the request context. The request-validity harness (`request_validity_tests`) drives every production route through steady, control, liveness and pin rows; its controls require a surface map change or A→B→A after admission to end in a non-success outcome. Completion provider errors use the same one-repair/one-retry owner as positional queries: await the engine-specific write barrier, recapture the surface and remap the requested position. No sleep certifies readiness; persistent errors fail closed and never supply a provider result.
+
+If workspace compilation advances the host diagnostics generation or replaces the canonical workspace root during publication, the rejected writer reserves one refresh epoch and wakes the coordinator for a diagnostics-only replacement. The coordinator atomically claims that epoch before cancelling or invalidating anything: a delayed refresh cannot displace a newer publication or reopened document. This is driven by basis changes, not a timer that repeatedly retries unchanged failures. Post-scan and importer scheduling still own changes that happen after a publication has finished.
 
 The provider result must also attest completion: tsserver requires successful semantic, syntactic and suggestion responses; both foreground and background tsgo pulls propagate transport errors. Diagnostic crash quarantine returns an error, never a successful empty result. Cached source bytes cannot validate a diagnostic fallback because imported dependencies may have changed. The neutral harness waits for all requested document versions to register before starting its compiler quiet window.
 
@@ -537,9 +725,11 @@ Three layers prevent tokio runtime starvation during rapid typing:
 2. **Version-fenced staged push diagnostics**: LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). After the quiet window, the coordinator computes the provider-free Verter/ownership batch and publishes it immediately if URI, source identity, and exact document version still match. Provider diagnostics run afterward on a cancellable detached task and replace that batch with the merged result under the same exact-version/source fence. A slow or hung provider therefore cannot starve Verter-owned errors/hints, while a newer edit cannot publish an older batch. Completion of optional native semantic enrichment broadcasts a versioned `SemanticReady` event that invalidates only the Verter diagnostic cache and schedules a diagnostics-only pass: it never repeats provider file sync or graph refresh. Broadcast lag recovers by scheduling every open document once; channel closure terminates the coordinator instead of spinning.
    **Background pulls never fill the window** (`max_background_diagnostics` = `max_inflight - 1`, clamped to 1..=2). A pull is background when its signal has no `user_received_at` and its document has no live touch (re-arms, semantic-ready, refreshes, importer arms). Background work is excluded from both the deadline and the choice once that bound is reached, so one slot always remains for a document the user turns to; and the bound is small in absolute terms because every background pull is an engine check competing with the interactive request the user is waiting on.
 
-   **Scan gate** (`SyncCoordinatorHandle::set_workspace_scan_in_progress`, raised when the scanner is installed, lowered by `complete_post_scan` BEFORE its re-arm, and lowered by a cancelled waiter only while its init generation is still current). While a workspace scan is publishing carriers into the provider, documents are still SYNCED but only a signal with `PendingSignal::edited` (set by `ChangeInFlight::signal`, merged with `|=`, carried across sync retries) is PULLED. A restart replays every open editor as an OPEN, so "user-received" cannot distinguish them; an edit can. Every pull during the scan makes the engine rebuild its program against a moving target and is thrown away by the post-scan re-arm anyway.
+   **Scan gate** (`SyncCoordinatorHandle::set_workspace_scan_in_progress`, raised when the scanner is installed, lowered by `complete_post_scan` BEFORE its re-arm, and lowered by a cancelled waiter only while its init generation is still current). While a workspace scan is publishing carriers into the provider, every document is still SYNCED, and every document — opened, replayed (a restart replays every open editor as an OPEN) or being edited alike — is pulled only once its DependencyReady receipt is current. An edit is no exemption: it changes the document, not whether its dependencies have been delivered, so the edited document keeps its sync and its place in the ordering but not an uncertified publication. The receipt is current (`ImportSyncMemo::is_current` under `dependency_freshness_key`, the same receipt navigation captures): its import closure is then in the engine, so the scan still publishing unrelated documents cannot change its answer, and it is certified without waiting for the scan or level 2. A document whose receipt is not current fails closed: the coordinator HOLDS its publication (synced, not pulled, not certified) and re-checks the receipt on every loop wake, so it is released the moment the receipt is current — whether the background import publication minted it (`SyncCoordinatorHandle::dependencies_settled` is only the wake) or an isolated edit elsewhere re-currented it (`handle_did_change` wakes the loop after `promote_after_isolated_edit`) — or the scan ends and releases everything held. A route with no type provider (verter-only, editor-owned tsserver plugin) has no receipt to wait for and publishes its documents during the scan; its Verter-owned diagnostics read no scan-mutated provider state. A released publication that already has a pending entry coalesces into it (forcing diagnostics, keeping that entry's instant). Level 2 keeps its meaning: it is still sent only by `complete_post_scan`.
 
    **Decorations obey the same gate** (`VerterLanguageServer::decorations_must_wait`). The editor asks for semantic tokens and inlay hints on its own, for every visible document, the moment the server is up. One such request answered mid-publication makes a lazily-building engine (tsgo) build a program from the half-published workspace; absorbing the rest into that program costs roughly TEN times a cold build (measured by replaying a recorded session against tsgo alone: 30 s worst request, against 2.7 s when no request precedes the last publication — the time is module-resolution `stat` calls). So those two handlers skip the type provider while the scan flag is up, exactly as they do during the typing cooldown, and `complete_post_scan` asks the editor to pull them again (`workspace/semanticTokens/refresh`, `workspace/inlayHint/refresh`) — only when the client advertised `refreshSupport`, and never awaited, because readiness must not wait on an editor's reply. User-initiated requests (hover, definition, completion) are not gated.
+
+   **Bounded outbound transport** (`crates/verter_lsp/src/outbound/`). Verter owns the LSP transport writer: `outbound::serve` replaces tower-lsp-server's `Server::serve` (it still drives `LspService` for dispatch, `$/cancelRequest`, `shutdown`/`exit`), and the server sends ONLY through its `Outbound` handle (`VerterLanguageServer::new(outbound, config)`, `ServerCore.client: Outbound`; tower's `Client` is never used to send). An `Outbound` accepts exactly one writer. Every message is accounted in one of three classes, each against its own `ClassBudget` in `OutboundBudget`, by count and serialized bytes from production until its write completes (`Outbound::load()` / `high_water()` → per-class `ClassLoad { admitted, waiting, shed }`); a lone message larger than its byte budget is admitted alone and written whole, never truncated. The writer takes the next message only when it is about to write it, by priority RESPONSE → CONTROL → REPLACEABLE, so the transport itself holds at most the one frame being written. RESPONSES: handler results are serialized and admitted; one produced while the admitted set is full WAITS, accounted, and keeps its handler's `LSP_MAX_CONCURRENCY` slot until admitted — the dispatcher never blocks on admission, so running handlers keep being polled. Cancellation notifications, the first shutdown request and exit use two reserved lifecycle slots even when every ordinary slot holds a response waiter; the first shutdown reply has one extra accounted waiter, and duplicate shutdown requests use ordinary slots. A failed write ends the session: `serve` drops input reading and every running handler. CONTROL (`control.rs`): every notification and server→client request (`send_notification`, `send_request` with Verter-assigned ids whose replies `serve` routes back, `show_message`/`log_message`, refreshes, `register_capability`) is admitted within budget in offer order; producers that find it full wait in ONE first-come line, accounted with their exact bytes — awaiting producers hold their place (cancelling withdraws), synchronous producers (`LspNotifier`) use `notify_detached`, whose waiting messages are capped at one control `ClassBudget`; a newer one sheds the oldest waiting detached message (counted in `ClassLoad.shed`), never an awaiting producer's message or a request. An oversized detached message that cannot be admitted immediately is shed instead of bypassing the waiting byte ceiling. As on any LSP client connection, notifications before the `initialize` response are suppressed (window messages excepted) and requests then fail as not initialized. REPLACEABLE (`replaceable.rs`): every `publishDiagnostics` leaves through ONE `ReplaceableLane`, built by the `Outbound` and handed to `DocumentRegistry::with_diagnostics_lane`. At most one payload per document is admitted or waiting (a newer epoch retires the older one at once, even while the newer one waits; an older one never overtakes); waiting payloads are admitted strictly in offer order. A publication stays retractable until the writer takes it: the registry passes a `still_current` check (its epoch, read under the diagnostics-state lock that `take_uri` cancels under, plus the basis's compiler generation and workspace root) that the writer evaluates AT THE TAKE, so a publication superseded or closed before the take is retired there even if its publisher has not yet run; only the frame already being written may finish. When the writer ends, held publications resolve `Delivery::Closed`. Tests drive a server without a byte stream through the `#[cfg(test)]` in-process writer `Outbound::wire()`. The server emits no standard partial results; responses are always complete. The frame reader resynchronises on the next usable `Content-Length: <digits>` header (a token inside the malformed body does not qualify) after a header block without a usable length and reads bodies incrementally. Guards: `outbound::tests`, `outbound::transport::tests`, `a_stalled_transport_never_writes_a_cancelled_publication`, `a_cancelled_publication_is_retired_when_the_writer_reaches_it`, `a_stalled_transport_retires_publications_from_an_outdated_environment`, `outbound_slow_client`.
 
    **A committed receipt can be outdated by another document's pass.** A compile advances `diagnostics_generation`, and computing a parent's diagnostics compiles the children it imports. When that lands AFTER the child's receipt was committed, no publication of the child is in flight to notice and no editor signal follows, so the child would read "not ready" until its next edit. Every `DocumentRegistry::publish_diagnostics` exit therefore runs `refresh_outdated_receipts`, which applies the same `refresh_superseded_diagnostics` rule (current snapshot, unmoved epoch, moved generation) to every committed receipt. It converges: compiles are cached per profile, so the refreshed pass does not advance the generation again.
 
@@ -561,7 +751,9 @@ Provider diagnostics are published only when their generated range maps back to 
 
 - **Establish** (`ProviderHub::establish`): singleflight per instance, runs on its own task (a caller that gives up neither cancels it nor starts a second one), bounded by `HubPolicy::establish_timeout` for the spawn and separately for the replay. A failed attempt arms the `HubPolicy::on_demand` retry cooldown. Under `on_demand` the first query establishes; under `explicit` the caller does (startup tsgo, router demands) and queries without a serving engine fail closed. A lazily-ATTACHED external transport (the shared editor attach, `HubPolicy::lazy_attach`) establishes through the re-arm door `ProviderHub::establish_rearming(probe)`: a demand at an UNCHANGED generation discriminant (reconnect nonce / workspace generation — re-probed after a success and retained as the establishment's own) fails closed with no attempt, and any advance re-arms through the same singleflight.
 - **Recover** (`ProviderHub::recover`, driven by the per-epoch crash monitor): retire the crashed epoch, quarantine the in-flight killers, respawn within `max_restarts` with bounded backoff, replay, install. A signal naming a retired epoch is inert; a deliberate shutdown advances the teardown generation so the torn-down child's EOF is never a crash, and a shutdown that lands during the restart backoff abandons the respawn before any process is spawned or failure reported. A hub that exhausted its restart budget reports its terminal state ("stays down for this session"), never an eternal "restarting"; only a settlement the serving epoch accepted self-heals a fingerprint's crash strikes. Under `HubPolicy::lazy_attach` a death instead RETIRES the epoch fail-closed (the establisher wires attach liveness into the crash signal): no respawn loop, no exhaustion — re-establishment belongs to the re-arm door alone.
+- **Direct-write compensation**: if the live basis changes after a generated-unit write lands, close the written path before refusing settlement and drop its applied receipt on confirmed removal. If close fails, enter the existing exact-epoch recovery lifecycle before returning; an initial shared-overlay injection has no committed marker for a later sweep to withdraw. Successful compensation keeps the healthy incarnation serving. Lazy attachments retire and retain their discriminant re-arm gate; explicit instances use their existing restart policy, while on-demand instances retire for establishment on the next demand.
 - **Epochs and receipts**: every install mints a strictly newer `verter_identity::ProviderEpoch` — including the shared editor attach's incarnation (the attach is served by its OWN `ProviderHub<TsgoSharedProvider>`; the former `LazyTransport` cell and its private epoch mint are gone). A query answered by an engine retired before its result settled returns an error, never a result of the replacement; a mutation's `AppliedReceipt` names the epoch that accepted it (`None` = held for replay).
+  Direct overlay withdrawals retain the serving read guard from epoch validation through applied-receipt removal. Their detached task owns physical close and settlement even if the issuer cancels; a retired close returns stale and cannot remove a replacement incarnation's receipt for the same path. The fence covers only synchronous settlement, never transport I/O.
 - **Start announcements** (`ProviderNotifier::provider_started(pid, EngineStart)`): every engine install is announced to the notifier with its kind -- `Initial` (first serve / re-activation) or `Recovery` (crash replacement). The WIRE policy is per route: the tsgo/tsserver routes announce both (`LspNotifier::new`), while the shared route's managed fallback announces recoveries only (`LspNotifier::recovery_only`) -- that route attests "managed TSGO remains cold until an observed attach failure", the editor-neutral contract asserts it over `$/verter/typeProviderStarted`, and the composite still legitimately activates the fallback for carriers whose generated units are not admitted to their owning project.
 - **Actor**: one single-writer actor per hub records desired state then forwards; it stays receptive to retirement/shutdown while a forward or replay is wedged and queues everything else in order. Hubs share nothing, so a held or failed instance never blocks an independent one.
 - **Deadlines**: the submitter's ambient request deadline is captured once (`deadline::current`) and re-opened around the forward on the actor task (`with_deadline_at`); the submitter's wait for the settlement is bounded by the same instant.
@@ -681,6 +873,72 @@ Open-document provider-sync state is an editor-liveness invariant. An OPEN `.vue
 - **Owner mismatch / loss forces reconciliation, not only `is_unresolved()`.** A previously-`Owned` open `.vue` whose owner changed or disappeared must be reconciled even when its IDE is already synced (`committed_binding_matches_current` / `current_owner_binding_for_source`); a fully-loaded import is only short-circuited when its committed binding still matches the live resolution. The owned→unowned conversion drops the owner-derived `.vue.ts` API path AND closes it (`dropped_api_path_on_unowned_conversion`) — that path is invalid once unowned — while never closing the IDE TSX.
 - **Partial sync stays queued for retry.** A drain pass that syncs one kind but fails another returns `SyncOutcome::Partial`; the drain dequeues only on `FullyReconciled`, so a failed kind is retried rather than permanently suppressed.
 - **`active_ide_path_for_uri` is state-backed only.** Interactive routing reads the committed `ProviderSyncState`, never re-derives a path from ownership at request time.
+
+**Document delivery ownership.** `DocumentSyncLanes` owns one lane per canonical
+and open generation. Interactive repair and close wait for that lane; coordinator,
+scanner, and drain writers try it once and requeue on contention without consuming
+retry budget. Nested locks follow document lane → lifecycle mutex → provider-path
+lock → provider actor. A writer already holding the document lane calls the shared
+transaction body directly; it must release the lane before entering another lane-owning
+writer. Edits can advance the source while a provider call is pending, so each writer
+also pins the document snapshot and refuses stale recording/admission.
+
+Generation establishment uses the lifecycle lane too. A delivery probe made
+after registration but before `did_open` mints its generation yields; it cannot
+create a second lane. A closed-start compile is current only while the carrier
+stays unregistered (`DocumentRegistry::compile_pin_is_current`), including the
+final check under the provider-path lock. Completion recovery republishes through
+`publish_open_carrier_to_external_ts`, which waits on the same generation-bound
+lane and revalidates it before publishing.
+
+The coordinator maps API-leg contention to `SyncFileOutcome::LaneBusy`, just as
+IDE-leg contention does, so its serial loop preserves the retry budget. Imported
+carrier sync waits for the lane again between legs; the unresolved API helper
+also queues refused work for a later snapshot drain. Open and request repair
+check IDE freshness before rearming or republishing; tsserver checks store
+publication, recorded surfaces and membership rather than companion-buffer bytes.
+
+The provider-free `verter_lsp` library nextest lane runs the regression proofs:
+
+- `document_sync_lane::tests::a_writer_probing_mid_open_yields_instead_of_minting_a_second_lane`
+  pins lane identity across the registration window.
+- `server::server_tests::a_scanner_started_closed_is_refused_when_the_document_opens_after_its_lane_probe`
+  checks the delivery fence after a successful open.
+- `server::server_tests::the_open_carrier_republish_waits_for_the_document_lane`
+  drives the production completion recovery path and proves it reaches the
+  fenced wrapper. The oracle is which of two test-owned fence points the arm
+  parks at — the wrapper's pre-lease point (only the lane-taking entry has one)
+  or the shared publish's post-compile seam (a lane-bypassing arm lands here
+  without ever taking the lane) — so lane exclusion is an observed ordering
+  event, not a deadline, and a slow-but-correct arm still passes.
+- `server::server_tests::an_api_leg_yielding_to_an_interactive_request_is_a_lane_yield_not_a_retry`
+  checks the coordinator's API contention disposition.
+- `server::server_tests::did_open_rearms_the_interactive_repair_only_when_the_ide_leg_is_owed`
+  and `server::server_tests::a_tsserver_revision_already_published_is_not_published_again`
+  check freshness, with engine-loss and edit controls.
+- `server::server_tests::an_unresolved_api_leg_waits_its_turn_behind_the_lane_holder`
+  checks that imported unresolved API work survives contention.
+
+IDE delivery completes and commits before API delivery starts. API transactions
+capture source revision, open generation, projection, owner and workspace publication,
+release the document lane for background provider I/O, then try to reacquire it and
+revalidate the captured basis. API-only admission patches the current state under the
+coordinator's entry lock, preserving IDE/declaration work committed during that I/O.
+API surface recording uses the pinned document's source inside the same identity
+closure; it must never fetch a second live source to pair with older delivered bytes.
+
+Each successful write returns its own typed delivery receipt. IDE recording and
+readiness consume that receipt's exact projected bytes and mapper; reading the path's
+latest delivery ledger cannot attest an earlier operation. Already-current legs skip
+provider writes independently, using committed owner/path, the provider's exact applied
+bytes, and recorded source/map identity. A current IDE leg therefore does not suppress
+an owed API leg, and a provider restart makes its missing bytes owed again.
+
+Tsserver membership-only delivery retains its own prepared coordinate model for
+fenced recording. Preparation never becomes an engine application receipt; the
+gateway's membership authorization remains the commit authority. Superseded
+unresolved IDE work applies and records nothing, requeues, and releases the lane
+before a separate transaction compiles the new revision.
 
 **Guards**: `sync_file_retains_stale_paths_when_owner_change_sync_fails` (`sync_coordinator_tests.rs`) + `scanner_sync_retains_stale_paths_when_owner_change_sync_fails` (`workspace_scanner.rs`) — the close-AFTER-successful-sync ordering proofs: on an owner change whose replacement sync FAILS, the prior path is NOT closed. The per-kind close-after-sync helpers (`revert_unsynced_kinds`, `genuinely_stale_after_sync`, `dropped_api_path_on_unowned_conversion`, `committed_binding_matches_current`) and their integration paths are pinned by the discriminating drain / aliased-resync / barrel / foreground regression tests in `provider_sync.rs` + `server_tests.rs`.
 
@@ -907,7 +1165,7 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_scheduler/src/node.rs` | `FileNode` -- per-file state container |
 | `crates/verter_scheduler/src/scheduler.rs` | `Scheduler` -- DashMap of FileNodes, driver thread |
 | `crates/verter_scheduler/src/job.rs` | `CompletionHandle<T>` -- request-scoped result handle |
-| `crates/verter_scheduler/src/executor.rs` | `StageExecutor` trait |
+| `crates/verter_scheduler/src/execution/executor.rs` | `StageExecutor` trait |
 | `crates/verter_scheduler/src/stage.rs` | `Priority` enum |
 | `crates/verter_scheduler/src/edges.rs` | `EdgeManager` -- reverse index + blocker registry |
 | `crates/verter_session/src/lib.rs` | `VerterHost` -- holds `Arc<Scheduler>`, `compile_cache` |
@@ -921,7 +1179,7 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_lsp/src/tsgo/ipc.rs` | TSGO LSP client, `LspTransport`, hang detection |
 | `crates/verter_type_runtime/src/provider_hub/` | `ProviderHub`: the ONE provider lifecycle owner (establish, recover, replay, serving `ProviderEpoch`, receipts, `bind_project`/`admit_request` admission and the lazy-attach re-arm door) |
 | `crates/verter_lsp/src/tsgo/resilient.rs` | Owned tsgo establishment strategy (`establish_owned`) |
-| `crates/verter_lsp/src/tsgo/project_sync.rs` | `ProjectSync` (batched provider file ops) |
+| `crates/verter_lsp/src/type_provider/project_sync.rs` | `ProjectSync` (batched provider file ops) |
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`, newline-delimited JSON transport |
 | `crates/verter_lsp/src/tsserver/resilient.rs` | tsserver establishment strategy (`hub`) |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |

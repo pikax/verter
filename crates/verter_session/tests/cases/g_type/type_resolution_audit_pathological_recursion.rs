@@ -19,8 +19,8 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::ProjectionMode;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 const PATHOLOGICAL_PICK_TS: &str = r#"
 type Pick<T, K> = Pick<T, K>;
@@ -64,7 +64,7 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
     // `build_resolve_decl` keys on `(canonical, name)` for top-level
     // decl name lookups.
     let pick_identity =
-        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/pathological.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Pick"),
@@ -73,7 +73,7 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
         &host,
         pick_identity,
         Arc::from(Vec::new().into_boxed_slice()),
-        verter_session::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Skeleton,
         ),
     );

@@ -27,7 +27,8 @@ fn read_file(rel: &str) -> String {
 fn owner_import_surface_builder_threads_chain_facts() {
     let source = read_file("src/owner_import_surface.rs");
     assert!(
-        source.contains("chain_facts: Vec<crate::resolver_core::FactVersionRef>"),
+        source
+            .contains("chain_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef>"),
         "build_owner_import_surface MUST accept `chain_facts: Vec<FactVersionRef>` so the \
          producer can thread the route-walk facts into the cached surface's \
          fact_dep_signature (R3/R26/R28)."
@@ -73,6 +74,17 @@ fn owner_import_surface_producer_calls_resolve_imported_type_root_with_facts() {
 /// `verter_session::resolver_core::central_signature_rail_tests`, which
 /// drives every `ValidatedFactCache` reader against a view whose only
 /// override is the central rail.
+///
+/// The whole-signature validation call itself is NOT asserted from
+/// this file: `owner_import_surface.rs` is passive storage and the
+/// expression lives in the owner driver
+/// (`host_manage/source_owner_import.rs`), so scanning the storage module
+/// for it would reject a storage split without testing anything about the
+/// validation. The behavioural coverage is
+/// unchanged — the fact matrix
+/// (`tests/cases/fact_matrix/owner_import_surface_*.rs`) and
+/// `negative_import_route_tests` drive the real warm-hit /
+/// invalidation behaviour.
 #[test]
 fn owner_import_surface_db_has_view_aware_lookup() {
     let source = read_file("src/owner_import_surface.rs");
@@ -80,12 +92,6 @@ fn owner_import_surface_db_has_view_aware_lookup() {
         source.contains("pub fn get_with_view"),
         "OwnerImportSurfaceDb MUST expose `get_with_view` so production callers fact-validate \
          the cached entry against the live store view (R3)."
-    );
-    assert!(
-        source.contains("view.validates_fact_signature(&candidate.read_set_signature.facts)"),
-        "OwnerImportSurfaceDb::get_with_view MUST validate the surface's \
-         fact_dep_signature through the view's whole-signature entry point \
-         `StoreView::validates_fact_signature`, not a local per-fact loop."
     );
     assert!(
         !source.contains("all(|fact| view.validates(fact))"),

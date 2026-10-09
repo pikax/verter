@@ -9,9 +9,10 @@
 //! structural / userland), and the intentional nullable-slot drop. Split out
 //! to keep each test module a readable size.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::typeinfo::framework_surface::vue_exec::{
     resolved_vue_surface_for_test, slots_from_typeinfo_surface,
@@ -36,7 +37,10 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
     });
 }
 
-fn whole_hash(host: &VerterHost, canonical_id: &str) -> verter_semantic::analysis::types::Hash16 {
+fn whole_hash(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     host.ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash
@@ -93,8 +97,13 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_0,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let mut names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     names.sort_unstable();
@@ -168,8 +177,13 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_1 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_1,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -236,8 +250,13 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_2,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     // The union-of-functions slot must be PUBLISHED (pre-fix it was dropped).
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
@@ -306,8 +325,13 @@ fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_3,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     // The union-of-callables slot is still PUBLISHED (positive): one arm having
     // no param does not make the member non-slot-like.
@@ -375,8 +399,13 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a Pick first-param resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_4,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -461,8 +490,13 @@ fn define_slots_imported_inline_pick_publishes_symbolic_binding() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with an imported-inline Pick resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_5 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_5,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -526,8 +560,13 @@ fn define_slots_named_alias_pick_publishes_symbolic_binding() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a named-alias Pick first-param resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_6 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_6,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -598,8 +637,13 @@ fn define_slots_userland_pick_shadow_publishes_concrete_not_symbolic() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a userland-Pick first-param resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_7 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_7,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -651,8 +695,13 @@ fn define_slots_structural_source_pick_publishes_concrete_not_symbolic() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a structural-source Pick resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_8 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_8,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let row = slots
         .iter()
@@ -708,8 +757,13 @@ fn define_slots_nullable_slot_is_intentionally_dropped() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_9 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_9,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     // CONTRAST: the non-nullable `present` slot IS published (the callable realizes).
     assert!(
@@ -757,8 +811,13 @@ fn define_slots_two_param_callback_binds_first_param_only() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_10 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_10,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let default_slot = slots
         .iter()
@@ -820,8 +879,13 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots =
-        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+    let fixture_dispatch_11 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &fixture_dispatch_11,
+        &resolved_vue_surface_for_test(surface.clone()),
+    );
 
     let default_slot = slots
         .iter()
@@ -837,11 +901,13 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
     // The FOLD is a node-domain fact: realize the slot member's RETURN NODE
     // through the SAME `CallableNodeView` route the DTO sink uses and mint it
     // once through the test output cap.
-    use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::project_semantic_dispatch::callable_view::{
+        ArmCombineNode, CallableNodeView,
+    };
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let dispatch = ProjectSemanticDispatch::new(&*host);
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        crate::semantic_query::ProjectionMode::Navigate,
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionMode::Navigate,
     );
     let member = surface
         .surface

@@ -28,22 +28,20 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
-use tokio::sync::Mutex as AsyncMutex;
-
-use verter_semantic::analysis::types::Hash16;
 use verter_session::external_ts::{
     CarrierOwnershipResolution, EngineBackend, EnvDims, ExternalTsProjectResolver, OpenState,
     ProjectBinding, ScriptKind, SnapshotFile, SnapshotRole, WorkspaceProjectResolver,
 };
+use verter_session::semantic_capability::CertifiedTypeEngineBinding;
 use verter_session::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 use verter_workspace::FilesystemWorkspace;
 
 use crate::carrier_provider_projection::PreparedCarrierProviderContent;
 use crate::external_ts::membership_ledger::AbsentReason;
 use crate::external_ts::membership_reconciler::{
     CarrierMembershipCommitter, CommitFuture, MembershipReconciler, ReconcileErr, ReconcileOutcome,
-    ReconcileReason,
+    ReconcileReason, SourceGates,
 };
 use crate::external_ts::tsserver_backend::TsserverEngineBackend;
 use crate::external_ts::CanonicalSource;
@@ -198,12 +196,13 @@ pub struct CarrierPublishCoordinator {
     provider: Option<Arc<dyn TypeProvider>>,
     /// The negotiated TypeScript version string carried on every minted binding.
     ts_version: Arc<str>,
-    /// The ONE shared per-source membership-serialization gate map. The coordinator
-    /// rebuilds a [`MembershipReconciler`] per transition ([`Self::reconciler`]), so it
-    /// owns this map and hands the same `Arc` to every rebuilt reconciler — otherwise
-    /// each per-call reconciler would get a fresh (useless) map and concurrent
-    /// same-source transitions would not serialize. Shared across coordinator clones.
-    source_gates: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
+    /// The ONE shared per-source membership-serialization gate registry. The
+    /// coordinator rebuilds a [`MembershipReconciler`] per transition
+    /// ([`Self::reconciler`]), so it owns this registry and hands the same `Arc` to
+    /// every rebuilt reconciler — otherwise each per-call reconciler would get a fresh
+    /// (useless) registry and concurrent same-source transitions would not serialize.
+    /// Shared across coordinator clones.
+    source_gates: Arc<SourceGates>,
 }
 
 impl CarrierPublishCoordinator {
@@ -218,7 +217,7 @@ impl CarrierPublishCoordinator {
             backend,
             provider: Some(provider),
             ts_version: ts_version.into(),
-            source_gates: Arc::new(DashMap::new()),
+            source_gates: Arc::new(SourceGates::new()),
         }
     }
 
@@ -233,7 +232,7 @@ impl CarrierPublishCoordinator {
             backend,
             provider: None,
             ts_version: ts_version.into(),
-            source_gates: Arc::new(DashMap::new()),
+            source_gates: Arc::new(SourceGates::new()),
         }
     }
 
@@ -241,6 +240,13 @@ impl CarrierPublishCoordinator {
     #[must_use]
     pub fn backend(&self) -> &Arc<TsserverEngineBackend> {
         &self.backend
+    }
+
+    /// The session's per-source membership gates — their live population and
+    /// backing capacity.
+    #[must_use]
+    pub fn source_gates(&self) -> &Arc<SourceGates> {
+        &self.source_gates
     }
 
     /// Retract a carrier source from the publish store — the delete / owner-lost /
@@ -475,8 +481,20 @@ impl CarrierPublishCoordinator {
             resolution_map_version: 0,
             fs_generation: 0,
         };
+        // Certify over OBSERVED facts only — the engine's negotiated capability
+        // interpretation, the serving session the backend is advertising under
+        // (identity + membership lease as its own typed dimension), and this
+        // snapshot's own basis. An engine whose handshake never happened is
+        // refused here rather than answered under an assumed profile.
+        let certified = CertifiedTypeEngineBinding::certify(
+            &bound,
+            &self.backend.serving_identity(),
+            self.backend.serving_lease(),
+            snapshot.input_basis(),
+        )
+        .map_err(|refusal| CarrierPublishError::Certification(format!("{refusal:?}")))?;
         self.backend
-            .publish_snapshot(&bound, snapshot)
+            .publish_snapshot(&certified, snapshot)
             .map_err(|e| CarrierPublishError::Publish(format!("{e:?}")))?;
         // The per-edit publish is a `SourceDelta` (unions into the target, never
         // prunes siblings), so the stale-owner prune is a SEPARATE store write that
@@ -555,6 +573,11 @@ impl CarrierMembershipCommitter for CarrierPublishCoordinator {
 pub enum CarrierPublishError {
     /// `ensure_project` failed on the backend.
     Ensure(String),
+    /// The engine binding could not be certified over observed facts (an
+    /// unobserved capability handshake, or a basis the certification does not
+    /// admit). PROPAGATED rather than swallowed: publishing under an assumed
+    /// profile is exactly the uncertified route this seam removed.
+    Certification(String),
     /// The two-phase store publish failed.
     Publish(String),
     /// A store retraction (owner-loss / cross-project A→B prune / publish-time
@@ -567,6 +590,9 @@ impl std::fmt::Display for CarrierPublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CarrierPublishError::Ensure(m) => write!(f, "ensure_project failed: {m}"),
+            CarrierPublishError::Certification(m) => {
+                write!(f, "engine binding certification refused: {m}")
+            }
             CarrierPublishError::Publish(m) => write!(f, "carrier publish failed: {m}"),
             CarrierPublishError::Retract(m) => write!(f, "carrier retract failed: {m}"),
         }

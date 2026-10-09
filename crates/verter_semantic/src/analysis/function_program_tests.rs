@@ -2,8 +2,9 @@
 //! `flow_body_stable_hash` discrimination tests.
 
 use super::*;
-use crate::analysis::top_level_owners::TopLevelOwnerTable;
-use crate::facts::SymbolSpace;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
+use verter_session_query::facts::SymbolSpace;
+use verter_session_query::function_program::FunctionProgramEntry;
 use verter_type_expr::facts::FunctionPartIdentity;
 
 fn index_of(source: &str) -> FunctionProgramIndex {
@@ -34,9 +35,9 @@ fn lexical_resolution_visits_only_candidates_of_the_referenced_name() {
         LEXICAL_CANDIDATE_VISITS.with(|visits| visits.set(0));
         let index = index_of(&source);
         let entry = entry_of(&index, "f");
-        assert_eq!(entry.references.len(), count);
+        assert_eq!(entry.references().len(), count);
         assert!(entry
-            .references
+            .references()
             .iter()
             .all(|reference| matches!(reference.binding, FunctionReferenceBinding::Resolved(_))));
         assert_eq!(LEXICAL_CANDIDATE_VISITS.with(std::cell::Cell::get), count);
@@ -50,7 +51,7 @@ fn lexical_resolution_visits_only_candidates_of_the_referenced_name() {
         let index = index_of(&siblings);
         let entry = entry_of(&index, "f");
         let identities: std::collections::HashSet<_> = entry
-            .references
+            .references()
             .iter()
             .map(|reference| {
                 reference
@@ -87,7 +88,7 @@ fn function_binding_inventory_preserves_every_stable_slot() {
     let index = index_of(source);
     let entry = entry_of(&index, "inventory");
     let actual: Vec<_> = entry
-        .bindings
+        .bindings()
         .iter()
         .map(|binding| binding.name.as_ref())
         .collect();
@@ -118,16 +119,16 @@ fn function_binding_inventory_preserves_every_stable_slot() {
         ]
     );
     let spans: std::collections::HashSet<_> = entry
-        .bindings
+        .bindings()
         .iter()
         .map(|binding| (binding.span.start, binding.span.end))
         .collect();
     assert_eq!(
         spans.len(),
-        entry.bindings.len(),
+        entry.bindings().len(),
         "each declaration has one real slot"
     );
-    for binding in entry.bindings.iter() {
+    for binding in entry.bindings().iter() {
         assert_eq!(
             &source[binding.span.start as usize..binding.span.end as usize],
             binding.name.as_ref()
@@ -140,18 +141,25 @@ fn nested_value_frames_have_exact_indexed_locators() {
     let source =
         "const root = () => { let x = 1; return () => ({ method() { return () => x; } }); };";
     let index = index_of(source);
-    assert_eq!(index.entries.len(), 4, "every nested callable owns a frame");
+    assert_eq!(
+        index.entries_for_test().len(),
+        4,
+        "every nested callable owns a frame"
+    );
     let allocator = oxc_allocator::Allocator::default();
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    for entry in index.entries.iter() {
-        let resolved = resolve_function_node(&parsed.program, &entry.locator)
+    for entry in index.entries_for_test().iter() {
+        let resolved = resolve_function_node(&parsed.program, entry.locator())
             .expect("indexed locator resolves");
-        assert_eq!(verter_span::Span::from(resolved.node.span()), entry.span);
+        assert_eq!(
+            verter_span::Span::new(resolved.node.span().start, resolved.node.span().end),
+            entry.span()
+        );
     }
-    for pair in index.entries.windows(2) {
-        assert_eq!(pair[1].lexical_parent.as_deref(), Some(&pair[0].key));
+    for pair in index.entries_for_test().windows(2) {
+        assert_eq!(pair[1].lexical_parent(), Some(pair[0].key()));
     }
 }
 
@@ -160,22 +168,23 @@ fn captures_exclude_local_shadows_and_share_hoisted_runtime_slots() {
     let index = index_of("function root(value) { var value; return [(value) => value, () => { const value = 2; return value; }, () => value]; }");
     let root = entry_of(&index, "root");
     let children: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
-        .filter(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .filter(|entry| entry.lexical_parent() == Some(root.key()))
         .collect();
     assert_eq!(children.len(), 3);
     assert!(
-        children[0].captures.0.is_empty(),
+        children[0].captures().is_empty(),
         "a child parameter shadows the outer variable"
     );
     assert!(
-        children[1].captures.0.is_empty(),
+        children[1].captures().is_empty(),
         "a child local shadows the outer variable"
     );
-    assert_eq!(children[2].captures.0.len(), 1);
+    assert_eq!(children[2].captures().count(), 1);
     assert_eq!(
-        children[2].captures.0[0].binding_slot, 0,
+        children[2].captures().next().unwrap().binding_slot,
+        0,
         "the parameter is the shared runtime identity of its var redeclaration"
     );
 }
@@ -191,9 +200,9 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
     let index = index_of(source);
     let root = entry_of(&index, "root");
     let children: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
-        .filter(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .filter(|entry| entry.lexical_parent() == Some(root.key()))
         .collect();
     assert_eq!(children.len(), 3);
     let first = children[0];
@@ -201,7 +210,7 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
     let middle = children[2];
     let root_targets = |entry: &FunctionProgramEntry| {
         entry
-            .writes
+            .writes()
             .iter()
             .flat_map(|write| write.targets.iter())
             .filter_map(|target| match target {
@@ -224,28 +233,31 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
         "parameter/var writes use the canonical parameter slot"
     );
     assert!(matches!(
-        &first.writes[1].targets[0],
+        &first.writes()[1].targets[0],
         FunctionWriteTarget::Binding {
             kind: FunctionWriteKind::Member,
             ..
         }
     ));
     let deepest = index
-        .entries
+        .entries_for_test()
         .iter()
-        .find(|entry| entry.lexical_parent.as_deref() == Some(&middle.key))
+        .find(|entry| entry.lexical_parent() == Some(middle.key()))
         .unwrap();
     let deepest_targets = root_targets(deepest);
     assert_eq!(
-        deepest_targets[0].defining_function, middle.key,
+        &deepest_targets[0].defining_function,
+        middle.key(),
         "an intervening local stops capture resolution"
     );
     assert!(
-        deepest.captures.0.contains(&deepest_targets[0]),
+        deepest
+            .captures()
+            .any(|binding| binding == &deepest_targets[0]),
         "write-only captures retain their exact binding authority"
     );
-    assert!(middle.descendant_writes.contains(&deepest_targets[0]));
-    assert!(!root.descendant_writes.contains(&deepest_targets[0]));
+    assert!(middle.descendant_writes().contains(&deepest_targets[0]));
+    assert!(!root.descendant_writes().contains(&deepest_targets[0]));
 }
 
 #[test]
@@ -259,12 +271,12 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
     let index = index_of(source);
     let root = entry_of(&index, "root");
     let child = index
-        .entries
+        .entries_for_test()
         .iter()
-        .find(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .find(|entry| entry.lexical_parent() == Some(root.key()))
         .unwrap();
     let reads: Vec<_> = child
-        .references
+        .references()
         .iter()
         .filter(|reference| {
             reference
@@ -286,39 +298,50 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
         "a sibling value read is not a call input"
     );
     let grandchild = index
-        .entries
+        .entries_for_test()
         .iter()
-        .find(|entry| entry.lexical_parent.as_deref() == Some(&child.key))
+        .find(|entry| entry.lexical_parent() == Some(child.key()))
         .unwrap();
     assert_eq!(
-        grandchild.captured_reads[0].path.as_ref(),
+        grandchild.captured_reads().next().unwrap().path.as_ref(),
         [Arc::from("selected")]
     );
-    assert_eq!(child.nested_captures[0].reads, grandchild.captured_reads);
-    assert_eq!(root.nested_captures[0].reads, child.captured_reads);
+    assert!(child
+        .nested_captures()
+        .next()
+        .unwrap()
+        .reads()
+        .eq(grandchild.captured_reads()));
+    assert!(root
+        .nested_captures()
+        .next()
+        .unwrap()
+        .reads()
+        .eq(child.captured_reads()));
     let transitive = index_of("function root(payload) { return () => () => payload.selected; }");
     let root = entry_of(&transitive, "root");
     let child = transitive
-        .entries
+        .entries_for_test()
         .iter()
-        .find(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
+        .find(|entry| entry.lexical_parent() == Some(root.key()))
         .unwrap();
     assert_eq!(
-        child.captures.0.len(),
+        child.captures().count(),
         1,
         "intervening closures retain the cell their children capture"
     );
     assert_eq!(
-        child.captured_reads[0].path.as_ref(),
+        child.captured_reads().next().unwrap().path.as_ref(),
         [Arc::from("selected")]
     );
 }
 
 #[test]
 fn flow_binding_map_is_bijective_for_value_bindings() {
-    use crate::analysis::flow::{
-        build_function_body_skeleton, FlowBindingMap, FlowBindingMapError, FunctionBodySource,
-        SkeletonBindingId,
+    use crate::analysis::flow::{build_function_body_skeleton, FunctionBodySource};
+    use verter_session_query::flow::{
+        binding::{FlowBindingMap, FlowBindingMapError},
+        skeleton::SkeletonBindingId,
     };
     let source = "\n function inventory(p, {x: renamed}, ...rest) { var p; { let twin; } { let twin; } const [a, ...b] = list; try {} catch (err) {} class C {} enum E { A } namespace N {} import Alias = N; type OnlyType = string; interface OnlyInterface {} function child() {} }";
     let index = index_of(source);
@@ -334,14 +357,16 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
         &FunctionBodySource::from_function(function).unwrap(),
         source,
     );
-    let map =
-        FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start).unwrap();
-    assert_eq!(map.value_count(), entry.bindings.len());
+    let map = FlowBindingMap::build(&skeleton, entry.bindings(), entry.key(), entry.span().start)
+        .unwrap();
+    assert_eq!(map.value_count(), entry.bindings().len());
     let parameter = SkeletonBindingId::from_index(0);
     let redeclaration = skeleton
         .bindings
         .iter()
-        .position(|binding| binding.kind == crate::analysis::flow::SkeletonBindingKind::Var)
+        .position(|binding| {
+            binding.kind == verter_session_query::flow::skeleton::SkeletonBindingKind::Var
+        })
         .map(|ordinal| SkeletonBindingId::from_index(ordinal as u32))
         .unwrap();
     assert_ne!(map.identity(parameter), map.identity(redeclaration));
@@ -374,23 +399,23 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
             assert!(slots.insert(identity.binding_slot));
             assert_eq!(map.local(identity), Some(local));
             assert_eq!(
-                entry.bindings[identity.binding_slot as usize].span,
-                binding.span.to_absolute(entry.span.start)
+                entry.bindings()[identity.binding_slot as usize].span,
+                binding.span.to_absolute(entry.span().start)
             );
         } else {
             assert!(map.identity(local).is_none());
         }
     }
-    let mut corrupt = entry.bindings.to_vec();
+    let mut corrupt = entry.bindings().to_vec();
     corrupt[1].span = corrupt[0].span;
     assert_eq!(
-        FlowBindingMap::build(&skeleton, &corrupt, &entry.key, entry.span.start),
+        FlowBindingMap::build(&skeleton, &corrupt, entry.key(), entry.span().start),
         Err(FlowBindingMapError::DuplicateDeclaration)
     );
-    let mut renamed = entry.bindings.to_vec();
+    let mut renamed = entry.bindings().to_vec();
     renamed[0].name = Arc::from("display-only");
     let renamed_map =
-        FlowBindingMap::build(&skeleton, &renamed, &entry.key, entry.span.start).unwrap();
+        FlowBindingMap::build(&skeleton, &renamed, entry.key(), entry.span().start).unwrap();
     let local = SkeletonBindingId::from_index(0);
     assert_eq!(
         map.identity(local),
@@ -402,21 +427,21 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     assert!(map.local(&foreign).is_none());
 }
 
-fn hash_of(source: &str, name: &str) -> crate::analysis::types::Hash16 {
+fn hash_of(source: &str, name: &str) -> verter_session_query::analysis::types::Hash16 {
     let index = index_of(source);
     let entry = index
-        .entries
+        .entries_for_test()
         .iter()
-        .find(|entry| entry.key.declaration.name.as_ref() == name)
+        .find(|entry| entry.key().declaration.name.as_ref() == name)
         .unwrap_or_else(|| panic!("{name} must be indexed"));
-    entry.flow_body_stable_hash
+    entry.flow_body_stable_hash()
 }
 
 fn entry_of<'a>(index: &'a FunctionProgramIndex, name: &str) -> &'a FunctionProgramEntry {
     index
-        .entries
+        .entries_for_test()
         .iter()
-        .find(|entry| entry.key.declaration.name.as_ref() == name)
+        .find(|entry| entry.key().declaration.name.as_ref() == name)
         .unwrap_or_else(|| panic!("{name} must be indexed"))
 }
 
@@ -426,11 +451,11 @@ fn member_entry_of<'a>(
     ordinal: u32,
 ) -> &'a FunctionProgramEntry {
     index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| {
-            entry.key.declaration.name.as_ref() == class_name
-                && matches!(&entry.key.part, FunctionPartIdentity::Member { member_path } if member_path.contains(&ordinal))
+            entry.key().declaration.name.as_ref() == class_name
+                && matches!(&entry.key().part, FunctionPartIdentity::Member { member_path } if member_path.contains(&ordinal))
         })
         .unwrap_or_else(|| panic!("{class_name} member {ordinal} must be indexed"))
 }
@@ -460,43 +485,52 @@ namespace Ns {
 
     let decl = entry_of(&index, "decl");
     assert!(matches!(
-        decl.key.part,
+        decl.key().part,
         FunctionPartIdentity::DeclarationBody
     ));
-    assert_eq!(decl.key.overload_ordinal, 0);
-    assert_eq!(decl.params.len(), 1);
-    assert!(decl.params[0].has_ts_annotation);
-    assert_eq!(decl.return_sites.len(), 1);
+    assert_eq!(decl.key().overload_ordinal, 0);
+    assert_eq!(decl.params().len(), 1);
+    assert!(decl.params()[0].has_ts_annotation);
+    assert_eq!(decl.return_sites().len(), 1);
 
     let arrow = entry_of(&index, "arrow");
-    assert!(matches!(arrow.key.part, FunctionPartIdentity::Initializer));
-    assert_eq!(arrow.key.declaration.space, SymbolSpace::Value);
+    assert!(matches!(
+        arrow.key().part,
+        FunctionPartIdentity::Initializer
+    ));
+    assert_eq!(arrow.key().declaration.space, SymbolSpace::Value);
 
     let fn_expr = entry_of(&index, "fnExpr");
     assert!(matches!(
-        fn_expr.key.part,
+        fn_expr.key().part,
         FunctionPartIdentity::Initializer
     ));
 
     let inst = member_entry_of(&index, "Klass", 0);
-    assert!(matches!(inst.key.part, FunctionPartIdentity::Member { .. }));
+    assert!(matches!(
+        inst.key().part,
+        FunctionPartIdentity::Member { .. }
+    ));
     let stat = member_entry_of(&index, "Klass", 1);
-    assert!(matches!(stat.key.part, FunctionPartIdentity::Member { .. }));
+    assert!(matches!(
+        stat.key().part,
+        FunctionPartIdentity::Member { .. }
+    ));
 
     // The bodiless overload consumes ordinal 0; the implementation is ordinal 1.
     let overloaded_impl = member_entry_of(&index, "Klass", 3);
-    assert_eq!(overloaded_impl.key.overload_ordinal, 1);
+    assert_eq!(overloaded_impl.key().overload_ordinal, 1);
 
     let object_members: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
-        .filter(|entry| entry.key.declaration.name.as_ref() == "obj")
+        .filter(|entry| entry.key().declaration.name.as_ref() == "obj")
         .collect();
     assert_eq!(object_members.len(), 2, "method + accessor both index");
 
     let inner = entry_of(&index, "Ns.inner");
     assert!(matches!(
-        inner.key.part,
+        inner.key().part,
         FunctionPartIdentity::DeclarationBody
     ));
 }
@@ -542,10 +576,10 @@ namespace Ns { export const nested = make(1); }
         &callback.source,
         ProgramExpressionSource::FunctionReturn(source) if source == callback_source
     ));
-    assert!(index.entries.iter().any(|entry| {
-        entry.key.declaration.name.as_ref() == "derived"
-            && matches!(entry.key.part, FunctionPartIdentity::Other { .. })
-            && entry.span.start == callback.span.start
+    assert!(index.entries_for_test().iter().any(|entry| {
+        entry.key().declaration.name.as_ref() == "derived"
+            && matches!(entry.key().part, FunctionPartIdentity::Other { .. })
+            && entry.span().start == callback.span.start
     }));
 
     assert!(
@@ -587,10 +621,10 @@ export function memberCall() {
     );
 
     let self_rec = entry_of(&index, "selfRec");
-    assert_eq!(self_rec.return_sites.len(), 2);
+    assert_eq!(self_rec.return_sites().len(), 2);
     assert!(
         self_rec
-            .call_sites
+            .call_sites()
             .iter()
             .any(|site| site.target.as_ref().is_some_and(|target| target
                 .declaration
@@ -598,25 +632,21 @@ export function memberCall() {
                 .as_ref()
                 == "selfRec")),
         "the self-call site carries its exact target: {:?}",
-        self_rec.call_sites
+        self_rec.call_sites()
     );
 
     let calls_other = entry_of(&index, "callsOther");
     assert!(
-        calls_other
-            .call_sites
-            .iter()
-            .any(|site| site.target.as_ref().is_some_and(|target| target
-                .declaration
-                .name
-                .as_ref()
-                == "selfRec")),
+        calls_other.call_sites().iter().any(|site| site
+            .target
+            .as_ref()
+            .is_some_and(|target| target.declaration.name.as_ref() == "selfRec")),
         "the local call site resolves to the exact same-file target"
     );
 
     let transparent = entry_of(&index, "loopTransparent");
     let loops: Vec<_> = transparent
-        .control
+        .control()
         .iter()
         .filter(|region| region.kind == FunctionControlKind::Loop)
         .collect();
@@ -628,7 +658,7 @@ export function memberCall() {
 
     let unsupported = entry_of(&index, "loopUnsupported");
     let loop_region = unsupported
-        .control
+        .control()
         .iter()
         .find(|region| region.kind == FunctionControlKind::Loop)
         .expect("loop region");
@@ -636,25 +666,25 @@ export function memberCall() {
 
     let switch = entry_of(&index, "switchUnsupported");
     assert!(switch
-        .control
+        .control()
         .iter()
         .any(|region| region.kind == FunctionControlKind::Switch && region.has_return));
 
     let bare = entry_of(&index, "bareReturn");
-    assert_eq!(bare.return_sites.len(), 1);
-    assert!(!bare.return_sites[0].has_argument);
+    assert_eq!(bare.return_sites().len(), 1);
+    assert!(!bare.return_sites()[0].has_argument);
 
     let member_call = entry_of(&index, "memberCall");
     assert!(
         member_call
-            .call_sites
+            .call_sites()
             .iter()
             .all(|site| site.target.is_none()),
         "a static member call site never binds an exact same-file target"
     );
     assert!(
         member_call
-            .effects
+            .effects()
             .iter()
             .any(|effect| matches!(&effect.callee, FunctionEffectCallee::StaticMember(path) if path.len() == 2))
     );
@@ -953,7 +983,7 @@ export function occursNested<T = number>(a: string, b: { k: T }): T { return b.k
     );
     let occurrence = |name: &str| {
         entry_of(&index, name)
-            .type_parameters
+            .type_parameters()
             .iter()
             .find(|param| param.name.as_ref() == "T")
             .unwrap_or_else(|| panic!("{name} declares T"))
@@ -1011,9 +1041,9 @@ fn entries_with_part<'a>(
     part: &FunctionPartIdentity,
 ) -> Vec<&'a FunctionProgramEntry> {
     index
-        .entries
+        .entries_for_test()
         .iter()
-        .filter(|entry| entry.key.declaration.name.as_ref() == name && &entry.key.part == part)
+        .filter(|entry| entry.key().declaration.name.as_ref() == name && &entry.key().part == part)
         .collect()
 }
 
@@ -1027,8 +1057,8 @@ function f() {
 "#,
     );
     let f = entry_of(&index, "f");
-    assert_eq!(f.call_sites.len(), 1, "one indexed call site");
-    let site = &f.call_sites[0];
+    assert_eq!(f.call_sites().len(), 1, "one indexed call site");
+    let site = &f.call_sites()[0];
     assert!(
         matches!(&site.callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "g"),
         "callee carrier is the bare identifier, got {:?}",
@@ -1070,39 +1100,39 @@ function outer() {
     let outer = outers[0];
 
     let nested: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
-        .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
+        .filter(|entry| matches!(entry.key().part, FunctionPartIdentity::Other { .. }))
         .collect();
     assert_eq!(nested.len(), 1, "exactly one nested served position");
     let inner = nested[0];
 
     // Exact key: the parent's declaration identity + Other { ordinal }.
-    assert_eq!(inner.key.declaration, outer.key.declaration);
+    assert_eq!(inner.key().declaration, outer.key().declaration);
     assert!(
-        matches!(inner.key.part, FunctionPartIdentity::Other { ordinal: 0 }),
+        matches!(inner.key().part, FunctionPartIdentity::Other { ordinal: 0 }),
         "the first nested position is Other {{ 0 }}, got {:?}",
-        inner.key.part
+        inner.key().part
     );
     // Body locator: parent descent plus the direct callable ordinal.
     // The preceding variable declaration does not introduce a callable.
     assert_eq!(
-        inner.locator.descent.last(),
+        inner.locator().descent.last(),
         Some(&FunctionDescentStep::NestedCallable { ordinal: 0 }),
         "the nested locator addresses the first directly nested callable"
     );
     // Lexical parent + capture identity (content-free binding identity only).
     assert_eq!(
-        inner.lexical_parent.as_deref(),
-        Some(&outer.key),
+        inner.lexical_parent(),
+        Some(outer.key()),
         "the lexical parent is the enclosing position"
     );
     assert_eq!(
-        inner.captures.0.as_ref(),
-        &[FlowBindingIdentity {
+        inner.captures().cloned().collect::<Vec<_>>(),
+        [FlowBindingIdentity {
             name: Arc::from("x"),
             kind: FunctionBindingKind::Const,
-            defining_function: outer.key.clone(),
+            defining_function: outer.key().clone(),
             binding_slot: 0,
             evolving_array: false,
         }],
@@ -1121,30 +1151,30 @@ function outer() {
 "#,
     );
     let callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
-        .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
+        .filter(|entry| matches!(entry.key().part, FunctionPartIdentity::Other { .. }))
         .collect();
     assert_eq!(callbacks.len(), 1, "exactly one callback position");
     let callback = callbacks[0];
     assert!(
         matches!(
-            callback.key.part,
+            callback.key().part,
             FunctionPartIdentity::Other { ordinal: 0 }
         ),
         "the callback is the first nested position"
     );
     assert_eq!(
-        callback.locator.descent.last(),
+        callback.locator().descent.last(),
         Some(&FunctionDescentStep::NestedCallable { ordinal: 0 }),
         "the callback locator addresses the first directly nested callable"
     );
     assert_eq!(
-        callback.captures.0.as_ref(),
-        &[FlowBindingIdentity {
+        callback.captures().cloned().collect::<Vec<_>>(),
+        [FlowBindingIdentity {
             name: Arc::from("x"),
             kind: FunctionBindingKind::Const,
-            defining_function: entry_of(&index, "outer").key.clone(),
+            defining_function: entry_of(&index, "outer").key().clone(),
             binding_slot: 0,
             evolving_array: false,
         }],
@@ -1162,23 +1192,27 @@ function outer() {
 "#,
     );
     let outer = entry_of(&index, "outer");
-    assert_eq!(outer.call_sites.len(), 1, "the outer frame sees only `run`");
+    assert_eq!(
+        outer.call_sites().len(),
+        1,
+        "the outer frame sees only `run`"
+    );
     assert!(
-        matches!(&outer.call_sites[0].callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "run"),
+        matches!(&outer.call_sites()[0].callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "run"),
     );
     let callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
-        .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
+        .filter(|entry| matches!(entry.key().part, FunctionPartIdentity::Other { .. }))
         .collect();
     assert_eq!(callbacks.len(), 1);
     assert_eq!(
-        callbacks[0].call_sites.len(),
+        callbacks[0].call_sites().len(),
         1,
         "the callback's own `id(deep)` call site is on the callback frame"
     );
     assert!(
-        matches!(&callbacks[0].call_sites[0].callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "id"),
+        matches!(&callbacks[0].call_sites()[0].callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "id"),
     );
 }
 
@@ -1193,25 +1227,25 @@ function outer() {
 "#,
     );
     let callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| {
             matches!(
-                entry.locator.descent.last(),
+                entry.locator().descent.last(),
                 Some(
                     FunctionDescentStep::CallArgument { .. }
                         | FunctionDescentStep::NestedCallable { .. }
                 )
-            ) && entry.nested_declaration_name.is_none()
+            ) && entry.nested_declaration_name().is_none()
         })
         .collect();
     assert_eq!(callbacks.len(), 1);
     assert_eq!(
-        callbacks[0].captures.0.as_ref(),
-        &[FlowBindingIdentity {
+        callbacks[0].captures().cloned().collect::<Vec<_>>(),
+        [FlowBindingIdentity {
             name: Arc::from("inner"),
             kind: FunctionBindingKind::NestedFunction,
-            defining_function: entry_of(&index, "outer").key.clone(),
+            defining_function: entry_of(&index, "outer").key().clone(),
             binding_slot: 0,
             evolving_array: false,
         }],
@@ -1246,25 +1280,25 @@ function outer(shadowed: string) {
     );
     let outer = entry_of(&index, "outer");
     let middle = index
-        .entries
+        .entries_for_test()
         .iter()
-        .find(|entry| entry.nested_declaration_name.as_deref() == Some("middle"))
+        .find(|entry| entry.nested_declaration_name().map(AsRef::as_ref) == Some("middle"))
         .expect("the hoisted nested declaration is a served position");
 
     let mut callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| {
             matches!(
-                entry.locator.descent.last(),
+                entry.locator().descent.last(),
                 Some(
                     FunctionDescentStep::CallArgument { .. }
                         | FunctionDescentStep::NestedCallable { .. }
                 )
-            ) && entry.nested_declaration_name.is_none()
+            ) && entry.nested_declaration_name().is_none()
         })
         .collect();
-    callbacks.sort_by_key(|entry| entry.span.start);
+    callbacks.sort_by_key(|entry| entry.span().start);
     assert_eq!(
         callbacks.len(),
         3,
@@ -1275,28 +1309,28 @@ function outer(shadowed: string) {
         .iter()
         .map(|entry| {
             assert_eq!(
-                entry.captures.0.len(),
+                entry.captures().count(),
                 1,
                 "each callback captures exactly one binding: {:?}",
-                entry.captures
+                entry.captures()
             );
-            &entry.captures.0[0]
+            entry.captures().next().unwrap()
         })
         .collect();
 
     // The outer callback sees the outer frame's parameter.
-    assert_eq!(identities[0].defining_function, outer.key);
+    assert_eq!(&identities[0].defining_function, outer.key());
     assert_eq!(identities[0].binding_slot, 0);
     assert_eq!(identities[0].kind, FunctionBindingKind::Param);
     // The middle callback sees the middle frame's parameter — a DIFFERENT
     // frame, so a name (or a per-capture-list ordinal) cannot tell them
     // apart.
-    assert_eq!(identities[1].defining_function, middle.key);
+    assert_eq!(&identities[1].defining_function, middle.key());
     assert_eq!(identities[1].binding_slot, 0);
     assert_eq!(identities[1].kind, FunctionBindingKind::Param);
     // The block callback sees the middle frame's BLOCK-scoped `const` — the
     // same frame as the previous capture, at a different slot.
-    assert_eq!(identities[2].defining_function, middle.key);
+    assert_eq!(&identities[2].defining_function, middle.key());
     assert_eq!(identities[2].binding_slot, 1);
     assert_eq!(identities[2].kind, FunctionBindingKind::Const);
 
@@ -1306,7 +1340,7 @@ function outer(shadowed: string) {
 
     // The frame inventory retains BOTH same-name binders in source order.
     let middle_shadowed: Vec<(&FunctionBindingKind, usize)> = middle
-        .bindings
+        .bindings()
         .iter()
         .enumerate()
         .filter(|(_, binding)| binding.name.as_ref() == "shadowed")
@@ -1358,14 +1392,14 @@ namespace N {
     let offset =
         |needle: &str| u32::try_from(source.find(needle).expect("fixture needle")).unwrap();
     let resolved_start = |entry: &FunctionProgramEntry| {
-        let resolved = resolve_function_node(&ret.program, &entry.locator)
-            .unwrap_or_else(|| panic!("{} must resolve", entry.key.declaration.name));
+        let resolved = resolve_function_node(&ret.program, entry.locator())
+            .unwrap_or_else(|| panic!("{} must resolve", entry.key().declaration.name));
         resolved.node.span().start
     };
 
     let inner = entry_of(&index, "N.M.make");
     assert_eq!(
-        inner.locator.descent.to_vec().as_slice(),
+        inner.locator().descent.to_vec().as_slice(),
         &[
             FunctionDescentStep::NamespaceMember {
                 statement_ordinal: 3
@@ -1384,7 +1418,7 @@ namespace N {
     );
     assert_eq!(
         resolved_start(inner),
-        inner.span.start,
+        inner.span().start,
         "the locator resolves the node the entry was discovered from"
     );
     let outer = entry_of(&index, "N.make");
@@ -1421,15 +1455,16 @@ fn exact_function_key_lookup_does_not_scan_sibling_functions() {
         .collect();
     let index = index_of(&source);
     let keys: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
-        .map(|entry| entry.key.clone())
+        .map(|entry| entry.key().clone())
         .collect();
-    super::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.set(0));
+    verter_session_query::function_program::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.set(0));
     for key in &keys {
         assert_eq!(index.get(key).unwrap().key(), key);
     }
-    let visits = super::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.get());
+    let visits = verter_session_query::function_program::FUNCTION_KEY_LOOKUP_VISITS
+        .with(|visits| visits.get());
     assert!(
         visits <= keys.len() * 2,
         "exact lookup must index keys once, not scan siblings: {visits} for {} keys",
@@ -1443,9 +1478,10 @@ fn exact_value_function_lookup_does_not_scan_sibling_functions() {
         .map(|ordinal| format!("function value{ordinal}() {{ return {ordinal}; }}"))
         .collect();
     let index = index_of(&source);
-    super::FUNCTION_VALUE_LOOKUP_VISITS.with(|visits| visits.set(0));
-    for entry in index.entries.iter() {
-        let key = &entry.key;
+    verter_session_query::function_program::FUNCTION_VALUE_LOOKUP_VISITS
+        .with(|visits| visits.set(0));
+    for entry in index.entries_for_test().iter() {
+        let key = entry.key();
         assert_eq!(
             index
                 .value_function(
@@ -1459,7 +1495,8 @@ fn exact_value_function_lookup_does_not_scan_sibling_functions() {
             key
         );
     }
-    let visits = super::FUNCTION_VALUE_LOOKUP_VISITS.with(|visits| visits.get());
+    let visits = verter_session_query::function_program::FUNCTION_VALUE_LOOKUP_VISITS
+        .with(|visits| visits.get());
     assert!(
         visits <= index.len() * 2,
         "value lookup must not scan sibling entries: {visits}"
@@ -1482,20 +1519,23 @@ fn retained_function_addresses_preserve_exact_locator_metadata() {
         Arc::from("/retained.ts"),
         &Default::default(),
     );
-    for entry in index.entries.iter() {
-        let expected = resolve_function_node(&parsed.program, &entry.locator).unwrap();
-        let actual = nodes.get(&entry.key).unwrap();
+    for entry in index.entries_for_test().iter() {
+        let expected = resolve_function_node(&parsed.program, entry.locator()).unwrap();
+        let actual = nodes.get(entry.key()).unwrap();
         assert_eq!(actual.node.span(), expected.node.span());
-        assert_eq!(actual.self_name, expected.self_name, "{:?}", entry.key);
+        assert_eq!(actual.self_name, expected.self_name, "{:?}", entry.key());
         assert_eq!(
             actual.enclosing_type_parameters.map(GetSpan::span),
             expected.enclosing_type_parameters.map(GetSpan::span),
             "{:?}",
-            entry.key
+            entry.key()
         );
-        for call in entry.call_sites.iter() {
+        for call in entry.call_sites().iter() {
             assert_eq!(
-                verter_span::Span::from(nodes.call(call.span).unwrap().span),
+                {
+                    let span = nodes.call(call.span).unwrap().span;
+                    verter_span::Span::new(span.start, span.end)
+                },
                 call.span
             );
         }
@@ -1510,15 +1550,15 @@ fn class_evaluation_occurrences_are_indexed_without_promoting_static_locals() {
     let entry = entry_of(&index, "f");
     assert!(
         entry
-            .references
+            .references()
             .iter()
             .any(|reference| reference.name.as_ref() == "touch"),
         "class evaluation call roots must be indexed"
     );
-    assert!(entry.writes.iter().flat_map(|write| write.targets.iter()).any(|target| matches!(target, FunctionWriteTarget::Binding { reference, .. } if reference.name.as_ref() == "x" && matches!(reference.binding, FunctionReferenceBinding::Resolved(_)))), "class evaluation writes retain their exact enclosing binding");
+    assert!(entry.writes().iter().flat_map(|write| write.targets.iter()).any(|target| matches!(target, FunctionWriteTarget::Binding { reference, .. } if reference.name.as_ref() == "x" && matches!(reference.binding, FunctionReferenceBinding::Resolved(_)))), "class evaluation writes retain their exact enclosing binding");
     assert!(
         !entry
-            .bindings
+            .bindings()
             .iter()
             .any(|binding| binding.name.as_ref() == "y"),
         "static-block locals never enter the function's runtime inventory"
@@ -1553,7 +1593,7 @@ export function reader<T>(p: ReturnType<typeof f>, q: T, r: T[]) {
         verter_span::Span::new(start, start + 1)
     };
     let queries: Vec<(&str, FunctionTypeQueryPosition, bool)> = entry
-        .type_queries
+        .type_queries()
         .iter()
         .map(|query| {
             (
@@ -1574,7 +1614,7 @@ export function reader<T>(p: ReturnType<typeof f>, q: T, r: T[]) {
         "the frame's type positions in source order; a nested function's own signature belongs to its own frame"
     );
     let annotations: Vec<Option<&str>> = entry
-        .params
+        .params()
         .iter()
         .map(|param| param.annotation_reference.as_deref())
         .collect();
@@ -1586,37 +1626,293 @@ fn every_class_records_the_members_its_body_declares() {
     let source = "class A { x = 1; m(): { p: number } { return { p: 1 }; } }\n\
                   function f() { class L extends A { y = 2 } return class { constructor(protected z: number, w: number) {} }; }";
     let index = index_of(source);
+    let classes = index.classes();
     let span_of = |text: &str| {
         let start = source.find(text).expect("fixture text") as u32;
         verter_span::Span::new(start, start + text.len() as u32)
     };
-    let a = index
-        .class_declaring_member(span_of("x = 1;"))
+    let a = classes
+        .declaring_member(span_of("x = 1;"))
         .expect("a class element");
-    assert!(!a.expression && !a.has_heritage);
-    assert!(!index.class_encloses(a.span));
+    assert!(!a.record().expression && !a.record().has_heritage);
+    assert!(!a.is_enclosed());
     assert_eq!(
-        index.class_declaring_member(span_of("m(): { p: number } { return { p: 1 }; }")),
-        Some(a)
+        classes
+            .declaring_member(span_of("m(): { p: number } { return { p: 1 }; }"))
+            .map(|class| class.record()),
+        Some(a.record())
     );
-    assert_eq!(
-        index.class_declaring_member(span_of("p: number")),
-        None,
+    assert!(
+        classes.declaring_member(span_of("p: number")).is_none(),
         "a type literal's member is no class member"
     );
-    let local = index
-        .class_declaring_member(span_of("y = 2"))
+    let local = classes
+        .declaring_member(span_of("y = 2"))
         .expect("a local class element");
-    assert!(!local.expression && local.has_heritage);
-    let expression = index
-        .class_declaring_member(span_of("protected z: number"))
+    assert!(!local.record().expression && local.record().has_heritage);
+    let expression = classes
+        .declaring_member(span_of("protected z: number"))
         .expect("a property-declaring constructor parameter");
-    assert!(expression.expression && !expression.has_heritage);
-    assert_eq!(
-        index.class_declaring_member(span_of("w: number")),
-        None,
+    assert!(expression.record().expression && !expression.record().has_heritage);
+    assert!(
+        classes.declaring_member(span_of("w: number")).is_none(),
         "a plain parameter declares no property"
     );
+}
+
+/// Every class node of the program, outer before inner, as one full walk of
+/// the program meets it: the reference the index's own collection is held
+/// to.
+fn every_class_span(source: &str) -> Vec<verter_span::Span> {
+    struct Classes(Vec<verter_span::Span>);
+    impl<'a> Visit<'a> for Classes {
+        fn visit_class(&mut self, class: &Class<'a>) {
+            self.0
+                .push(verter_span::Span::new(class.span.start, class.span.end));
+            walk::walk_class(self, class);
+        }
+    }
+    let allocator = oxc_allocator::Allocator::default();
+    let ret = verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse();
+    let mut classes = Classes(Vec::new());
+    classes.visit_program(&ret.program);
+    classes.0
+}
+
+/// The index records each class discovery reaches once, in source order:
+/// outside every function, a declaration, an exported or default-exported
+/// class and a class expression a variable holds; and in any served body or
+/// body no entry serves (a local class's method, a callback), in a served
+/// function's parameter default and decorator. Discovery's walk of the
+/// syntax outside served functions reaches every position — a call
+/// argument, a block, a namespace body, a static block or field
+/// initializer, an array.
+#[test]
+fn the_class_index_records_every_class_discovery_reaches_once_in_source_order() {
+    let source = "declare function deco(x: unknown): any;\n\
+                  class A { m() { class M {} return M; } }\n\
+                  export default class { }\n\
+                  export class X {}\n\
+                  const held = () => { class InArrow {} return InArrow; };\n\
+                  const CE = class {};\n\
+                  let LE = (class {});\n\
+                  function served(p = class Default {}) {\n\
+                    class Local { m() { class InUnservedMethod {} return [1].map(() => class InCallback {}); } }\n\
+                    const e = class { q() { return class InServedMethod {}; } };\n\
+                    return [Local, e];\n\
+                  }\n\
+                  class D { method(@deco(class InDecorator {}) x: number) { return x; } }\n";
+    let index = index_of(source);
+    let recorded: Vec<verter_span::Span> = index
+        .classes()
+        .records()
+        .iter()
+        .map(|record| record.span)
+        .collect();
+    assert_eq!(recorded, every_class_span(source));
+    assert_eq!(recorded.len(), 15);
+
+    let reached = "declare function use(x: unknown): void;\n\
+                   use(class CallArg { k() { return class Served {}; } });\n\
+                   { class Block {} }\n\
+                   namespace NS { export class N {} }\n\
+                   class F { static s = class Field {}; static { class SB {} } }\n\
+                   export const arr = [class InArray {}];\n";
+    let index = index_of(reached);
+    let names: Vec<&str> = index
+        .classes()
+        .records()
+        .iter()
+        .map(|record| {
+            let text = &reached[record.span.start as usize..record.span.end as usize];
+            text.split([' ', '{']).nth(1).unwrap_or(text)
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["CallArg", "Served", "Block", "N", "F", "Field", "SB", "InArray"],
+        "every class is indexed in source order"
+    );
+}
+
+/// Discovering a statement's served positions and recording the classes
+/// it holds are one walk of it: discovery enters each statement outside
+/// every served function once — a top-level statement, a namespace member,
+/// a statement nested in a block, a branch or a static block — and never a
+/// statement inside a served function, however large that body grows.
+#[test]
+fn discovery_enters_each_statement_outside_served_functions_once() {
+    fn statements_outside_served(source: &str, served: &[verter_span::Span]) -> usize {
+        struct Statements<'s> {
+            served: &'s [verter_span::Span],
+            count: usize,
+        }
+        impl Statements<'_> {
+            fn is_served(&self, span: oxc_span::Span) -> bool {
+                self.served
+                    .iter()
+                    .any(|served| served.start == span.start && served.end == span.end)
+            }
+        }
+        impl<'a> Visit<'a> for Statements<'_> {
+            fn visit_statement(&mut self, statement: &Statement<'a>) {
+                self.count += 1;
+                walk::walk_statement(self, statement);
+            }
+            fn visit_function(
+                &mut self,
+                function: &Function<'a>,
+                flags: oxc_syntax::scope::ScopeFlags,
+            ) {
+                if !self.is_served(function.span) {
+                    walk::walk_function(self, function, flags);
+                }
+            }
+            fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+                if !self.is_served(arrow.span) {
+                    walk::walk_arrow_function_expression(self, arrow);
+                }
+            }
+        }
+        let allocator = oxc_allocator::Allocator::default();
+        let ret =
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse();
+        let mut statements = Statements { served, count: 0 };
+        statements.visit_program(&ret.program);
+        statements.count
+    }
+    let fixture = |served_body: &str| {
+        format!(
+            "declare const flag: boolean;\n\
+             class A {{ static s = class Field {{}}; static {{ class SB {{}} }} m() {{ {served_body} return 1; }} }}\n\
+             namespace NS {{ export class N {{}} export function f() {{ {served_body} }} {{ class InBlock {{}} }} }}\n\
+             if (flag) {{ class Cond {{}} }} else {{ (() => {{ class Unserved {{}} }})(); }}\n\
+             export const v = [class InArray {{}}];\n\
+             function served() {{ {served_body} }}\n"
+        )
+    };
+    let mut entered = Vec::new();
+    for served_body in ["", &"const a = 1; if (a) { class Inner {} }\n".repeat(64)] {
+        let source = fixture(served_body);
+        let _ = discovery_walk::take_statement_entries_for_tests();
+        let _ = crate::analysis::class_index::take_repeated_records_for_tests();
+        let index = index_of(&source);
+        let statements = discovery_walk::take_statement_entries_for_tests();
+        assert_eq!(
+            crate::analysis::class_index::take_repeated_records_for_tests(),
+            0,
+            "no second traversal meets a class discovery already recorded"
+        );
+        let served: Vec<verter_span::Span> = index
+            .entries_for_test()
+            .iter()
+            .map(|entry| entry.span())
+            .collect();
+        assert_eq!(
+            statements,
+            statements_outside_served(&source, &served),
+            "each statement outside every served function is entered once"
+        );
+        let names: Vec<&str> = index
+            .classes()
+            .records()
+            .iter()
+            .filter(|record| !source[record.span.start as usize..].starts_with("class Inner"))
+            .map(|record| {
+                let text = &source[record.span.start as usize..record.span.end as usize];
+                text.split([' ', '{']).nth(1).unwrap_or(text)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["A", "Field", "SB", "N", "InBlock", "Cond", "Unserved", "InArray"]
+        );
+        entered.push(statements);
+    }
+    assert_eq!(
+        entered[0], entered[1],
+        "a served body's statements are the hash fold's, never discovery's walk's"
+    );
+}
+
+/// A class's `extends` name resolves where the checker resolves it: in the
+/// frame the class is written in, then the frames around it, then the
+/// file. It names a class this file authors only through a class
+/// declaration's name or a `const` a class expression initializes; any
+/// other binding — a parameter or a `let` shadowing it, a method of a local
+/// class (a frame no entry serves) — and any
+/// clause that is not a bare name leaves the base unresolved.
+#[test]
+fn a_class_base_resolves_lexically() {
+    use verter_session_query::function_program::ClassBaseMatch;
+    let source = "declare function mixin(x: unknown): new () => object;\n\
+                  class A {}\n\
+                  const CE = class extends A {};\n\
+                  class B extends (CE) {}\n\
+                  function shadowed(A: new () => object) { class P extends A {} return P; }\n\
+                  function local() {\n\
+                    class A {}\n\
+                    class L extends A {}\n\
+                    const M = class extends L {};\n\
+                    let N = class {};\n\
+                    class O extends N {}\n\
+                    return () => class Inner extends M {};\n\
+                  }\n\
+                  class S extends mixin(A) {}\n\
+                  class T { m() { class W extends A {} return W; } }\n\
+                  function g() { class V { m() { class U extends A {} return U; } } return V; }\n";
+    let index = index_of(source);
+    let classes = index.classes();
+    let class_at = |text: &str| {
+        let start = source.find(text).expect("fixture text") as u32;
+        let record = classes
+            .records()
+            .iter()
+            .find(|record| record.span.start == start)
+            .expect("a class starts at the fixture text");
+        classes.at(record.span).expect("indexed by its span")
+    };
+    let base_of = |text: &str| match class_at(text).base() {
+        ClassBaseMatch::None => "none".to_owned(),
+        ClassBaseMatch::Unresolved => "unresolved".to_owned(),
+        ClassBaseMatch::Class(base) => {
+            source[base.record().span.start as usize..base.record().span.end as usize].to_owned()
+        }
+    };
+    assert_eq!(base_of("class A {}\nconst"), "none");
+    assert_eq!(base_of("class extends A {};\nclass B"), "class A {}");
+    assert_eq!(base_of("class B"), "class extends A {}");
+    assert_eq!(base_of("class P"), "unresolved", "a parameter shadows `A`");
+    assert_eq!(
+        base_of("class L"),
+        "class A {}",
+        "the local `A` shadows the file's"
+    );
+    assert_eq!(base_of("class extends L"), "class L extends A {}");
+    assert_eq!(
+        base_of("class O"),
+        "unresolved",
+        "a `let` may hold another value"
+    );
+    assert_eq!(base_of("class Inner"), "class extends L {}");
+    assert_eq!(base_of("class S"), "unresolved", "a mixin application");
+    assert_eq!(
+        base_of("class W"),
+        "class A {}",
+        "a served method reads the file"
+    );
+    assert_eq!(base_of("class U"), "unresolved", "a method no entry serves");
+    // The local `A` resolves to the local class, never the file's.
+    let local_a = source.find("class A {}\nclass L").map(|at| at as u32);
+    assert!(matches!(
+        class_at("class L").base(),
+        ClassBaseMatch::Class(base) if Some(base.record().span.start) == local_a
+    ));
+    // A class inside another class's body is enclosed by it.
+    assert!(class_at("class W").is_enclosed());
+    assert!(!class_at("class T").is_enclosed());
 }
 
 /// Callables nested 10,000 deep index on a 1 MiB thread: discovery walks
@@ -1631,18 +1927,18 @@ fn callables_nested_10000_deep_index_on_a_small_stack() {
             let source = format!("export const v = {}1;", "() => ".repeat(10_000));
             let index = index_of(&source);
             let deepest = index
-                .entries
+                .entries_for_test()
                 .iter()
-                .map(|entry| entry.locator.descent.len())
+                .map(|entry| entry.locator().descent.len())
                 .max()
                 .unwrap_or(0);
-            let shared = index.entries.iter().all(|entry| {
-                entry.lexical_parent.as_deref().is_none_or(|parent| {
+            let shared = index.entries_for_test().iter().all(|entry| {
+                entry.lexical_parent().is_none_or(|parent| {
                     let parent = index.get(parent).expect("the parent is indexed").entry();
-                    entry.locator.descent.extends(&parent.locator.descent)
+                    entry.locator().descent.extends(&parent.locator().descent)
                 })
             });
-            (index.entries.len(), deepest, shared)
+            (index.entries_for_test().len(), deepest, shared)
         })
         .expect("spawn the indexing thread")
         .join()
@@ -1654,13 +1950,13 @@ fn callables_nested_10000_deep_index_on_a_small_stack() {
 fn hashes_of(
     source: &str,
 ) -> Vec<(
-    crate::analysis::types::Hash16,
-    Option<crate::analysis::types::Hash16>,
+    verter_session_query::analysis::types::Hash16,
+    Option<verter_session_query::analysis::types::Hash16>,
 )> {
     index_of(source)
-        .entries
+        .entries_for_test()
         .iter()
-        .map(|entry| (entry.flow_body_stable_hash, entry.flow_body_exact_hash))
+        .map(|entry| (entry.flow_body_stable_hash(), entry.flow_body_exact_hash()))
         .collect()
 }
 
@@ -1756,4 +2052,426 @@ fn descents_carry_their_hash_and_namespace_steps() {
     assert_ne!(hash(&namespaced), hash(&other));
     assert!(namespaced.has_namespace_member());
     assert!(!other.has_namespace_member());
+}
+
+// ---------------------------------------------------------------------------
+// Shared transitive capture summaries
+// ---------------------------------------------------------------------------
+
+/// The transitive captures and captured reads of `entry`, computed the
+/// direct way from the index's own records: the position's own references
+/// and write targets that resolve to an enclosing frame, then each
+/// directly nested position's set placed at its start, less what this
+/// frame declares; each binding (each binding and path, for reads) once,
+/// first in source order.
+fn expected_captures(
+    index: &FunctionProgramIndex,
+    entry: &FunctionProgramEntry,
+) -> (Vec<FlowBindingIdentity>, Vec<FunctionCapturedRead>) {
+    let key = entry.key();
+    let mut sites: Vec<(u32, FlowBindingIdentity)> = Vec::new();
+    let mut reads: Vec<FunctionCapturedRead> = Vec::new();
+    for reference in entry.references().iter() {
+        let FunctionReferenceBinding::Resolved(binding) = &reference.binding else {
+            continue;
+        };
+        if &binding.defining_function == key {
+            continue;
+        }
+        sites.push((reference.span.start, binding.clone()));
+        if reference.read_role.is_some() {
+            reads.push(FunctionCapturedRead {
+                binding: binding.clone(),
+                path: Arc::clone(&reference.path),
+                span: reference.span,
+            });
+        }
+    }
+    for target in entry.writes().iter().flat_map(|write| write.targets.iter()) {
+        if let FunctionWriteTarget::Binding { reference, .. } = target {
+            if let FunctionReferenceBinding::Resolved(binding) = &reference.binding {
+                if &binding.defining_function != key {
+                    sites.push((reference.span.start, binding.clone()));
+                }
+            }
+        }
+    }
+    for child in index
+        .entries_for_test()
+        .iter()
+        .filter(|candidate| candidate.lexical_parent() == Some(key))
+    {
+        let (child_captures, child_reads) = expected_captures(index, child);
+        sites.extend(
+            child_captures
+                .into_iter()
+                .filter(|binding| &binding.defining_function != key)
+                .map(|binding| (child.span().start, binding)),
+        );
+        reads.extend(
+            child_reads
+                .into_iter()
+                .filter(|read| &read.binding.defining_function != key),
+        );
+    }
+    sites.sort_by_key(|(start, _)| *start);
+    let mut seen = std::collections::HashSet::new();
+    let captures = sites
+        .into_iter()
+        .filter_map(|(_, binding)| seen.insert(binding.clone()).then_some(binding))
+        .collect();
+    reads.sort_by_key(|read| read.span.start);
+    let mut seen = std::collections::HashSet::new();
+    reads.retain(|read| seen.insert((read.binding.clone(), Arc::clone(&read.path))));
+    (captures, reads)
+}
+
+/// Every position's shared view answers exactly what its own records
+/// imply, through shadowing parameters and block locals, a parameter
+/// shared with its `var` redeclaration, sibling same-name locals,
+/// write-only and member-path captures, and three levels of nesting.
+#[test]
+fn shared_capture_views_answer_each_position_exactly() {
+    let source = r#"function root(value, payload) {
+        var value; let outer = 0; const object = {};
+        { let twin = 1; const first = () => { twin++; object.field = payload.a; [value, outer] = pair; }; }
+        { let twin = 2; const second = (value) => { twin = value + payload.b; }; }
+        const middle = () => {
+            let outer = 1;
+            const inner = () => { const payload = 3; return () => outer + payload + value + twin; };
+            return () => { outer = 4; return payload.c.d + object; };
+        };
+        function hoisted() { return value + payload.a; }
+        return [middle, hoisted, (x) => x + outer];
+    }
+    function other() { let value = 9; return () => value; }"#;
+    let index = index_of(source);
+    let mut nested_positions = 0;
+    for entry in index.entries_for_test().iter() {
+        let (captures, reads) = expected_captures(&index, entry);
+        assert_eq!(
+            entry.captures().cloned().collect::<Vec<_>>(),
+            captures,
+            "captures of {:?}",
+            entry.key()
+        );
+        assert_eq!(
+            entry.captured_reads().cloned().collect::<Vec<_>>(),
+            reads,
+            "captured reads of {:?}",
+            entry.key()
+        );
+        for nested in entry.nested_captures() {
+            nested_positions += 1;
+            let child = index.get(nested.function()).unwrap().entry();
+            assert_eq!(nested.span(), child.span());
+            assert!(nested.bindings().eq(child.captures()));
+            assert!(nested.reads().eq(child.captured_reads()));
+            assert_eq!(nested.exhaustive(), child.captures_exhaustive());
+        }
+    }
+    assert!(
+        nested_positions >= 8,
+        "the fixture nests: {nested_positions}"
+    );
+    let other = entry_of(&index, "other");
+    assert!(other.captures().is_empty());
+    let other_child = other.nested_captures().next().unwrap();
+    assert_eq!(
+        other_child
+            .bindings()
+            .map(|binding| &binding.defining_function)
+            .collect::<Vec<_>>(),
+        [other.key()],
+        "a same-name local of another function is its own binding"
+    );
+    let root = entry_of(&index, "root");
+    assert!(index
+        .entries_for_test()
+        .iter()
+        .all(|entry| entry.shares_capture_summary(root)));
+}
+
+/// A class's members are code no entry serves: the frame creating one,
+/// and every frame enclosing it, has only a lower bound of captures.
+#[test]
+fn unserved_callables_make_every_enclosing_capture_set_partial() {
+    let index = index_of(
+        "function root(a) { return () => { const b = a; return () => class { m() { return b; } }; }; }\nfunction plain(a) { return () => a; }",
+    );
+    let root = entry_of(&index, "root");
+    let child = root.nested_captures().next().unwrap();
+    let grandchild = index
+        .get(child.function())
+        .unwrap()
+        .entry()
+        .nested_captures()
+        .next()
+        .unwrap();
+    assert!(!grandchild.exhaustive());
+    assert!(!child.exhaustive());
+    assert!(!root.captures_exhaustive());
+    let plain = entry_of(&index, "plain");
+    assert!(plain.captures_exhaustive());
+    assert!(plain.nested_captures().all(|child| child.exhaustive()));
+}
+
+/// `function root(v0) { return (v1) => (v2) => … => [v0, v1, …]; }`: each
+/// arrow declares one binding and the innermost reads them all.
+fn nested_capture_chain(depth: usize) -> String {
+    let mut source = String::from("function root(v0) { return ");
+    for ordinal in 1..depth {
+        source.push_str(&format!("(v{ordinal}) => "));
+    }
+    source.push_str("() => [");
+    for ordinal in 0..depth {
+        source.push_str(&format!("v{ordinal},"));
+    }
+    source.push_str("]; }");
+    source
+}
+
+/// `function root(v0, …, vN) { return () => () => () => () => [v0, …]; }`:
+/// four functions nested in the one declaring every captured binding.
+fn wide_capture_family(width: usize) -> String {
+    let parameters: Vec<_> = (0..width).map(|ordinal| format!("v{ordinal}")).collect();
+    format!(
+        "function root({}) {{ return () => () => () => () => [{}]; }}",
+        parameters.join(","),
+        parameters.join(",")
+    )
+}
+
+/// The capture summary stores each authored capture once. A chain of N
+/// nested functions whose innermost reads one binding from each enclosing
+/// frame captures 1 + 2 + … + N bindings across its positions, but holds
+/// N capture records; N bindings read through four enclosing functions
+/// hold N records, not one copy per enclosing function.
+#[test]
+fn capture_summary_records_grow_with_authored_captures_not_nesting() {
+    let mut previous: Option<usize> = None;
+    for depth in [128, 256, 512, 1024] {
+        let index = index_of(&nested_capture_chain(depth));
+        let root = entry_of(&index, "root");
+        let counts = root.capture_summary_counts();
+        assert_eq!(counts.frames, depth + 1);
+        assert_eq!(counts.nested_links, depth);
+        assert_eq!(counts.bindings, depth);
+        assert_eq!(counts.captures, depth, "one record per authored capture");
+        assert_eq!(counts.reads, depth, "one record per authored read");
+        // The views still answer every position's transitive set: the
+        // arrow at nesting k captures v0 … v(k - 1).
+        let mut logical = 0;
+        let mut frame = root.nested_captures().next();
+        let mut nesting = 1;
+        while let Some(current) = frame {
+            let captured = current.bindings().count();
+            assert_eq!(captured, nesting, "the arrow at nesting {nesting}");
+            assert_eq!(current.reads().count(), nesting);
+            logical += captured;
+            frame = index
+                .get(current.function())
+                .unwrap()
+                .entry()
+                .nested_captures()
+                .next();
+            nesting += 1;
+        }
+        assert_eq!(nesting, depth + 1);
+        assert_eq!(logical, depth * (depth + 1) / 2);
+        if let Some(previous) = previous {
+            assert!(
+                counts.total() * 10 <= previous * 21,
+                "doubling the nesting at most doubles the records: {previous} -> {}",
+                counts.total()
+            );
+        }
+        previous = Some(counts.total());
+
+        let index = index_of(&wide_capture_family(depth));
+        let root = entry_of(&index, "root");
+        let counts = root.capture_summary_counts();
+        assert_eq!(counts.frames, 5);
+        assert_eq!(counts.bindings, depth);
+        assert_eq!(counts.captures, depth, "no enclosing function copies them");
+        assert_eq!(counts.reads, depth);
+        let mut frame = root.nested_captures().next();
+        let mut nesting = 0;
+        while let Some(current) = frame {
+            assert_eq!(current.bindings().count(), depth);
+            assert_eq!(current.reads().count(), depth);
+            frame = index
+                .get(current.function())
+                .unwrap()
+                .entry()
+                .nested_captures()
+                .next();
+            nesting += 1;
+        }
+        assert_eq!(nesting, 4);
+    }
+}
+
+/// Every function-valued call argument of `host`, with the callback
+/// expression record its linked return source names.
+fn linked_callbacks<'a>(
+    index: &'a FunctionProgramIndex,
+    host: &str,
+) -> Vec<(u32, Option<&'a ProgramExpressionRecord>)> {
+    entry_of(index, host)
+        .call_sites()
+        .iter()
+        .flat_map(|site| site.args.iter())
+        .filter(|argument| argument.is_function_value)
+        .map(|argument| {
+            let record = argument.function_return_source.as_ref().map(|source| {
+                index
+                    .expression(&ProgramExpressionIdentity {
+                        canonical_id: Arc::from("/test.ts"),
+                        offset: argument.point,
+                    })
+                    .filter(|record| {
+                        matches!(&record.source, ProgramExpressionSource::FunctionReturn(linked) if linked == source)
+                    })
+                    .expect("a linked argument names its own callback record")
+            });
+            (argument.point, record)
+        })
+        .collect()
+}
+
+#[test]
+fn callback_linking_work_is_linear_and_skips_ordinary_arguments() {
+    let mut probes = Vec::new();
+    let mut lookups = Vec::new();
+    for count in [128usize, 256, 512, 1024] {
+        let mut source = String::from("function host() {");
+        for ordinal in 0..count {
+            source.push_str(&format!(
+                "run{ordinal}((x: number) => x + {ordinal}, {ordinal}, \"s\", [{ordinal}]);"
+            ));
+        }
+        source.push_str("return 0;}");
+        take_callback_link_probes();
+        let index = index_of(&source);
+        let linking = take_callback_link_probes();
+        // Only the function-valued argument of each call is looked up;
+        // the three ordinary arguments examine no callback.
+        assert!(
+            (count..=count * 2).contains(&linking),
+            "about one callback position compared per function argument at {count}: {linking}"
+        );
+
+        verter_session_query::function_program::PROGRAM_EXPRESSION_LOOKUP_VISITS
+            .with(|visits| visits.set(0));
+        let linked = linked_callbacks(&index, "host");
+        let visits = verter_session_query::function_program::PROGRAM_EXPRESSION_LOOKUP_VISITS
+            .with(std::cell::Cell::get);
+        assert_eq!(linked.len(), count);
+        assert!(linked.iter().all(|(_, record)| record.is_some()));
+        assert!(
+            (count..=count * 2).contains(&visits),
+            "about one expression point compared per lookup at {count}: {visits}"
+        );
+        probes.push(linking);
+        lookups.push(visits);
+    }
+    for pair in probes.windows(2).chain(lookups.windows(2)) {
+        assert!(
+            pair[1] * 2 <= pair[0] * 5,
+            "doubling the callbacks grows the lookup work at most 2.5x (a population scan quadruples it): {pair:?}"
+        );
+    }
+
+    let mut ordinary = String::from("function host() {");
+    for ordinal in 0..256 {
+        ordinary.push_str(&format!("run{ordinal}({ordinal}, \"s\", value{ordinal});"));
+    }
+    ordinary.push_str("return () => 0;}");
+    take_callback_link_probes();
+    let _ = index_of(&ordinary);
+    assert_eq!(
+        take_callback_link_probes(),
+        0,
+        "ordinary arguments probe no callback population"
+    );
+}
+
+#[test]
+fn callback_linking_keeps_nested_duplicate_and_lexical_owner_identities() {
+    let source = r#"
+function host() {
+  outer(() => inner(() => 1));
+  same(() => 2);
+  same(() => 2);
+  return (() => 3)();
+}
+function other() {
+  same(() => 2);
+}
+const derived = wrap(() => 4);
+"#;
+    let index = index_of(source);
+    let host = linked_callbacks(&index, "host");
+    let other = linked_callbacks(&index, "other");
+    let start = |needle: &str, nth: usize| {
+        u32::try_from(
+            source
+                .match_indices(needle)
+                .nth(nth)
+                .expect("fixture needle")
+                .0,
+        )
+        .unwrap()
+    };
+    // The outer callback and the callback nested inside it link to their
+    // own records; identical callbacks at distinct positions stay distinct.
+    let host_points: Vec<_> = host.iter().map(|(point, _)| *point).collect();
+    assert!(host_points.contains(&start("() => inner", 0)));
+    assert!(host_points.contains(&start("() => 2", 0)));
+    assert!(host_points.contains(&start("() => 2", 1)));
+    assert!(host.iter().all(|(_, record)| record.is_some()));
+    let host_sources: std::collections::HashSet<_> = host
+        .iter()
+        .map(|(_, record)| format!("{:?}", record.unwrap().source))
+        .collect();
+    assert_eq!(
+        host_sources.len(),
+        host.len(),
+        "every callback keeps its own identity"
+    );
+    let inner_linked = index.entries_for_test().iter().any(|entry| {
+        entry.call_sites().iter().any(|site| {
+            site.args.iter().any(|argument| {
+                argument.point == start("() => 1", 0) && argument.function_return_source.is_some()
+            })
+        })
+    });
+    assert!(inner_linked, "the nested callback's call links it too");
+
+    // A textually identical callback under another lexical owner links to
+    // that owner's own position, never to the host's.
+    assert_eq!(other.len(), 1);
+    let (point, record) = other[0];
+    assert_eq!(point, start("() => 2", 2));
+    let record = record.expect("other's callback is linked");
+    assert!(!host_sources.contains(&format!("{:?}", record.source)));
+    let ProgramExpressionSource::FunctionReturn(FunctionReturnSource::Flow(identity)) =
+        &record.source
+    else {
+        panic!("a callback record carries its flow return identity");
+    };
+    assert_eq!(identity.anchor.symbol.as_ref(), "other");
+
+    // The top-level initializer's call record links its callback as well.
+    let derived = index
+        .expression(&ProgramExpressionIdentity {
+            canonical_id: Arc::from("/test.ts"),
+            offset: start("wrap(", 0),
+        })
+        .expect("initializer record");
+    let ProgramExpressionSource::SemanticCall { site, .. } = &derived.source else {
+        panic!("the initializer is a semantic call");
+    };
+    assert!(site.args[0].function_return_source.is_some());
 }

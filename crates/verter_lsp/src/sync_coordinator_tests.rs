@@ -12,43 +12,23 @@ use crate::ProjectSyncMode;
 use futures_util::{FutureExt, StreamExt};
 use std::time::Duration;
 use tokio::time::Instant;
-use tower_lsp_server::{LspService, Server};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
-#[derive(Default)]
-struct NoopLanguageServer;
-
-impl tower_lsp_server::LanguageServer for NoopLanguageServer {
-    async fn initialize(
-        &self,
-        _: InitializeParams,
-    ) -> tower_lsp_server::jsonrpc::Result<InitializeResult> {
-        Ok(InitializeResult::default())
-    }
-
-    async fn shutdown(&self) -> tower_lsp_server::jsonrpc::Result<()> {
-        Ok(())
-    }
+/// The transport of a registry-only fixture: it publishes through `documents`'
+/// diagnostics lane, and a reading client drains everything it sends.
+fn make_test_client(documents: &DocumentRegistry) -> crate::outbound::Outbound {
+    let outbound = undrained_test_client(documents);
+    let mut wire = outbound.wire();
+    tokio::spawn(async move { while wire.next().await.is_some() {} });
+    outbound
 }
 
-fn make_test_client() -> Client {
-    let client_slot = Arc::new(std::sync::Mutex::new(None));
-    let client_slot_for_service = Arc::clone(&client_slot);
-    let (service, socket) = LspService::new(move |client| {
-        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
-        NoopLanguageServer
-    });
-    tokio::spawn(async move {
-        let _ = Server::new(tokio::io::empty(), tokio::io::sink(), socket)
-            .serve(service)
-            .await;
-    });
-    let client = client_slot
-        .lock()
-        .expect("client lock")
-        .clone()
-        .expect("test client should be captured");
-    client
+/// The transport of a registry-only fixture whose client the test reads itself.
+fn undrained_test_client(documents: &DocumentRegistry) -> crate::outbound::Outbound {
+    crate::outbound::Outbound::with_diagnostics_lane(
+        crate::outbound::OutboundBudget::DEFAULT,
+        documents.diagnostics_lane(),
+    )
 }
 
 #[tokio::test]
@@ -222,11 +202,12 @@ async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missin
     ))));
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(provider, ProjectSyncMode::FullProject)),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -266,14 +247,15 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
     ))));
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -338,14 +320,15 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
 
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -401,11 +384,12 @@ async fn merged_diagnostics_surface_verter_project_warning_on_unowned_carrier() 
     });
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -439,7 +423,7 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
     // DISCRIMINATING: a regression that re-terminals a multi-claimant carrier as
     // `Ambiguous(MultipleOwners)` while still serving `Bound` would surface a
     // `verter(project)` warning here and fail this assertion.
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+    let resolver = verter_resolution::ModuleResolverCore::new(vec![
         verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
@@ -500,11 +484,12 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
     }
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -558,11 +543,12 @@ async fn merged_diagnostics_surface_verter_project_warning_on_carrier_path_confl
     });
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -637,6 +623,7 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
             shadow_path: None,
             shadow_background_loaded: false,
             committed_ide_surface: None,
+            committed_api_surface: None,
             commit_stamp: None,
             api_delivered_hash: None,
             api_observed_hash: None,
@@ -645,14 +632,15 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -708,8 +696,11 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::<str>::from(source),
-        file_language: crate::server::self_file_language_for(canonical_id)
-            .expect("the path classifies as a rune module"),
+        file_language: crate::server::self_file_language_for(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            canonical_id,
+        )
+        .expect("the path classifies as a rune module"),
         aliases: Vec::new(),
     });
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
@@ -723,19 +714,24 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         text: source.to_string(),
     });
 
-    let file_language = crate::server::self_file_language_for(canonical_id).unwrap();
+    let file_language = crate::server::self_file_language_for(
+        &verter_session::framework::HostLanguageClassifier::default(),
+        canonical_id,
+    )
+    .unwrap();
     let provider = Arc::new(MockTypeProvider::new());
 
     let provider_sync_states = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -889,14 +885,15 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1001,14 +998,15 @@ async fn sync_file_routes_open_plain_script_through_self_file_shadow_not_carrier
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1086,8 +1084,11 @@ async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::<str>::from("export const utilValue: number = 1;\n"),
-        file_language: crate::server::self_file_language_for(canonical_id)
-            .expect("the path classifies as a plain script"),
+        file_language: crate::server::self_file_language_for(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            canonical_id,
+        )
+        .expect("the path classifies as a plain script"),
         aliases: Vec::new(),
     });
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
@@ -1113,14 +1114,15 @@ async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1204,6 +1206,7 @@ defineProps<{ msg: string }>()
         shadow_path: None,
         shadow_background_loaded: false,
         committed_ide_surface: None,
+        committed_api_surface: None,
         commit_stamp: None,
         api_delivered_hash: None,
         api_observed_hash: None,
@@ -1212,14 +1215,15 @@ defineProps<{ msg: string }>()
     provider_sync_states.insert(canonical_id.to_string(), prior_state.clone());
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1327,13 +1331,14 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1410,7 +1415,7 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
 /// `resolve_carrier_source` (inside the eventual record) re-reads whatever
 /// document text is live AT RECORD TIME — with no identity fence pinning the
 /// two together, unlike the interactive repair path's
-/// `record_carrier_ide_snapshot_if_current` / `retained_ide_response_is_current`.
+/// `record_delivered_carrier_ide_snapshot` / `retained_ide_response_is_current`.
 ///
 /// A `did_change` landing in the provider-await window is exactly the
 /// documented "surface a request-time repair must resync" scenario — but
@@ -1448,13 +1453,14 @@ async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flig
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1467,7 +1473,7 @@ async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flig
         ),
     };
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     // Pause the coordinator's `open_file` call — `ide.code` is already
     // compiled from revision A by this point, and the record has not run yet.
     let (arrived, release) = provider.block_open_file(&ide_path);
@@ -1573,13 +1579,14 @@ async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_afte
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1592,7 +1599,7 @@ async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_afte
         ),
     };
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     // Pause the tick right after the compile — the pre-fix pin-capture spot.
     let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
 
@@ -1667,13 +1674,14 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1711,22 +1719,9 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
     );
 }
 
-/// The SAME compile-to-identity race as
-/// `coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_after`,
-/// reached through the OTHER `sync_file` arm that records a `CarrierIde`
-/// surface: `preserve_open_unresolved_carrier` (owner-None over a ready
-/// snapshot). `sync_file` captures ONE pin near its top and threads it
-/// through to whichever arm ends up recording — this test proves that thread-
-/// through actually reaches the unresolved-preserve arm's record call, not
-/// just the owner-resolved `DirectOpen` arm the sibling test covers.
-///
-/// Same discrimination method: pausing at
-/// [`test_hooks::block_after_ide_compile`] (the pre-fix pin-capture spot) and
-/// landing an edit there reproduces the pre-fix torn pair if the pin capture
-/// is moved back below it (verified by hand while authoring this test, same
-/// as the sibling). Against the fix, the already-earlier pin stays anchored
-/// to revision A, so the mismatched live identity (B) at record time makes
-/// `preserve_open_unresolved_carrier`'s fenced record refuse outright.
+/// An unresolved coordinator compile pins A before the pause. An interleaved
+/// edit makes A ineligible for both delivery and recording. A separate transaction
+/// then pins B, delivers it once and records its own bytes, source and map.
 #[tokio::test(flavor = "multi_thread")]
 async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile_not_after() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -1762,13 +1757,14 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1789,13 +1785,14 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
     let edit = async {
         arrived.notified().await;
         let result = documents.did_change(&uri, 2, SOURCE_B);
+        release.notify_one();
         assert!(
             result.changed,
             "the interleaved edit must really commit revision B"
         );
-        release.notify_one();
     };
-    futures_util::future::join(tick, edit).await;
+    let (outcome, _) = futures_util::future::join(tick, edit).await;
+    assert_eq!(outcome, SyncFileOutcome::Retry);
 
     assert_eq!(
         documents
@@ -1807,34 +1804,67 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
         "precondition: the live document is revision B"
     );
 
-    let state = provider_sync_states
-        .get(canonical_id)
-        .map(|entry| entry.clone())
-        .expect("the open unresolved carrier must still commit provider state");
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     assert!(
-        state.is_unresolved(),
-        "owner-None over a ready snapshot must commit an Unresolved binding"
+        provider.file_sync_calls().is_empty(),
+        "revision A must produce no provider application"
     );
-    let ide_path = state
-        .ide_path
-        .clone()
-        .expect("the preserve must keep a live IDE path");
-
-    // Same fail-closed requirement as the sibling test: the pin was captured
-    // before the compile and before the edit, so it stays anchored to A while
-    // the live identity moves to B — the fenced record inside
-    // `preserve_open_unresolved_carrier` must refuse outright.
     assert!(
         documents
             .provider_surfaces()
             .current_snapshot(&ide_path)
             .is_none(),
-        "a pin captured before the compile must make the unresolved-preserve \
-         record refuse when an edit lands after that capture — a recorded \
-         surface here means the pin either was not threaded through to this \
-         arm or was captured too late, reproducing the pre-fix torn-pairing \
-         defect"
+        "the stale revision must never be paired with revision B's source"
     );
+    assert!(
+        provider_sync_states
+            .get(canonical_id)
+            .and_then(|state| state.ide_path.clone())
+            .is_none(),
+        "first open cannot invent a live path before successful fresh delivery"
+    );
+    assert!(deps.pending_snapshot_provider_sync.contains(canonical_id));
+
+    // A separate transaction pins B before compiling. The refused transaction
+    // has released its lane, so B can deliver and record its own coherent pair.
+    assert_eq!(
+        sync_file(&deps, canonical_id, uri.as_str()).await,
+        SyncFileOutcome::Settled
+    );
+    let state = provider_sync_states.get(canonical_id).unwrap().clone();
+    assert!(state.is_unresolved());
+    assert_eq!(state.ide_path.as_deref(), Some(ide_path.as_str()));
+    assert!(state.ide_background_loaded);
+    let snapshot = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .unwrap();
+    assert_eq!(
+        snapshot.source_hash,
+        crate::provider_surface_store::ContentHash::of(SOURCE_B)
+    );
+    assert!(snapshot.provider_content.contains("revision-b-edited"));
+    assert!(!snapshot.provider_content.contains("revision-a"));
+    let profile = documents.tsx_profile.read().clone();
+    let ide = host.get_ide(canonical_id, &profile).unwrap();
+    assert_eq!(
+        snapshot.stamp.map_hash,
+        ide.source_map
+            .as_deref()
+            .map(|map| crate::provider_surface_store::ContentHash::of(map).to_hash16())
+            .unwrap_or([0; 16])
+    );
+    assert_eq!(
+        deps.project_sync
+            .as_ref()
+            .unwrap()
+            .delivered_provider_content(&ide_path, &ide.code)
+            .as_deref(),
+        Some(snapshot.provider_content.as_ref())
+    );
+    assert_eq!(provider.file_sync_calls().iter().filter(|call| matches!(call,
+        crate::type_provider::mock::MockCall::OpenFile { path, .. } | crate::type_provider::mock::MockCall::UpdateFile { path, .. }
+        if path == &ide_path)).count(), 1);
 }
 
 /// Shared setup for the background carrier-diagnostics tests: an owner-resolved,
@@ -1842,6 +1872,21 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
 /// type diagnostic positioned over the script's `const msg` statement so a
 /// successful merge maps it back into the `.vue` source.
 async fn make_carrier_diagnostics_fixture() -> (
+    Arc<DocumentRegistry>,
+    Arc<DashMap<String, ProviderSyncState>>,
+    Arc<MockTypeProvider>,
+    String,
+    String,
+    SyncCoordinatorDeps,
+) {
+    carrier_diagnostics_fixture(true).await
+}
+
+/// [`make_carrier_diagnostics_fixture`], with the client read by the test
+/// itself when `drained` is false.
+async fn carrier_diagnostics_fixture(
+    drained: bool,
+) -> (
     Arc<DocumentRegistry>,
     Arc<DashMap<String, ProviderSyncState>>,
     Arc<MockTypeProvider>,
@@ -1873,13 +1918,18 @@ async fn make_carrier_diagnostics_fixture() -> (
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: if drained {
+            make_test_client(&documents)
+        } else {
+            undrained_test_client(&documents)
+        },
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2015,7 +2065,7 @@ async fn invalidated_inflight_diagnostics_cannot_restore_completion() {
     // previous provider completion, even at the same authored version.
     let publication = documents.begin_diagnostics_publication(&uri).unwrap();
     documents
-        .publish_diagnostics(&deps.client, &uri, &publication, Vec::new(), false, None)
+        .publish_diagnostics(&uri, &publication, Vec::new(), false, None)
         .await;
     assert!(!documents.diagnostics_ready(&uri));
 }
@@ -2092,7 +2142,7 @@ async fn generation_advance_after_a_committed_receipt_owes_a_refresh() {
     documents.host().bump_diagnostics_generation(&canonical_id);
     let publication = documents.begin_diagnostics_publication(&parent).unwrap();
     documents
-        .publish_diagnostics(&deps.client, &parent, &publication, Vec::new(), true, None)
+        .publish_diagnostics(&parent, &publication, Vec::new(), true, None)
         .await;
 
     let refresh = refreshes
@@ -2227,8 +2277,8 @@ async fn diagnostics_are_not_suppressed_by_same_version_deferred_api_work() {
 /// @ai-generated - Guards exact-version diagnostics publication after provider I/O.
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_diagnostics_are_not_published_for_a_superseded_document_version() {
-    let (documents, _states, provider, canonical_id, ide_path, mut deps) =
-        make_carrier_diagnostics_fixture().await;
+    let (documents, _states, provider, canonical_id, ide_path, deps) =
+        carrier_diagnostics_fixture(false).await;
     let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
     let source = documents
         .get(&uri)
@@ -2245,33 +2295,7 @@ async fn provider_diagnostics_are_not_published_for_a_superseded_document_versio
         }),
     );
 
-    let client_slot = Arc::new(std::sync::Mutex::new(None));
-    let client_slot_for_service = Arc::clone(&client_slot);
-    let (mut service, mut socket) = LspService::new(move |client| {
-        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
-        NoopLanguageServer
-    });
-    deps.client = client_slot
-        .lock()
-        .expect("client lock")
-        .clone()
-        .expect("test client should be captured");
-    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
-        .id(1)
-        .params(serde_json::json!({
-            "processId": null,
-            "rootUri": null,
-            "capabilities": {}
-        }))
-        .finish();
-    let response = tower_service::Service::call(&mut service, initialize)
-        .await
-        .expect("initialize service call")
-        .expect("initialize response");
-    assert!(
-        response.is_ok(),
-        "test client must initialize: {response:?}"
-    );
+    let mut socket = deps.client.wire();
 
     let publish_uri = uri.to_string();
     let publish = tokio::spawn(async move {
@@ -2307,8 +2331,8 @@ async fn provider_diagnostics_are_not_published_for_a_superseded_document_versio
 /// snapshot results and must reach the editor before that pull completes.
 #[tokio::test(flavor = "multi_thread")]
 async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
-    let (documents, _states, provider, canonical_id, ide_path, mut deps) =
-        make_carrier_diagnostics_fixture().await;
+    let (documents, _states, provider, canonical_id, ide_path, deps) =
+        carrier_diagnostics_fixture(false).await;
     let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
     let source = "<script setup lang=\"ts\">\n\
                   defineProps<{ deadProp: string }>();\n\
@@ -2337,33 +2361,7 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
         }),
     );
 
-    let client_slot = Arc::new(std::sync::Mutex::new(None));
-    let client_slot_for_service = Arc::clone(&client_slot);
-    let (mut service, mut socket) = LspService::new(move |client| {
-        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
-        NoopLanguageServer
-    });
-    deps.client = client_slot
-        .lock()
-        .expect("client lock")
-        .clone()
-        .expect("test client should be captured");
-    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
-        .id(1)
-        .params(serde_json::json!({
-            "processId": null,
-            "rootUri": null,
-            "capabilities": {}
-        }))
-        .finish();
-    let response = tower_service::Service::call(&mut service, initialize)
-        .await
-        .expect("initialize service call")
-        .expect("initialize response");
-    assert!(
-        response.is_ok(),
-        "test client must initialize: {response:?}"
-    );
+    let mut socket = deps.client.wire();
 
     let publish_uri = uri.clone();
     let publish = tokio::spawn(async move {
@@ -2510,8 +2508,11 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         canonical_id: Some(canonical_id.to_string()),
         input_id: canonical_id.to_string(),
         source: Arc::<str>::from(source),
-        file_language: crate::server::self_file_language_for(canonical_id)
-            .expect("the path classifies as a rune module"),
+        file_language: crate::server::self_file_language_for(
+            &verter_session::framework::HostLanguageClassifier::default(),
+            canonical_id,
+        )
+        .expect("the path classifies as a rune module"),
         aliases: Vec::new(),
     });
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
@@ -2524,19 +2525,24 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         version: 1,
         text: source.to_string(),
     });
-    let file_language = crate::server::self_file_language_for(canonical_id).unwrap();
+    let file_language = crate::server::self_file_language_for(
+        &verter_session::framework::HostLanguageClassifier::default(),
+        canonical_id,
+    )
+    .unwrap();
 
     let provider = Arc::new(MockTypeProvider::new());
     let provider_sync_states = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2662,11 +2668,12 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
     needs_provider_sync.insert(canonical_id.clone());
     let cached_verter_diags = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync,
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::clone(&cached_verter_diags),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2737,13 +2744,14 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
     let cached_verter_diags = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::clone(&cached_verter_diags),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2791,11 +2799,12 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
 /// Deps for a verter-only (no in-process provider) coordinator publish.
 fn verter_only_deps(documents: Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
     SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -3042,11 +3051,12 @@ fn debounce_probe_deps() -> (SyncCoordinatorDeps, Arc<DashSet<String>>) {
     ))));
     let needs_provider_sync = Arc::new(DashSet::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::clone(&needs_provider_sync),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -3818,14 +3828,22 @@ async fn provider_diagnostic_pulls_are_bounded_and_the_next_slot_follows_the_use
         .await;
 }
 
-/// While a workspace scan is publishing hundreds of documents into the provider,
-/// every background diagnostic pull makes the engine rebuild its program against
-/// a moving target — and buys nothing, because every open document is re-armed
-/// when the scan completes. A restart replays every open editor as an OPEN, so
-/// only a document the user is EDITING is pulled during a scan; the rest are
-/// still SYNCED, and are pulled once it ends.
+/// A restart replays every open editor as an OPEN to a server that is also
+/// scanning the whole workspace. A replayed document must not wait for that
+/// scan: once its own sync has landed AND its DependencyReady receipt is
+/// current, the imports its diagnostics read are already in the engine, and it
+/// is certified while the scan is still running. One whose receipt is not
+/// current stays fail-closed — synced, never pulled, never certified — until
+/// the receipt is minted or the scan ends. An edited document is held exactly
+/// the same way: the edit changes the document, not whether the dependencies
+/// its diagnostics read have been delivered.
+///
+/// The scan flag stays raised throughout the first two phases, and level 2 of
+/// the readiness ladder is announced only after it is lowered
+/// (`complete_post_scan`), so every certification asserted before the last
+/// phase happened with level 2 still unannounced.
 #[tokio::test(flavor = "multi_thread")]
-async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
+async fn during_a_workspace_scan_a_document_publishes_once_its_dependencies_are_current() {
     let (documents, _states, provider, _app_id, _ide_path, deps) =
         make_carrier_diagnostics_fixture().await;
     let source = |marker: &str| {
@@ -3835,15 +3853,20 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
         )
     };
     let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let receipts = Arc::clone(&deps.dependency_receipts);
+    let vfs_workspace = Arc::clone(&deps.vfs_workspace);
     let handle = spawn_sync_coordinator(deps);
     handle.set_workspace_scan_in_progress(true);
 
-    let overdue = Instant::now() - Duration::from_secs(60);
-    let names = ["ReplayedA", "ReplayedB", "Active"];
+    // `Current` has its dependency closure delivered; `Parked` is waiting on a
+    // dependency the scan has not reached; `Unsettled` never gets a receipt
+    // during the scan; `Active` is being edited while its own dependency is
+    // still parked.
+    // `Promoted` is made current without any import pass minting it.
+    let names = ["Current", "Parked", "Unsettled", "Active", "Promoted"];
     let docs: Vec<(String, Uri)> = names
         .iter()
-        .enumerate()
-        .map(|(index, name)| {
+        .map(|name| {
             let uri: Uri = format!("file:///workspace/src/{name}.vue")
                 .parse()
                 .expect("test uri");
@@ -3857,21 +3880,33 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
                 .get_canonical_id(&uri)
                 .expect("the document must be open");
             needs_provider_sync.insert(canonical_id.clone());
-            if *name == "Active" {
-                // The one document the user is typing in.
-                let change = handle.change_received(canonical_id.clone());
-                let _ = documents.did_change(&uri, 2, &source("Active edited"));
-                change.signal(uri.as_str().to_string());
-            } else {
-                handle.signal(
-                    canonical_id.clone(),
-                    uri.as_str().to_string(),
-                    overdue + Duration::from_millis(index as u64),
-                );
-            }
             (canonical_id, uri)
         })
         .collect();
+    let (active_id, active_uri) = &docs[3];
+    let change = handle.change_received(active_id.clone());
+    let _ = documents.did_change(active_uri, 2, &source("Active edited"));
+
+    // Minted only after every content change above, under the key the
+    // workspace is published at now.
+    let record_receipt = |canonical_id: &str| {
+        let key = crate::server::dependency_freshness_key(&documents, &vfs_workspace)
+            .expect("the fixture publishes a resolver, so receipts have a key");
+        receipts.record_delivered(canonical_id.to_string(), key);
+        assert!(receipts.is_current(canonical_id, &documents, &vfs_workspace));
+    };
+    record_receipt(&docs[0].0);
+
+    let overdue = Instant::now() - Duration::from_secs(60);
+    for (index, (canonical_id, uri)) in docs[..3].iter().chain(&docs[4..]).enumerate() {
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            overdue + Duration::from_millis(index as u64),
+        );
+    }
+    change.signal(active_uri.as_str().to_string());
+    drop(change);
 
     let synced = |calls: &[MockCall], name: &str| {
         calls.iter().any(|call| match call {
@@ -3896,26 +3931,88 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
     .expect("every replayed document is still SYNCED during a scan");
     handle
         .await_until(
-            || documents.diagnostics_ready(&docs[2].1) && handle.diag_tasks_live() == 0,
-            || panic!("the edited document must be certified during the scan"),
+            || {
+                documents.diagnostics_ready(&docs[0].1)
+                    && handle.diag_tasks_live() == 0
+                    // `Parked`, `Unsettled`, `Promoted` and the edited
+                    // `Active`: each tick has decided, and held.
+                    && handle.dependency_holds() >= 4
+            },
+            || {
+                panic!(
+                    "a document whose dependencies are current must be certified while the \
+                     scan is still running, and every other one held"
+                )
+            },
         )
         .await;
+    assert!(handle.workspace_scan_in_progress());
     let calls = provider.calls();
-    assert!(pulled(&calls, "Active"));
-    assert!(
-        !pulled(&calls, "ReplayedA") && !pulled(&calls, "ReplayedB"),
-        "documents the user is not looking at are not pulled while the scan runs: {calls:?}"
-    );
-
-    // The scan ends and the open documents are re-armed: now they are pulled.
-    handle.set_workspace_scan_in_progress(false);
-    for (canonical_id, uri) in &docs[..2] {
-        handle.signal_diagnostics_only(
-            canonical_id.clone(),
-            uri.as_str().to_string(),
-            Instant::now() - Duration::from_secs(1),
+    assert!(pulled(&calls, "Current"));
+    for (index, name) in [(1, "Parked"), (2, "Unsettled"), (3, "Active")] {
+        assert!(
+            !pulled(&calls, name),
+            "{name} has no current dependency receipt and must not be pulled: {calls:?}"
+        );
+        assert!(
+            !documents.diagnostics_ready(&docs[index].1),
+            "{name} must stay fail-closed while its dependencies are not current"
         );
     }
+
+    // The parked dependency is delivered: `Parked` is certified at once, while
+    // the scan still runs and `Unsettled` is still held.
+    record_receipt(&docs[1].0);
+    handle.dependencies_settled();
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&docs[1].1) && handle.diag_tasks_live() == 0,
+            || panic!("a minted receipt must release the publication the scan held back"),
+        )
+        .await;
+    assert!(handle.workspace_scan_in_progress());
+    assert!(
+        !pulled(&provider.calls(), "Unsettled"),
+        "a receipt minted for one document releases only that document"
+    );
+    assert!(
+        !documents.diagnostics_ready(active_uri),
+        "the edited document is still held: its own dependency has not settled"
+    );
+
+    // The edited document's dependency settles: it is certified while the scan
+    // still runs and the unrelated `Unsettled` is still held.
+    record_receipt(active_id);
+    handle.dependencies_settled();
+    handle
+        .await_until(
+            || documents.diagnostics_ready(active_uri) && handle.diag_tasks_live() == 0,
+            || panic!("the edited document must be certified once its dependency settles"),
+        )
+        .await;
+    assert!(handle.workspace_scan_in_progress());
+    assert!(pulled(&provider.calls(), "Active"));
+    assert!(!pulled(&provider.calls(), "Unsettled"));
+
+    // A receipt re-currented without a mint (an isolated edit elsewhere promotes
+    // it) still releases the publication: the loop re-checks on wake.
+    assert!(
+        !documents.diagnostics_ready(&docs[4].1),
+        "Promoted is held until its receipt is current"
+    );
+    record_receipt(&docs[4].0);
+    handle.dependencies_settled();
+    handle
+        .await_until(
+            || documents.diagnostics_ready(&docs[4].1) && handle.diag_tasks_live() == 0,
+            || panic!("a receipt that became current without a mint must release the hold"),
+        )
+        .await;
+    assert!(handle.workspace_scan_in_progress());
+    assert!(!pulled(&provider.calls(), "Unsettled"));
+
+    // The scan ends: whatever it still held is released with no re-arm signal.
+    handle.set_workspace_scan_in_progress(false);
     handle
         .await_until(
             || {
@@ -3925,6 +4022,44 @@ async fn during_a_workspace_scan_only_an_edited_document_is_pulled() {
             || panic!("every open document is certified once the scan has ended"),
         )
         .await;
+}
+
+/// A route with no type provider publishes only Verter's own diagnostics, which
+/// read no scan-mutated provider state: a non-edited document is certified
+/// while the workspace scan is still running, with no receipt to wait for.
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_workspace_scan_a_providerless_document_publishes_without_a_receipt() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/Plain.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>\n".to_string(),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("the document must be open");
+    let deps = verter_only_deps(Arc::clone(&documents));
+    let cached_verter_diags = Arc::clone(&deps.cached_verter_diags);
+    deps.needs_provider_sync.insert(canonical_id.clone());
+    let handle = spawn_sync_coordinator(deps);
+    handle.set_workspace_scan_in_progress(true);
+    handle.signal(
+        canonical_id,
+        uri.as_str().to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    await_publish_for_version(
+        &handle,
+        &cached_verter_diags,
+        uri.as_str(),
+        1,
+        "a provider-less document during a scan",
+    )
+    .await;
+    assert!(handle.workspace_scan_in_progress());
 }
 
 /// Background re-arms (the post-scan sweep re-arms every open document at once)
@@ -4139,7 +4274,6 @@ const msg = '{marker}'
         )
     };
     let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
-    let client = deps.client.clone();
     let handle = spawn_sync_coordinator(deps);
     let open = |name: &str| {
         let uri: Uri = format!("file:///workspace/src/{name}.vue")
@@ -4214,7 +4348,7 @@ const msg = '{marker}'
         .begin_diagnostics_publication(other_uri)
         .expect("the other document is open");
     documents
-        .publish_diagnostics(&client, other_uri, &publication, Vec::new(), false, None)
+        .publish_diagnostics(other_uri, &publication, Vec::new(), false, None)
         .await;
 
     tokio::time::timeout(
@@ -4424,10 +4558,11 @@ async fn a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot() {
         let provider = Arc::new(MockTypeProvider::new());
         let mut deps = SyncCoordinatorDeps {
             documents: Arc::clone(&documents),
+            dependency_receipts: Default::default(),
             project_sync: None,
             needs_provider_sync: Arc::new(DashSet::new()),
             pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-            client: make_test_client(),
+            client: make_test_client(&documents),
             type_provider: None,
             cached_verter_diags: Arc::new(DashMap::new()),
             position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -4502,10 +4637,11 @@ async fn await_projection_via_coordinator(
 fn make_provider_less_deps(documents: &Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
     SyncCoordinatorDeps {
         documents: Arc::clone(documents),
+        dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -5177,6 +5313,7 @@ async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new_with_kind(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -5184,7 +5321,7 @@ async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -5975,13 +6112,14 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -5994,7 +6132,7 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
         ),
     };
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
 
     let tick = sync_file(&deps, canonical_id, uri.as_str());
@@ -6074,13 +6212,14 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     let pending_snapshot_provider_sync: Arc<DashSet<String>> = Arc::new(DashSet::new());
     let deps = Arc::new(SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
+        dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -6150,4 +6289,495 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         calls_before,
         "a restart pulse after coordinator shutdown must not start drain passes"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Per-document sync lane.
+//
+// ONE lane per `(canonical id, open generation)` is shared by the interactive
+// request repair and EVERY background writer — the debounced coordinator here,
+// the synchronous and detached API syncs, the snapshot/pending drains and the
+// workspace scanner. Without it, a background transaction of one revision
+// delivers its bytes between another transaction's own delivery and its commit.
+//
+// The tests below drive the real `sync_file` against the real mock provider and
+// use only `test_hooks` arrival/release barriers, so every ordering they assert
+// is decided rather than raced.
+// ---------------------------------------------------------------------------
+
+/// Open `source` under a fresh registry and mint the open generation that the
+/// server's `did_open` mints. Without a generation the document has no lane and
+/// every writer would legitimately proceed unserialized.
+fn open_with_lane(
+    documents: &Arc<DocumentRegistry>,
+    uri: &Uri,
+    canonical_id: &str,
+    source: &str,
+) -> crate::document_sync_lane::DocumentLaneLease {
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let lanes = documents.document_lanes();
+    let lease = lanes.lifecycle_lease(canonical_id);
+    lanes.begin_open_generation(canonical_id, lease.lane());
+    lease
+}
+
+fn lane_test_deps(
+    documents: &Arc<DocumentRegistry>,
+    provider: &Arc<MockTypeProvider>,
+) -> SyncCoordinatorDeps {
+    SyncCoordinatorDeps {
+        documents: Arc::clone(documents),
+        dependency_receipts: Default::default(),
+        project_sync: Some(ProjectSync::new(
+            Arc::clone(provider) as Arc<dyn crate::type_provider::traits::TypeProvider>,
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(documents),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+            "/other",
+            Some("/other/tsconfig.json"),
+        )),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    }
+}
+
+/// Every provider write of this document's IDE companion path.
+fn ide_companion_writes(provider: &MockTypeProvider, ide_path: &str) -> Vec<MockCall> {
+    provider
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call,
+                MockCall::OpenFile { path, .. }
+                    | MockCall::OpenFileBackground { path, .. }
+                    | MockCall::UpdateFile { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                    if path == ide_path
+            )
+        })
+        .collect()
+}
+
+/// The debounced transaction is parked after its compile — holding
+/// the document's lane — and a second transaction of the same document arrives.
+///
+/// It does NOT interleave and does NOT wait: the serial loop asks the lane, is
+/// told it is busy, and yields the document for a later pass. Exactly ONE
+/// provider write for the revision reaches the provider, so there is no second
+/// application to supersede the first transaction's commit and no half-applied
+/// state between them.
+///
+/// RED-before (no shared lane): the second `sync_file` runs to completion while
+/// the first is parked, so `ide_companion_writes` returns two writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_debounced_sync_yields_the_document_lane_to_an_in_flight_transaction() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    // Unique canonical id: the pause-hook registry is keyed by it, so the shared
+    // "/workspace/src/App.vue" literal would let a concurrent test steal it.
+    let canonical_id = "/workspace/src/LaneHolderParked.vue";
+    let uri: Uri = "file:///workspace/src/LaneHolderParked.vue"
+        .parse()
+        .expect("test uri");
+    const SOURCE: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                          <template><div>{{ msg }}</div></template>\n";
+    let _lease = open_with_lane(&documents, &uri, canonical_id, SOURCE);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let deps = lane_test_deps(&documents, &provider);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
+
+    // Park the first transaction right after its compile. From here until it is
+    // released it owns the document's lane.
+    let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
+    let first = sync_file(&deps, canonical_id, uri.as_str());
+    let contending = async {
+        arrived.notified().await;
+
+        // The serial loop never waits on a lane. Prove it returned rather than
+        // blocking: `sync_file` is a plain future, so awaiting it here would
+        // deadlock the single-threaded join if it took the lane.
+        let contended = sync_file(&deps, canonical_id, uri.as_str()).await;
+        let writes_while_held = ide_companion_writes(&provider, &ide_path).len();
+        release.notify_one();
+        (contended, writes_while_held)
+    };
+    let (first_outcome, (contended, writes_while_held)) =
+        futures_util::future::join(first, contending).await;
+
+    assert_eq!(
+        first_outcome,
+        SyncFileOutcome::Settled,
+        "the lane holder's own transaction delivers normally"
+    );
+    assert_eq!(
+        contended,
+        SyncFileOutcome::LaneBusy,
+        "a second transaction of a document whose lane is held must yield, not wait and not deliver"
+    );
+    assert_eq!(
+        writes_while_held, 0,
+        "the contending transaction delivered nothing while the lane was held"
+    );
+    let final_writes = ide_companion_writes(&provider, &ide_path);
+    assert_eq!(
+        final_writes.len(),
+        1,
+        "exactly ONE provider application for the revision: no interleaved delivery to \
+         supersede the holder's commit. Writes: {final_writes:?}"
+    );
+    assert!(
+        deps.pending_snapshot_provider_sync.contains(canonical_id),
+        "the yielded document is requeued on the shared pending queue, so it is \
+         redriven even if the coordinator receipt is coalesced away"
+    );
+}
+
+/// A busy document is requeued WITHOUT spending its retry budget, and
+/// another document is still serviced. A contended document must not consume
+/// the budget that exists for genuine delivery failures — otherwise repeated
+/// contention alone would strand it with the provider permanently unsynced.
+#[tokio::test(flavor = "multi_thread")]
+async fn contention_on_one_document_leaves_another_documents_sync_unaffected() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let contended_id = "/workspace/src/LaneContended.vue";
+    let contended_uri: Uri = "file:///workspace/src/LaneContended.vue"
+        .parse()
+        .expect("test uri");
+    let free_id = "/workspace/src/LaneFree.vue";
+    let free_uri: Uri = "file:///workspace/src/LaneFree.vue"
+        .parse()
+        .expect("test uri");
+    const SOURCE: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                          <template><div>{{ msg }}</div></template>\n";
+    let _contended_lease = open_with_lane(&documents, &contended_uri, contended_id, SOURCE);
+    let _free_lease = open_with_lane(&documents, &free_uri, free_id, SOURCE);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let deps = lane_test_deps(&documents, &provider);
+
+    // Hold the contended document's lane for the whole interleaving.
+    let held = match documents.document_lanes().try_delivery_lane(contended_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the held document must hand out its lane, got {other:?}"),
+    };
+    let contended_ide =
+        verter_session_query::resolution::carrier_ide_provider_path(contended_id, false);
+    let free_ide = verter_session_query::resolution::carrier_ide_provider_path(free_id, false);
+
+    let contended_outcome = sync_file(&deps, contended_id, contended_uri.as_str()).await;
+    let free_outcome = sync_file(&deps, free_id, free_uri.as_str()).await;
+
+    assert_eq!(
+        contended_outcome,
+        SyncFileOutcome::LaneBusy,
+        "the contended document yields"
+    );
+    assert_eq!(
+        free_outcome,
+        SyncFileOutcome::Settled,
+        "a different document is not blocked by another document's lane"
+    );
+    assert!(
+        ide_companion_writes(&provider, &contended_ide).is_empty(),
+        "the contended document delivered nothing"
+    );
+    assert_eq!(
+        ide_companion_writes(&provider, &free_ide).len(),
+        1,
+        "the uncontended document's provider work completed while the other was held"
+    );
+    drop(held);
+}
+
+/// A transaction that starts while its document is CLOSED and finds it
+/// open before delivery must take the lane (or yield to its holder).
+///
+/// `try_delivery_lane` is asked at the delivery point, not at the start of the
+/// transaction, so it observes the document's live open generation rather than
+/// the state the transaction began with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transaction_that_starts_closed_takes_the_lane_when_it_finds_the_document_open() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/LaneOpensMidFlight.vue";
+    let uri: Uri = "file:///workspace/src/LaneOpensMidFlight.vue"
+        .parse()
+        .expect("test uri");
+    let lanes = documents.document_lanes();
+
+    // The transaction starts with the document closed: no open generation, so
+    // there is nothing to serialize against and it proceeds.
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Closed
+        ),
+        "a closed document has no lane to take"
+    );
+
+    // The editor opens the document mid-flight and a request begins repairing it.
+    let _lease = open_with_lane(
+        &documents,
+        &uri,
+        canonical_id,
+        "<script setup lang=\"ts\">\n</script>\n",
+    );
+    let held = match lanes.try_delivery_lane(canonical_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the newly open document must hand out a lane, got {other:?}"),
+    };
+
+    // The still-running transaction now delivers and finds an open document whose
+    // transaction owns it. It yields rather than interleaving.
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Busy
+        ),
+        "a transaction that started closed must still take (or yield to) the lane of a \
+         document that became open before delivery"
+    );
+    drop(held);
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Acquired(_)
+        ),
+        "once the open document's transaction completes the lane is free again"
+    );
+}
+
+/// Background API work never holds or waits on the lane across a provider
+/// round trip ahead of an interactive request.
+///
+/// An interactive transaction parks in the middle of its own work (here: a
+/// provider round trip, the longest hold a transaction can have). A background
+/// writer asked during that window must return BUSY straight away rather than
+/// blocking, and the interactive transaction must remain the only one running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_writer_yields_immediately_instead_of_waiting_for_an_interactive_holder() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/LaneApiWaiter.vue";
+    let uri: Uri = "file:///workspace/src/LaneApiWaiter.vue"
+        .parse()
+        .expect("test uri");
+    let _lease = open_with_lane(
+        &documents,
+        &uri,
+        canonical_id,
+        "<script setup lang=\"ts\">\n</script>\n",
+    );
+    let lanes = Arc::clone(documents.document_lanes());
+
+    // The interactive request's transaction takes the lane for repair.
+    let interactive = lanes.repair_lease(
+        canonical_id,
+        lanes
+            .open_generation(canonical_id)
+            .expect("the document was opened"),
+    );
+    let holder = interactive.lock().await;
+
+    // A background API task arrives while that holder is parked mid-transaction.
+    // It must observe the busy lane NOW. This is decisive rather than
+    // timing-sensitive: `holder` is deliberately still alive across the whole
+    // await, so a probe that BLOCKED on the lane could never complete and the
+    // timeout would fire. Completing at all IS the non-blocking proof.
+    let probe = {
+        let lanes = Arc::clone(&lanes);
+        let canonical_id = canonical_id.to_string();
+        tokio::spawn(async move { lanes.try_delivery_lane(&canonical_id) })
+    };
+    let background = tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+        .await
+        .expect("a background writer must not block on the document's lane")
+        .expect("the background probe task must not panic");
+    assert!(
+        matches!(background, crate::document_sync_lane::DeliveryLane::Busy),
+        "the background writer observed the held lane, got {background:?}"
+    );
+
+    // The interactive transaction still holds the lane throughout — the
+    // background writer neither waited nor displaced it.
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Busy
+        ),
+        "the background writer neither waited for nor displaced the interactive holder"
+    );
+    drop(holder);
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Acquired(_)
+        ),
+        "the lane is released with the interactive transaction"
+    );
+}
+
+/// A waiter of a RETIRED open generation never commits into a reopened
+/// one's lane. A close/reopen overlaps the stale transaction; the stale lease is
+/// detached, so locking it neither blocks nor serializes with the live document,
+/// and revalidating the generation refuses its commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiter_of_a_retired_open_generation_never_takes_the_reopened_documents_lane() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/LaneStaleGeneration.vue";
+    let lanes = documents.document_lanes();
+
+    // The transaction captures the open generation, then the document is closed.
+    let crate::document_sync_lane::EstablishedGeneration::Open(opened) =
+        lanes.try_establish_open_generation(canonical_id, || true)
+    else {
+        panic!("the document's generation is established");
+    };
+    let stale = lanes.repair_lease(canonical_id, opened);
+    let stale_generation = stale.generation();
+    assert!(lanes.generation_is_open(canonical_id, stale_generation));
+
+    // `did_close` retires the exact generation AND the lane object serving it.
+    // The retirement is what makes the reopen install a DIFFERENT lane rather
+    // than handing the stale transaction's own lane back to the new document.
+    let close_lease = lanes.lifecycle_lease(canonical_id);
+    let close_guard = close_lease.lock().await;
+    lanes.close_open_generation(canonical_id, stale_generation);
+    close_lease.retire();
+    drop(close_guard);
+    drop(close_lease);
+
+    // The editor reopens: a NEW generation and a live lane now exist.
+    let live = lanes.lifecycle_lease(canonical_id);
+    let live_guard = live.lock().await;
+    let reopened = lanes.begin_open_generation(canonical_id, live.lane());
+    assert_ne!(
+        reopened, stale_generation,
+        "a reopen mints a fresh generation"
+    );
+
+    // The stale transaction locks its DETACHED lane while the reopened document's
+    // live transaction holds the live one. It cannot deadlock and cannot block:
+    // the live lane reports `Busy` because the LIVE transaction owns it, and the
+    // live transaction was the one already holding before the stale lock.
+    let stale_guard = stale.lock().await;
+    assert!(
+        matches!(
+            lanes.try_delivery_lane(canonical_id),
+            crate::document_sync_lane::DeliveryLane::Busy
+        ),
+        "the reopened document's live transaction still owns its lane; the stale \
+         waiter serialized on its own detached lane and did not interfere"
+    );
+
+    // ...and it cannot commit: its generation no longer validates.
+    assert!(
+        !lanes.generation_is_open(canonical_id, stale_generation),
+        "the retired generation must fail revalidation after the reopen"
+    );
+    drop(stale_guard);
+    drop(live_guard);
+}
+
+/// A transaction of a revision whose IDE leg another transaction already
+/// delivered, recorded and committed applies nothing: one IDE-companion
+/// application per revision however many writers arrive for it. Every part of
+/// the leg's basis still forces it — an engine restart (the serving engine no
+/// longer holds the bytes) and an edit (a new revision) each deliver again.
+/// Covered for both the owned direct-open commit and the unowned open-document
+/// liveness commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_current_ide_leg_is_skipped_until_its_basis_moves() {
+    for (case, owner_root, tsconfig) in [
+        ("unowned", "/other", "/other/tsconfig.json"),
+        ("owned", "/workspace", "/workspace/tsconfig.json"),
+    ] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+        let canonical_id = "/workspace/src/LaneFreshLeg.vue";
+        let uri: Uri = "file:///workspace/src/LaneFreshLeg.vue"
+            .parse()
+            .expect("test uri");
+        const SOURCE: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                              <template><div>{{ msg }}</div></template>\n";
+        const EDITED: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-b'\n</script>\n\
+                              <template><div>{{ msg }}</div></template>\n";
+        let _lease = open_with_lane(&documents, &uri, canonical_id, SOURCE);
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let mut deps = lane_test_deps(&documents, &provider);
+        deps.vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+            owner_root,
+            Some(tsconfig),
+        ));
+        let ide_path =
+            verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
+        let writes = || ide_companion_writes(&provider, &ide_path);
+
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            1,
+            "{case}: the first transaction delivers the revision"
+        );
+
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            1,
+            "{case}: a transaction of an already-current revision applies nothing. Writes: {:?}",
+            writes()
+        );
+
+        provider.forget_applied_content();
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            2,
+            "{case}: a restarted engine no longer holds the bytes, so the leg is owed again"
+        );
+
+        let _ = documents.did_change(&uri, 2, EDITED);
+        assert_eq!(
+            sync_file(&deps, canonical_id, uri.as_str()).await,
+            SyncFileOutcome::Settled,
+            "{case}"
+        );
+        assert_eq!(
+            writes().len(),
+            3,
+            "{case}: an edit is a new revision, so its leg is delivered"
+        );
+    }
 }

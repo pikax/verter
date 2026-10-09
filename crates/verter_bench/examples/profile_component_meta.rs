@@ -30,8 +30,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use verter_semantic::analysis::AnalyzedMacroKind;
-use verter_session::{FileAnalysisSnapshot, HostConfig, VerterHost};
+use verter_session::{HostConfig, VerterHost};
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -497,7 +498,7 @@ fn collect_snapshot_counts(snapshot: &FileAnalysisSnapshot) -> SnapshotCounts {
 }
 
 fn collect_evaluated_counts(
-    evaluated: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    evaluated: &verter_session_query::analysis::type_expand::ExpandedComponentTypes,
 ) -> EvaluatedCounts {
     let mut prop_names = BTreeSet::new();
     for field in &evaluated.props {
@@ -522,8 +523,10 @@ fn run_component_meta_request(
 
     let (resolve_imported_elapsed, resolved_imported_types) = if include_resolve_imported {
         let resolve_started = Instant::now();
-        let resolved =
-            host.resolve_component_meta(target_id, verter_session::ProjectionMode::Expanded);
+        let resolved = host.resolve_component_meta(
+            target_id,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        );
         let resolved_count = resolved
             .map(|state| state.resolved_macros.len())
             .unwrap_or(0);

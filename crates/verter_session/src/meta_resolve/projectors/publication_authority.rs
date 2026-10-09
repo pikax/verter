@@ -66,13 +66,16 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
-use crate::meta_resolve::projection_demand::{ProjectionCursor, PublishedSurfaceKind};
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{DeclIdentity, SemanticNodeId, SurfaceMember};
+use crate::meta_resolve::projection_demand::ProjectionCursor;
+use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{DeclIdentity, SemanticNodeId, SurfaceMember};
 
 use super::macro_payload_substrate::PayloadSurfaceScope;
 
@@ -305,7 +308,7 @@ impl<'a> AdmittedPublishedMember<'a> {
 /// unresolved-decl it pushes a diagnostic and returns `None`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_macro_payload(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -340,7 +343,7 @@ pub(crate) fn resolve_macro_payload(
 /// from the single-source-of-truth [`super::macro_payload_surface_provenance`]
 /// for the payload's macro kind.
 pub(crate) fn resolve_payload_surface(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     payload: &ResolvedMacroPayload,
     expansion_kind: MacroExpansionKind,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
@@ -375,7 +378,7 @@ pub(crate) fn resolve_payload_surface(
 /// through to the single-dispatch surface. The kind is DERIVED from the
 /// payload's macro kind exactly as in [`resolve_payload_surface`].
 pub(crate) fn resolve_payload_surface_with_scope(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     payload: &ResolvedMacroPayload,
     expansion_kind: MacroExpansionKind,
     scope: PayloadSurfaceScope,
@@ -408,17 +411,26 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// MOVING each [`SurfaceMember`] out of the enumerated vector.
 ///
 /// AUTHORITY-PRIVATE enumeration: wraps the single shared
-/// [`super::read_positive_surface_members`] node→members reader (this is NOT a
+/// [`verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members`] node→members reader (this is NOT a
 /// second reader — it is the candidate-tokenising wrapper
 /// over that one reader). Each candidate carries the surface's derived kind so
 /// admission can compare against the cursor's surface kind.
 pub(crate) fn read_surface_member_candidates(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
     // An INCOMPLETE member read records its typed reason and enumerates only
     // the usable subset — never a silently truncated candidate set.
-    let members = super::read_positive_surface_members(ctx, surface.node)
+    let members =
+        verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            ctx,
+            dispatch,
+            surface.node,
+        )
         .recorded()
         .unwrap_or_default();
     members
@@ -455,7 +467,7 @@ pub(crate) fn read_surface_member_candidates(
 pub(crate) fn admit_published_member<'a>(
     candidate: SurfaceMemberCandidate,
     cursor: &ProjectionCursor<'a>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
 ) -> Option<AdmittedPublishedMember<'a>> {
     // (1) Visibility gate.
     if !candidate.member.visibility.is_public() {
@@ -479,7 +491,8 @@ pub(crate) fn admit_published_member<'a>(
     // The descent key is the PUBLISHED name: the publication surface is
     // string-named, and member lookup coerces the numeric spelling to the
     // same property by JS property identity.
-    let member_key = crate::semantic_query::PropertyKey::identifier(Arc::clone(&member_name));
+    let member_key =
+        verter_type_engine::semantic_query::PropertyKey::identifier(Arc::clone(&member_name));
     let member_cursor = cursor.descend_published_member(&member_key)?;
     // (4) Record the published-field origin edge BEFORE the mint. This is the
     // semantic-provenance rail (`MemberEdgeProvenance::PublishedField`) the
@@ -526,7 +539,7 @@ mod tests {
     fn member_with_visibility(visibility: MemberVisibility) -> SurfaceMember {
         SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            key: crate::semantic_query::AuthoredPropertyKey::string("foo"),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("foo"),
             value: SemanticNodeId(0),
             optional: false,
             readonly: false,
@@ -535,8 +548,9 @@ mod tests {
             visibility,
             spans: Default::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         }
     }
 

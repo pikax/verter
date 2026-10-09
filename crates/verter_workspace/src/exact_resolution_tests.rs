@@ -9,7 +9,7 @@
 use super::*;
 use crate::types::ExactResolution;
 use std::collections::BTreeSet;
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 fn default_ctx() -> ResolutionContext {
     ResolutionContext {
@@ -1112,4 +1112,797 @@ fn replace_exact_resolutions_noop_gate_is_duplicate_key_safe() {
         "a duplicate-keyed input whose distinct-key set value-matches the \
          stored table is a true no-op",
     );
+}
+
+#[test]
+fn a_superseded_duplicate_route_stores_no_dependency_evidence_fresh_or_incremental() {
+    let refresh = || {
+        vec![
+            exact("./a", Some("/lib/x.ts"), vec![]),
+            exact("./a", Some("/lib/y.ts"), vec![]),
+        ]
+    };
+    let mut fresh = EdgeStore::new();
+    assert!(
+        fresh
+            .replace_exact_resolutions("/src/Comp.vue", refresh())
+            .changed
+    );
+
+    let mut incremental = EdgeStore::new();
+    incremental.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./a", Some("/lib/y.ts"), vec![])],
+    );
+    let result = incremental.replace_exact_resolutions("/src/Comp.vue", refresh());
+    assert!(
+        !result.changed,
+        "the last route per key already matches the stored table"
+    );
+
+    for (label, store) in [("fresh", &fresh), ("incremental", &incremental)] {
+        let snapshot = store.snapshot("/src/Comp.vue").expect("owner state");
+        assert_eq!(
+            snapshot.exact_resolved,
+            BTreeSet::from(["/lib/y.ts".to_string()]),
+            "{label}: a superseded route's target is no exact dependency"
+        );
+        assert!(
+            store.reverse_deps("/lib/x.ts").is_empty(),
+            "{label}: no reverse edge may point from a superseded route's target"
+        );
+        assert_eq!(
+            store.reverse_deps("/lib/y.ts"),
+            vec!["/src/Comp.vue".to_string()],
+            "{label}: the winning route's target keeps its reverse edge"
+        );
+    }
+}
+
+#[test]
+fn an_empty_refresh_of_an_owner_without_edge_state_is_unchanged() {
+    let mut store = EdgeStore::new();
+    let result = store.replace_exact_resolutions("/src/never.ts", vec![]);
+    assert!(
+        !result.changed,
+        "an owner with no edge state stores the empty table already"
+    );
+    assert!(
+        store.snapshot("/src/never.ts").is_none(),
+        "an unchanged refresh creates no owner state"
+    );
+}
+
+// ── Owner-local exact publication ──
+
+mod owner_local_publication {
+    use std::collections::BTreeSet;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
+
+    use crate::changes::WorkspaceChange;
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use crate::memory::{MemoryOptions, MemoryWorkspace};
+    use crate::resolution_currency::{
+        take_exact_publication_work, CapturedResolutionWorld, ResolutionFactKey,
+        ResolutionFactVersion,
+    };
+    use crate::traits::{WorkspaceAccess, WorkspaceRead};
+    use crate::types::{ExactResolution, ParsedEdge};
+    use verter_session_query::resolution::{
+        ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind,
+    };
+
+    const OWNER_COUNTS: [usize; 4] = [128, 256, 512, 1024];
+
+    fn owner_id(index: usize) -> String {
+        format!("/p/src/owner{index:04}.ts")
+    }
+
+    /// Two routes per owner, distinct per owner and per revision.
+    fn owner_routes(index: usize, revision: usize) -> Vec<ExactResolution> {
+        vec![
+            ExactResolution {
+                specifier: "./a".to_string(),
+                phase: ResolvePhase::CodegenBlocker,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some(format!("/p/dep/a{index}_{revision}.ts")),
+                possible_canonical_ids: vec![format!("/p/dep/a{index}_{revision}.ts")],
+            },
+            ExactResolution {
+                specifier: "./b".to_string(),
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some(format!("/p/dep/b{index}_{revision}.ts")),
+                possible_canonical_ids: vec![format!("/p/dep/b{index}_{revision}.ts")],
+            },
+        ]
+    }
+
+    fn route_fact_keys(index: usize) -> Vec<ResolutionFactKey> {
+        owner_routes(index, 0)
+            .iter()
+            .map(|route| {
+                ResolutionFactKey::exact_importer(
+                    &owner_id(index),
+                    &route.specifier,
+                    ResolutionContext {
+                        phase: route.phase,
+                        kind: route.kind,
+                    },
+                    ResolutionPopulation::Base,
+                )
+            })
+            .collect()
+    }
+
+    fn populated(owners: usize) -> MemoryWorkspace {
+        let workspace = MemoryWorkspace::new(MemoryOptions::default());
+        for index in 0..owners {
+            workspace.set_exact_resolutions(&owner_id(index), owner_routes(index, 0));
+        }
+        workspace
+    }
+
+    /// Exact-table work of one refresh of `owner` in a workspace of `owners`
+    /// owners: unchanged and changed exact refreshes, an unchanged and a
+    /// changed parsed-edge refresh carrying the exact routes, and the
+    /// owner's deletion.
+    fn refresh_work(owners: usize, owner: usize) -> [u64; 5] {
+        let workspace = populated(owners);
+        let bare = [ParsedEdge::Bare {
+            specifier: "pkg".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+        }];
+        workspace.record_parsed_edges_with_exact_resolutions(
+            &owner_id(owner),
+            &bare,
+            owner_routes(owner, 0),
+        );
+        let _ = take_exact_publication_work();
+
+        let unchanged = workspace.set_exact_resolutions(&owner_id(owner), owner_routes(owner, 0));
+        assert!(!unchanged.changed, "an identical refresh must not publish");
+        let unchanged_exact = take_exact_publication_work();
+
+        let changed = workspace.set_exact_resolutions(&owner_id(owner), owner_routes(owner, 1));
+        assert!(changed.changed, "a changed refresh must publish");
+        let changed_exact = take_exact_publication_work();
+
+        workspace.record_parsed_edges_with_exact_resolutions(
+            &owner_id(owner),
+            &bare,
+            owner_routes(owner, 1),
+        );
+        let unchanged_parsed = take_exact_publication_work();
+
+        workspace.record_parsed_edges_with_exact_resolutions(
+            &owner_id(owner),
+            &bare,
+            owner_routes(owner, 2),
+        );
+        let changed_parsed = take_exact_publication_work();
+
+        workspace.apply_changes(vec![WorkspaceChange::FileDeleted {
+            canonical_id: owner_id(owner),
+        }]);
+        let deleted = take_exact_publication_work();
+
+        [
+            unchanged_exact,
+            changed_exact,
+            unchanged_parsed,
+            changed_parsed,
+            deleted,
+        ]
+    }
+
+    #[test]
+    fn exact_refresh_work_is_independent_of_unrelated_owner_count() {
+        let samples: Vec<[u64; 5]> = OWNER_COUNTS
+            .iter()
+            .map(|&owners| refresh_work(owners, owners / 2))
+            .collect();
+        let labels = [
+            "unchanged exact refresh",
+            "changed exact refresh",
+            "unchanged parsed-edge refresh",
+            "changed parsed-edge refresh",
+            "owner deletion",
+        ];
+        for (operation, label) in labels.iter().enumerate() {
+            let work: Vec<u64> = samples.iter().map(|sample| sample[operation]).collect();
+            assert!(
+                work[0] > 0,
+                "{label}: the work counter must observe the refresh at all"
+            );
+            assert!(
+                work.iter().all(|&w| w == work[0]),
+                "{label}: exact-table work must be owner-local, identical at \
+                 {OWNER_COUNTS:?} owners with two routes each; observed {work:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subtree_owner_seek_visits_only_the_subtree_key_range() {
+        use crate::resolution_currency::ResolutionWorldRoot;
+        use verter_session_query::resolution::ResolutionWorldId;
+
+        // Unrelated owners elsewhere AND component-prefix siblings of the
+        // directory (`/p/sub-…`, `/p/sub.…`, `/p/subway/…`, all adjacent to
+        // `/p/sub/` in key order) grow with `owners`; the subtree's own
+        // importers stay fixed.
+        let seek = |owners: usize| {
+            let mut root = ResolutionWorldRoot::bootstrap(ResolutionWorldId::from_raw(1));
+            for index in 0..owners {
+                root.replace_owner_exacts(&owner_id(index), &owner_routes(index, 0));
+                for sibling in [
+                    format!("/p/sub-{index:04}.ts"),
+                    format!("/p/sub.{index:04}.ts"),
+                    format!("/p/subway/{index:04}.ts"),
+                ] {
+                    root.replace_owner_exacts(&sibling, &owner_routes(index, 0));
+                }
+            }
+            for (owner, index) in [("/p/sub", 0), ("/p/sub/a.ts", 1), ("/p/sub/b/c.ts", 2)] {
+                root.replace_owner_exacts(owner, &owner_routes(index, 0));
+            }
+            let _ = take_exact_publication_work();
+            let under = root.exact_owners_under("/p/sub/");
+            (under, take_exact_publication_work())
+        };
+        let samples: Vec<_> = OWNER_COUNTS.iter().map(|&owners| seek(owners)).collect();
+        for (owners, (under, _)) in OWNER_COUNTS.iter().zip(&samples) {
+            assert_eq!(
+                under,
+                &[
+                    "/p/sub".to_string(),
+                    "/p/sub/a.ts".to_string(),
+                    "/p/sub/b/c.ts".to_string()
+                ],
+                "{owners} owners: exactly the directory's own path and the importers under it"
+            );
+        }
+        let work: Vec<u64> = samples.iter().map(|(_, work)| *work).collect();
+        assert!(
+            work.iter().all(|&w| w == work[0]),
+            "the seek must not visit importers outside the subtree, component-prefix \
+             siblings included; observed {work:?}"
+        );
+    }
+
+    #[test]
+    fn root_replacement_shares_every_unrelated_owner_bucket() {
+        let owners = 256;
+        let workspace = populated(owners);
+        let engine = &workspace.engine;
+        let before = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        let versions_before: Vec<_> = (0..owners)
+            .flat_map(route_fact_keys)
+            .map(|key| engine.resolution_fact_version_for_test(ResolutionPopulation::Base, &key))
+            .collect();
+
+        workspace.set_exact_resolutions(&owner_id(7), owner_routes(7, 1));
+
+        let after = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        for index in (0..owners).filter(|&index| index != 7) {
+            let id = owner_id(index);
+            assert!(
+                Arc::ptr_eq(
+                    &before.base.exact_bucket(&id).expect("populated owner"),
+                    &after.base.exact_bucket(&id).expect("populated owner"),
+                ),
+                "root replacement must share {id}'s untouched bucket"
+            );
+        }
+        assert!(
+            !Arc::ptr_eq(
+                &before.base.exact_bucket(&owner_id(7)).expect("populated"),
+                &after.base.exact_bucket(&owner_id(7)).expect("populated"),
+            ),
+            "the refreshed owner publishes a replacement bucket"
+        );
+        assert_eq!(
+            before
+                .base
+                .exact(&owner_id(7), "./a", context(ResolvePhase::CodegenBlocker)),
+            Some(&owner_routes(7, 0)[0]),
+            "a held root keeps the bucket it was published with"
+        );
+        let versions_after: Vec<_> = (0..owners)
+            .flat_map(route_fact_keys)
+            .map(|key| engine.resolution_fact_version_for_test(ResolutionPopulation::Base, &key))
+            .collect();
+        for (index, (was, now)) in versions_before.iter().zip(&versions_after).enumerate() {
+            let owner = index / 2;
+            if owner == 7 {
+                assert_ne!(was, now, "the refreshed owner's route facts advance");
+            } else {
+                assert_eq!(
+                    was, now,
+                    "owner {owner}'s route fact must keep its identity across another \
+                     owner's refresh"
+                );
+            }
+        }
+    }
+
+    /// Owners populated through real resolutions, so the root's recorded
+    /// probes and realpaths grow with the owner count. An unchanged exact
+    /// refresh opens no publication window and leaves the published root in
+    /// place; a changed one builds its replacement without copying any of
+    /// those unrelated observations.
+    #[test]
+    fn exact_refresh_copies_no_unrelated_root_observation() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let owners = 256;
+        let refreshed = 9;
+        let workspace = MemoryWorkspace::new(MemoryOptions::default());
+        for index in 0..owners {
+            workspace.inject_file(owner_id(index), Arc::from("export {}\n"));
+            workspace.inject_file(format!("/p/src/dep{index:04}.ts"), Arc::from("export {}\n"));
+            assert!(
+                workspace
+                    .resolve_import(
+                        &owner_id(index),
+                        &format!("./dep{index:04}"),
+                        context(ResolvePhase::CodegenBlocker),
+                    )
+                    .is_some(),
+                "owner {index} resolves its sibling"
+            );
+            workspace.set_exact_resolutions(&owner_id(index), owner_routes(index, 0));
+        }
+        let engine = &workspace.engine;
+        let before = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        assert!(
+            before.base.path_probes.len() >= owners,
+            "the fixture's resolutions record probes for every owner"
+        );
+
+        let windows = Rc::new(Cell::new(0));
+        let unchanged = resolution_test_hooks::with_repeating_hook(
+            ResolutionPhase::WorldWriteHeld,
+            {
+                let windows = Rc::clone(&windows);
+                move || windows.set(windows.get() + 1)
+            },
+            || workspace.set_exact_resolutions(&owner_id(refreshed), owner_routes(refreshed, 0)),
+        );
+        assert!(!unchanged.changed, "an identical refresh must not publish");
+        assert_eq!(
+            windows.get(),
+            0,
+            "an unchanged refresh must not open a publication window"
+        );
+        let after_unchanged = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        assert!(
+            Arc::ptr_eq(&before.base, &after_unchanged.base),
+            "an unchanged refresh leaves the published root in place"
+        );
+
+        let changed =
+            workspace.set_exact_resolutions(&owner_id(refreshed), owner_routes(refreshed, 1));
+        assert!(changed.changed, "a changed refresh must publish");
+        let after_changed = engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        assert!(
+            !Arc::ptr_eq(&before.base, &after_changed.base),
+            "a changed refresh publishes a replacement root"
+        );
+        assert!(
+            after_changed
+                .base
+                .shares_observation_maps_with(&before.base),
+            "the replacement root shares every unrelated recorded observation"
+        );
+    }
+
+    #[test]
+    fn a_refresh_whose_last_route_per_key_matches_the_published_bucket_is_unchanged() {
+        let workspace = populated(4);
+        let published = owner_routes(2, 0);
+        let mut superseded = owner_routes(2, 1);
+        superseded.extend(published.iter().cloned());
+
+        let result = workspace.set_exact_resolutions(&owner_id(2), superseded);
+
+        assert!(
+            !result.changed,
+            "the last route per key wins, so this refresh republishes the stored bucket \
+             and the edge store and the world must both report it unchanged"
+        );
+        assert_eq!(
+            published_routes(&workspace, 4)[2],
+            (Some(published[0].clone()), Some(published[1].clone()))
+        );
+    }
+
+    fn context(phase: ResolvePhase) -> ResolutionContext {
+        ResolutionContext {
+            phase,
+            kind: ResolveRequestKind::EsmImport,
+        }
+    }
+
+    /// Every owner's published routes, read from the current root.
+    fn published_routes(
+        workspace: &MemoryWorkspace,
+        owners: usize,
+    ) -> Vec<(Option<ExactResolution>, Option<ExactResolution>)> {
+        let world = workspace
+            .engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        (0..owners)
+            .map(|index| {
+                let id = owner_id(index);
+                (
+                    world
+                        .base
+                        .exact(&id, "./a", context(ResolvePhase::CodegenBlocker))
+                        .cloned(),
+                    world
+                        .base
+                        .exact(&id, "./b", context(ResolvePhase::ProviderGraph))
+                        .cloned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_refresh_of_an_importer_the_workspace_never_saw_publishes_nothing() {
+        let workspace = populated(4);
+        let before = workspace
+            .engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+
+        let result = workspace.set_exact_resolutions("/p/never.ts", vec![]);
+
+        assert!(!result.changed, "no route existed and none is published");
+        let after = workspace
+            .engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        assert!(
+            Arc::ptr_eq(&before.base, &after.base),
+            "an unchanged refresh publishes no replacement root"
+        );
+    }
+
+    /// Bounds every channel wait so a broken interleaving fails instead of
+    /// hanging; no correct run comes near it.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    fn route_versions(world: &CapturedResolutionWorld, index: usize) -> Vec<ResolutionFactVersion> {
+        route_fact_keys(index)
+            .iter()
+            .map(|key| world.fact_version(key))
+            .collect()
+    }
+
+    /// Edge-store exact evidence of `owner`: its exact dependencies and the
+    /// importers of each target it ever routed to.
+    fn edge_evidence(
+        workspace: &MemoryWorkspace,
+        index: usize,
+        revisions: usize,
+    ) -> (BTreeSet<String>, Vec<Vec<String>>) {
+        let edges = workspace.engine.edges.read();
+        let exact_resolved = edges
+            .snapshot(&owner_id(index))
+            .map(|snapshot| snapshot.exact_resolved)
+            .unwrap_or_default();
+        let reverse = (0..revisions)
+            .flat_map(|revision| owner_routes(index, revision))
+            .filter_map(|route| route.resolved_canonical_id)
+            .map(|target| edges.reverse_deps(&target))
+            .collect();
+        (exact_resolved, reverse)
+    }
+
+    /// One changed exact refresh is held inside its publication window while
+    /// a competing parsed-edge publication and a resolution reach the
+    /// publication gate it holds. Nothing observes the held publication
+    /// partially; both queued operations run against the world it leaves;
+    /// both owners' updates survive; every other owner's bucket and route
+    /// facts keep their identity; and the result equals a fresh build.
+    #[test]
+    fn a_held_exact_publication_lands_whole_before_the_publications_queued_behind_it() {
+        let owners = 128;
+        let held = 3;
+        let queued = 5;
+        let workspace = Arc::new(populated(owners));
+        let held_target = owner_routes(held, 1)[0]
+            .resolved_canonical_id
+            .clone()
+            .expect("routed");
+        workspace.inject_file(held_target.clone(), Arc::from("export {}\n"));
+        let before = workspace
+            .engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let held_writer = {
+            let workspace = Arc::clone(&workspace);
+            std::thread::spawn(move || {
+                resolution_test_hooks::with_hook(
+                    ResolutionPhase::WorldWriteHeld,
+                    move || {
+                        held_tx.send(()).expect("the test is listening");
+                        release_rx
+                            .recv_timeout(WAIT)
+                            .expect("the test releases the held publication");
+                    },
+                    || workspace.set_exact_resolutions(&owner_id(held), owner_routes(held, 1)),
+                )
+            })
+        };
+        held_rx
+            .recv_timeout(WAIT)
+            .expect("the exact refresh enters its publication window");
+        assert!(
+            workspace
+                .engine
+                .capture_published_resolution_world(ResolutionPopulation::Base)
+                .is_none(),
+            "no capture may observe a root while its exact publication is in flight"
+        );
+
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let queued_writer = {
+            let workspace = Arc::clone(&workspace);
+            std::thread::spawn(move || {
+                resolution_test_hooks::with_every_phase_hook(
+                    move |phase| {
+                        let _ = queued_tx.send(phase);
+                    },
+                    || {
+                        workspace.record_parsed_edges_with_exact_resolutions(
+                            &owner_id(queued),
+                            &[],
+                            owner_routes(queued, 1),
+                        )
+                    },
+                )
+            })
+        };
+        loop {
+            let phase = queued_rx
+                .recv_timeout(WAIT)
+                .expect("the parsed-edge publication reaches the publication gate");
+            assert_ne!(
+                phase,
+                ResolutionPhase::WorldWriteHeld,
+                "a competing publication must not enter its window while another is held"
+            );
+            if phase == ResolutionPhase::PublicationGateWait {
+                break;
+            }
+        }
+
+        let (reader_tx, reader_rx) = mpsc::channel();
+        let reader = {
+            let workspace = Arc::clone(&workspace);
+            std::thread::spawn(move || {
+                resolution_test_hooks::with_hook(
+                    ResolutionPhase::PublicationGateWait,
+                    move || reader_tx.send(()).expect("the test is listening"),
+                    || {
+                        workspace.resolve_import(
+                            &owner_id(held),
+                            "./a",
+                            context(ResolvePhase::CodegenBlocker),
+                        )
+                    },
+                )
+            })
+        };
+        reader_rx
+            .recv_timeout(WAIT)
+            .expect("the resolution waits on the held publication");
+
+        release_tx
+            .send(())
+            .expect("the held publication is waiting");
+        assert!(
+            held_writer.join().expect("held writer").changed,
+            "the held refresh publishes"
+        );
+        assert!(
+            queued_writer.join().expect("queued writer").changed,
+            "the queued refresh publishes"
+        );
+        assert_eq!(
+            reader
+                .join()
+                .expect("reader")
+                .map(|resolved| resolved.source_id),
+            Some(held_target),
+            "a resolution that waited on the publication answers from the world it left"
+        );
+
+        let after = workspace
+            .engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world");
+        for index in [held, queued] {
+            let id = owner_id(index);
+            assert_eq!(
+                before
+                    .base
+                    .exact(&id, "./a", context(ResolvePhase::CodegenBlocker)),
+                Some(&owner_routes(index, 0)[0]),
+                "the root held from before keeps {id}'s old routes"
+            );
+            assert_eq!(
+                after
+                    .base
+                    .exact(&id, "./a", context(ResolvePhase::CodegenBlocker)),
+                Some(&owner_routes(index, 1)[0]),
+                "{id}'s update survives the other publication"
+            );
+            assert!(
+                route_versions(&after, index)
+                    .iter()
+                    .zip(route_versions(&before, index))
+                    .all(|(now, was)| *now > was),
+                "{id}'s route facts advance with its routes"
+            );
+        }
+        for index in (0..owners).filter(|index| ![held, queued].contains(index)) {
+            let id = owner_id(index);
+            assert!(
+                Arc::ptr_eq(
+                    &before.base.exact_bucket(&id).expect("populated owner"),
+                    &after.base.exact_bucket(&id).expect("populated owner"),
+                ),
+                "neither publication may replace {id}'s bucket"
+            );
+            assert_eq!(
+                route_versions(&before, index),
+                route_versions(&after, index),
+                "{id}'s route facts keep their identity"
+            );
+        }
+
+        let fresh = MemoryWorkspace::new(MemoryOptions::default());
+        for index in 0..owners {
+            let revision = usize::from([held, queued].contains(&index));
+            fresh.set_exact_resolutions(&owner_id(index), owner_routes(index, revision));
+        }
+        assert_eq!(
+            published_routes(&workspace, owners),
+            published_routes(&fresh, owners),
+            "the interleaved publications publish exactly the table a fresh build does"
+        );
+        for index in [held, queued, 0] {
+            assert_eq!(
+                edge_evidence(&workspace, index, 2),
+                edge_evidence(&fresh, index, 2),
+                "owner {index}'s exact dependency evidence matches a fresh build"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_owner_refreshes_preserve_unrelated_buckets_and_match_a_fresh_build() {
+        const WRITERS: usize = 4;
+        const ROUNDS: usize = 24;
+        let owners = 128;
+        let workspace = Arc::new(populated(owners));
+        let bystander = owner_id(owners - 1);
+        let bystander_bucket = workspace
+            .engine
+            .capture_published_resolution_world(ResolutionPopulation::Base)
+            .expect("a settled world")
+            .base
+            .exact_bucket(&bystander)
+            .expect("populated owner");
+        let barrier = Arc::new(Barrier::new(WRITERS + 1));
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let workspace = Arc::clone(&workspace);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for round in 0..ROUNDS {
+                        // Each writer owns a disjoint stripe; every round
+                        // republishes its stripe (alternating changed and
+                        // unchanged refreshes through both writers).
+                        for index in (writer..owners - 1).step_by(WRITERS) {
+                            let revision = round / 2;
+                            if round % 3 == 0 {
+                                workspace.record_parsed_edges_with_exact_resolutions(
+                                    &owner_id(index),
+                                    &[],
+                                    owner_routes(index, revision),
+                                );
+                            } else {
+                                workspace.set_exact_resolutions(
+                                    &owner_id(index),
+                                    owner_routes(index, revision),
+                                );
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        let reader = {
+            let workspace = Arc::clone(&workspace);
+            let barrier = Arc::clone(&barrier);
+            let bystander_bucket = Arc::clone(&bystander_bucket);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut observed = 0;
+                while observed < ROUNDS * 8 {
+                    // A capture fails only while a writer is mid-publication.
+                    let Some(world) = workspace
+                        .engine
+                        .capture_published_resolution_world(ResolutionPopulation::Base)
+                    else {
+                        std::thread::yield_now();
+                        continue;
+                    };
+                    observed += 1;
+                    assert!(
+                        Arc::ptr_eq(
+                            &world
+                                .base
+                                .exact_bucket(&owner_id(owners - 1))
+                                .expect("kept"),
+                            &bystander_bucket,
+                        ),
+                        "no concurrent publication may replace an unrelated owner's bucket"
+                    );
+                    std::thread::yield_now();
+                }
+            })
+        };
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        reader.join().expect("reader");
+
+        let fresh = MemoryWorkspace::new(MemoryOptions::default());
+        let final_revision = (ROUNDS - 1) / 2;
+        for index in 0..owners {
+            let revision = if index == owners - 1 {
+                0
+            } else {
+                final_revision
+            };
+            fresh.set_exact_resolutions(&owner_id(index), owner_routes(index, revision));
+        }
+        assert_eq!(
+            published_routes(&workspace, owners),
+            published_routes(&fresh, owners),
+            "incremental owner refreshes must publish exactly the table a fresh build does"
+        );
+        for index in 0..owners {
+            assert_eq!(
+                edge_evidence(&workspace, index, final_revision + 1),
+                edge_evidence(&fresh, index, final_revision + 1),
+                "owner {index}'s exact dependency evidence matches a fresh build"
+            );
+        }
+    }
 }

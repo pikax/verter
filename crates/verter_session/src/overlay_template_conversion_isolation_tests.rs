@@ -67,7 +67,7 @@ fn overlay_view(host: &Arc<VerterHost>) -> OverlaidView {
 
 fn persisted_template(
     host: &VerterHost,
-) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
     host.derived_raw_cache().get(CANONICAL).and_then(|d| {
         d.raw_template_analysis()
             .map(|entry| Arc::clone(&entry.template))
@@ -78,7 +78,7 @@ fn persisted_template(
 /// bytes (`<Bar />`) converted with the overlay snapshot's imports
 /// (`Bar` → `./Bar.vue`).
 fn assert_overlay_coherent(
-    tpl: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    tpl: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     lane: &str,
 ) {
     let bar = tpl

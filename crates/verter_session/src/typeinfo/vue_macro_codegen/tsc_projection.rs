@@ -21,23 +21,22 @@ use super::*;
 /// no widen at all. A carrier declared in ANOTHER module is nameable and
 /// keeps its precise `typeof` spelling at every depth.
 fn nameable_render_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: crate::semantic_query::SemanticNodeId,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
-) -> crate::semantic_query::SemanticNodeId {
+) -> verter_type_engine::semantic_query::SemanticNodeId {
     dispatch.widen_owner_local_nominal_typeofs(node, owner_canonical)
 }
 
 pub(super) fn render_tsc_node(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
     let node = nameable_render_node(dispatch, node, owner_canonical);
-    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
+    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node);
     if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
@@ -89,15 +88,14 @@ pub(super) fn render_tsc_node(
 /// declaration is a tracked local dependency. A genuine miss (no rendered
 /// node at all) still fails closed, matching every other caller.
 pub(super) fn render_tsc_testing_node(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
     counters.tsc_materializations += 1;
     let node = nameable_render_node(dispatch, node, owner_canonical);
-    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
+    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node);
     if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
@@ -114,8 +112,7 @@ pub(super) fn render_tsc_testing_node(
 pub(super) fn tsc_scope_requirements(
     mac: &AnalyzedMacro,
     inventory: &TscScopeInventory<'_>,
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
     tsc_scope_requirements_for(
@@ -123,7 +120,6 @@ pub(super) fn tsc_scope_requirements(
         Some(mac.span),
         &mac.type_references,
         inventory,
-        ctx,
         dispatch,
         owner_canonical,
     )
@@ -143,8 +139,7 @@ pub(super) fn tsc_scope_requirements_for(
     macro_span: Option<verter_span::Span>,
     type_references: &[String],
     inventory: &TscScopeInventory<'_>,
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
     let macro_owner = tsc_script_owner(owner)?;
@@ -271,7 +266,6 @@ pub(super) fn tsc_scope_requirements_for(
                     entry.span,
                     entry.kind == LocalDeclarationKind::TypeAndValue,
                     inventory,
-                    ctx,
                     dispatch,
                     owner_canonical,
                 ) {
@@ -520,8 +514,7 @@ fn inferred_class_members(
     declaration_span: verter_span::Span,
     include_static: bool,
     inventory: &TscScopeInventory<'_>,
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
 ) -> Result<InferredClassProjection, ClassInferenceFailure> {
     fn collect_overload_groups(
@@ -529,7 +522,7 @@ fn inferred_class_members(
         is_static: bool,
         groups: &mut BTreeSet<(String, bool)>,
     ) -> Result<(), verter_type_expr::facts::InferenceUnavailableReason> {
-        use crate::resolver_core::shallow_file_state::SEMANTIC_INFERENCE_TRAVERSAL_BUDGET;
+        use verter_semantic_source::typeof_dependencies::SEMANTIC_INFERENCE_TRAVERSAL_BUDGET;
 
         let mut pending = vec![ty];
         let mut visited = 0usize;
@@ -562,29 +555,33 @@ fn inferred_class_members(
         Ok(())
     }
 
-    let Some(lowered) = inventory.shallow_state.effective_type_decl_in(owner, name) else {
+    let Some(lowered) =
+        inventory
+            .lowering
+            .effective_type_decl(inventory.shallow_state, owner, name)
+    else {
         return Err(ClassInferenceFailure::Unresolved(
             UnresolvedReason::MissingDependency,
         ));
     };
-    if lowered.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
+    if lowered.kind != verter_session_query::declarations::TypeDeclKind::Class {
         return Ok(InferredClassProjection {
             members: Vec::new(),
             value_dependencies: BTreeSet::new(),
         });
     }
-    let contributor_parts = match inventory
-        .shallow_state
-        .decl_bodies()
-        .transient_type_parts_in(owner, name)
-    {
-        crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => parts,
-        _ => {
-            return Err(ClassInferenceFailure::Unresolved(
-                UnresolvedReason::MissingDependency,
-            ));
-        }
-    };
+    let contributor_parts =
+        match inventory
+            .lowering
+            .transient_type_parts(inventory.shallow_state, owner, name)
+        {
+            verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => parts,
+            _ => {
+                return Err(ClassInferenceFailure::Unresolved(
+                    UnresolvedReason::MissingDependency,
+                ));
+            }
+        };
     let Some(body) = contributor_parts.bodies.get(contributor_ordinal) else {
         return Err(ClassInferenceFailure::Unresolved(
             UnresolvedReason::MissingDependency,
@@ -703,8 +700,8 @@ fn inferred_class_members(
 
     if include_static
         && inventory
-            .shallow_state
-            .effective_value_decl_in(owner, name)
+            .lowering
+            .effective_value_decl(inventory.shallow_state, owner, name)
             .is_none()
     {
         return Err(ClassInferenceFailure::Unresolved(
@@ -713,11 +710,10 @@ fn inferred_class_members(
     }
     let static_parts = if include_static {
         match inventory
-            .shallow_state
-            .decl_bodies()
-            .transient_value_parts_in(owner, name)
+            .lowering
+            .transient_value_parts(inventory.shallow_state, owner, name)
         {
-            crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => Some(parts),
+            verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => Some(parts),
             _ => {
                 return Err(ClassInferenceFailure::Unresolved(
                     UnresolvedReason::MissingDependency,
@@ -867,7 +863,7 @@ fn inferred_class_members(
                 &verter_type_expr::facts::FunctionReturnSource::Flow(*identity),
                 owner_canonical,
             ) {
-                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
+                verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
                     // A DEGRADED SUCCESS never splices display text: this
                     // projection is fail-closed (every degraded shape
                     // refuses), and a modeled-`any` substitution is a
@@ -878,7 +874,7 @@ fn inferred_class_members(
                         ));
                     }
                     let Some((safe, typeof_paths)) =
-                        crate::project_semantic_dispatch::raise::node_declaration_facts_with_dispatch(
+                        verter_type_engine::project_semantic_dispatch::raise::node_declaration_facts_with_dispatch(
                             dispatch,
                             result.return_type(),
                         )
@@ -893,7 +889,7 @@ fn inferred_class_members(
                         ));
                     }
                     let Some(rendered) = crate::typeinfo::raise::render_node_display_with_ctx(
-                        ctx,
+                        dispatch,
                         result.return_type(),
                     ) else {
                         return Err(ClassInferenceFailure::Unsupported(
@@ -911,16 +907,16 @@ fn inferred_class_members(
                     }
                     (rendered.text, typeof_paths)
                 }
-                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
-                    crate::semantic_query::FlowReturnFailure::Budget(reason),
+                verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::Budget(reason),
                 ) => {
                     return Err(ClassInferenceFailure::InferenceUnavailable(reason));
                 }
                 // A call in the body did not resolve: the member is typed
                 // UNSUPPORTED and suppresses admission — never widened
                 // back to `any`.
-                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
-                    crate::semantic_query::FlowReturnFailure::CallResolution(_),
+                verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::CallResolution(_),
                 ) => {
                     return Err(ClassInferenceFailure::Unsupported(
                         UnsupportedReason::SemanticConstruct,
@@ -955,7 +951,7 @@ fn inferred_class_members(
                 UnsupportedReason::SemanticConstruct,
             ));
         };
-        match crate::resolver_core::shallow_file_state::type_expr_is_declaration_safe(
+        match verter_semantic_source::typeof_dependencies::type_expr_is_declaration_safe(
             candidate_type,
         ) {
             Ok(true) => {}
@@ -976,7 +972,7 @@ fn inferred_class_members(
         let type_text = verter_type_expr::render_type_expr_display(candidate_type)
             .map_err(|_| ClassInferenceFailure::Unsupported(UnsupportedReason::SemanticConstruct))?
             .text;
-        crate::resolver_core::shallow_file_state::collect_typeof_roots(
+        verter_semantic_source::typeof_dependencies::collect_typeof_roots(
             candidate_type,
             &mut value_dependencies,
         )
@@ -1019,9 +1015,10 @@ fn collect_local_declaration_closure(
     }
 
     let declaration_owner = top_level_owner(owner);
-    let Some(deps) = inventory
-        .shallow_state
-        .type_deps_in(declaration_owner, name)
+    let Some(deps) =
+        inventory
+            .lowering
+            .type_dependencies(inventory.shallow_state, declaration_owner, name)
     else {
         return Err(resolution_failure(MacroProjectionLane::Tsc));
     };
@@ -1178,15 +1175,17 @@ fn binding_usage_precedence(usage: TscBindingUsage) -> u8 {
 /// interface in this SFC's own `<script>`) is retained normally (its
 /// declaration is in scope). A cross-file reference into a plain `.ts`/`.d.ts`
 /// module is also kept — that import resolves. The carrier classification is
-/// the registry-backed [`verter_semantic::resolver_core::path_is_carrier`], the
+/// the registry-backed [`verter_session_query::resolution::path_is_carrier`], the
 /// single structural authority (a new carrier extends the registry, not this
 /// predicate).
 pub(super) fn emit_type_is_cross_sfc_carrier(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    payload: crate::semantic_query::SemanticNodeId,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    payload: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> bool {
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, payload) else {
+    let Some(data) =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), payload)
+    else {
         return false;
     };
     let canonical: &str = match data.as_ref() {
@@ -1194,7 +1193,7 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
         SemanticNodeData::InstantiationRef { base, .. } => base.canonical_id.as_ref(),
         _ => return false,
     };
-    canonical != owner_canonical && verter_semantic::resolver_core::path_is_carrier(canonical)
+    canonical != owner_canonical && verter_session_query::resolution::path_is_carrier(canonical)
 }
 
 /// Testing-surface type text for a prop whose resolved type is a type declared
@@ -1212,14 +1211,15 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
 /// cross-file type whose bare name IS a directly-imported binding (the scope
 /// requirements retain that named import, so the bare form already resolves).
 pub(super) fn cross_file_namespace_import_type(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     attempt: &mut verter_compiler::compile_transaction::CompileAttempt<'_>,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
     inventory: &TscScopeInventory<'_>,
 ) -> Option<String> {
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
+    let data =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
     let SemanticNodeData::DeclRef { identity } = data.as_ref() else {
         return None;
     };
@@ -1259,8 +1259,7 @@ pub(super) fn cross_file_namespace_import_type(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tsc_emit_rows(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     surface: &TypeInfoSurface,
     mac: &AnalyzedMacro,
@@ -1280,23 +1279,22 @@ pub(super) fn tsc_emit_rows(
         // surface is published from this lane, hence no completeness claim to
         // gate). A complete no-name signature contributes no row.
         let names = match callable.event_names(context) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(names)
+            | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(names) => {
                 names.into_inner()
             }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                match incomplete.into_authored_fallback() {
-                    Some(names) => names,
-                    None => continue,
-                }
-            }
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                incomplete,
+            ) => match incomplete.into_authored_fallback() {
+                Some(names) => names,
+                None => continue,
+            },
         };
         let Some(signature) = callable.signature(context) else {
             continue;
         };
         let parameters = render_function_parameters(
-            ctx,
             dispatch,
             owner_canonical,
             &signature.raw_params()[1..],
@@ -1321,7 +1319,7 @@ pub(super) fn tsc_emit_rows(
             continue;
         };
         let parameters =
-            render_emit_payload_parameters(ctx, dispatch, owner_canonical, member.value, counters)?;
+            render_emit_payload_parameters(dispatch, owner_canonical, member.value, counters)?;
         push_tsc_emit(
             &mut rows,
             name.as_ref(),
@@ -1364,13 +1362,12 @@ fn push_tsc_emit(
 }
 
 fn render_emit_payload_parameters(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
-    use crate::semantic_query::SemanticNodeData;
+    use verter_type_engine::semantic_query::SemanticNodeData;
 
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
     let Some(node) = dispatch
@@ -1383,32 +1380,33 @@ fn render_emit_payload_parameters(
             resolution_failure(MacroProjectionLane::Tsc)
         });
     };
-    match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
+    match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        .as_deref()
+    {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
-            render_tuple_parameters(ctx, dispatch, owner_canonical, elements, counters)
+            render_tuple_parameters(dispatch, owner_canonical, elements, counters)
         }
         // CALL kind only: an emit payload replays a callback's parameters;
         // a construct signature is not a callback shape and degrades to the
         // honest open rest below.
         Some(SemanticNodeData::Signature {
-            kind: crate::semantic_query::SignatureKind::Call,
+            kind: verter_type_engine::semantic_query::SignatureKind::Call,
             params,
             ..
-        }) => render_function_parameters(ctx, dispatch, owner_canonical, params, counters),
+        }) => render_function_parameters(dispatch, owner_canonical, params, counters),
         _ => Ok(TscSpliceText::new("...args: unknown[]")),
     }
 }
 
 fn render_tuple_parameters(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    elements: &[crate::semantic_query::TupleElement],
+    elements: &[verter_type_engine::semantic_query::TupleElement],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(elements.len());
     for (index, element) in elements.iter().enumerate() {
-        let ty = render_tsc_node(ctx, dispatch, owner_canonical, element.value, counters)?;
+        let ty = render_tsc_node(dispatch, owner_canonical, element.value, counters)?;
         let name = element
             .label
             .as_deref()
@@ -1427,15 +1425,14 @@ fn render_tuple_parameters(
 }
 
 fn render_function_parameters(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    params: &[crate::semantic_query::FunctionParam],
+    params: &[verter_type_engine::semantic_query::FunctionParam],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(params.len());
     for (index, param) in params.iter().enumerate() {
-        let ty = render_tsc_node(ctx, dispatch, owner_canonical, param.ty, counters)?;
+        let ty = render_tsc_node(dispatch, owner_canonical, param.ty, counters)?;
         let name = param
             .name
             .as_deref()

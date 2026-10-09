@@ -37,6 +37,37 @@ use super::rename_prepare::{
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
+/// Read an export's declaration span (re-export chains followed) together with
+/// the source that span indexes, both at ONE committed content of the declaring
+/// file, recording that content as the foreground request's dependency evidence.
+fn export_span_and_source(
+    server: &VerterLanguageServer,
+    canonical_id: &str,
+    binding_name: &str,
+) -> Option<(String, u32, u32, std::sync::Arc<str>)> {
+    let host = server.documents.host();
+    let lookup = || {
+        host.get_export_span_follow_reexports(canonical_id, binding_name)
+            .or_else(|| {
+                let (s, e) = host.get_export_span(canonical_id, binding_name)?;
+                Some((canonical_id.to_string(), s, e))
+            })
+    };
+    let (declaring_id, _, _) = lookup()?;
+    server.read_child_at_one_revision(&declaring_id, || {
+        let (resolved_id, start, end) = lookup()?;
+        if resolved_id != declaring_id {
+            return None;
+        }
+        let source = crate::documents::ForegroundRequest::host_target_source(
+            &server.documents,
+            &resolved_id,
+            host.get_source(&resolved_id)?,
+        )?;
+        Some((resolved_id, start, end, source))
+    })
+}
+
 /// Resolve a named export's declaration `Location` in a REAL source file through
 /// the host's export tables (re-export chains followed). Fail-closed `None` when
 /// the export, source, or position conversion is unavailable.
@@ -45,14 +76,8 @@ fn host_export_location(
     canonical_id: &str,
     binding_name: &str,
 ) -> Option<Location> {
-    let host = &server.documents.host();
-    let (resolved_id, start, end) = host
-        .get_export_span_follow_reexports(canonical_id, binding_name)
-        .or_else(|| {
-            let (s, e) = host.get_export_span(canonical_id, binding_name)?;
-            Some((canonical_id.to_string(), s, e))
-        })?;
-    let source = host.get_source(&resolved_id)?;
+    let (resolved_id, start, end, source) =
+        export_span_and_source(server, canonical_id, binding_name)?;
     let encoding = server.position_encoding.read().clone();
     let li = LineIndex::new(&source, encoding);
     let range = Range {
@@ -162,7 +187,7 @@ pub(super) async fn handle_goto_definition(
     server: &VerterLanguageServer,
     params: GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
-    let _hg = HandlerGuard::new("goto_definition");
+    let _hg = HandlerGuard::new(&server.handler_activity, "goto_definition");
     let uri = &params.text_document_position_params.text_document.uri;
     let _timer = server
         .statistics
@@ -175,6 +200,26 @@ pub(super) async fn handle_goto_definition(
         position.character
     );
 
+    // One admission covers the native leg, the provider leg and every early
+    // return: an edit that commits anywhere between them is a revision change
+    // of this request, so a native answer can never ride into a provider
+    // answer computed on a later revision.
+    server
+        .answer_foreground(
+            crate::documents::ForegroundRoute::Definition,
+            uri,
+            handle_goto_definition_attempt(server, uri, position),
+        )
+        .await
+}
+
+/// The unsettled definition computation; [`handle_goto_definition`] owns its
+/// admission and settlement.
+async fn handle_goto_definition_attempt(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    position: &Position,
+) -> Result<Option<GotoDefinitionResponse>> {
     // Capture-only readiness: a miss enqueues/coalesces background dependency
     // publication, but definition never joins it and still queries the provider
     // immediately against the project state already available. The handler must
@@ -221,9 +266,7 @@ pub(super) async fn handle_goto_definition(
                                     d.end,
                                     encoding.clone(),
                                     &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
+                                        block_in_place_if_available(|| server.target_source(p))
                                     },
                                 )?
                             } else {
@@ -246,7 +289,7 @@ pub(super) async fn handle_goto_definition(
 
     struct NativeDefinitionSnapshot {
         capture: crate::documents::SourceFeatureDocumentCapture,
-        analysis: Option<verter_session::FileAnalysisSnapshot>,
+        analysis: Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
         svelte_render_lexical_visibility: Option<SvelteRenderLexicalVisibility>,
         svelte_script_render_prop: SvelteScriptRenderPropResolution,
         source_authoritative_svelte_render: bool,
@@ -327,17 +370,9 @@ pub(super) async fn handle_goto_definition(
             Some(&resolve_path as &dyn Fn(&str) -> Option<String>);
 
         let encoding = server.position_encoding.read().clone();
-        let host: &verter_session::VerterHost = &host_guard;
         let resolve_export = |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
-            // Follow re-exports (cycle-detected) to find the actual definition
-            let (resolved_id, start, end) = host
-                .get_export_span_follow_reexports(target_canonical_id, binding_name)
-                .or_else(|| {
-                    // Fallback to non-following version for backwards compat
-                    let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
-                    Some((target_canonical_id.to_string(), s, e))
-                })?;
-            let target_source = host.get_source(&resolved_id)?;
+            let (resolved_id, start, end, target_source) =
+                export_span_and_source(server, target_canonical_id, binding_name)?;
             let target_li = LineIndex::new(&target_source, encoding.clone());
             let start_pos = target_li.offset_to_position(start)?;
             let end_pos = target_li.offset_to_position(end)?;
@@ -394,6 +429,7 @@ pub(super) async fn handle_goto_definition(
             .as_ref()
             .map(|snapshot| snapshot.structure().clone());
         let mut def = definition_at_position(
+            server.documents.language_classifier(),
             position,
             &doc.source,
             &blocks,
@@ -427,7 +463,7 @@ pub(super) async fn handle_goto_definition(
     let native_snapshot_is_current = native_snapshot.as_ref().is_some_and(|native| {
         server
             .documents
-            .source_feature_capture_is_current(uri, &native.capture)
+            .source_feature_document_is_current(uri, &native.capture)
     });
     if !native_snapshot_is_current {
         verter_result = None;
@@ -473,13 +509,33 @@ pub(super) async fn handle_goto_definition(
     // try_component_contract_definition. The old separate resolve_component_event_definition
     // and resolve_component_prop_definition calls are subsumed by it.
 
+    // Repair once before capturing the provider surface; partial syntax may
+    // remain repairable. A revision change during the repair supersedes the
+    // admitted request at settlement.
+    let prepared_ctx = if server.type_provider.is_some() {
+        server.repaired_type_provider_context(uri).await
+    } else {
+        None
+    };
+    definition_provider_attempt(server, uri, position, verter_result, prepared_ctx).await
+}
+
+/// The provider leg of a definition request; [`handle_goto_definition`] owns
+/// its admission and settlement.
+async fn definition_provider_attempt(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    position: &Position,
+    verter_result: Option<GotoDefinitionResponse>,
+    prepared_ctx: Option<super::TypeProviderContext>,
+) -> Result<Option<GotoDefinitionResponse>> {
     // Enhance with the TypeProvider immediately. Dependency readiness above is
     // a background-healing signal, not an admission gate for non-destructive
     // navigation; a partial provider answer during project loading is preferable
     // to blocking the request behind publication.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(initial_ctx) = server.repaired_type_provider_context(uri).await {
+        if let Some(initial_ctx) = prepared_ctx {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
             if let Some(initial_offset) = merge::carrier_position_to_tsx_offset_validated(
@@ -509,11 +565,12 @@ pub(super) async fn handle_goto_definition(
                         // queries), so a returned foreign location maps through
                         // the generation the attempt began against (never the
                         // merge-time current one).
-                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                        let foreign_api_set = server
+                        let lifecycle_root = server
                             .documents
                             .provider_surfaces()
-                            .capture_current_carrier_api_set();
+                            .capture_lifecycle_root();
+                        let foreign_ide_set = lifecycle_root.carrier_ide_set();
+                        let foreign_api_set = lifecycle_root.carrier_api_set();
                         let type_defs = tp.get_definition(&tsx_path, offset).await?;
                         Ok((type_defs, foreign_ide_set, foreign_api_set))
                     },
@@ -545,6 +602,7 @@ pub(super) async fn handle_goto_definition(
                     let negotiated_encoding = server.position_encoding.read().clone();
                     let api_resolver = |api_path: &str| {
                         crate::provider_surface_store::classify_captured_api_surface(
+                            Some(&server.documents),
                             &foreign_api_set,
                             api_path,
                             negotiated_encoding.clone(),
@@ -582,11 +640,7 @@ pub(super) async fn handle_goto_definition(
                         &carrier_source_exists,
                         Some(&barrel_resolver),
                         negotiated_encoding.clone(),
-                        &|p: &str| {
-                            block_in_place_if_available(|| {
-                                server.documents.host().workspace_read().read_file(p)
-                            })
-                        },
+                        &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                     );
                     // If the type provider resolved to a barrel file, follow
                     // re-exports to the terminal declaration.
@@ -680,11 +734,7 @@ pub(super) async fn handle_goto_definition(
                         &carrier_source_exists,
                         Some(&barrel_resolver),
                         negotiated_encoding.clone(),
-                        &|p: &str| {
-                            block_in_place_if_available(|| {
-                                server.documents.host().workspace_read().read_file(p)
-                            })
-                        },
+                        &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                     );
                     let mut locations = match server.resolve_barrel_locations(merged) {
                         Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
@@ -723,7 +773,7 @@ pub(super) async fn handle_goto_type_definition(
     server: &VerterLanguageServer,
     params: GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
-    let _hg = HandlerGuard::new("goto_type_definition");
+    let _hg = HandlerGuard::new(&server.handler_activity, "goto_type_definition");
     let uri = &params.text_document_position_params.text_document.uri;
     let _timer = server
         .statistics
@@ -785,9 +835,7 @@ pub(super) async fn handle_goto_type_definition(
                                     d.end,
                                     encoding.clone(),
                                     &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
+                                        block_in_place_if_available(|| server.target_source(p))
                                     },
                                 )?
                             } else {
@@ -831,11 +879,12 @@ pub(super) async fn handle_goto_type_definition(
                     |tsx_path: String, offset: u32| async move {
                         // Pin the FOREIGN carrier IDE surfaces BEFORE the query
                         // (per attempt — see handle_goto_definition).
-                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                        let foreign_api_set = server
+                        let lifecycle_root = server
                             .documents
                             .provider_surfaces()
-                            .capture_current_carrier_api_set();
+                            .capture_lifecycle_root();
+                        let foreign_ide_set = lifecycle_root.carrier_ide_set();
+                        let foreign_api_set = lifecycle_root.carrier_api_set();
                         let type_defs = tp.get_type_definition(&tsx_path, offset).await?;
                         Ok((type_defs, foreign_ide_set, foreign_api_set))
                     },
@@ -867,6 +916,7 @@ pub(super) async fn handle_goto_type_definition(
                     let negotiated_encoding = server.position_encoding.read().clone();
                     let api_resolver = |api_path: &str| {
                         crate::provider_surface_store::classify_captured_api_surface(
+                            Some(&server.documents),
                             &foreign_api_set,
                             api_path,
                             negotiated_encoding.clone(),
@@ -887,11 +937,7 @@ pub(super) async fn handle_goto_type_definition(
                         &carrier_source_exists,
                         Some(&barrel_resolver),
                         negotiated_encoding.clone(),
-                        &|p: &str| {
-                            block_in_place_if_available(|| {
-                                server.documents.host().workspace_read().read_file(p)
-                            })
-                        },
+                        &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                     ));
                 }
             } else {
@@ -912,7 +958,7 @@ pub(super) async fn handle_references(
     server: &VerterLanguageServer,
     params: ReferenceParams,
 ) -> Result<Option<Vec<Location>>> {
-    let _hg = HandlerGuard::new("references");
+    let _hg = HandlerGuard::new(&server.handler_activity, "references");
     let uri = &params.text_document_position.text_document.uri;
     let _timer = server
         .statistics
@@ -966,9 +1012,7 @@ pub(super) async fn handle_references(
                                     r.end,
                                     encoding.clone(),
                                     &|p: &str| {
-                                        block_in_place_if_available(|| {
-                                            server.documents.host().workspace_read().read_file(p)
-                                        })
+                                        block_in_place_if_available(|| server.target_source(p))
                                     },
                                 )?
                             } else {
@@ -1115,11 +1159,7 @@ pub(super) async fn handle_references(
                                 }),
                                 &carrier_source_exists,
                                 negotiated_encoding,
-                                &|p: &str| {
-                                    block_in_place_if_available(|| {
-                                        server.documents.host().workspace_read().read_file(p)
-                                    })
-                                },
+                                &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                             ),
                             child_prop_declaration,
                         ));
@@ -1176,7 +1216,7 @@ pub(super) async fn handle_rename(
     server: &VerterLanguageServer,
     params: RenameParams,
 ) -> Result<Option<WorkspaceEdit>> {
-    let _hg = HandlerGuard::new("rename");
+    let _hg = HandlerGuard::new(&server.handler_activity, "rename");
     let uri = &params.text_document_position.text_document.uri;
     let position = &params.text_document_position.position;
     let new_name = &params.new_name;
@@ -1299,14 +1339,15 @@ pub(super) async fn handle_rename(
                     // the snapshot captured here for that exact path + generation;
                     // a path absent from the set, or whose generation was later
                     // superseded by a racing background sync, fails closed (drop).
-                    let query_snapshot = server
+                    let lifecycle_root = server
                         .documents
                         .provider_surfaces()
-                        .capture_current_carrier_api_set();
-                    // And the FOREIGN carrier IDE set, pinned under the same
-                    // fence, so a returned foreign `.vue.tsx` location maps
-                    // through the generation this request began against.
-                    let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                        .capture_lifecycle_root();
+                    let query_snapshot = lifecycle_root.carrier_api_set();
+                    // And the FOREIGN carrier IDE view of the same captured root,
+                    // so a returned foreign `.vue.tsx` location maps through the
+                    // generation this request began against.
+                    let foreign_ide_set = lifecycle_root.carrier_ide_set();
 
                     // IMPORTED-TYPE declaration UPGRADE: a `defineProps<ImportedType>()`
                     // child prop has no inline macro-field span (its declaration lives
@@ -1436,6 +1477,7 @@ pub(super) async fn handle_rename(
                                 //   • ABSENT from the capture → NotVirtual (a genuinely real same-named
                                 //     file the store did not know as virtual; edit it in place).
                                 crate::provider_surface_store::classify_captured_api_surface(
+                                    Some(&server.documents),
                                     &query_snapshot,
                                     api_path,
                                     negotiated_encoding.clone(),
@@ -1455,11 +1497,7 @@ pub(super) async fn handle_rename(
                                 Some(&api_resolver),
                                 &carrier_source_exists,
                                 negotiated_encoding.clone(),
-                                &|p: &str| {
-                                    block_in_place_if_available(|| {
-                                        server.documents.host().workspace_read().read_file(p)
-                                    })
-                                },
+                                &|p: &str| block_in_place_if_available(|| server.target_source(p)),
                             );
                             // CROSS-FILE COMPLETENESS GATE. The merge reports every
                             // provider location it could not map onto authored bytes.

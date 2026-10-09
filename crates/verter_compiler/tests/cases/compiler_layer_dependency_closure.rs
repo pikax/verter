@@ -3,8 +3,10 @@
 //! Walks the resolved production graph (`cargo metadata --format-version 1
 //! --all-features`) and asserts `verter_compiler`'s production closure:
 //!
-//! * never reaches host/session/query/LSP/NAPI/FFI/WASM crates — those own
-//!   TypeInfo execution and host integration, not compiler authority;
+//! * never reaches host/session/LSP/NAPI/FFI/WASM crates — those own
+//!   TypeInfo execution and host integration, not compiler authority. The
+//!   parser-free semantic vocabulary in `verter_session_query` sits below
+//!   `verter_semantic` and is reachable through it;
 //! * still reaches `verter_semantic` and `verter_macro_dto` so the compiler
 //!   consumes shared analysis and the neutral macro DTO instead of importing
 //!   host TypeInfo types.
@@ -25,9 +27,8 @@ const COMPILER_PACKAGE: &str = "verter_compiler";
 /// not reach. Reaching any of these would let the compiler import host
 /// TypeInfo execution or session/transport types. This list is not an
 /// in-crate analyzer inventory.
-const FORBIDDEN_HOST_AND_ANALYZER: [&str; 7] = [
+const FORBIDDEN_HOST_AND_ANALYZER: [&str; 6] = [
     "verter_session",
-    "verter_session_query",
     "verter_lsp",
     "verter_napi",
     "verter_mcp",
@@ -188,7 +189,7 @@ fn compiler_production_closure_does_not_reach_host_session_or_transport_crates()
     assert!(
         leaks.is_empty(),
         "compiler production closure reached host/session/transport crates {leaks:?}; \
-         the compiler crate must not depend on session, query, LSP, NAPI, MCP, FFI, \
+         the compiler crate must not depend on session, LSP, NAPI, MCP, FFI, \
          or WASM. This assertion does not claim in-crate analyzer absence. \
          Closure names include verter crates: {:?}",
         {

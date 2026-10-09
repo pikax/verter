@@ -4181,9 +4181,153 @@ async fn reload_projects_recovery_fires_again_after_cooldown() {
 async fn real_publication_refresh_admits_plugin_carriers() {
     let real = RealReloadHarness::new().await;
     real.register_carriers().await;
+    for carrier in &real.carriers {
+        assert_eq!(
+            real.provider.applied_content(&carrier.companion_path),
+            crate::traits::AppliedContent::Applied(Arc::from(carrier.content)),
+        );
+    }
+    let mut activations = Vec::new();
+    for carrier in &real.carriers {
+        real.provider
+            .close_file(&carrier.companion_path)
+            .await
+            .unwrap();
+        real.provider
+            .register_carrier_metadata(
+                &carrier.source_path,
+                &carrier.companion_path,
+                carrier.content,
+                &real.project_file_name,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            real.provider.applied_content(&carrier.companion_path),
+            crate::traits::AppliedContent::NotApplied
+        );
+        activations.push(crate::traits::CarrierActivation {
+            source_path: carrier.source_path.clone(),
+            companion_path: carrier.companion_path.clone(),
+            project_file_name: real.project_file_name.clone(),
+            script_kind: crate::traits::CarrierScriptKind::Tsx,
+        });
+    }
+    let cached = &real.carriers[0];
+    real.provider
+        .load_file(&cached.companion_path, "cache-only replacement")
+        .await
+        .unwrap();
+    real.provider
+        .activate_carrier_members(&activations)
+        .await
+        .unwrap();
+    assert_eq!(
+        real.provider.applied_content(&cached.companion_path),
+        crate::traits::AppliedContent::NotApplied,
+        "activation cannot certify a cache-only replacement as registered carrier content"
+    );
+    real.provider
+        .register_carrier_metadata(
+            &cached.source_path,
+            &cached.companion_path,
+            cached.content,
+            &real.project_file_name,
+        )
+        .await
+        .unwrap();
+    for carrier in &real.carriers {
+        assert_eq!(
+            real.provider.applied_content(&carrier.companion_path),
+            crate::traits::AppliedContent::Applied(Arc::from(carrier.content))
+        );
+    }
+    let path = real
+        ._project
+        .path()
+        .join("receipt.ts")
+        .to_string_lossy()
+        .into_owned();
+    let before = "export const receipt: number = 1;";
+    let after = "export const receipt: string = 'delivered';";
+    real.provider.load_file(&path, before).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::NotApplied
+    );
+    real.provider.open_file(&path, before).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::Applied(Arc::from(before))
+    );
+    // A shorter cache-only load must not shorten the next full replacement's
+    // old range or become proof of delivered bytes.
+    real.provider.load_file(&path, "x").await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::Applied(Arc::from(before))
+    );
+    real.provider.update_file(&path, after).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::Applied(Arc::from(after))
+    );
+    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    assert!(
+        hover.contents.contains("receipt: string"),
+        "{}",
+        hover.contents
+    );
+    real.provider.close_file(&path).await.unwrap();
+    assert_eq!(
+        real.provider.applied_content(&path),
+        crate::traits::AppliedContent::NotApplied
+    );
     real.publish_ready(2, 1, false);
     real.refresh_publication(2).await;
     real.assert_raw_types(false).await;
+    real.shutdown().await;
+}
+
+/// tsserver asserts (`Debug Failure. False expression.`) when `updateOpen`
+/// closes a file it holds a ScriptInfo for but does not have open, and the
+/// acknowledged close turns that into a failed write that restarts the engine.
+/// A close the provider never opened — a project member that was only ever read
+/// from disk, a carrier companion whose registration is already gone, or a
+/// repeated close — must therefore settle without reaching tsserver.
+#[tokio::test]
+async fn real_close_of_a_file_tsserver_does_not_hold_open_succeeds() {
+    let real = RealReloadHarness::new().await;
+    // The companions are on-disk members of the configured project the anchor
+    // open loaded, but no carrier was registered and nothing opened them.
+    for carrier in &real.carriers {
+        real.provider
+            .close_file(&carrier.companion_path)
+            .await
+            .expect("closing a never-opened project member must not reach tsserver");
+    }
+    let path = real
+        ._project
+        .path()
+        .join("closed-twice.ts")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let content = "export const closedTwice: number = 1;";
+    real.provider.open_file(&path, content).await.unwrap();
+    real.provider.close_file(&path).await.unwrap();
+    real.provider
+        .close_file(&path)
+        .await
+        .expect("a repeated close must not reach tsserver");
+
+    // The engine is still the one that served before the closes.
+    real.provider.open_file(&path, content).await.unwrap();
+    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    assert!(
+        hover.contents.contains("closedTwice: number"),
+        "{}",
+        hover.contents
+    );
     real.shutdown().await;
 }
 

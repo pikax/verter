@@ -503,7 +503,7 @@ pub struct ResolverHotPathCounters {
     // Attribute `ProjectSemanticDispatch::execute` calls by
     // `SemanticQueryKey` variant + cold-vs-warm to localise pathological
     // cost (ChatMessages.vue's >30s timeout). Producers in
-    // `verter_session::project_semantic_dispatch`.
+    // `verter_type_engine::project_semantic_dispatch`.
     /// Cold dispatches of `SemanticQueryKey::TypeOf`.
     pub semantic_query_typeof_cold: u32,
     /// Warm dispatches of `SemanticQueryKey::TypeOf`.

@@ -12,7 +12,8 @@
  * ARH0 god-module candidate population; every ARH1 authority responsibility
  * is carried by exactly one characterization row. Every behavioral pin is a
  * real cargo nextest lane: the command is canonical (`cargo nextest run`),
- * the crate is a live workspace member, the filter selects the recorded
+ * the crate (the row's crate, or the pin's own crate when its witnesses
+ * compile in another package) is a live workspace member, the filter selects the recorded
  * witnesses under nextest substring semantics over the compiled module path
  * (`mod` / `#[path]` plus the enclosing inline `mod` of each function, never
  * a filesystem `src::` fragment or a cross-product of sibling inline modules),
@@ -103,6 +104,42 @@ const FORBIDDEN_NUMERIC_KEYS = Object.freeze([
 ]);
 // Narrowing successors whose cutover routes ARH2 must characterize first.
 const NARROWING_HEIRS = Object.freeze(["ARH3", "ARH4"]);
+// ARH1-CUT-2 stale-work protection: removal history is replaced by FileNode
+// incarnation identity and external publication is fenced by the
+// scheduler-minted source witness, so the scheduler field route must keep
+// pinning the incarnation-rejection, removal-drain and source-witness proofs
+// (plus deferred-blocker replacement) beside the narrowed fields. A pin may
+// carry more witnesses, never fewer.
+const SCHEDULER_RS = "crates/verter_scheduler/src/scheduler.rs";
+const SCHEDULER_LIFECYCLE_RS = "crates/verter_scheduler/src/scheduler/lifecycle.rs";
+export const SCHEDULER_FIELD_ROUTE_WITNESSES = Object.freeze(
+  [
+    ["incarnation rejection", SCHEDULER_RS, "incarnation_rejects_pre_remove_source_submission"],
+    [
+      "incarnation rejection",
+      SCHEDULER_LIFECYCLE_RS,
+      "delayed_source_worker_cannot_republish_a_retired_incarnation",
+    ],
+    [
+      "incarnation rejection",
+      SCHEDULER_LIFECYCLE_RS,
+      "delayed_failure_cannot_cancel_same_generation_successor_after_remove_or_reset",
+    ],
+    ["removal drain", SCHEDULER_RS, "removal_retires_the_canonical_so_late_admission_is_refused"],
+    [
+      "removal drain",
+      SCHEDULER_LIFECYCLE_RS,
+      "removal_reset_and_cancellation_leave_no_restart_history",
+    ],
+    [
+      "source-witness fence",
+      SCHEDULER_LIFECYCLE_RS,
+      "delayed_external_publication_cannot_cross_a_retired_incarnation",
+    ],
+    ["source-witness fence", SCHEDULER_RS, "reset_successor_versions_never_alias_the_cleared_node"],
+    ["deferred-blocker replacement", SCHEDULER_RS, "deferred_blockers_are_replaced_not_appended"],
+  ].map(([concern, file, test]) => Object.freeze({ concern, file, test })),
+);
 
 export function loadProducts() {
   const products = {};
@@ -576,7 +613,17 @@ function checkWitness(witness, errors, caseId) {
   return true;
 }
 
-function checkPin(pin, crate, errors, caseId) {
+function checkPin(pin, defaultCrate, crates, errors, caseId) {
+  // A pin whose witnesses compile in another package than the row's names
+  // that package itself; the lane runs there.
+  const crate = pin.crate === undefined ? defaultCrate : pin.crate;
+  if (pin.crate !== undefined && !crates.has(pin.crate)) {
+    errors.push({
+      caseId,
+      code: "hotspot-crate-unknown",
+      detail: `${pin.crate} is not a workspace member crate`,
+    });
+  }
   const expected = `cargo nextest run -p ${crate} ${pin.filter}`;
   if (pin.command !== expected) {
     errors.push({
@@ -839,7 +886,7 @@ function validateCharacterization(products, predecessors, errors) {
       errors.push({ caseId, code: "hotspot-without-pins", detail: hotspot.path });
       continue;
     }
-    for (const pin of hotspot.pins) checkPin(pin, hotspot.crate, errors, caseId);
+    for (const pin of hotspot.pins) checkPin(pin, hotspot.crate, crates, errors, caseId);
   }
 
   // Every narrowing cutover route (ARH3/ARH4 heirs) plus this node's own
@@ -891,7 +938,7 @@ function validateCharacterization(products, predecessors, errors) {
         const crate = route.path.includes("verter_scheduler")
           ? "verter_scheduler"
           : "verter_session";
-        checkPin(pin, crate, errors, caseId);
+        checkPin(pin, crate, crates, errors, caseId);
       }
     }
   }
@@ -914,12 +961,29 @@ function validateCharacterization(products, predecessors, errors) {
         detail: "ARH1-CUT-2 items are not exactly the ARH1 field narrowing population",
       });
     }
+    // The characterized field stays a declared scheduler field across its
+    // narrowing: `pub` before the narrowing heir lands, `pub(crate)` after.
     for (const item of items) {
-      if (!new RegExp(`pub\\s+${item}\\s*:`).test(schedulerText)) {
+      if (!new RegExp(`pub(?:\\(crate\\))?\\s+${item}\\s*:`).test(schedulerText)) {
         errors.push({
           caseId,
           code: "route-surface-not-live",
-          detail: `${item} is not a live pub field of ${schedulerRel}; the surface must be characterized before narrowing`,
+          detail: `${item} is not a live pub or narrowed pub(crate) field of ${schedulerRel}; the surface must be characterized before narrowing`,
+        });
+      }
+    }
+    const pinned = new Set(
+      (fieldsRoute.pins || []).flatMap((pin) =>
+        (pin.witnesses || []).map((w) => `${w.file}::${w.test}`),
+      ),
+    );
+    for (const required of SCHEDULER_FIELD_ROUTE_WITNESSES) {
+      const id = `${required.file}::${required.test}`;
+      if (!pinned.has(id)) {
+        errors.push({
+          caseId,
+          code: "route-required-witness-missing",
+          detail: `ARH1-CUT-2 ${required.concern} witness ${id} is not pinned`,
         });
       }
     }
@@ -954,7 +1018,7 @@ function validateCharacterization(products, predecessors, errors) {
   }
   const bulkRoute = (characterization.routes || []).find((r) => r.cutoverRow === "ARH1-CUT-4");
   if (bulkRoute) {
-    const queryRel = "crates/verter_session/src/semantic_query.rs";
+    const queryRel = "crates/verter_type_engine/src/semantic_query.rs";
     const contract = arh1["dependency-contracts"].hotspots.find((h) => h.path === queryRel);
     const declared = contract?.minimalPublicSurface || {};
     const bulkRow = (declared.narrow || []).find((r) => r.kind === "bulk");

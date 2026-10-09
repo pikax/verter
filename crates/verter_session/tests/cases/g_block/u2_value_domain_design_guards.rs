@@ -237,7 +237,7 @@ fn mentions_error_type_arm(content: &str) -> bool {
 #[test]
 fn error_rides_opaque_no_new_error_type_wire_arm() {
     let root = workspace_root();
-    let semantic_query = root.join("crates/verter_session/src/semantic_query.rs");
+    let semantic_query = root.join("crates/verter_type_engine/src/semantic_query.rs");
     let graph = root.join("crates/verter_protocol/src/typeinfo/graph.rs");
     let proto = root.join("crates/verter_protocol/proto/verter/v1/typeinfo.proto");
 

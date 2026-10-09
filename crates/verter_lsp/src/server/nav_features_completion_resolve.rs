@@ -22,9 +22,24 @@ use crate::type_provider::auto_import::{
 };
 
 use super::VerterLanguageServer;
+use crate::provider_surface_store::ProviderSurfaceSnapshot;
+
+/// Capture, BEFORE the resolve query, the provider surface `provider_path`
+/// serves: the carrier document the path reverse-maps to, with the surface
+/// currently recorded for it when that surface is the one at `provider_path`.
+/// `None` when the path maps to no open carrier or has no consistent surface.
+pub(super) fn capture_resolve_surface(
+    server: &VerterLanguageServer,
+    provider_path: &str,
+) -> Option<(Uri, std::sync::Arc<ProviderSurfaceSnapshot>)> {
+    let carrier_uri = server.carrier_uri_from_ide_path(provider_path)?;
+    let snapshot = server.capture_provider_request_surface(&carrier_uri)?;
+    (snapshot.stamp.provider_path.as_ref() == provider_path).then_some((carrier_uri, snapshot))
+}
 
 /// Translate a type provider's completion-resolve `additionalTextEdits` (generated-TSX byte
-/// offsets) into carrier-source [`TextEdit`]s.
+/// offsets) into carrier-source [`TextEdit`]s through `surface`, the surface the resolve
+/// captured before it queried (see [`capture_resolve_surface`]).
 ///
 /// The auto-import re-anchor maps provider edits back through a Vue `<script setup>` carrier — it
 /// reverse-maps a carrier IDE TSX path to its `.vue` source and re-anchors the import at the SFC's
@@ -53,6 +68,7 @@ use super::VerterLanguageServer;
 pub(super) fn resolve_provider_auto_import_edits(
     server: &VerterLanguageServer,
     tsx_path: &str,
+    surface: Option<&ProviderSurfaceSnapshot>,
     provider_edits: &[ProviderImportEdit],
 ) -> std::result::Result<Option<Vec<TextEdit>>, String> {
     // Reverse-map the provider path to its owning source URI. A self-file rune module maps to
@@ -79,13 +95,16 @@ pub(super) fn resolve_provider_auto_import_edits(
     // descriptor-identity `carrier_kind_for_language`. ONLY a `Some(CarrierKind::Vue)` continues; a
     // Svelte / non-carrier classification — and any future markup carrier without its own arm —
     // fails closed here (`Ok(None)`), never falling through into Vue `<script setup>` synthesis.
-    let carrier_continues =
-        crate::server::carrier_language_for(carrier_uri.as_str()).is_some_and(|language| {
-            matches!(
-                crate::features::auto_close_tag::carrier_kind_for_language(&language),
-                Some(crate::features::auto_close_tag::CarrierKind::Vue)
-            )
-        });
+    let carrier_continues = crate::server::carrier_language_for(
+        server.documents.language_classifier(),
+        carrier_uri.as_str(),
+    )
+    .is_some_and(|language| {
+        matches!(
+            crate::features::auto_close_tag::carrier_kind_for_language(&language),
+            Some(crate::features::auto_close_tag::CarrierKind::Vue)
+        )
+    });
     if !carrier_continues {
         return Ok(None);
     }
@@ -95,12 +114,13 @@ pub(super) fn resolve_provider_auto_import_edits(
     // `Ok(None)` success, which would silently drop the provider's non-empty
     // auto-import edits ("accepted completion but no import").
     //
-    // The translation inputs come from ONE captured immutable provider surface
-    // (content + mapper recorded by the same sync), validated against the open
-    // carrier document — a resolve racing an edit/re-sync fails with a
-    // structured error instead of placing an import through a torn mapping
-    // (STRICT: a corrupt edit is worse than no edit).
-    let Some(snapshot) = server.capture_provider_request_surface(&carrier_uri) else {
+    // The translation inputs come from the ONE immutable provider surface the
+    // resolve captured BEFORE it queried the provider (content + mapper recorded
+    // by the same sync) and bracketed after the answer arrived — never from the
+    // surface current when the answer arrives, which may be a replacement the
+    // provider never answered against (STRICT: a corrupt edit is worse than no
+    // edit).
+    let Some(snapshot) = surface else {
         return Err(format!("no consistent provider surface for {tsx_path}"));
     };
     if snapshot.stamp.provider_path.as_ref() != tsx_path {
@@ -111,10 +131,28 @@ pub(super) fn resolve_provider_auto_import_edits(
     let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
         return Err(format!("no IDE context for {tsx_path}"));
     };
+    let missing_document = || format!("no open document for {}", carrier_uri.as_str());
+    let identity = server
+        .documents
+        .snapshot_identity(&carrier_uri)
+        .ok_or_else(missing_document)?;
     let doc = server
         .documents
         .get(&carrier_uri)
-        .ok_or_else(|| format!("no open document for {}", carrier_uri.as_str()))?;
+        .ok_or_else(missing_document)?;
+    // The edits are placed through the captured surface's map, so they address
+    // the carrier bytes that map was built from. Those bytes must be the open
+    // revision the request captured; any other revision would place the import
+    // through a later revision's line index, so the request settles
+    // `ContentModified` instead of answering.
+    let coherent = *doc.source == *identity.source()
+        && crate::provider_surface_store::ContentHash::of(identity.source())
+            == snapshot.source_hash;
+    crate::documents::ForegroundRequest::bracket_target(&carrier_uri, identity);
+    if !coherent {
+        crate::documents::ForegroundRequest::mark_target_incoherent();
+        return Ok(None);
+    }
 
     let tsx_li = LineIndex::new(&snapshot.provider_content, server.documents.encoding());
     // `AnalyzedImport.span` is SFC-absolute; pass the spans straight through. The anchor authority

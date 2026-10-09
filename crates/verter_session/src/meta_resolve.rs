@@ -23,7 +23,7 @@
 // of this shell — bare-name references in tests need the imports in
 // scope here.
 #[cfg(test)]
-use crate::types::ProjectionMode;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
@@ -44,8 +44,6 @@ pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 // sub-module split — siblings live in `crates/verter_session/src/meta_resolve/`.
 // The shell re-exports the moved `pub(crate)` surface so existing
 // `crate::meta_resolve::*` paths keep working without callsite churn.
-pub(crate) mod callable_view;
-mod dep_signature;
 pub(crate) mod diagnostic_convert;
 pub(crate) mod dispatch_helpers;
 pub(crate) mod exactness;
@@ -67,14 +65,6 @@ mod slot_binding_graph_tests;
 #[cfg(test)]
 #[path = "meta_resolve/typed_ir_consumer_tests.rs"]
 mod typed_ir_consumer_tests;
-pub(crate) use dep_signature::emit_dispatch_dep_signature_facts;
-// Consumed by the Vue/Svelte normalizers in §5a SP2/SP3; the re-export lands now
-// (substrate-first) but has no production caller yet, so the import is unused on
-// the lib build until each method is wired.
-#[allow(unused_imports)]
-pub(crate) use callable_view::{
-    ArmCombineNode, CallableNodeView, PositionalParamNode, SignatureNodeView, SlotCallableNodeParts,
-};
 pub(crate) use dispatch_helpers::{
     arg_preserving_member_use_site_slot, project_expr_class_a_node_via_dispatch_threaded,
     project_expr_class_a_via_dispatch,
@@ -114,19 +104,18 @@ pub(crate) use origin_graph::build_origin_graph;
 // §10a.0.A). The re-export re-points at the new home so the
 // `crate::meta_resolve::*` public surface stays intact for callers.
 pub(crate) use crate::host_manage::component_meta_request_impl::{
-    next_component_meta_audit_request_id, request_source_performed_compute,
-    should_skip_imported_registry_seed_refresh, trace_request_source,
+    request_source_performed_compute, should_skip_imported_registry_seed_refresh,
+    trace_request_source,
 };
 pub use crate::host_manage::component_meta_request_impl::{
-    CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedDeclarationKind,
-    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
-    ResolvedTypeDeclaration, ResolvedTypeRegistryMeta,
+    CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedJsdocBlock,
+    ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedTypeRegistryMeta,
 };
 pub(crate) use output::PublishedCompleteness;
 pub use output::{
     ComponentMetaFailure, ComponentMetaOutput, ComponentMetaOutputError,
     ComponentMetaOutputFailure, ComponentMetaOutputLane, ComponentMetaResolutionOutput,
-    InteriorSourceStep, MaterializedComponentMetaTypeLanes, MaterializedComponentMetaTypes,
+    MaterializedComponentMetaTypeLanes, MaterializedComponentMetaTypes,
     MaterializedEventOccurrence, MaterializedTypePublication, TerminalTypeDisplay,
 };
 pub(crate) use resolved_state::RegistryMaterialization;
@@ -140,3 +129,6 @@ pub(crate) use scoring::compare_type_expr_improvement;
 #[cfg(test)]
 #[path = "meta_resolve_tests.rs"]
 mod meta_resolve_tests;
+
+#[cfg(test)]
+mod callable_view_tests;
