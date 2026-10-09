@@ -200,6 +200,11 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("src/GlobalTagSetup.vue").await;
         let comp_uri = session.open_fixture_file("src/GlobalCountComp.vue").await;
+        // The tag navigates into the registering declaration as well as the
+        // carrier: both are delivered, so the engine's coordinates decode
+        // through the bytes it evaluated.
+        let registry_uri = session.open_fixture_file("src/global-components.d.ts").await;
+        session.ensure_synced(&registry_uri).await;
         session.ensure_synced(&comp_uri).await;
         session.ensure_synced(&uri).await;
 
@@ -224,6 +229,11 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("src/GlobalTagOptions.vue").await;
         let comp_uri = session.open_fixture_file("src/GlobalCountComp.vue").await;
+        // The tag navigates into the registering declaration as well as the
+        // carrier: both are delivered, so the engine's coordinates decode
+        // through the bytes it evaluated.
+        let registry_uri = session.open_fixture_file("src/global-components.d.ts").await;
+        session.ensure_synced(&registry_uri).await;
         session.ensure_synced(&comp_uri).await;
         session.ensure_synced(&uri).await;
 
@@ -345,6 +355,11 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("src/CustomElementTag.vue").await;
         let comp_uri = session.open_fixture_file("src/GlobalCountComp.vue").await;
+        // The tag navigates into the registering declaration as well as the
+        // carrier: both are delivered, so the engine's coordinates decode
+        // through the bytes it evaluated.
+        let registry_uri = session.open_fixture_file("src/global-components.d.ts").await;
+        session.ensure_synced(&registry_uri).await;
         session.ensure_synced(&comp_uri).await;
         session.ensure_synced(&uri).await;
 
