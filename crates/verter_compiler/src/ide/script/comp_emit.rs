@@ -660,28 +660,27 @@ fn walk_children_for_comp(
     prop_names: &rustc_hash::FxHashSet<&str>,
 ) {
     // The flow chain each authored chain of this list opened, by chain index.
-    let mut opened: Vec<(usize, usize)> = Vec::new();
+    let mut opened: rustc_hash::FxHashMap<usize, usize> = rustc_hash::FxHashMap::default();
+    // The authored chain of each member, indexed once per children list.
+    let chain_of: rustc_hash::FxHashMap<usize, usize> = chains
+        .iter()
+        .enumerate()
+        .flat_map(|(chain, authored)| authored.member_indices.iter().map(move |&m| (m, chain)))
+        .collect();
     for (index, &child_id) in children.iter().enumerate() {
         let node = &ast.nodes[child_id.0];
         if let AstNodeKind::Element(el) = &node.kind {
             // The element's own branch encloses it and its children.
             let region = match &el.v_condition {
                 Some(condition) => {
-                    let authored = chains
-                        .iter()
-                        .position(|chain| chain.member_indices.contains(&index));
-                    let continued = authored.and_then(|chain| {
-                        opened
-                            .iter()
-                            .find(|(opened_chain, _)| *opened_chain == chain)
-                            .map(|&(_, flow_chain)| flow_chain)
-                    });
+                    let authored = chain_of.get(&index).copied();
+                    let continued = authored.and_then(|chain| opened.get(&chain).copied());
                     let flow_chain = match continued {
                         Some(flow_chain) => flow_chain,
                         None => {
                             let flow_chain = flow.open_chain(region);
                             if let Some(chain) = authored {
-                                opened.push((chain, flow_chain));
+                                opened.insert(chain, flow_chain);
                             }
                             flow_chain
                         }

@@ -653,6 +653,52 @@ pub fn javascript() -> SfcFixture {
     d.finish()
 }
 
+/// A generic component under narrowing: the authored callback's parameter is
+/// inferred from the component's own type parameter through the deferred
+/// component instantiation. With `broken`, the callback hands the inferred
+/// `number` to a `string` contract and reads a reference its branch does not
+/// narrow.
+pub fn generic_component(root: SfcRoot, broken: bool) -> SfcFixture {
+    let r = root.expr();
+    let mut d = Draft::new(
+        format!(
+            "GenericComponent{}{}",
+            pascal(root.label()),
+            if broken { "Broken" } else { "" }
+        ),
+        true,
+        |s| {
+            s.push("type UC = { kind: 'a'; a: string } | { kind: 'b'; b: number };\n");
+            s.push(TAKE);
+            s.push("function takeNumber(value: number): void {}\n");
+            s.push(
+                "const Gen = defineComponent({\n\
+                 \x20 props: { items: { type: Array, required: true }, onPick: { type: Function, required: true } },\n\
+                 }) as unknown as new <T>(props: { items: T[]; onPick: (item: T) => void }) => { $props: { items: T[]; onPick: (item: T) => void } };\n",
+            );
+            root.declare("UC", s);
+        },
+    );
+    d.sfc.push(&format!("  <div v-if=\"{r}.kind === 'a'\">\n"));
+    d.conditions = 1;
+    d.sfc.push("    <Gen :items=\"[1, 2]\" :onPick=\"(");
+    let item = d.sfc.mark("item");
+    // The broken twin's hover is left to the clean twin: the diagnostics
+    // already pin the inferred `number` there.
+    if !broken {
+        d.hovers.push(HoverExpectation {
+            authored: item,
+            contains: "number",
+        });
+    }
+    d.sfc.push(&format!(") => {{ take({r}.a); "));
+    d.sfc.push(if broken { "take(" } else { "takeNumber(" });
+    d.mark_if(broken, TS2345, "item");
+    d.sfc.push(") }\" />\n  </div>\n");
+    d.guarded_callbacks = 1;
+    d.finish()
+}
+
 /// Every semantic fixture of the exactness contract, in a fixed order.
 pub fn semantic_suite() -> Vec<SfcFixture> {
     let mut fixtures = Vec::new();
@@ -663,6 +709,8 @@ pub fn semantic_suite() -> Vec<SfcFixture> {
         fixtures.push(flat_chain(root, 40, true));
         fixtures.push(contextual(root, false));
         fixtures.push(contextual(root, true));
+        fixtures.push(generic_component(root, false));
+        fixtures.push(generic_component(root, true));
         fixtures.push(lexical(root));
         fixtures.push(lifted_chain(root, false));
         fixtures.push(lifted_chain(root, true));

@@ -631,6 +631,61 @@ const el = ref()
 }
 
 #[test]
+fn comp_unconditional_sibling_after_chain_stays_outside_it() {
+    let source = r#"<script setup lang="ts">
+import Foo from './Foo.vue'
+import Bar from './Bar.vue'
+import Baz from './Baz.vue'
+const a = true
+const b = true
+</script>
+<template>
+  <Foo v-if="a" />
+  <Bar v-else-if="b" />
+  <Baz ref="x" />
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let baz = tag_offset(source, "Baz");
+    assert!(
+        !code.contains(&format!("___VERTER___s{baz}")),
+        "an unconditional sibling is not captured in the chain, got:\n{code}"
+    );
+    let comp = code
+        .split(&format!("function ___VERTER___Comp{baz}"))
+        .nth(1)
+        .and_then(|rest| rest.split("\nfunction ").next())
+        .unwrap_or("");
+    assert!(
+        !comp.contains("flowBranch"),
+        "an unconditional sibling's component function has no branch guard, got:\n{code}"
+    );
+}
+
+#[test]
+fn comp_adjacent_top_level_chains_stay_siblings() {
+    let source = r#"<script setup lang="ts">
+import Foo from './Foo.vue'
+import Bar from './Bar.vue'
+const a = true
+const b = true
+</script>
+<template>
+  <Foo v-if="a" ref="x" />
+  <Foo v-else ref="y" />
+  <Bar v-if="b" ref="z" />
+  <Bar v-else ref="w" />
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let first = tag_offset(source, "Foo v-if");
+    let second = tag_offset(source, "Bar v-if");
+    assert!(
+        code.contains(&format!("function ___VERTER___Flow{first}()"))
+            && code.contains(&format!("function ___VERTER___Flow{second}()")),
+        "each top-level chain gets its own flow, got:\n{code}"
+    );
+}
+
+#[test]
 fn comp_v_else_negates_all_prior() {
     let source = r#"<script setup lang="ts">
 import { ref } from 'vue'

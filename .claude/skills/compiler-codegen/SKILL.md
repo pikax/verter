@@ -72,7 +72,6 @@ ide/                      # IDE codegen: TSX or JSX+JSDoc (for LSP/TSGO type che
 +-- mod.rs                # generate_ide_template() -- Vue template -> valid JSX; IdeScriptOptions, IdeTemplateOptions
 +-- script.rs             # generate_ide_script() -- script block -> TS or JS+JSDoc wrapper
 +-- script_recover.rs     # Token scanner for macro binding recovery from broken script tails
-+-- condition.rs          # accumulated condition text (script-side component functions only)
 +-- template/
     +-- mod.rs            # walk_element/walk_node, cached directive removal, ref conversion
     +-- flow.rs           # condition narrowing: invoked chain/frame blocks, callback snapshots
