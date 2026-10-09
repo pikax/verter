@@ -190,11 +190,12 @@ Each cell names one producer node and one ratified receiving acceptance id
 of that producer requiring proof of the operation. Null receivers and
 pending-receiver notes are invalid. A ratified receiver records an obligation;
 it does not claim that the feature is implemented or qualified.
-Cells `C28`–`C30` also record `receivingProof`: the required operations,
-proof command and discriminating controls of their amended receivers. Its
-`obligation-only` status is not an executed proof or an MRK9 pass. MRK1G's
-lock spec must reject removal of completion, custom-tag definition or native
-attribute completion from these requirements while the cell still claims it.
+Cells `C28`–`C30` and `C36` also record `receivingProof`: the required
+operations, proof command and discriminating controls of their amended
+receivers. Its `obligation-only` status is not an executed proof or an MRK9
+pass. MRK1G's lock spec must reject removal of completion, custom-tag
+definition, native attribute completion or native attribute rename refusal
+from these requirements while the cell still claims it.
 Every cell records `tsgoOperations` and `tsgoLimitation` explicitly; an
 empty list and `null` mean none. On a kernel cell (`C20`–`C22`) the tsgo
 operations are checker queries the producer consumes as type-authority
@@ -271,6 +272,27 @@ route's disposition and owning acceptances; the two must agree row for row.
 - **F-MRK0-05 (MRK5).** Cells `C28`–`C30` name the ratified amended
   receivers `MRK5-AC1`–`MRK5-AC3` below. MRK5 delivers their implementation
   and proof after MRK0; receiver ratification supplies no conformance pass.
+
+- **F-MRK0-06 (MRK5R).** Cell `C36` claims rename refusal for core tags,
+  native tags **and native HTML attributes**. MRK5R's Outcome lists native
+  attributes among its refused targets, but `MRK5R-AC4` as written requires
+  refusal only for `<let>`, `<for>` and a native `<div>`, and `MRK5R-AC2`
+  only checks that an attribute stays untouched when a tag variable is
+  renamed. `C36` therefore names the amended `MRK5R-AC4` below, submitted to
+  the architect for ratification with the same disposition as F-MRK0-05.
+  Until that amendment is ratified, `C36`'s native-attribute operation has no
+  proving receiver and the cell cannot be promoted. MRK5R delivers the
+  implementation and proof after MRK0.
+
+### Rename refusal receiving requirement
+
+`MRK5R-AC4` requires renaming `<let>`, `<for>`, a native `<div>`, **or a
+native HTML attribute target** (`id` in `<div id="x">`) to return a typed
+refusal with a reason and zero edits, never an empty or partial edit. A
+TS-symbol rename at a sibling position in the same fixture still succeeds.
+A planted authored edit to the native attribute (`id` renamed to `data-id`)
+and a planted empty edit each fail. Proof (unchanged):
+`cargo nextest run -p verter_session -E 'test(/framework_corpus_marko::rename/)'`.
 
 ### Navigation receiving requirements
 

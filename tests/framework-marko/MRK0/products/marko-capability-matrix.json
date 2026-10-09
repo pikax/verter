@@ -516,6 +516,12 @@
       "profile": "marko-6-tags@6.4.3",
       "producer": "MRK5R",
       "receivingAcceptance": "MRK5R-AC4",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["core-tag-rename-refusal", "native-tag-rename-refusal", "native-attribute-rename-refusal"],
+        "test": "cargo nextest run -p verter_session -E 'test(/framework_corpus_marko::rename/)'",
+        "controls": "Renaming <let>, <for>, a native <div>, or the native attribute id in <div id=\"x\"> each returns a typed refusal with a reason and zero edits, never an empty or partial edit. A TS-symbol rename at a sibling position in the same fixture still succeeds. A planted authored edit to a native attribute (id renamed to data-id) and a planted empty edit each fail."
+      },
       "tsgoOperations": [],
       "tsgoLimitation": null
     },
