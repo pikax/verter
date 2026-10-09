@@ -40,11 +40,11 @@
       },
       {
         "selector": "ember-source 7.x stable (registry latest 7.3.0 on 2026-10-09)",
-        "reason": "unratified-major: the charter ratifies 6.x; admission of 7.x is the open operator question glm0-ember-major and needs a re-pin of this lock"
+        "reason": "unratified-major: excluded by the ratified decision to admit 6.12.0 only; admitting 7.x needs an explicit re-ratification and a re-pin of this lock"
       },
       {
         "selector": "ember-source beta channel (7.4.0-beta.1 on 2026-10-09)",
-        "reason": "beta-excluded: the beta channel now ships a 7.x prerelease, not a 6.x one; admitting it would admit an unratified major (decision 1)"
+        "reason": "beta-excluded: the beta channel now ships a 7.x prerelease, not a 6.x one; excluded by the ratified decision to admit 6.12.0 only, and admitting it needs an explicit re-ratification and a re-pin of this lock"
       },
       {
         "selector": "ember-source alpha, canary and any -alpha.N build",

@@ -757,15 +757,15 @@
       "cells": {
         "strict-gjs": {
           "producer": "GLM8",
-          "acceptance": "GLM8-AC1"
+          "acceptance": "GLM8-AC2"
         },
         "strict-gts": {
           "producer": "GLM8",
-          "acceptance": "GLM8-AC1"
+          "acceptance": "GLM8-AC2"
         },
         "colocated-hbs": {
           "producer": "GLM8",
-          "acceptance": "GLM8-AC1"
+          "acceptance": "GLM8-AC2"
         }
       }
     },

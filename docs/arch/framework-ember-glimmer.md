@@ -53,7 +53,7 @@ GLM1G (`GLM1G-ACV`); until it lands, nothing checks these files in CI.
 | ---- | -------- |
 | Admitted release | `ember-source` **6.12.0**, the last published 6.x and the registry's `lts` on 2026-10-09 |
 | Beta channel | **excluded**. The beta channel now ships `7.4.0-beta.1`, a 7.x prerelease; admitting it would admit an unratified major |
-| 7.x stable | excluded as an unratified major (registry `latest` is `7.3.0`). Whether to re-pin to 7.x is open operator question `glm0-ember-major` |
+| 7.x stable | **excluded** by the ratified decision to admit 6.12.0 only (registry `latest` is `7.3.0`). 7.x, stable and beta, is reported unsupported with this reason; admitting it needs an explicit re-ratification and a re-pin of the lock |
 | Other 6.x minors | excluded: one release per manifest |
 | Alpha, canary, legacy (`< 6`) | excluded |
 | Profiles | `strict-gjs`, `strict-gts` (strict-mode template tags) and `colocated-hbs` (loose-mode co-located templates with Glimmer components, including template-only) |
