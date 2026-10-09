@@ -74,8 +74,9 @@
 //   is a non-breaking diagnostic cross-check whose result never changes the returned value; explicit
 //   overflow-safe arithmetic was NOT audited workspace-wide and is out of scope for this block — so the
 //   guard stays.
-//   NOT COVERED, explicitly: this is not an optimised build. The profile inherits dev codegen (opt-level
-//   0, no LTO, many codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of
+//   NOT COVERED, explicitly: this is not an optimised build of the workspace. The profile inherits dev
+//   codegen (workspace crates at opt-level 0, dependencies at opt-level 2 exactly as `dev`, no LTO, many
+//   codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of
 //   scope. `verter_shipped_cfg_contract` covers only the code paths its own tests exercise, not the whole
 //   workspace — a `debug_assertions`-dependent regression outside that crate's reach is not covered by
 //   the guard (though `cargo check --profile no-debug-assertions --all-targets` still compiles it).
@@ -1524,7 +1525,8 @@ async function runVueMacroOracleChecks(ctx) {
 // makes a cross-crate item gated on `debug_assertions` a COMPILE error here rather than a shipped-build
 // surprise, because a dependent's code is compiled against the same profile as the dependency.
 //
-// WHAT IT DOES NOT COVER, stated plainly: it is not an optimised build (dev codegen, no LTO — optimisation-
+// WHAT IT DOES NOT COVER, stated plainly: it is not an optimised build of the workspace (dev codegen:
+// workspace crates at opt-level 0, dependencies at opt-level 2 exactly as `dev`, no LTO — optimisation-
 // and LTO-dependent behaviour is out of scope). `verter_shipped_cfg_contract` is deliberately small
 // ("dozens of tests at most") — it covers the production code paths ITS OWN tests exercise, not the whole
 // workspace. It is retained only until semantic dependence on `debug_assertions`/overflow-checks is
