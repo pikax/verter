@@ -1,0 +1,138 @@
+{
+  "id": "option-impact-classification.v1",
+  "schema": 1,
+  "contractNode": "CMP0",
+  "subblock": "CMP0-C",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "companionInventory": "compile-request-inventory.v1.json",
+  "classes": [
+    {
+      "id": "Parse",
+      "key": "ParseKey",
+      "meaning": "Changes the bytes-to-tree result of a region. Enters only through SyntaxProfileId inside the existing verter_identity ParseKey (PAR0 G07). The parse tree stays lossless (PAR0 PD05), so presentation choices such as whitespace condensing or comment dropping are never Parse."
+    },
+    {
+      "id": "Semantic",
+      "key": "SemanticKey",
+      "meaning": "Changes the framework meaning computed over admitted parses: bindings, reactivity, macro and prop semantics, component naming and scope identity, CSS-module key surfaces, namespace and mode facts."
+    },
+    {
+      "id": "CompileStructure",
+      "key": "CompileStructureKey",
+      "meaning": "Changes which demanded fact families, regions, style stages and product topology (inline versus separate, block participation) the compile structure for one product contains."
+    },
+    {
+      "id": "TargetPlan",
+      "key": "TargetPlanKey",
+      "meaning": "Changes how one target lowers the structure: backend selection, dev versus production branches, hoisting and caching plans, whitespace and comment policy, custom-element mode, IDE projection policy."
+    },
+    {
+      "id": "Emit",
+      "key": "EmitKey",
+      "meaning": "Changes only the emitted bytes and maps of an already planned target: helper module specifiers, default-export spelling, TypeScript stripping of output, MapMode, version disclosure, style trimming."
+    },
+    {
+      "id": "Terminal",
+      "key": "TerminalKey",
+      "meaning": "Changes only host assembly, decoration, serialization or presentation of an already emitted artifact set: SSR manifest key, HMR decoration, map serialization encoding, output/presentation/serialization profiles."
+    },
+    {
+      "id": "Refused",
+      "key": null,
+      "meaning": "No Verter stage consumes the option. Admission returns the typed Unsupported outcome on presence, on every route. An option whose impact cannot be classified is Refused until an owning amendment classifies it (CMP0 abort rule)."
+    }
+  ],
+  "rules": [
+    "OI01. Every caller-settable field of CompileRequest, FrameworkCompileRequest, VueCompileRequest, SvelteCompileRequest and the CompileProduct requests has exactly one row and exactly one class.",
+    "OI02. A row enters the key of its class and, by chaining, every later key of the same product. It never enters an earlier key.",
+    "OI03. A framework row enters keys only of products whose typed framework request is that framework. A Vue row never enters a Svelte product's key, and the reverse.",
+    "OI04. MapMode and map demand are Emit; map serialization encoding is Terminal. Neither enters ParseKey, SemanticKey, CompileStructureKey or TargetPlanKey.",
+    "OI05. Common execution controls (cancellation, budgets, audit capture, scheduler hints) have no row and enter no key. A control that changes output bytes is an option and must be classified here first.",
+    "OI06. A row whose current status is not 'routed' is a defect against CMP-F01/CMP-F02 or a planned refusal; CMP1 routes it to its class or refuses it at the single admission (CMP-D15)."
+  ],
+  "statusValues": {
+    "routed": "read by its stage on every production route that admits it",
+    "partially-routed": "read on some production routes or for some products only",
+    "unread": "admitted on the standalone route and read by no stage; refused on presence by the host integration route",
+    "refused": "refused on presence at request construction on every route",
+    "host-refused": "admitted by construction, refused by the host integration route, and read by the standalone route",
+    "duplicate-authority": "a second spelling of a fact another row already carries"
+  },
+  "rows": [
+    { "id": "OC-T01", "framework": "neutral", "field": "CompileRequest.products", "wire": "products[]", "class": "CompileStructure", "status": "routed", "note": "Each product roots its own key chain from its own demanded closure; adding a product never changes another product's keys (CN03)." },
+    { "id": "OC-T02", "framework": "neutral", "field": "CompileRequest.framework (FrameworkCompileRequest discriminant)", "wire": "framework arm", "class": "Semantic", "status": "routed", "note": "The framework discriminant selects the semantic profile; it enters SemanticKey as the FrameworkProfileId once CPF1 lands, never as a FrameworkTag spelling (VID0 R03)." },
+    { "id": "OC-T03", "framework": "neutral", "field": "CompileRequest.semantic_profile", "wire": "host-resolved profile (not on the wire)", "class": "Semantic", "status": "partially-routed", "note": "Read by the standalone route only; the host bundle refuses it (UnroutableHostRequestAxis::SemanticProfile)." },
+    { "id": "OC-T04", "framework": "neutral", "field": "CompileRequest.filename", "wire": "identity.filename", "class": "Semantic", "status": "routed", "note": "Component name and scope hash; map sources follow by chaining." },
+    { "id": "OC-T05", "framework": "neutral", "field": "CompileRequest.component_id", "wire": "identity.componentId", "class": "Semantic", "status": "partially-routed", "note": "Vue scope id. Admitted on Svelte requests and read by no Svelte stage (CMP-F06)." },
+    { "id": "OC-T06", "framework": "neutral", "field": "CompileRequest.is_production", "wire": "identity.isProduction", "class": "TargetPlan", "status": "routed", "note": "Svelte also reads SvelteCompileRequest.dev; two dev-mode authorities (CMP-F06)." },
+    { "id": "OC-T07", "framework": "neutral", "field": "CompileRequest.force_js", "wire": "identity.forceJs", "class": "Emit", "status": "routed" },
+    { "id": "OC-T08", "framework": "neutral", "field": "CompileRequest.ssr_module_id", "wire": "identity.ssrModuleId", "class": "Terminal", "status": "partially-routed", "note": "Vue main assembly only; inert for Svelte." },
+    { "id": "OC-T09", "framework": "neutral", "field": "CompileRequest.hmr_strategy", "wire": "identity.hmrStrategy", "class": "Terminal", "status": "partially-routed", "note": "Vue main assembly decoration only; inert for Svelte." },
+    { "id": "OC-T10", "framework": "neutral", "field": "CompileRequest.emit_ssr_module_registration", "wire": "none (hard-wired true by the FFI converter)", "class": "Terminal", "status": "partially-routed" },
+
+    { "id": "OC-P01", "framework": "neutral", "field": "RuntimeProductRequest.inline", "wire": "runtimeClient|runtimeServer.inline", "class": "CompileStructure", "status": "routed", "note": "Vue only; refused on Svelte requests." },
+    { "id": "OC-P02", "framework": "neutral", "field": "RuntimeProductRequest.runtime_source_map", "wire": "runtimeClient|runtimeServer.runtimeSourceMap", "class": "Emit", "status": "routed", "note": "MapMode for the runtime product (OI04)." },
+    { "id": "OC-P03", "framework": "neutral", "field": "RuntimeProductRequest.style_processing", "wire": "runtimeClient|runtimeServer.styleProcessing", "class": "CompileStructure", "status": "routed", "note": "Selects which style stages the compiler owns; AuthoredOnly is the current NeedInputs analog. Refused on Svelte." },
+    { "id": "OC-P04", "framework": "neutral", "field": "RuntimeProductRequest.output_profile", "wire": "host-resolved (not on the wire)", "class": "Terminal", "status": "host-refused", "note": "UnroutableHostRequestAxis::RuntimeOutputProfile." },
+    { "id": "OC-P05", "framework": "neutral", "field": "RuntimeProductRequest.serialization", "wire": "host-resolved (not on the wire)", "class": "Terminal", "status": "host-refused" },
+    { "id": "OC-P06", "framework": "neutral", "field": "IdeProductRequest.want_source_map", "wire": "ideCompanion.wantSourceMap", "class": "Emit", "status": "routed" },
+    { "id": "OC-P07", "framework": "neutral", "field": "IdeProductRequest.embed_ambient_types", "wire": "ideCompanion.embedAmbientTypes", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-P08", "framework": "vue", "field": "IdeProductRequest.conditional_root_narrowing", "wire": "ideCompanion.conditionalRootNarrowing", "class": "TargetPlan", "status": "routed", "note": "Vue-only axis on a shared product; refused on Svelte (VueOnlyAxis). CFG0 CF-H04 host flag maps onto this axis; no profile-scoped key is introduced." },
+    { "id": "OC-P09", "framework": "vue", "field": "IdeProductRequest.strict_slots", "wire": "ideCompanion.strictSlots", "class": "TargetPlan", "status": "routed", "note": "As OC-P08." },
+    { "id": "OC-P10", "framework": "vue", "field": "IdeProductRequest.types_module_name", "wire": "ideCompanion.typesModuleName", "class": "Emit", "status": "routed", "note": "Refused on Svelte (VueOnlyAxis)." },
+    { "id": "OC-P11", "framework": "neutral", "field": "IdeProductRequest.ide_chunk_boundaries", "wire": "ideCompanion.ideChunkBoundaries", "class": "Emit", "status": "host-refused", "note": "The carrier bridge substitutes it from the selected template block." },
+    { "id": "OC-P12", "framework": "neutral", "field": "IdeProductRequest.output_profile", "wire": "host-resolved", "class": "Terminal", "status": "host-refused" },
+    { "id": "OC-P13", "framework": "neutral", "field": "IdeProductRequest.diagnostics", "wire": "host-resolved", "class": "Terminal", "status": "host-refused" },
+    { "id": "OC-P14", "framework": "neutral", "field": "IdeProductRequest.serialization", "wire": "host-resolved", "class": "Terminal", "status": "host-refused" },
+    { "id": "OC-P15", "framework": "neutral", "field": "AnalysisProductRequest.want_script_bindings", "wire": "analysis.wantScriptBindings", "class": "CompileStructure", "status": "routed" },
+    { "id": "OC-P16", "framework": "neutral", "field": "AnalysisProductRequest.want_template_data", "wire": "analysis.wantTemplateData", "class": "CompileStructure", "status": "routed" },
+    { "id": "OC-P17", "framework": "neutral", "field": "PublicApiProductRequest.{output_profile, serialization}", "wire": "publicApi (unit variant)", "class": "Terminal", "status": "refused", "note": "The product kind is refused as unsupported before its axes are read." },
+    { "id": "OC-P18", "framework": "neutral", "field": "DeclarationProductRequest.{output_profile, serialization}", "wire": "declarations (unit variant)", "class": "Terminal", "status": "refused" },
+
+    { "id": "OC-V01", "framework": "vue", "field": "VueCompileRequest.backend", "wire": "vue.backend", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-V02", "framework": "vue", "field": "VueCompileRequest.ssr", "wire": "vue.ssr", "class": "TargetPlan", "status": "duplicate-authority", "note": "Restates RuntimeServer product presence; the host route refuses a mismatch, the standalone route does not (CMP-F06)." },
+    { "id": "OC-V03", "framework": "vue", "field": "VueCompileRequest.is_custom_element", "wire": "vue.isCustomElement", "class": "Parse", "status": "routed", "note": "SyntaxProfileId custom_elements, order and duplicates irrelevant." },
+    { "id": "OC-V04", "framework": "vue", "field": "VueCompileRequest.delimiters", "wire": "vue.delimiters", "class": "Parse", "status": "routed", "note": "SyntaxProfileId delimiters." },
+    { "id": "OC-V05", "framework": "vue", "field": "VueCompileRequest.whitespace", "wire": "vue.whitespace", "class": "TargetPlan", "status": "unread", "note": "The official parser condenses at parse time; Verter keeps a lossless tree, so condensing is a lowering policy." },
+    { "id": "OC-V06", "framework": "vue", "field": "VueCompileRequest.comments", "wire": "vue.comments", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-V07", "framework": "vue", "field": "VueCompileRequest.hoist_static", "wire": "vue.hoistStatic", "class": "TargetPlan", "status": "host-refused", "note": "Read by the standalone route through CodegenOptions; refused by the host route (CMP-F02)." },
+    { "id": "OC-V08", "framework": "vue", "field": "VueCompileRequest.cache_handlers", "wire": "vue.cacheHandlers", "class": "TargetPlan", "status": "unread" },
+    { "id": "OC-V09", "framework": "vue", "field": "VueCompileRequest.hmr", "wire": "vue.hmr", "class": "TargetPlan", "status": "unread" },
+    { "id": "OC-V10", "framework": "vue", "field": "VueCompileRequest.optimize_imports", "wire": "vue.optimizeImports", "class": "Emit", "status": "unread" },
+    { "id": "OC-V11", "framework": "vue", "field": "VueCompileRequest.runtime_module_name", "wire": "vue.runtimeModuleName", "class": "Emit", "status": "routed" },
+    { "id": "OC-V12", "framework": "vue", "field": "VueCompileRequest.ssr_runtime_module_name", "wire": "vue.ssrRuntimeModuleName", "class": "Emit", "status": "partially-routed", "note": "Read only by the standalone main-assembly prelude (compose_vue_runtime); refused by the host route." },
+    { "id": "OC-V13", "framework": "vue", "field": "VueCompileRequest.parse_pad", "wire": "vue.parsePad", "class": "Refused", "status": "unread", "note": "Pads the official SFC descriptor's block content; Verter spans are exact and no Verter product publishes that descriptor." },
+    { "id": "OC-V14", "framework": "vue", "field": "VueCompileRequest.ignore_empty", "wire": "vue.ignoreEmpty", "class": "CompileStructure", "status": "unread", "note": "The lossless parse keeps empty blocks; whether they participate is a structure decision." },
+    { "id": "OC-V15", "framework": "vue", "field": "VueCompileRequest.babel_parser_plugins", "wire": "vue.babelParserPlugins", "class": "Refused", "status": "unread", "note": "Babel plugin names have no meaning at the OXC choke point (PAR0 PD09)." },
+    { "id": "OC-V16", "framework": "vue", "field": "VueCompileRequest.gen_default_as", "wire": "vue.genDefaultAs", "class": "Emit", "status": "unread" },
+    { "id": "OC-V17", "framework": "vue", "field": "VueCompileRequest.props_destructure", "wire": "vue.propsDestructure", "class": "Semantic", "status": "unread" },
+    { "id": "OC-V18", "framework": "vue", "field": "VueCompileRequest.script_custom_element", "wire": "vue.scriptCustomElement", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-V19", "framework": "vue", "field": "VueCompileRequest.transform_asset_urls", "wire": "vue.transformAssetUrls", "class": "TargetPlan", "status": "unread" },
+    { "id": "OC-V20", "framework": "vue", "field": "VueCompileRequest.style_trim", "wire": "vue.styleTrim", "class": "Emit", "status": "unread" },
+    { "id": "OC-V21", "framework": "vue", "field": "VueCompileRequest.css_modules", "wire": "vue.cssModules", "class": "Semantic", "status": "unread", "note": "Module class names are a key surface the template and script observe through $style." },
+
+    { "id": "OC-S01", "framework": "svelte", "field": "SvelteCompileRequest.dev", "wire": "svelte.dev", "class": "TargetPlan", "status": "duplicate-authority", "note": "Beside CompileRequest.is_production (CMP-F06)." },
+    { "id": "OC-S02", "framework": "svelte", "field": "SvelteCompileRequest.custom_element", "wire": "svelte.customElement", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-S03", "framework": "svelte", "field": "SvelteCompileRequest.custom_element_descriptor", "wire": "svelte.customElementDescriptor", "class": "Semantic", "status": "host-refused", "note": "Read by the standalone route; refused by the host route." },
+    { "id": "OC-S04", "framework": "svelte", "field": "SvelteCompileRequest.namespace", "wire": "svelte.namespace", "class": "Semantic", "status": "routed", "note": "Foreign is host-refused. The host route flattens the enum to a string that the standalone route reparses (CMP-D12)." },
+    { "id": "OC-S05", "framework": "svelte", "field": "SvelteCompileRequest.css", "wire": "svelte.css", "class": "TargetPlan", "status": "host-refused" },
+    { "id": "OC-S06", "framework": "svelte", "field": "SvelteCompileRequest.preserve_comments", "wire": "svelte.preserveComments", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-S07", "framework": "svelte", "field": "SvelteCompileRequest.preserve_whitespace", "wire": "svelte.preserveWhitespace", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-S08", "framework": "svelte", "field": "SvelteCompileRequest.fragments", "wire": "svelte.fragments", "class": "TargetPlan", "status": "routed" },
+    { "id": "OC-S09", "framework": "svelte", "field": "SvelteCompileRequest.runes", "wire": "svelte.runes", "class": "Semantic", "status": "routed" },
+    { "id": "OC-S10", "framework": "svelte", "field": "SvelteCompileRequest.disclose_version", "wire": "svelte.discloseVersion", "class": "Emit", "status": "routed" },
+    { "id": "OC-S11", "framework": "svelte", "field": "SvelteCompileRequest.compatibility", "wire": "svelte.compatibility", "class": "Semantic", "status": "unread", "note": "Sealed, presence-only; refused by the host route, ignored by the standalone route." },
+    { "id": "OC-S12", "framework": "svelte", "field": "SvelteOptionAttempt.{generate_module, experimental_async}", "wire": "svelte.generateModule, svelte.experimentalAsync", "class": "CompileStructure", "status": "refused", "note": "Well-formed options gated by the unsupported SVELTE-MODULE / experimental cells." },
+    { "id": "OC-S13", "framework": "svelte", "field": "SvelteOptionAttempt.loose", "wire": "svelte.loose", "class": "Parse", "status": "refused", "note": "Changes error recovery; SyntaxProfileId already reserves the bit." },
+    { "id": "OC-S14", "framework": "svelte", "field": "SvelteOptionAttempt.{accessors, immutable, compatibility_component_api, hmr, custom_element_extend}", "wire": "svelte.accessors, immutable, compatibilityComponentApi, hmr, customElementExtend", "class": "Refused", "status": "refused" },
+    { "id": "OC-V22", "framework": "vue", "field": "VueOptionAttempt.{compat_config*, transform_compat_config, codegen_mode}", "wire": "vue.compatConfig*, transformCompatConfig, codegenMode", "class": "Refused", "status": "refused" },
+
+    { "id": "OC-H01", "framework": "vue", "field": "VueExecutionInputs.{prop_constness_overrides, template_binding_metadata, template_used_vars}", "wire": "host-resolved facts", "class": "Semantic", "status": "routed", "note": "Not options: host-resolved facts. They enter SemanticKey through the semantic admission basis digest, never as option bytes." },
+    { "id": "OC-H02", "framework": "vue", "field": "VueExecutionInputs.{style_v_bind_vars, style_v_bind_usage_complete, prepared_styles}", "wire": "host-supplied style facts", "class": "Semantic", "status": "routed", "note": "Supplied external style stages are the NeedInputs resume payload; their digest enters SemanticKey." },
+    { "id": "OC-H03", "framework": "vue", "field": "VueExecutionInputs.{runtime_template_hole, runtime_inline_template_chunk}", "wire": "host composition inputs", "class": "CompileStructure", "status": "routed" },
+    { "id": "OC-H04", "framework": "svelte", "field": "SvelteExecutionInputs.{css_hash_override, prepared_styles}", "wire": "host-resolved cssHash result, supplied styles", "class": "Semantic", "status": "routed", "note": "The resolved cssHash value is a host-resolved fact (scope class naming)." }
+  ]
+}
