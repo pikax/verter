@@ -33,24 +33,24 @@ Deletion population: empty. The contract is additive; no route is displaced.
 
 ## MDX0-AC2 — owned matrix
 
-| Case                           | Planted change                                                                                 | Expected failure reason                                                  |
-| ------------------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `AC2-build-output-cell`        | cell `{operation: "compile-mdx", host: "verter-session", producer: "MDX6"}`                    | build cell; build is exclusion `X01`                                     |
-| `AC2-bnd-cell`                 | cell naming a BND entry or bundler hook for `.mdx`                                             | BND consumption is excluded                                              |
-| `AC2-runtime-cell`             | cell `{operation: "render-mdx"}`                                                               | runtime cell; exclusion `X03`                                            |
-| `AC2-unowned-row`              | a cell with no `producer`                                                                      | unowned cell                                                             |
-| `AC2-missing-acceptance`       | a cell with no `acceptance`                                                                    | cell without a receiving AC                                              |
-| `AC2-duplicate-owner`          | two cells with the same `operation`, `host` and `profile` and different producers              | duplicate owner                                                          |
-| `AC2-unknown-producer`         | `producer: "MDX99"`                                                                            | producer is not a plan node                                              |
-| `AC2-exclusion-without-reason` | an exclusion row with no `reason`                                                              | exclusion is not truthful                                                |
-| `AC2-unknown-host`             | `host: "tsserver"`                                                                             | host outside the closed host set                                         |
-| `AC2-second-markdown-parser`   | `parserDecisions` row giving Markdown `DK4 NewParser` in an MDX home                           | a second Markdown parser; MDX extends `CL32`                             |
-| `AC2-planned-op-dropped`       | cell `C36` (MDX1S folding) removed with no exclusion naming it                                 | a planned operation is neither cell nor exclusion                        |
-| `AC2-grammar-cell`             | a cell with `producer: "MDX1G"` replacing exclusion `X12`                                      | highlighting is not a product operation (`MDX1G-AC6`)                    |
-| `AC2-capitalised-candidate`    | `C22.componentCandidateRule.rule` admitting a capitalised name as proof                        | capitalised-name heuristic; only a proven React component is a candidate |
-| `AC2-override-open`            | `overridableConstructs.markdown` gaining `div`, or a slot recorded for a name outside the list | the overridable set is closed at the pinned table of components          |
-| `AC2-source-without-licence`   | a `featureSources.sources` row with no `licence`                                               | feature source not ratified with its licence                             |
-| `AC2-gap-unrouted`             | an `acceptanceGap` with no `routedTo`                                                          | a non-discriminating receiving AC is not recorded as routed              |
+| Case                           | Planted change                                                                                                         | Expected failure reason                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `AC2-build-output-cell`        | cell `{operation: "compile-mdx", host: "verter-session", producer: "MDX6"}`                                            | build cell; build is exclusion `X01`                                     |
+| `AC2-bnd-cell`                 | cell naming a BND entry or bundler hook for `.mdx`                                                                     | BND consumption is excluded                                              |
+| `AC2-runtime-cell`             | cell `{operation: "render-mdx"}`                                                                                       | runtime cell; exclusion `X03`                                            |
+| `AC2-unowned-row`              | a cell with no `producer`                                                                                              | unowned cell                                                             |
+| `AC2-missing-acceptance`       | a cell with no `acceptance`                                                                                            | cell without a receiving AC                                              |
+| `AC2-duplicate-owner`          | two cells with the same `operation`, `host` and `profile` and different producers                                      | duplicate owner                                                          |
+| `AC2-unknown-producer`         | `producer: "MDX99"`                                                                                                    | producer is not a plan node                                              |
+| `AC2-exclusion-without-reason` | an exclusion row with no `reason`                                                                                      | exclusion is not truthful                                                |
+| `AC2-unknown-host`             | `host: "tsserver"`                                                                                                     | host outside the closed host set                                         |
+| `AC2-second-markdown-parser`   | `parserDecisions` row giving Markdown `DK4 NewParser` in an MDX home                                                   | a second Markdown parser; MDX extends `CL32`                             |
+| `AC2-planned-op-dropped`       | cell `C36` (MDX1S folding) removed with no exclusion naming it                                                         | a planned operation is neither cell nor exclusion                        |
+| `AC2-grammar-cell`             | a cell with `producer: "MDX1G"` replacing exclusion `X12`                                                              | highlighting is not a product operation (`MDX1G-AC6`)                    |
+| `AC2-capitalised-candidate`    | `C22.componentCandidateRule.rule` admitting a capitalised name as proof                                                | capitalised-name heuristic; only a proven React component is a candidate |
+| `AC2-override-open`            | `overridableConstructs.markdown` gaining `div`, or a slot recorded for a name outside the list                         | the overridable set is closed at the pinned table of components          |
+| `AC2-source-without-licence`   | a `featureSources.sources` row with no `licence`                                                                       | feature source not ratified with its licence                             |
+| `AC2-obligation-unbound`       | `C20` back at `acceptance: "MDX9-AC2"`, or an `acceptanceObligation.acceptance` differing from its cell's `acceptance` | the discriminating case is not bound to its producer AC                  |
 
 ## MDX0-AC3 — activation and host
 
@@ -90,12 +90,11 @@ Deletion population: empty. The contract is additive; no route is displaced.
 
 ## Successor fixture obligations
 
-These are not MDX0 validator rows: they are the discriminating fixture cases the matrix records for a
-producer whose receiving AC does not yet discriminate the operation (`acceptanceGap`). Each is routed to
-its producer through the controller.
+These are not MDX0 validator rows: they are the discriminating fixture cases each cell's
+`acceptanceObligation` binds to its producer AC. The producer implements and executes them after MDX0.
 
-| Cell  | Producer | Discriminating case                                                                                                                           |
+| Cell  | AC       | Discriminating case                                                                                                                           |
 | ----- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `C20` | MDX6     | a type error inside an `.mdx` `{expression}` is published once by tsgo at its exact authored range; a planted off-by-one projection map fails |
-| `C22` | MDX5     | a capitalised export that is not a proven React component is not a component auto-import candidate; a proven React component export is        |
-| `C25` | MDX5     | the symbol tree holds each named ESM export and the layout default export under MDX1S's outline; a planted import symbol fails                |
+| `C20` | MDX6-AC2 | a type error inside an `.mdx` `{expression}` is published once by tsgo at its exact authored range; a planted off-by-one projection map fails |
+| `C22` | MDX5-AC2 | a capitalised export that is not a proven React component is not a component auto-import candidate; a proven React component export is        |
+| `C25` | MDX5-AC5 | the symbol tree holds each named ESM export and the layout default export under MDX1S's outline; a planted import symbol fails                |

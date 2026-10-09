@@ -187,11 +187,14 @@ Component completion (`C22`) offers a component auto-import candidate only for
 an export proven to be a React component; a capitalised name is never proof,
 and generic MDX parses and binds without React.
 
-Three cells name a receiving AC that does not yet discriminate their operation:
-`C20` (in-`.mdx` diagnostics, MDX6), `C22` (the component-candidate rule,
-MDX5) and `C25` (export and layout symbols, MDX5). Each carries an
-`acceptanceGap` with its discriminating case, routed to the producer through the
-controller; the named receiving AC holds until that amendment is ratified.
+Three cells bind a discriminating case to their producer's acceptance through
+`acceptanceObligation`: `C20` at MDX6-AC2 (an expression type error is
+published once at its exact authored range; an off-by-one map fails), `C22` at
+MDX5-AC2 (a proven React component is an auto-import candidate; a capitalised
+non-component export is not) and `C25` at MDX5-AC5 (named ESM exports and the
+layout default export sit beneath MDX1S's outline at exact ranges; an
+import-as-export symbol fails). The producers implement and execute these after
+MDX0.
 
 ## Overridable constructs and feature sources
 
@@ -210,6 +213,7 @@ tree of `mdx-js/mdx` at the `3.1.1` tag) and that repository's
 ## Proof is not support
 
 No cell cites MDXP, MDXR0, STP7, an installed parser or syntax highlighting
-(the MDX1G TextMate grammar) as product evidence. A cell is evidenced only by
+(the MDX1G TextMate grammar) as product evidence; the rule reads a cell's
+evidence, not the provenance of a rule it records. A cell is evidenced only by
 its producer's acceptance; MDX9-AC1 joins every cell to a passing fixture and
 MDX10 closes the terminal against this matrix.

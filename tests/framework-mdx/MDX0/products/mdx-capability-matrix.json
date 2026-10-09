@@ -222,14 +222,13 @@
       "host": "tsgo",
       "profile": "mdx-react",
       "producer": "MDX6",
-      "acceptance": "MDX9-AC2",
+      "acceptance": "MDX6-AC2",
       "verterComputesTsAnswer": false,
       "tsgoOps": ["textDocument/publishDiagnostics"],
       "tsgoLimitation": null,
-      "acceptanceGap": {
-        "gap": "MDX9-AC2 checks use-site diagnostic agreement with the oracle but no producer AC discriminates an in-.mdx diagnostic remapped to the wrong authored range; MDX6's acceptance covers hover/definition (MDX6-AC2) and the .tsx importer (MDX6-AC3) only",
-        "discriminatingCase": "a type error inside an .mdx {expression} region is published once by tsgo at its exact authored range; a planted off-by-one projection map fails",
-        "routedTo": "MDX6 (producer) through the controller as a charter amendment adding that case to its acceptance; MDX9-AC2 stays the receiving item until the amendment is ratified"
+      "acceptanceObligation": {
+        "acceptance": "MDX6-AC2",
+        "discriminatingCase": "a type error inside an .mdx {expression} region is published once by tsgo at its exact authored range; a planted off-by-one projection map fails"
       }
     },
     {
@@ -254,8 +253,8 @@
       "tsgoOps": ["textDocument/completion", "textDocument/hover", "textDocument/references"],
       "tsgoLimitation": null,
       "componentCandidateRule": {
-        "rule": "a JSX component completion or auto-import candidate is offered only for an export proven to be a React component (MDX3 use-site surface over RCT3's React facets, resolved through MDXR0's provider chain at MDX1M); a capitalised name is never proof, and a non-React profile or generic MDX still parses and binds without React",
-        "source": "MDX0 charter, Predecessor contracts (MDXR0 matrix rules); MDX1M amendment: no capitalised-name heuristic",
+        "rule": "a JSX component completion or auto-import candidate is offered only for an export proven to be a React component (MDX3 use-site surface over RCT3's React facets, resolved through the predecessor provider chain at MDX1M); a capitalised name is never proof, and a non-React profile or generic MDX still parses and binds without React",
+        "source": "MDX0 charter, Predecessor contracts (provider-chain matrix rules); MDX1M amendment: no capitalised-name heuristic",
         "forbidden": [
           "capitalised-name heuristic",
           "same-named file match",
@@ -263,9 +262,9 @@
         ],
         "discriminatingCase": "in one fixture, a capitalised export that is not a proven React component (for example `export const Title = 'x'`) is not a component auto-import candidate, while a proven React component export (`export function Note(props) { return <aside>{props.children}</aside> }`) is"
       },
-      "acceptanceGap": {
-        "gap": "MDX5-AC2 discriminates duplicate results but not the component-candidate rule",
-        "routedTo": "MDX5 (producer) through the controller as a charter amendment adding the discriminatingCase of componentCandidateRule to MDX5-AC2"
+      "acceptanceObligation": {
+        "acceptance": "MDX5-AC2",
+        "discriminatingCase": "componentCandidateRule.discriminatingCase"
       }
     },
     {
@@ -296,15 +295,14 @@
       "host": "lsp-enhancement",
       "profile": "mdx-react",
       "producer": "MDX5",
-      "acceptance": "MDX9-AC1",
+      "acceptance": "MDX5-AC5",
       "verterComputesTsAnswer": false,
       "tsgoOps": [],
       "tsgoLimitation": null,
       "attachesUnder": "C35 (MDX1S structural outline)",
-      "acceptanceGap": {
-        "gap": "MDX9-AC1 is a generic coverage join; no MDX5 AC discriminates the export and layout symbols",
-        "discriminatingCase": "the document-symbol tree contains each named ESM export and the layout default export under MDX1S's outline at exact ranges; a planted symbol for an import (not an export) fails",
-        "routedTo": "MDX5 (producer) through the controller as a charter amendment adding that case to its acceptance; MDX9-AC1 stays the receiving item until the amendment is ratified"
+      "acceptanceObligation": {
+        "acceptance": "MDX5-AC5",
+        "discriminatingCase": "the document-symbol tree contains each named ESM export and the layout default export under MDX1S's outline at exact ranges; a planted symbol for an import (not an export) fails"
       }
     },
     {
@@ -682,10 +680,11 @@
       "an installed parser",
       "syntax highlighting (MDX1G TextMate grammar)"
     ],
-    "rule": "no cell cites a proof node, an installed parser or highlighting as product evidence; a cell is evidenced only by its producer's acceptance"
+    "rule": "no cell cites a proof node, an installed parser or highlighting as product evidence; a cell is evidenced only by its producer's acceptance",
+    "appliesTo": "a cell's evidence; a rule's provenance (such as componentCandidateRule.source) is not evidence"
   },
   "noDenominatorShrinking": true,
-  "notes": "Cells cover the mdx-react profile, the only admitted profile. Every operation a plan node delivers for MDX has a cell or an exclusion: MDX1S's structure features (C34-C38), MDX8F's carrier formatting views (C39-C41), MDX8F-MD's Markdown content formatting (C42), and MDX1G's client grammar as exclusion X12. A cell carrying acceptanceGap names a receiving AC that does not yet discriminate the operation; the gap is routed to the producer through the controller, and the named receiving AC holds until the amendment is ratified. MDX10-AC1/AC4 hold the terminal: the generated rows equal this matrix and no cell shrinks to unsupported without a ratified replan.",
+  "notes": "Cells cover the mdx-react profile, the only admitted profile. Every operation a plan node delivers for MDX has a cell or an exclusion: MDX1S's structure features (C34-C38), MDX8F's carrier formatting views (C39-C41), MDX8F-MD's Markdown content formatting (C42), and MDX1G's client grammar as exclusion X12. A cell carrying acceptanceObligation names the discriminating case its producer AC must hold (C20 at MDX6-AC2, C22 at MDX5-AC2, C25 at MDX5-AC5); the obligation's acceptance equals the cell's acceptance. MDX10-AC1/AC4 hold the terminal: the generated rows equal this matrix and no cell shrinks to unsupported without a ratified replan.",
   "overridableConstructs": {
     "rule": "the closed set of Markdown constructs whose rendered element a provider or `components` prop can substitute; MDX2 records a slot only for these names and MDX4 resolves only these; every other lowercase tag is an intrinsic",
     "source": "mdx-js/mdx 3.1.1 docs/table-of-components.mdx (the components you can overwrite); typed by @types/mdx@2.0.14 MDXComponents",
