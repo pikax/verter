@@ -1,0 +1,140 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "AST0",
+  "kind": "lock",
+  "products": [
+    "AstroVersionLock",
+    "AstroCapabilityMatrix",
+    "AstroActivationPolicy"
+  ],
+  "productFiles": {
+    "AstroVersionLock": "tests/framework-astro/AST0/products/astro-version-lock.json",
+    "AstroCapabilityMatrix": "tests/framework-astro/AST0/products/astro-capability-matrix.json",
+    "AstroActivationPolicy": "tests/framework-astro/AST0/products/astro-activation-policy.json"
+  },
+  "mandatoryCases": [
+    "AST0-AC1",
+    "AST0-AC2",
+    "AST0-AC3",
+    "AST0-AC4",
+    "AST0-AC5"
+  ],
+  "cases": [
+    {
+      "id": "AST0-AC1",
+      "title": "pinned release",
+      "disposition": "reject",
+      "twins": [
+        "floating-range-pin",
+        "latest-tag-pin",
+        "beta-channel-admitted-as-second-profile",
+        "unknown-version-pin",
+        "missing-official-source",
+        "two-releases-in-one-manifest",
+        "legacy-major-profile",
+        "wdx1-astro-5-0-0-diverged-pin",
+        "oracle-pin-floating",
+        "oracle-as-product-dependency"
+      ]
+    },
+    {
+      "id": "AST0-AC2",
+      "title": "owned matrix",
+      "disposition": "reject",
+      "twins": [
+        "unowned-cell",
+        "duplicate-owner-cell",
+        "duplicate-operation-host-profile-cell",
+        "unknown-acceptance-id",
+        "bnd-build-consumption-cell",
+        "runtime-execution-cell",
+        "fabricated-feature-cell",
+        "exclusion-without-reason",
+        "cell-on-excluded-profile"
+      ]
+    },
+    {
+      "id": "AST0-AC3",
+      "title": "activation and host policy",
+      "disposition": "reject",
+      "twins": [
+        "extension-only-activation",
+        "second-activation-source",
+        "declared-range-activation",
+        "verter-native-ts-region-cell",
+        "tsserver-specific-cell",
+        "astro-compiler-parser-authority",
+        "new-client-transport"
+      ]
+    },
+    {
+      "id": "AST0-AC4",
+      "title": "proof is not support",
+      "disposition": "reject",
+      "twins": [
+        "cell-cites-astp",
+        "cell-cites-installed-parser",
+        "cell-cites-syntax-highlighting",
+        "claim-basis-above-none-at-ratification"
+      ]
+    },
+    {
+      "id": "AST0-AC5",
+      "title": "wire tag ratified",
+      "disposition": "reject",
+      "twins": [
+        "open-canonical-adapter-tag",
+        "reused-tag-value",
+        "class-a-collision",
+        "missing-tag"
+      ]
+    }
+  ],
+  "corpus": {
+    "path": "tests/framework-astro/AST0/corpus",
+    "admittedRelease": "astro-7.3.8",
+    "authorship": "Verter-authored from the Astro syntax reference for 7.3.8; no upstream file is copied",
+    "valid": [
+      {"file": "valid/frontmatter-and-expressions.astro", "constructs": ["frontmatter fence", "Props interface", "Astro.props destructure", "text expressions", "template literal and string braces inside expressions", "element spread"]},
+      {"file": "valid/components-and-fragments.astro", "constructs": ["component tag", "namespaced component tag", "<> fragment", "<Fragment>", "set:html on Fragment"]},
+      {"file": "valid/nested-markup-in-expressions.astro", "constructs": ["markup nested in .map() callbacks", "conditional markup", "ternary markup", "multi-line parenthesised markup", "fragment inside an expression"]},
+      {"file": "valid/attribute-forms.astro", "constructs": ["attr={...}", "shorthand {attr}", "spread {...props}", "backtick attribute value", "single-quoted and boolean attributes"]},
+      {"file": "valid/directives.astro", "constructs": ["client:load", "client:visible", "client:idle", "client:media", "client:only", "server:defer", "set:html", "set:text", "is:raw", "class:list", "transition:name", "transition:animate", "define:vars"]},
+      {"file": "valid/script-and-style.astro", "constructs": ["processed <script>", "<script is:inline>", "<style>", "<style lang=\"scss\" is:global>"]},
+      {"file": "valid/comments.astro", "constructs": ["frontmatter comments", "HTML comment containing braces and tags", "{/* */} expression comment", "trailing comment inside an expression"]},
+      {"file": "valid/slots.astro", "constructs": ["default <slot />", "named slot with fallback", "named slot inside an expression", "Astro.slots.has", "Astro.slots.render"]}
+    ],
+    "recovery": [
+      {"file": "recovery/unterminated-expression.astro", "island": "the unterminated { on line 6", "laterIdentifiers": ["after", "title"], "receiver": "AST1-AC2"},
+      {"file": "recovery/unclosed-frontmatter.astro", "island": "the --- fence with no closing fence", "laterIdentifiers": ["title", "after"], "receiver": "AST1-AC2"},
+      {"file": "recovery/unclosed-element.astro", "island": "the <div class=\"open\"> with no closing tag", "laterIdentifiers": ["after"], "receiver": "AST1-AC2"}
+    ],
+    "recoveryNote": "Recovery semantics belong to the Astro grammar (PAR0 PD05). The upstream implementations disagree on these inputs and are not the recovery oracle."
+  },
+  "featureSources": {
+    "rule": "Upstream fixture directories AST9 may import into the hermetic conformance harness, each with its licence; listed, not vendored here.",
+    "repository": "withastro/astro",
+    "tag": "astro@7.3.8",
+    "license": "MIT",
+    "receiver": "AST9 (AST9-AC1, AST9-AC2)",
+    "directories": [
+      "packages/astro/test/fixtures/astro-basic",
+      "packages/astro/test/fixtures/astro-slots-nested",
+      "packages/astro/test/fixtures/astro-client-only",
+      "packages/astro/test/fixtures/astro-scripts",
+      "packages/astro/test/fixtures/astro-component-code",
+      "packages/astro/test/fixtures/scoped-style-strategy",
+      "packages/astro/test/fixtures/html-slots",
+      "packages/astro/test/fixtures/slots-vue",
+      "packages/astro/test/fixtures/slots-svelte"
+    ]
+  },
+  "test": {
+    "command": "node --test tests/framework-astro/AST0/astro-lock.spec.ts",
+    "status": "not landed here",
+    "owner": "AST1G (AST1G-ACV) writes contract.ts and astro-lock.spec.ts; REG0's scripts/run-framework-locks.mjs (REG0-AC6) discovers the spec"
+  },
+  "runtimeCorrectness": false,
+  "notes": "Ratification lock for the Astro family. Contract bytes only: no production code, no executable validator, no CI gate. Each AST0 acceptance item is met here by the reviewed products and cases.md; the planted-row rejection proofs execute at AST1G. FWA1, REG0 and FCH1 read the products as data."
+}
