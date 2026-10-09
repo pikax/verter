@@ -22,13 +22,16 @@ ratios. It is a portable summary; the raw harness runs stay out of the tree.
   tsc 7.0.2 answers `2`, with no diagnostic, at 200, 600, 1,800 and 3,200
   arms in all four `strictNullChecks` × `noImplicitAny` settings.
 - **Answers and allocations.** `node scripts/benchmark/semantic-perf.mjs
-  --tier quick --only relation-`: the quick tier's arms (`verter`, `tsc-api`,
-  `verter-obs`, `verter-observe`, `verter-counted`), one warmup, three
-  measured fresh processes and three in-process warm repeats per arm, every
-  relation size in the catalog, setting `strict`. 260 invocations, none
-  skipped; **validation passed** (0 failures), so every tsc answer reproduced
-  its reference and repetitions of each arm agreed on the answer and its
-  class.
+  --tier stress --only relation-`. The quick tier admits only the three
+  200-arm rows (`relation-aligned-200`, `relation-aligned-false-200`,
+  `relation-reversed-200`); every other size in the tables below is a
+  standard or stress scenario, and the stress tier (which includes the
+  lighter tiers) is the one that runs them all. Arms: `verter`, `tsc-api`,
+  `verter-obs`, `verter-observe`, `verter-counted`, one warmup, three
+  measured fresh processes and three in-process warm repeats per arm,
+  setting `strict`. The harness validates that every tsc answer reproduces
+  its reference and that repetitions of each arm agree on the answer and its
+  class. The quick-tier rows are the 200-arm subset of this run.
 - **Work.** `cargo run --release -p verter_bench --features semantic-observe
   --example resolver_dispatch_profile -- <scenario-dir>...` over the run's
   `scenarios/relation-*/strict` directories: resolver port calls and
@@ -112,7 +115,11 @@ The growth ratio of the aligned true and false series' relation work is
 asserted by `false_aligned_object_unions_decide_at_the_first_arm`
 (`crates/verter_session/src/project_semantic_dispatch_tests/relation_work_tests.rs`):
 doubling the arms at most about doubles each series' connected work, and the
-false relation costs no more than the true one.
+false relation costs no more than the true one. The allocation growth is
+asserted by `aligned_relation_allocation_grows_linearly_with_the_arms`
+(`crates/verter_session/tests/allocation_cases/construction_bytes.rs`): the bytes
+allocated by each series at 200, 400 and 800 arms at most about double per
+doubling.
 
 ## Warm repeats
 
