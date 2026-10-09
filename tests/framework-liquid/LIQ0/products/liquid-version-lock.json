@@ -112,8 +112,19 @@
         "pin": "10.30.0",
         "requiredBy": "@11ty/eleventy 3.1.6 dependency `liquidjs ^10.27.0`",
         "admittedLine": "10",
-        "notes": "Equal to the liquidjs profile's reference pin; a diverged engine pin between the two profiles is a lock failure (LIQ0-AC1 case P-AC1-07). Eleventy constructs the engine with strictFilters: true and extname .liquid (src/Engines/Liquid.js)."
-      }
+        "notes": "Equal to the liquidjs profile's reference pin; a diverged engine pin between the two profiles is a lock failure (LIQ0-AC1 twin `diverged-engine-pin`). Eleventy constructs the engine with strictFilters: true and extname .liquid (src/Engines/Liquid.js)."
+      },
+      "defaultPlugins": [
+        {
+          "package": "@11ty/eleventy-plugin-bundle",
+          "registry": "npm",
+          "pin": "3.0.7",
+          "integrity": "sha512-QK1tRFBhQdZASnYU8GMzpTdsMMFLVAkuU0gVVILqNyp09xJJZb81kAS3AFrNrwBCsgLxTdWHJ8N64+OTTsoKkA==",
+          "license": "MIT",
+          "requiredBy": "@11ty/eleventy 3.1.6 dependency `@11ty/eleventy-plugin-bundle ^3.0.7`, added unconditionally by src/defaultConfig.js",
+          "notes": "Source of the eleventy getBundle and getBundleFileUrl tags (liquid-vocabulary.json). 3.0.7 is the only published release the dependency range admits."
+        }
+      ]
     }
   ],
   "nextLines": [

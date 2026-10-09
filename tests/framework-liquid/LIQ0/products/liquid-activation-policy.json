@@ -13,6 +13,7 @@
     "states": ["active", "inactive", "unsupported-version", "off"],
     "needSelectionNote": "NeedSelection is a per-file outcome of the .liquid association below, not a fifth record state. FWA1 owns how it is carried; this lock fixes only that it is distinct from active, inactive and off and is never resolved by a guess."
   },
+  "precedenceRule": "A lower precedence rank wins. Rank 0 is the switch (frameworks.liquid = off or an explicit on naming a release); rank 1 is the automatic sources AP-S1..AP-S4, which never outrank each other and only combine through the association rule; rank 2 is the inactive default.",
   "switch": {
     "key": "frameworks.liquid",
     "values": ["auto", "on", "off"],
@@ -57,21 +58,22 @@
       "scope": "the package",
       "admittedRelease": "the resolved exact @11ty/eleventy version when it lies in the eleventy admittedLine, and its resolved liquidjs inside the liquidjs admittedLine; otherwise unsupported-version",
       "provenance": "manifest",
-      "subsumes": "liquidjs resolved in the same package, direct or transitive, is the Eleventy engine and is not a second claim"
+      "subsumes": "only the liquidjs that @11ty/eleventy resolves through its own dependency edge is the Eleventy engine and is not a second claim. A liquidjs the package declares itself is an independent AP-S4 claim even when it resolves to the same installed instance: package co-presence proves neither that the instances are one nor that every .liquid file uses the Eleventy profile, so both claims over one file are NeedSelection."
     },
     {
       "id": "AP-S4",
       "precedence": 1,
       "mode": "liquidjs",
-      "evidence": "liquidjs resolved as a direct dependency of a package that does not resolve @11ty/eleventy",
+      "evidence": "liquidjs resolved as a direct dependency of the package, whether or not the package also resolves @11ty/eleventy",
       "readAs": "resolved package facts; user code calling the engine is never executed",
       "scope": "the package",
       "admittedRelease": "the resolved exact liquidjs version when it lies in the liquidjs admittedLine; otherwise unsupported-version",
-      "provenance": "manifest"
+      "provenance": "manifest",
+      "narrowing": "The charter admits liquidjs resolved in the package graph. This row reads that as a direct dependency: a liquidjs reached only transitively through a dependency other than @11ty/eleventy is that dependency's private engine and says nothing about the package's own .liquid files, the same reason a bare liquid gem names no dialect (AP-N4). Such a package needs an explicit on (AP-S5). A liquidjs reached through @11ty/eleventy is AP-S3's engine."
     },
     {
       "id": "AP-S5",
-      "precedence": 1,
+      "precedence": 0,
       "evidence": "frameworks.liquid = { state: on, release: <exact admitted release> }",
       "outcome": "active in the mode of the named release's profile, for every .liquid file in the configuration's scope; it also resolves NeedSelection for those files",
       "provenance": "explicit"
@@ -89,6 +91,7 @@
     { "id": "AP-N2", "evidence": "a <script src> naming a Liquid engine build (for example a CDN liquidjs bundle)", "reason": "no manifest entry; activation needs an explicit on (FWA1 Switch)" },
     { "id": "AP-N3", "evidence": "directory evidence other than the two theme-root files together: snippets/, sections/, blocks/, templates/, locales/, _includes/, _layouts/, _posts/, _config.yml, eleventy.config.*, .eleventy.js, shopify.extension.toml, or only one of the two theme-root files", "reason": "the only directory evidence the charter admits is the theme root; any other layout is a name match" },
     { "id": "AP-N4", "evidence": "the liquid gem resolved in Gemfile.lock without jekyll", "reason": "the charter's lockfile source is jekyll; a bare engine dependency names no dialect, so it needs an explicit on" },
+    { "id": "AP-N6", "evidence": "liquidjs resolved only transitively, through a dependency other than @11ty/eleventy", "reason": "a dependency's private engine names no dialect for the package's files (AP-S4 narrowing); it needs an explicit on" },
     { "id": "AP-N5", "evidence": "a dialect chosen from file contents, a tag spelling, a front-matter fence or a declared version range", "reason": "a dialect needs a resolved version or a named on profile (VID0 R08: activation reads the resolved installed version, never the declared range)" }
   ],
   "association": {
@@ -96,8 +99,8 @@
     "languageId": "liquid",
     "owner": "LIQP0 owns document selectors and CLI globs (framework-template-carrier Surfaces); LIQ1G owns the client language contribution",
     "rule": "A .liquid file takes the mode of the one active Liquid claim whose scope contains it. Claims are the scopes of AP-S1..AP-S4 that are active for the file's package or ancestors.",
-    "needSelection": "A file inside the scopes of two claims with different modes (for example a theme root inside a Jekyll site, or a Jekyll Gemfile.lock and an Eleventy package over one directory) is NeedSelection: no Liquid parse in either mode, no facts, and an explain output naming both claims. Only AP-S5 naming one profile resolves it. Registration order, nesting depth, load order or recency never decides (VID0 R10).",
-    "sameModeClaims": "Two claims with the same mode over one file are one claim; the nearest scope supplies the admitted release."
+    "needSelection": "A file inside the scopes of two claims naming different semantic profiles is NeedSelection: different modes (for example a theme root inside a Jekyll site, a Jekyll Gemfile.lock and an Eleventy package over one directory, or an Eleventy package that also declares liquidjs directly), or one mode at two different exact releases (for example nested Gemfile.lock files resolving jekyll 4.4.0 and 4.4.1, or overlapping liquidjs claims resolving 10.29.0 and 10.30.0; each release is its own profile identity, docs/arch/kernel/identities.md). It gets no Liquid parse in either profile, no facts, and an explain output naming both claims. Only AP-S5 naming one profile resolves it. Registration order, nesting depth, load order or recency never decides (VID0 R10).",
+    "sameModeClaims": "Two claims over one file are one claim only when they decode to the same profile at the same exact release (one semantic profile identity). The same mode at different exact releases is two claims and NeedSelection; the nearest scope never supplies the release."
   },
   "explain": "Every outcome carries its provenance (explicit, theme-root, lockfile, manifest, none) for the FWA1 explain output (LIQP0-AC1)."
 }

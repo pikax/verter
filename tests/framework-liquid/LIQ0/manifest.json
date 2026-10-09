@@ -64,7 +64,10 @@
         "dialect-without-resolved-version",
         "explicit-on-without-profile",
         "bare-liquid-gem-activation",
-        "need-selection-by-guess"
+        "need-selection-by-guess",
+        "independent-liquidjs-subsumed",
+        "same-mode-release-collapse",
+        "explicit-on-ranked-with-auto"
       ]
     },
     {

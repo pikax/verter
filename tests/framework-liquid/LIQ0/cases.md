@@ -66,9 +66,10 @@ exclusion with a non-empty reason. `facets` are all `absent`; `frameworkTag` is
 
 Clean leg: `A` activates only through AP-S1 (both theme-root files), AP-S2
 (`jekyll` in `Gemfile.lock`), AP-S3 (`@11ty/eleventy` resolved), AP-S4
-(`liquidjs` resolved directly, no Eleventy) or AP-S5 (explicit `on` naming an
-admitted release); every mode is one profile of `V`; NeedSelection is resolved
-only by AP-S5.
+(`liquidjs` resolved as a direct dependency) or AP-S5 (explicit `on` naming an
+admitted release); every mode is one profile of `V`; AP-S0 and AP-S5 rank
+above AP-S1..AP-S4; two claims are one only when they name the same profile at
+the same exact release; NeedSelection is resolved only by AP-S5.
 
 | Twin | Planted row | Expected failure |
 | ---- | ----------- | ---------------- |
@@ -80,6 +81,9 @@ only by AP-S5.
 | `explicit-on-without-profile` | `A` AP-S5 evidence `frameworks.liquid = on` with no release | explicit `on` that names no profile |
 | `bare-liquid-gem-activation` | `A` a source activating any mode from `liquid` alone in `Gemfile.lock` | the lockfile source is `jekyll`; a bare engine names no dialect |
 | `need-selection-by-guess` | `A` `association.needSelection` resolved by nesting depth or by the nearer claim | NeedSelection is never a guess (VID0 R10) |
+| `independent-liquidjs-subsumed` | `A` AP-S3 `subsumes` = every liquidjs resolved in the package, direct or transitive, or AP-S4 evidence restricted to packages that do not resolve `@11ty/eleventy` | an independent liquidjs claim is erased: an Eleventy package that also declares `liquidjs` must be NeedSelection |
+| `same-mode-release-collapse` | `A` `association.sameModeClaims` = same-mode claims merge and the nearest scope supplies the release | distinct exact releases are distinct profiles: nested `Gemfile.lock` files resolving `jekyll` 4.4.0 and 4.4.1 over one file must be NeedSelection |
+| `explicit-on-ranked-with-auto` | `A` AP-S5 `precedence` = 1 | the explicit `on` must outrank the automatic sources it overrides |
 
 Not a failure: AP-S1 admits the shopify reference release with no resolved
 version. A theme vendors no engine; the theme root is the charter's named
@@ -92,7 +96,9 @@ Clean leg: for every competitor in `M.competitors` and every capability it
 `alsoCapabilities`; `cli.lint` matches a `textDocument/publishDiagnostics` cell
 whose `host` or `alsoHosts` includes `cli`), there is exactly
 one `M.coexistence` row naming that competitor and capability, and its `cells`
-are exactly those cells. i18n Ally rows cover only LIQ11/LIQ11T cells.
+are exactly those cells. A competitor's `scope` is applied first: for a
+competitor with a `scope` (i18n Ally: the LIQ11/LIQ11T cells), only the cells
+inside that scope are matched, so its rows cover only those cells.
 
 | Twin | Planted row | Expected failure |
 | ---- | ----------- | ---------------- |

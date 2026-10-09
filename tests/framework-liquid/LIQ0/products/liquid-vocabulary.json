@@ -5,7 +5,7 @@
   "family": "liquid",
   "describes": "docs(arch): record the parser decision, ownership, reuse and lineage (#812), 2026-10-09",
   "rules": [
-    "Every table names one exact source (package, registry, pin and path inside the published artifact). A name is in a dialect only through a table of that dialect; a name shared by two dialects appears in a table of each, with each dialect's own source.",
+    "Every table names one exact source (package, registry, pin and path inside the published artifact). A path is relative to the artifact root: the gem root for rubygems, the tarball's package/ directory for npm. A name is in a dialect only through a table of that dialect; a name shared by two dialects appears in a table of each, with each dialect's own source.",
     "Tables are written from the official published artifacts of the reference pins in liquid-version-lock.json, never inferred from spellings or from another dialect. LIQ4 reads this file as the only object and filter source.",
     "Block delimiters (else, elsif, when and end<tag>) are grammar, not tags, and are listed once per dialect under blockDelimiters.",
     "A tag or filter outside its dialect's tables is unknown: an opaque node for a tag (LIQ1-AC3), Unavailable with a reason for a filter (LIQ4-AC2)."
@@ -56,7 +56,7 @@
             "package": "@shopify/theme-check-docs-updater",
             "registry": "npm",
             "pin": "3.30.1",
-            "path": "package/data/tags.json"
+            "path": "data/tags.json"
           },
           "names": [
             "content_for",
@@ -76,7 +76,7 @@
             "package": "@shopify/liquid-html-parser",
             "registry": "npm",
             "pin": "2.10.2",
-            "path": "package/dist/grammar.js (RAW_TAGS)"
+            "path": "dist/grammar.js (RAW_TAGS)"
           },
           "names": [
             "schema"
@@ -88,7 +88,7 @@
           "package": "@shopify/theme-check-docs-updater",
           "registry": "npm",
           "pin": "3.30.1",
-          "path": "package/data/tags.json (deprecated: true)"
+          "path": "data/tags.json (deprecated: true)"
         },
         "names": [
           "include"
@@ -172,7 +172,7 @@
             "package": "@shopify/theme-check-docs-updater",
             "registry": "npm",
             "pin": "3.30.1",
-            "path": "package/data/filters.json"
+            "path": "data/filters.json"
           },
           "names": [
             "article_img_url",
@@ -277,7 +277,7 @@
             "package": "@shopify/theme-check-docs-updater",
             "registry": "npm",
             "pin": "3.30.1",
-            "path": "package/data/filters.json (translate syntax: string | t)"
+            "path": "data/filters.json (translate syntax: string | t)"
           },
           "aliasOf": "translate",
           "names": [
@@ -290,7 +290,7 @@
           "package": "@shopify/theme-check-docs-updater",
           "registry": "npm",
           "pin": "3.30.1",
-          "path": "package/data/filters.json (deprecated: true)"
+          "path": "data/filters.json (deprecated: true)"
         },
         "names": [
           "article_img_url",
@@ -309,7 +309,7 @@
             "package": "@shopify/theme-check-docs-updater",
             "registry": "npm",
             "pin": "3.30.1",
-            "path": "package/data/objects.json (access.global: true)"
+            "path": "data/objects.json (access.global: true)"
           },
           "names": [
             "additional_checkout_buttons",
@@ -354,7 +354,7 @@
             "package": "@shopify/theme-check-docs-updater",
             "registry": "npm",
             "pin": "3.30.1",
-            "path": "package/data/objects.json"
+            "path": "data/objects.json"
           },
           "names": [
             "additional_checkout_buttons",
@@ -876,6 +876,20 @@
             "tablerow",
             "unless"
           ]
+        },
+        {
+          "kind": "eleventy-bundle-shortcodes",
+          "source": {
+            "package": "@11ty/eleventy-plugin-bundle",
+            "registry": "npm",
+            "pin": "3.0.7",
+            "path": "src/eleventy.shortcodes.js (addShortcode)"
+          },
+          "names": [
+            "getBundle",
+            "getBundleFileUrl"
+          ],
+          "notes": "@11ty/eleventy 3.1.6 adds this plugin unconditionally (src/defaultConfig.js addPlugin(bundlePlugin, { bundles: false, immediate: true })); both shortcodes register regardless of bundles: false, and Eleventy's Liquid engine (src/Engines/Liquid.js) exposes every shortcode as a Liquid tag."
         }
       ],
       "filters": [

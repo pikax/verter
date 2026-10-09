@@ -25,7 +25,7 @@ The reviewed contract data lives in `tests/framework-liquid/LIQ0/`:
 | `products/liquid-version-lock.json` | The four profiles: release package, exact reference pin, admitted line, registry, integrity and licence; pinned data; engine dependencies; next lines and excluded lines |
 | `products/liquid-vocabulary.json` | Per dialect, the tag, filter and object tables, each with its exact source artifact and path |
 | `products/liquid-activation-policy.json` | The FWA1 `liquid` activation row, the sources that never activate, and the `.liquid` association with `NeedSelection` |
-| `products/liquid-capability-matrix.json` | Cells `LQM01`–`LQM73`, qualification rows `LQQ1`–`LQQ7`, exclusions `LQE1`–`LQE7`, competitors, and COXD1 cells `LQX01`–`LQX17` |
+| `products/liquid-capability-matrix.json` | Cells `LQM01`–`LQM74`, qualification rows `LQQ1`–`LQQ7`, exclusions `LQE1`–`LQE7`, competitors, and COXD1 cells `LQX01`–`LQX17` (`LQX03`, `LQX05` unassigned) |
 
 FWA1 reads the version lock and the activation row as data. LIQ4 reads the
 vocabulary as its only object and filter source. FCH1's coverage join and LIQ9
@@ -70,7 +70,8 @@ not historical proof.
 
 `liquid-vocabulary.json` holds, per dialect, the tag, filter and object
 tables. Each table names one source: package, registry, pin and the path inside
-the published artifact. A name shared by two dialects appears in a table of
+the published artifact, relative to the artifact root (the gem root, or the
+npm tarball's `package/` directory). A name shared by two dialects appears in a table of
 each, with that dialect's source. Nothing is inferred from a spelling or
 borrowed from another dialect.
 
@@ -79,7 +80,7 @@ borrowed from another dialect.
 | `shopify` | 21 engine (`Tags::STANDARD_TAGS` plus `liquid`), 9 platform (`data/tags.json`), `schema` (`RAW_TAGS`) | 60 engine (`StandardFilters`), 94 platform (`data/filters.json`), the `t` alias of `translate` | 34 global and all 142 catalog objects (`data/objects.json`) |
 | `jekyll` | 16 engine (Liquid 4.0.4), 5 Jekyll (`highlight`, `include`, `include_relative`, `link`, `post_url`) | 48 engine, 33 Jekyll | 9 payload names (`UnifiedPayloadDrop`) |
 | `liquidjs` | 21 (`new Liquid().tags`) | 88 (`new Liquid().filters`) | none: context comes from user code |
-| `eleventy` | the 21 LiquidJS tags | the 88 LiquidJS filters plus 10 Eleventy defaults | 5 data-cascade names (`collections`, `content`, `eleventy`, `page`, `pkg`) |
+| `eleventy` | the 21 LiquidJS tags plus 2 default bundle shortcodes (`getBundle`, `getBundleFileUrl`, from `@11ty/eleventy-plugin-bundle` 3.0.7, which Eleventy adds unconditionally) | the 88 LiquidJS filters plus 10 Eleventy defaults | 5 data-cascade names (`collections`, `content`, `eleventy`, `page`, `pkg`) |
 
 Block delimiters (`else`, `elsif`, `when`, `end<tag>`) are grammar, not tags.
 Under a dialect, a tag outside its tables is an opaque node (LIQ1-AC3), and a
@@ -99,17 +100,28 @@ is the record's `mode`, and a mode is exactly one profile.
 | AP-S1 | `shopify` | one directory holds both `layout/theme.liquid` and `config/settings_schema.json` | theme-root |
 | AP-S2 | `jekyll` | `jekyll` resolved in the package's `Gemfile.lock`, read as data | lockfile |
 | AP-S3 | `eleventy` | `@11ty/eleventy` resolved in the package graph | manifest |
-| AP-S4 | `liquidjs` | `liquidjs` resolved as a direct dependency of a package that does not resolve `@11ty/eleventy` | manifest |
-| AP-S5 | named | `frameworks.liquid = { state: on, release: <exact admitted release> }` | explicit |
+| AP-S4 | `liquidjs` | `liquidjs` resolved as a direct dependency of the package, with or without `@11ty/eleventy` | manifest |
+| AP-S5 (rank 0) | named | `frameworks.liquid = { state: on, release: <exact admitted release> }` | explicit |
 | AP-S6 | none | none of the above: `.liquid` files fall back and no Liquid parse runs | none |
 
 The explicit `on` uses CFG0's shape. A release decodes to exactly one profile,
-so naming the release names the profile. Inside an Eleventy package, LiquidJS
-is Eleventy's engine, not a second claim.
+so naming the release names the profile. The switch (AP-S0, AP-S5) ranks
+above the automatic sources AP-S1..AP-S4, which never outrank each other.
+Only the LiquidJS that Eleventy resolves through its own dependency edge is
+Eleventy's engine and not a second claim; a `liquidjs` the package declares
+itself is an independent AP-S4 claim, because package co-presence proves
+neither one instance nor one profile for every `.liquid` file.
+
+AP-S4 narrows the charter's "`liquidjs` resolved in the package graph" to a
+direct dependency: a `liquidjs` reached only through a dependency other than
+Eleventy is that dependency's private engine and names no dialect for the
+package's files, as a bare `liquid` gem names none. Such a package needs an
+explicit `on`.
 
 These never activate: a `.liquid` extension; a `<script src>` naming a Liquid
 build; any directory evidence other than the two theme-root files together;
-the `liquid` gem in `Gemfile.lock` without `jekyll`; a dialect read from file
+the `liquid` gem in `Gemfile.lock` without `jekyll`; a `liquidjs` resolved only
+transitively through a dependency other than `@11ty/eleventy`; a dialect read from file
 contents or a declared version range.
 
 FWA1 can carry this row as written. Its record has a `mode` field, and its
@@ -119,13 +131,17 @@ read as data, so the charter's abort condition does not apply.
 ## The `.liquid` association
 
 A `.liquid` file takes the mode of the one active claim whose scope contains
-it. A file under two claims with different modes is `NeedSelection`. For
-example, a theme root inside a Jekyll site, or a Jekyll `Gemfile.lock` and an
-Eleventy package over one directory. Under `NeedSelection` there is no Liquid
-parse in either mode and no fact, and the explain output names both claims.
+it. A file under two claims naming different profiles is `NeedSelection`:
+different modes (a theme root inside a Jekyll site, a Jekyll `Gemfile.lock`
+and an Eleventy package over one directory, an Eleventy package that also
+declares `liquidjs`), or one mode at two exact releases (nested
+`Gemfile.lock` files resolving `jekyll` 4.4.0 and 4.4.1). Each release is its
+own profile identity. Under `NeedSelection` there is no Liquid parse in either
+profile and no fact, and the explain output names both claims.
 Only an explicit `on` naming one profile resolves it. Nesting depth,
 registration order, load order and recency never decide (VID0 `R10`). Two
-claims with the same mode are one claim.
+claims are one claim only when they name the same profile at the same exact
+release; the nearer scope never chooses a release.
 
 LIQP0 owns document selectors and CLI globs. LIQ1G owns the client language
 contribution: language `liquid`, extension `.liquid`, grammar scope
@@ -133,7 +149,7 @@ contribution: language `liquid`, extension `.liquid`, grammar scope
 
 ## Operation × host × dialect matrix
 
-The matrix has 73 cells. Each cell has one producer and one receiving
+The matrix has 74 cells. Each cell has one producer and one receiving
 acceptance item, and for each of the four dialects it is either admitted or
 excluded with a reason.
 
@@ -152,7 +168,7 @@ excluded with a reason.
 | LIQ1 | LQM01–LQM04 | lossless parse, recovery, dialect tag tables, raw bodies (parser: NewParser with owner-local dialect tables, PAR0 `CL17`, home `H07` `crates/verter_liquid_syntax`) |
 | LIQ3, LIQP0 | LQM05–LQM06 | inactive is zero work; dialect selection with provenance |
 | LIQ1S | LQM07–LQM11 | native syntax diagnostics, symbols, folding and selection, carrier semantic tokens, gating and incrementality |
-| LIQ2 | LQM12–LQM16 | templated-HTML composition through ERBH1; embedded regions through EMB0 |
+| LIQ2 | LQM12–LQM16, LQM74 | templated-HTML composition through ERBH1; embedded regions through EMB0, including authored `<script>` and `<style>` |
 | LIQ3 | LQM17–LQM20 | scopes, loops, partial resolution, incremental index |
 | LIQ4 | LQM21–LQM24 | render contracts, catalog types, static data |
 | LIQ5 | LQM25–LQM28 | Shopify settings, template references, schemas, dialect gating |
@@ -200,14 +216,17 @@ cell (LIQ1G-AC6).
 Three competitors are declared:
 
 - **Shopify Liquid**: VS Code extension `Shopify.theme-check-vscode`. It
-  provides completion, hover, signature help, definition, references, rename,
-  formatting, linked editing, diagnostics and code actions.
+  provides completion, hover, definition, rename, formatting, linked editing,
+  diagnostics and code actions. Its language server advertises no references
+  or signature help, so neither gets a coexistence cell.
 - **Theme Check**: `@shopify/theme-check-node`, also run by that extension and
   by `shopify theme check`. It provides diagnostics, fixes and CLI lint.
 - **i18n Ally**: `Lokalise.i18n-ally`, on the LIQ11 translation cells only.
 
 Each capability a competitor provides that a cell also has gets one COXD1
-cell, `LQX01`–`LQX17`, listing exactly the cells it covers. COXD2 decides
+cell, `LQX01`–`LQX17` (`LQX03` and `LQX05` unassigned), listing exactly the
+cells it covers. A competitor with a `scope` (i18n Ally) is matched only
+against the cells inside that scope. COXD2 decides
 ownership per capability at runtime; Unknown means Verter owns.
 
 ## Predecessor contracts
@@ -235,3 +254,8 @@ then the products are reviewed data, not CI-checked.
   but no LIQ6 acceptance item does. Their cells (LQM36, LQM37) take LIQ9-AC1 as
   receiving acceptance, with an `acceptanceNote`. A LIQ6 acceptance item for
   each would make the producer's own test discriminate them.
+- **Authored `<script>` and `<style>`.** LIQ2's outcome attaches them through
+  EMB0, but LIQ2-AC3 names only `{% schema %}`, `{% stylesheet %}` and front
+  matter. Their cell (LQM74) takes LIQ9-AC1 with an `acceptanceNote`. A LIQ2
+  acceptance item for them would make the producer's own test discriminate
+  them.
