@@ -133,21 +133,10 @@ pub(crate) struct CarrierSyncRequest<'a> {
     /// no live document to pin against (a closed carrier, or a call site that
     /// never compiles against an open buffer).
     ///
-    /// UNTESTED-BY-DESIGN for the tsserver `Published` branch specifically:
-    /// from wherever the caller compiled `ide` through to
-    /// `record_and_version_carrier_companions` inside this function's
-    /// `Published` arm, there is no `.await` — `capture_carrier_ownership`,
-    /// `prepare_sync_transition`, `get_public_api` (via `block_in_place`), and
-    /// `build_carrier_companions` are all synchronous. A same-task `did_change`
-    /// therefore cannot interleave there via cooperative yielding (the
-    /// mechanism `sync_coordinator_tests.rs`'s `block_after_ide_compile`-based
-    /// tests exploit); only literal concurrent OS-thread execution racing the
-    /// SAME few statements could matter, which a `Notify`-pause test cannot
-    /// force deterministically without an explicit yield point this branch
-    /// does not have. `open_pin` still closes the same class of bug here
-    /// (narrows the window to true multi-thread races the sync stretch cannot
-    /// avoid regardless), it is simply not independently exercised by a new
-    /// deterministic test the way the `DirectOpen` branch is.
+    /// The window is real on every engine: an edit can land on another thread
+    /// at any point between the caller's pin and the fenced record, the
+    /// compile itself included. When the fence refuses the record, the pass
+    /// publishes nothing and stays queued (see the gateway's record step).
     pub open_pin: Option<(
         &'a tower_lsp_server::ls_types::Uri,
         &'a crate::documents::DocumentSnapshotIdentity,
@@ -263,6 +252,11 @@ enum NotOwnedReason {
     /// [`CarrierPublishError::Retract`](super::publish_coordinator::CarrierPublishError::Retract)
     /// ("PROPAGATED rather than swallowed").
     RetractFailed,
+    /// The open document moved after the compile's pin, so the pass published
+    /// nothing: its companions describe a revision the editor no longer holds.
+    /// Requeued like [`NotOwnedReason::Pending`]; a distinct class so a caller
+    /// that drives its own retry treats it as the superseded transaction it is.
+    Superseded,
 }
 
 /// A NON-OWNED carrier-sync outcome whose disposition is owned by the coordinator.
@@ -307,6 +301,13 @@ impl CarrierNotOwned {
             reason: NotOwnedReason::RetractFailed,
         }
     }
+    /// The SUPERSEDED non-owned outcome: the document moved after the pin, so
+    /// nothing was published this pass.
+    fn superseded() -> Self {
+        Self {
+            reason: NotOwnedReason::Superseded,
+        }
+    }
 }
 
 /// The classified disposition [`CarrierTransactionCoordinator::settle`] hands back after it
@@ -329,6 +330,10 @@ pub(crate) enum SettleClass {
     /// DISTINCT class so the fail-closed durability breach is never reported as a clean
     /// "nothing advertised" pass.
     RetractFailed,
+    /// The document moved after the compile's pin and nothing was published:
+    /// requeued and local state preserved exactly like [`SettleClass::Pending`].
+    /// A caller that reports its own retry reports this pass as superseded.
+    Superseded,
 }
 
 impl SettleClass {
@@ -857,14 +862,26 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     // freshly-recorded generation, so navigation span-classification carries both
     // roles' content/map identity AND the IDE companion's `getScriptVersion` advances
     // on edits. The single publish-time recording+versioning path.
-    crate::provider_surface_store::record_and_version_carrier_companions(
+    //
+    // A refused IDE record means the open document moved after this compile's
+    // pin: the companions hold a revision the editor no longer has. Publish
+    // nothing. The store is the provider's view, while the LSP-side records
+    // still describe the live revision; writing the stale content would leave
+    // the two disagreeing, and an edit that returns the document to the
+    // already-committed text (insert then undo) would find nothing to
+    // republish. The live revision is requeued and publishes on its own pass.
+    if crate::provider_surface_store::record_and_version_carrier_companions(
         req.provider_surfaces,
         req.documents,
         req.host,
         req.canonical_id,
         &mut companions,
         req.open_pin,
-    );
+    )
+    .is_err()
+    {
+        return CarrierSyncDecision::NotOwned(CarrierNotOwned::superseded());
+    }
 
     match membership
         .coordinator
@@ -1717,6 +1734,12 @@ impl CarrierTransactionCoordinator {
                     set.insert(source.to_string());
                 }
                 SettleClass::RetractFailed
+            }
+            NotOwnedReason::Superseded => {
+                if let Some(set) = requeue {
+                    set.insert(source.to_string());
+                }
+                SettleClass::Superseded
             }
         }
     }

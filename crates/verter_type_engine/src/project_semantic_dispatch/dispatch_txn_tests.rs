@@ -3,7 +3,11 @@
 //! nested re-discharge context save/restore over the tagged substitution
 //! table.
 
+use super::super::inference::session::*;
 use super::*;
+use crate::semantic_query::{
+    ConstParamPolicy, ContextualInferenceMode, InferenceContextKey, InferencePassKind, NoInferMask,
+};
 
 fn setup(
     param_node: SemanticNodeId,

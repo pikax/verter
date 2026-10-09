@@ -9,10 +9,10 @@
 //!   incarnation and owner epoch held from its capture to the answer's decode
 //!   (a failed decode bracket drops that provider contribution) and still hold
 //!   at settlement (the request keeps every surface it decoded through), and
-//!   every imported source a native contribution was read from is still at
-//!   the host revision it was read at, and every published child contract it
-//!   was read through still validates against the producer read sets it was
-//!   derived from;
+//!   every imported source a native contribution was read from is still
+//!   committed with the content it was read at, and every published child
+//!   contract it was read through still validates against the producer read
+//!   sets it was derived from;
 //! - applicability: the admitted revision and authority still describe what
 //!   the client holds when the answer is delivered — the disposition below;
 //! - publication freshness: whether background diagnostics are current. That
@@ -31,8 +31,8 @@ use crate::features::action_utils::{
     bind_workspace_edit, EditRefusal, EditTargetRevision, WorkspaceEditSupport,
 };
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
-use verter_session::carrier_publication_store::HostSourceRevisionToken;
 use verter_session::framework::api_projector::ComponentApiProjectionWitness;
+use verter_session::CommittedSourceContent;
 
 /// Every foreground LSP route whose answer is settled against a request
 /// snapshot.
@@ -104,8 +104,8 @@ enum Superseded {
     /// A provider surface an answer was decoded through changed content, map,
     /// incarnation or owner — possibly changing back — before settlement.
     ProviderSurface,
-    /// An imported source a native contribution was read from was re-registered,
-    /// or a published child contract it was read through no longer validates
+    /// An imported source a native contribution was read from was committed
+    /// with other content, or a published child contract it was read through no longer validates
     /// against its producer read sets, before settlement.
     Dependency,
     /// Another open document a location or edit was decoded through was
@@ -153,20 +153,24 @@ pub(crate) struct ForegroundRequest {
     /// Open incarnation, edit generation, client version and source bytes of
     /// the requested document; `None` when it was not open.
     document: Option<DocumentSnapshotIdentity>,
-    /// The published workspace root the request was answered under.
-    authority: Option<Arc<verter_workspace::PublishedRoot>>,
+    /// The host authority identity the request was answered under, which
+    /// settlement compares. Nothing is retained: an equivalent root
+    /// republication, a cache eviction or a cache-row removal leaves it
+    /// unchanged and every authority replacement changes it.
+    authority: Arc<verter_session::HostAuthorityView>,
     /// Every provider surface a provider answer of this request was decoded
     /// through, in decode order. Each stays bracketed until settlement, so two
     /// contributions decoded through different epochs of one surface cannot
     /// both settle, and a surface that moves after its decode supersedes the
     /// answer built from it.
     decoded_surfaces: parking_lot::Mutex<Vec<Arc<ProviderSurfaceSnapshot>>>,
-    /// The host source revision of every imported source a native
+    /// The committed content hash of every imported source a native
     /// contribution of this request was read from — the explicit dependency
     /// evidence that ties native child-contract enrichment to one basis with the
-    /// provider answer it is delivered beside. Two reads of one source at
-    /// different revisions cannot both settle.
-    dependencies: parking_lot::Mutex<Vec<(Box<str>, HostSourceRevisionToken)>>,
+    /// provider answer it is delivered beside. Two reads of one source with
+    /// different content cannot both settle; an eviction and identical reload
+    /// of the source, which re-commits the same bytes, keeps the evidence.
+    dependencies: parking_lot::Mutex<Vec<(Box<str>, CommittedSourceContent)>>,
     /// The producer witness of every published child contract a native
     /// contribution of this request was read from. The witness carries the
     /// contract's complete read sets, so a change to anything the contract
@@ -181,6 +185,11 @@ pub(crate) struct ForegroundRequest {
     /// Set when a decode found an open target holding bytes other than the
     /// ones the semantic answer addressed; the answer cannot settle.
     target_incoherent: AtomicBool,
+    /// Set when reads of one imported source never observed a single
+    /// committed content, so the native contribution they served is missing
+    /// or mixed; the answer cannot settle, whatever content the source ends
+    /// at.
+    dependency_unsettled: AtomicBool,
 }
 
 impl ForegroundRequest {
@@ -197,12 +206,13 @@ impl ForegroundRequest {
             edit_support,
             uri: uri.clone(),
             document: documents.snapshot_identity(uri),
-            authority: documents.host().workspace_read().published_root(),
+            authority: documents.host().capture_authority_view(),
             decoded_surfaces: parking_lot::Mutex::new(Vec::new()),
             dependencies: parking_lot::Mutex::new(Vec::new()),
             contract_publications: parking_lot::Mutex::new(Vec::new()),
             targets: parking_lot::Mutex::new(Vec::new()),
             target_incoherent: AtomicBool::new(false),
+            dependency_unsettled: AtomicBool::new(false),
         })
     }
 
@@ -234,17 +244,26 @@ impl ForegroundRequest {
     }
 
     /// Record that the current task's foreground request read a native
-    /// contribution from the imported source `canonical_id` at host revision
-    /// `revision`. A no-op outside a foreground request.
-    pub(crate) fn bracket_dependency(canonical_id: &str, revision: HostSourceRevisionToken) {
+    /// contribution from the imported source `canonical_id` committed with
+    /// content `content`. A no-op outside a foreground request.
+    pub(crate) fn bracket_dependency(canonical_id: &str, content: CommittedSourceContent) {
         let _ = ACTIVE_REQUEST.try_with(|request| {
             let mut dependencies = request.dependencies.lock();
             if !dependencies
                 .iter()
-                .any(|(known, at)| **known == *canonical_id && *at == revision)
+                .any(|(known, at)| **known == *canonical_id && *at == content)
             {
-                dependencies.push((Box::from(canonical_id), revision));
+                dependencies.push((Box::from(canonical_id), content));
             }
+        });
+    }
+
+    /// Record that the current task's foreground request read an imported
+    /// source whose content moved across every read of it: the answer
+    /// settles `ContentModified`. A no-op outside a foreground request.
+    pub(crate) fn mark_dependency_unsettled() {
+        let _ = ACTIVE_REQUEST.try_with(|request| {
+            request.dependency_unsettled.store(true, Ordering::Release);
         });
     }
 
@@ -447,11 +466,7 @@ impl ForegroundRequest {
         if !revision_is_current {
             return Some(Superseded::Revision);
         }
-        let authority_is_current = authority_is_equivalent(
-            self.authority.as_ref(),
-            documents.host().workspace_read().published_root().as_ref(),
-        );
-        if !authority_is_current {
+        if !self.authority.is_current(&documents.host()) {
             return Some(Superseded::Authority);
         }
         let surfaces = documents.provider_surfaces();
@@ -473,12 +488,13 @@ impl ForegroundRequest {
             return Some(Superseded::Target);
         }
         let host = documents.host();
-        let dependencies_are_current =
-            self.dependencies
+        let dependencies_are_current = !self.dependency_unsettled.load(Ordering::Acquire)
+            && self
+                .dependencies
                 .lock()
                 .iter()
                 .all(|(canonical_id, revision)| {
-                    host.registered_source_revision_token(canonical_id) == Some(*revision)
+                    host.registered_source_whole_hash(canonical_id) == Some(*revision)
                 });
         let dependencies_are_current = dependencies_are_current
             && self
@@ -532,34 +548,6 @@ impl EditBearing for Vec<CodeActionOrCommand> {
             CodeActionOrCommand::CodeAction(_) | CodeActionOrCommand::Command(_) => true,
         });
         Ok(())
-    }
-}
-
-/// Whether `current` is the admitted project authority or a republication of
-/// the same workspace snapshot `Arc` with the same ownership readiness and
-/// project environment tables, differing only in the consumer extension (the
-/// LSP views derived from that snapshot).
-///
-/// Snapshot identity, not snapshot content, is the authority: a publication
-/// that mints a new `WorkspaceSnapshot` — which is what every project-graph,
-/// resolver and background-initialisation publication does — replaces the
-/// authority even when its content and scalar generation repeat the admitted
-/// one, because nothing proves a rebuilt snapshot resolves the same way. Such
-/// a publication answers `ContentModified` conservatively.
-fn authority_is_equivalent(
-    admitted: Option<&Arc<verter_workspace::PublishedRoot>>,
-    current: Option<&Arc<verter_workspace::PublishedRoot>>,
-) -> bool {
-    match (admitted, current) {
-        (None, None) => true,
-        (Some(admitted), Some(current)) => {
-            Arc::ptr_eq(admitted, current)
-                || (Arc::ptr_eq(&admitted.snapshot, &current.snapshot)
-                    && admitted.ownership_ready == current.ownership_ready
-                    && admitted.env_hashes_by_project == current.env_hashes_by_project
-                    && admitted.project_identity_hashes == current.project_identity_hashes)
-        }
-        _ => false,
     }
 }
 

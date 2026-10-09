@@ -1621,7 +1621,8 @@ async fn apply_owner_resolved_carrier_sync(
                 // `RetractFailed` additionally means the cross-process store may still
                 // advertise it, so it is never treated as a settled disposition.
                 crate::external_ts::SettleClass::Pending
-                | crate::external_ts::SettleClass::RetractFailed => CarrierApplyOutcome::Pending,
+                | crate::external_ts::SettleClass::RetractFailed
+                | crate::external_ts::SettleClass::Superseded => CarrierApplyOutcome::Pending,
             }
         }
     }

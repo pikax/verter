@@ -599,10 +599,15 @@ impl DocumentRegistry {
             revision: document.document_revision,
             source: Arc::clone(&document.source),
         };
+        let expected_source_hash = expected_host_revision.and_then(|_| {
+            self.host()
+                .registered_source_whole_hash(&document.canonical_id)
+        });
         Some(SourceFeatureDocumentCapture {
             document: document.clone(),
             identity,
             expected_host_revision,
+            expected_source_hash,
             semantic_generation: self.current_semantic_generation(),
         })
     }
@@ -628,6 +633,8 @@ impl DocumentRegistry {
     /// Final request-local admission: the document identity and semantic
     /// generation must remain live, and the host revision is rechecked while
     /// the document shard is held so an edit cannot enter a check/use gap.
+    /// A semantic generation that moved means the capture may read an
+    /// obsolete native publication, so it is captured again.
     pub(crate) fn source_feature_capture_is_current(
         &self,
         uri: &Uri,
@@ -655,6 +662,39 @@ impl DocumentRegistry {
                         }
                 })
                 .unwrap_or(false)
+    }
+
+    /// Whether an answer already computed from `capture` still addresses the
+    /// document: its identity, and the host still holding the bytes the
+    /// capture was admitted against, rechecked under the document shard.
+    ///
+    /// Neither the semantic generation nor the host revision is consulted.
+    /// The generation rejects obsolete native publications before they are
+    /// read; the revision pairs a capture with its projection at admission.
+    /// Once an answer is computed, a cache eviction that re-commits the same
+    /// bytes changes nothing it addresses, and whether it stays deliverable
+    /// across an authority replacement is the request disposition's question.
+    pub(crate) fn source_feature_document_is_current(
+        &self,
+        uri: &Uri,
+        capture: &SourceFeatureDocumentCapture,
+    ) -> bool {
+        self.with_current_snapshot_identity(uri, &capture.identity, |document| {
+            document.source == capture.document.source
+                && match capture.expected_source_hash {
+                    Some(expected) => {
+                        self.host()
+                            .registered_source_whole_hash(&document.canonical_id)
+                            == Some(expected)
+                    }
+                    None if capture.expected_host_revision.is_some() => false,
+                    None => self
+                        .host()
+                        .get_source(&document.canonical_id)
+                        .is_some_and(|source| *source == *document.source),
+                }
+        })
+        .unwrap_or(false)
     }
 
     fn current_analysis_for_source_feature_capture(

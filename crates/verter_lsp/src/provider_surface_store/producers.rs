@@ -777,6 +777,11 @@ pub(crate) fn record_carrier_companion_surface_with_source(
 /// difference is this returns the linearized generation so the caller can
 /// stamp `companion.version` from it, the same contract
 /// [`record_carrier_companion_surface`] offers non-fenced callers.
+///
+/// `Err(CompanionRecordSuperseded)` when the pin no longer matches the open
+/// document: the compiled IDE content belongs to a revision the editor no
+/// longer holds. `Ok(None)` when the record was skipped for any other reason
+/// (an open carrier compiled without a pin, or an unavailable source).
 #[allow(
     clippy::too_many_arguments,
     reason = "the fenced record choke point needs the pin alongside every other producer input"
@@ -790,11 +795,13 @@ fn record_carrier_companion_surface_fenced(
     surface: RecordedProviderSurface<'_>,
     source_map_json: Option<&str>,
     open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
-) -> Option<u64> {
+) -> Result<Option<u64>, CompanionRecordSuperseded> {
     if let Some((open_uri, revision)) = open_pin {
-        let documents = documents?;
-        let generation = documents
-            .with_current_snapshot_identity(open_uri, revision, |document| {
+        let Some(documents) = documents else {
+            return Err(CompanionRecordSuperseded);
+        };
+        let Some(generation) =
+            documents.with_current_snapshot_identity(open_uri, revision, |document| {
                 record_carrier_companion_surface_with_source(
                     store,
                     canonical_id,
@@ -804,14 +811,14 @@ fn record_carrier_companion_surface_fenced(
                     Arc::clone(&document.source),
                 )
             })
-            .flatten();
-        if generation.is_none() {
+        else {
             tracing::debug!(
                 "provider_surface_store: discarding IDE companion for {provider_path} — the \
                  open document moved mid-sync"
             );
-        }
-        return generation;
+            return Err(CompanionRecordSuperseded);
+        };
+        return Ok(generation);
     }
     if let Some(documents) = documents {
         if documents.canonical_id_to_uri(canonical_id).is_some() {
@@ -819,10 +826,10 @@ fn record_carrier_companion_surface_fenced(
                 "provider_surface_store: discarding IDE companion for {provider_path} — the \
                  carrier is open but no revision was pinned for this compile"
             );
-            return None;
+            return Ok(None);
         }
     }
-    record_carrier_companion_surface(
+    Ok(record_carrier_companion_surface(
         store,
         documents,
         host,
@@ -830,8 +837,19 @@ fn record_carrier_companion_surface_fenced(
         provider_path,
         surface,
         source_map_json,
-    )
+    ))
 }
+
+/// The fenced `CarrierIde` record was refused because the open document moved
+/// after the compile's pin: the companions carry content of a revision the
+/// editor no longer holds. A caller must publish none of them — the provider
+/// store would otherwise serve that content while every LSP-side record (the
+/// refused surface, the committed state) still describes the live revision,
+/// and a later edit back to an already-committed text would find nothing to
+/// republish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a superseded companion set must not be published"]
+pub(crate) struct CompanionRecordSuperseded;
 
 /// Record EVERY published carrier companion's surface through the store at publish
 /// time (so each role's generation — the plugin's `getScriptVersion` — advances on
@@ -848,7 +866,9 @@ fn record_carrier_companion_surface_fenced(
 /// [`record_carrier_ide_surface_fenced`] for the full invariant). It fences
 /// only the `CarrierIde` companion — the role the torn-pairing hazard applies
 /// to — through [`record_carrier_companion_surface_fenced`]; every other role
-/// records through the ordinary unfenced path unaffected by this pin.
+/// records through the ordinary unfenced path unaffected by this pin. A refused
+/// IDE record stops the pass with [`CompanionRecordSuperseded`] before any
+/// later companion is recorded.
 pub(crate) fn record_and_version_carrier_companions(
     store: &ProviderSurfaceStore,
     documents: Option<&DocumentRegistry>,
@@ -856,7 +876,7 @@ pub(crate) fn record_and_version_carrier_companions(
     canonical_id: &str,
     companions: &mut [crate::external_ts::CarrierCompanion],
     open_pin: Option<(&Uri, &DocumentSnapshotIdentity)>,
-) {
+) -> Result<(), CompanionRecordSuperseded> {
     use verter_session::external_ts::SnapshotRole;
     for companion in companions.iter_mut() {
         let kind = match companion.role {
@@ -891,7 +911,7 @@ pub(crate) fn record_and_version_carrier_companions(
                 surface,
                 companion.map_json.as_deref(),
                 open_pin,
-            )
+            )?
         } else {
             record_carrier_companion_surface(
                 store,
@@ -906,6 +926,7 @@ pub(crate) fn record_and_version_carrier_companions(
         .unwrap_or(1);
         companion.version = generation;
     }
+    Ok(())
 }
 
 /// Hash a string into a [`Hash16`] (the env-hash representation the contract
