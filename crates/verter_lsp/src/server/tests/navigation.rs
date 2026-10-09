@@ -3166,6 +3166,87 @@ async fn references_drop_provider_locations_when_surface_regenerates_mid_request
     );
 }
 
+/// A REFERENCES answer locating into a FOREIGN carrier decodes only through
+/// the surface the request maps it through: when the engine holds other bytes
+/// for the foreign carrier than the surface the LSP recorded (a delivery that
+/// ran ahead of its record), the query refuses the location instead of letting
+/// the LSP map the engine's offsets through the captured surface.
+#[tokio::test(flavor = "multi_thread")]
+async fn references_into_a_foreign_carrier_decode_only_through_the_mapped_surface() {
+    let (service, provider, parent_uri, position, child_ide_path, _child_canonical) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+    let parent_ctx = synced_type_provider_context(server, &parent_uri).await;
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &parent_ctx.carrier_line_index,
+        &parent_ctx.mapper,
+        &parent_ctx.tsx_line_index,
+    )
+    .expect("parent position maps to tsx");
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let child_target = recorded
+        .provider_content
+        .find("msg")
+        .expect("token present in child IDE content") as u32;
+    provider.set_references(
+        &parent_ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: child_ide_path.clone(),
+            start: child_target,
+            end: child_target + 3,
+        }],
+    );
+    let references = || async {
+        server
+            .references(ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier {
+                        uri: parent_uri.clone(),
+                    },
+                    position,
+                },
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .expect("references request should succeed")
+    };
+    let maps_child = |response: &Option<Vec<Location>>| {
+        response
+            .iter()
+            .flatten()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue"))
+    };
+
+    provider.hold_engine_target(&child_ide_path, &recorded.provider_content);
+    let held = references().await;
+    assert!(
+        maps_child(&held),
+        "the engine holding the recorded surface maps the foreign location: {held:?}"
+    );
+
+    let ahead = format!(
+        "{}\n// delivered ahead of its record",
+        recorded.provider_content
+    );
+    provider.hold_engine_target(&child_ide_path, &ahead);
+    let raced = references().await;
+    assert!(
+        !maps_child(&raced),
+        "offsets the engine produced against other bytes must never map through the \
+         recorded foreign surface: {raced:?}"
+    );
+}
+
 #[tokio::test]
 async fn contract_builtin_directive_definition_is_fail_closed_empty() {
     // There is nothing authored to jump to for a built-in directive: the

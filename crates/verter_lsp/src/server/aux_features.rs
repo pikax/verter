@@ -583,10 +583,13 @@ async fn handle_code_action_attempt(
                     // a returned foreign-file edit maps through the generation
                     // this request began against.
                     let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                    if let Ok(type_actions) = tp
-                        .get_code_actions(&ctx.snapshot.provider_query(), so, eo, &diag_ctx)
-                        .await
-                    {
+                    // Every foreign edit decodes through exactly the surface this
+                    // set maps it through.
+                    let query = ctx
+                        .snapshot
+                        .provider_query()
+                        .with_targets(std::sync::Arc::new(foreign_ide_set.clone()));
+                    if let Ok(type_actions) = tp.get_code_actions(&query, so, eo, &diag_ctx).await {
                         // Post-await validation (STRICT for code actions: a corrupt
                         // edit is worse than no edit): on a superseded surface drop
                         // the WHOLE provider action set — only Verter-native actions

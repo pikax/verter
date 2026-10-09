@@ -1140,12 +1140,14 @@ pub(super) async fn handle_references(
                 }
                 tracing::debug!("references: querying tp at tsx offset {}", tsx_offset);
                 // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
-                // handle_goto_definition).
+                // handle_goto_definition); every foreign location decodes through
+                // exactly the surface this set maps it through.
                 let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                match tp
-                    .get_references(&ctx.snapshot.provider_query(), tsx_offset)
-                    .await
-                {
+                let query = ctx
+                    .snapshot
+                    .provider_query()
+                    .with_targets(std::sync::Arc::new(foreign_ide_set.clone()));
+                match tp.get_references(&query, tsx_offset).await {
                     Ok(type_refs) => {
                         // Post-await validation: a response produced against a
                         // surface that no longer matches must be DROPPED (fail

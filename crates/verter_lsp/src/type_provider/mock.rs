@@ -356,9 +356,30 @@ mod inner {
         /// default) keeps the trait default — no engine-start pulse — so only
         /// tests that drive the pending-sync re-drive wiring opt in.
         restart_pulse: Option<std::sync::Arc<tokio::sync::Notify>>,
+        /// Test seam: the bytes the engine holds for a foreign target file. A
+        /// definition, references or code-action answer locating into one is
+        /// refused when its requester will map it through other bytes, as an
+        /// adapter's target decode refuses it.
+        engine_targets: std::collections::HashMap<String, Arc<str>>,
     }
 
     impl MockState {
+        /// Refuse an answer locating into `targets` when the query's requester
+        /// will map a location there through bytes other than the ones the
+        /// engine holds for it.
+        fn check_targets<'a>(
+            &self,
+            query: &ProviderQuery,
+            targets: impl IntoIterator<Item = &'a str>,
+        ) -> Result<(), TypeProviderError> {
+            for path in targets {
+                if let Some(held) = self.engine_targets.get(path) {
+                    query.check_intended_target(path, Some(held))?;
+                }
+            }
+            Ok(())
+        }
+
         /// Record that a query at `path` is evaluated now, against the bytes
         /// the engine holds there at this instant.
         fn note_evaluation(&mut self, path: &str) {
@@ -595,6 +616,15 @@ mod inner {
             state
                 .type_definition_responses
                 .push((path.to_string(), offset, locs));
+        }
+
+        /// Hold `content` as the engine's bytes for the foreign target file
+        /// `path`, whatever surface the LSP recorded for it.
+        pub fn hold_engine_target(&self, path: &str, content: &str) {
+            let mut state = self.state.lock().unwrap();
+            state
+                .engine_targets
+                .insert(path.to_string(), Arc::from(content));
         }
 
         /// Configure reference locations for a specific path and offset.
@@ -1772,6 +1802,9 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let result = state
+                    .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                    .map(|()| result);
                 let on_query = match &state.on_query {
                     Some((armed_path, _)) if armed_path == path => {
                         state.on_query.take().map(|(_, cb)| cb)
@@ -1796,7 +1829,7 @@ mod inner {
                         "scripted transient definition failure".to_string(),
                     ));
                 }
-                Ok(result)
+                result
             }))
         }
 
@@ -1853,6 +1886,9 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let result = state
+                    .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                    .map(|()| result);
                 let on_query = match &state.on_query {
                     Some((armed_path, _)) if armed_path == path => {
                         state.on_query.take().map(|(_, cb)| cb)
@@ -1866,7 +1902,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered(Box::pin(async move { Ok(result) }))
+            self.barriered(Box::pin(async move { result }))
         }
 
         fn get_rename_locations(
@@ -1967,7 +2003,15 @@ mod inner {
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, actions)| actions.clone())
                 .unwrap_or_default();
-            self.barriered(Box::pin(async move { Ok(result) }))
+            let result = state
+                .check_targets(
+                    query,
+                    result
+                        .iter()
+                        .flat_map(|action| action.edits.iter().map(|edit| edit.path.as_str())),
+                )
+                .map(|()| result);
+            self.barriered(Box::pin(async move { result }))
         }
 
         fn get_semantic_tokens(

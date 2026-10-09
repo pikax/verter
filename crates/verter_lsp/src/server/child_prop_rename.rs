@@ -456,11 +456,16 @@ impl VerterLanguageServer {
         // returned foreign carrier location maps through the generation this
         // request began against.
         let foreign_ide_set = self.capture_foreign_carrier_ide_set();
+        // Every foreign location decodes through exactly the surface this set
+        // maps it through.
+        let definition_query = parent_query
+            .clone()
+            .with_targets(std::sync::Arc::new(foreign_ide_set.clone()));
 
         // Resolve the declaration target via the provider DEFINITION hop, mapped to
         // a source `{uri, range}` exactly as go-to-definition maps it.
         let Ok(type_defs) = type_provider
-            .get_definition(parent_query, parent_tsx_offset)
+            .get_definition(&definition_query, parent_tsx_offset)
             .await
         else {
             return;

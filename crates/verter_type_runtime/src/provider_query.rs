@@ -340,8 +340,29 @@ impl ProviderQuery {
         }
     }
 
-    fn intended_target(&self, path: &str) -> Option<Arc<str>> {
-        self.request.targets.as_ref()?.intended(path)
+    /// Check that `held` — the bytes a returned location in `path` is about to
+    /// be decoded through — is exactly the surface the requester will map that
+    /// location through. A target the requester captured no surface for
+    /// decodes through whatever bytes are held.
+    ///
+    /// # Errors
+    /// [`ConflictKind::IntendedSurface`] when the requester intends other bytes.
+    pub fn check_intended_target(
+        &self,
+        path: &str,
+        held: Option<&Arc<str>>,
+    ) -> Result<(), ProviderQueryConflict> {
+        match self
+            .request
+            .targets
+            .as_ref()
+            .and_then(|targets| targets.intended(path))
+        {
+            Some(intended) if !held.is_some_and(|held| same_bytes(held, &intended)) => Err(
+                ProviderQueryConflict::new(path, ConflictKind::IntendedSurface),
+            ),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -865,17 +886,8 @@ impl BoundQuery {
                 }
             }
         };
-        if let Some(intended) = self.query.intended_target(intended_as) {
-            if !bytes
-                .as_ref()
-                .is_some_and(|bytes| same_bytes(bytes, &intended))
-            {
-                return Err(ProviderQueryConflict::new(
-                    intended_as,
-                    ConflictKind::IntendedSurface,
-                ));
-            }
-        }
+        self.query
+            .check_intended_target(intended_as, bytes.as_ref())?;
         Ok(bytes)
     }
 

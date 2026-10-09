@@ -1528,6 +1528,15 @@ impl verter_type_runtime::provider_query::IntendedTargets for ProviderLifecycleR
     }
 }
 
+/// A captured view names, for every path it holds a mappable surface of, the
+/// exact provider bytes a returned location in that path is mapped through.
+impl verter_type_runtime::provider_query::IntendedTargets for ProviderQuerySnapshot {
+    fn intended(&self, path: &str) -> Option<Arc<str>> {
+        self.snapshot_for(path)
+            .map(|snapshot| Arc::clone(&snapshot.provider_content))
+    }
+}
+
 impl ProviderSurfaceSnapshot {
     /// The delivered-surface identity a provider query intending this surface
     /// carries.
