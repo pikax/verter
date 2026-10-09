@@ -128,6 +128,13 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
             context: format!("pending-flow-root::{gap:?}"),
             property_name: None,
         },
+        // A relation refused at its comparison allowance (TS2859): the
+        // operation budget stopped it, naming the check's two subjects.
+        ShallowDiagnostic::RelationTooComplex { source, target } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::BudgetExceeded,
+            context: format!("relation-too-complex@{source:?}->{target:?}"),
+            property_name: None,
+        },
     }
 }
 
