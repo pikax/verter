@@ -1,0 +1,7 @@
+error: cannot construct `NodeLease` with struct literal syntax due to private fields
+  --> tests/cases/compile-fail/node_lease_unforgeable.rs:10:5
+   |
+10 |     NodeLease { id }
+   |     ^^^^^^^^^   -- private field
+   |
+   = note: ...and other private fields `core` and `_charge` that were not provided

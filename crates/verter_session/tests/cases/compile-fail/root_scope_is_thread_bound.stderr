@@ -1,0 +1,21 @@
+error[E0277]: `*const ()` cannot be sent between threads safely
+  --> tests/cases/compile-fail/root_scope_is_thread_bound.rs:13:18
+   |
+13 |     require_send(scope);
+   |     ------------ ^^^^^ `*const ()` cannot be sent between threads safely
+   |     |
+   |     required by a bound introduced by this call
+   |
+   = help: within `SemanticRootScope`, the trait `Send` is not implemented for `*const ()`
+note: required because it appears within the type `PhantomData<*const ()>`
+  --> $RUST/core/src/marker.rs
+note: required because it appears within the type `SemanticRootScope`
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/node_roots.rs
+   |
+   | pub struct SemanticRootScope {
+   |            ^^^^^^^^^^^^^^^^^
+note: required by a bound in `require_send`
+  --> tests/cases/compile-fail/root_scope_is_thread_bound.rs:8:20
+   |
+ 8 | fn require_send<T: Send>(_: T) {}
+   |                    ^^^^ required by this bound in `require_send`

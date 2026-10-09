@@ -58,7 +58,9 @@ pub mod inflight;
 pub(crate) mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
+pub(crate) mod node_roots;
 pub(crate) mod nodes;
+pub use node_roots::{LeaseError, NodeLease, NodeRootSet, RootScopeHandle, SemanticRootScope};
 pub use nodes::AliasChainEnd;
 mod observability;
 mod origin_edges;
@@ -383,12 +385,6 @@ pub struct SemanticGraphStore {
     /// iteration) instead of trading correctness for it. ONE per-node sidecar:
     /// the entry holds every bit memoized for the id, released together.
     unresolved_reach: Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>,
-    /// Set (and never cleared) by the first [`Self::release_canonical`]
-    /// that tombstones a node. Until then every id ever handed out is
-    /// live, so the warm-read liveness check ([`Self::result_is_live`])
-    /// is a single relaxed load; afterwards a warm candidate whose result
-    /// names a released node is skipped as a miss instead of being served.
-    released_any: std::sync::atomic::AtomicBool,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.

@@ -366,7 +366,7 @@ impl SemanticGraphStore {
     /// the store. Until the first release every id is live and this is one
     /// relaxed load.
     fn keeps_structure_bits(&self, node: SemanticNodeId) -> bool {
-        !self.released_any.load(std::sync::atomic::Ordering::Relaxed) || self.arena.is_live(node)
+        !self.arena.core().released_any() || self.arena.is_live(node)
     }
 
     /// The memoized structural bits of `node`, if any was decided.

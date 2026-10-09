@@ -52,12 +52,15 @@
 //! **Acyclic by contract.** A payload names children the arena already
 //! holds: every child id is below the id the payload is interned at, so the
 //! node graph is a DAG and every structural walk over it terminates without
-//! cycle detection. A payload naming a child the arena could still allocate
-//! (an id at or above the new node's, below [`UNALLOCATABLE_ID_FLOOR`]) is a
-//! forward reference, the only way to close a cycle; it interns as the typed
+//! cycle detection. A payload naming a child the arena has not handed out
+//! (below [`UNALLOCATABLE_ID_FLOOR`]) is a forward reference, the only way
+//! to close a cycle; it interns as the typed
 //! `Opaque(ForeignSemanticOperand)` refusal instead, never as its payload.
-//! Ids from the floor up are never allocated (binder tokens, sentinels), so
-//! they can dangle but never close a cycle.
+//! A payload naming a child that is released or dying interns as the typed
+//! `Opaque(StaleSemanticOperand)` refusal: its edge could never be counted
+//! (see **Ownership**). Ids from the floor up are never allocated (binder
+//! tokens, sentinels), so they can dangle but never close a cycle; they carry
+//! no counted edge.
 //!
 //! Dispatch builders query the sidecar via [`super::SemanticGraphStore::node_scope`]
 //! to route per-base-scope lookups through the correct
@@ -91,10 +94,38 @@
 //! stays while any one of its slots is live (a long-lived node interned
 //! alongside churned ones pins its chunk), so the retained storage is bounded
 //! by the live set times the chunk size, never by history.
+//!
+//! **Ownership.** Every slot carries a reference count of its counted
+//! edges: one per occurrence of the node among the retained children of a
+//! live parent ([`SemanticNodeData::for_each_retained_child`], a multiset),
+//! plus one per explicit root that holds it ([`super::node_roots`]: a
+//! [`super::node_roots::NodeLease`], a [`super::node_roots::NodeRootSet`]
+//! entry, or a root scope's membership). A fresh intern counts its child
+//! edges before the parent becomes visible, so a child outlives every
+//! parent that names it; a child that is already dying (or was never
+//! handed out) refuses the parent as a typed stale (or foreign) operand
+//! instead of resurrecting it. The dedup index owns nothing: a node's LAST
+//! count falls under its dedup shard's lock, which forgets the node's entry
+//! in the same step, so a dedup candidate is never dying. A hit under a root
+//! scope upgrades the candidate's count under that same lock; a hit racing
+//! the final release either upgrades first (and the node lives on) or finds
+//! the entry gone and mints a fresh node — a dying node is never handed out
+//! again. The twelve primitive vocabulary nodes
+//! (`Primitive(_)` under the `Global` scope) are permanent; nothing else
+//! is. When a count reaches zero the node is DYING: it is queued for
+//! destruction, and destruction — removing its dedup entry, dropping its
+//! payload and scope, and releasing the edges to its children — runs
+//! iteratively from one queue per arena, so the depth of a chain never
+//! becomes the depth of a stack and a release under foreign locks never
+//! re-enters the arena. A node interned with no root scope active on the
+//! thread is unowned: it counts only the edges of its parents and stays
+//! until a parent edge or a root releases it, or a document close sweeps
+//! it.
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use smallvec::SmallVec;
@@ -107,15 +138,36 @@ use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
 /// so a payload naming one can dangle but never close a cycle.
 pub const UNALLOCATABLE_ID_FLOOR: u64 = 1 << 62;
 
-/// Whether `data`, interned at `id`, names a child the arena could allocate
-/// at or after `id`: a forward reference, the only way to close a cycle.
-fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
-    let mut forward = false;
-    let mut check = |child: SemanticNodeId| {
-        forward |= child.0 >= id.0 && child.0 < UNALLOCATABLE_ID_FLOOR;
-    };
-    data.for_each_retained_child(&mut check);
-    forward
+/// Reference-count value of a node whose count reached zero: it is queued
+/// for (or undergoing) destruction and can never be acquired again.
+const DYING: u32 = u32::MAX;
+/// Reference-count value of a permanent vocabulary node: acquiring and
+/// releasing it are no-ops.
+const PERMANENT: u32 = u32::MAX - 1;
+
+/// Whether a node interned under `scope` is one of the twelve permanent
+/// primitive vocabulary nodes.
+fn is_permanent_vocabulary(data: &SemanticNodeData, scope: &NodeScopeId) -> bool {
+    matches!(data, SemanticNodeData::Primitive(_)) && matches!(scope, NodeScopeId::Global)
+}
+
+/// Why a payload's child edge could not be counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EdgeRefusal {
+    /// The child id was never handed out: a forward reference.
+    Unallocated,
+    /// The child was released by a close or is dying.
+    Stale,
+}
+
+impl EdgeRefusal {
+    fn refusal_payload(self) -> SemanticNodeData {
+        use crate::semantic_query::QueryError;
+        SemanticNodeData::Opaque(match self {
+            Self::Unallocated => QueryError::ForeignSemanticOperand,
+            Self::Stale => QueryError::StaleSemanticOperand,
+        })
+    }
 }
 
 /// Test builds: every node id `data`'s `Debug` form prints is one
@@ -176,20 +228,45 @@ pub(super) struct ShardIndex {
 
 impl ShardIndex {
     /// Return the interned id for the node structurally + scope equal to
-    /// `(data, scope)` within this shard, or `None`. The `fingerprint`
-    /// already selected the bucket; the per-candidate content `Eq` is the
-    /// identity authority that keeps a fingerprint collision from aliasing
-    /// two distinct nodes.
+    /// `(data, scope)` within this shard that `accept` takes, or `None`.
+    /// The `fingerprint` already selected the bucket; the per-candidate
+    /// content `Eq` is the identity authority that keeps a fingerprint
+    /// collision from aliasing two distinct nodes. More than one equal
+    /// candidate can sit in a bucket — a dying node beside the fresh one
+    /// minted after it — so every equal candidate is offered to `accept`
+    /// (which upgrades its count, or refuses a dying one) until one is
+    /// taken.
     fn lookup(
         &self,
         fingerprint: u64,
         data: &SemanticNodeData,
         scope: &NodeScopeId,
+        mut accept: impl FnMut(SemanticNodeId) -> bool,
     ) -> Option<SemanticNodeId> {
         let bucket = self.index.get(&fingerprint)?;
         bucket.iter().find_map(|(cand_data, cand_scope, cand_id)| {
-            (cand_scope == scope && cand_data.as_ref() == data).then_some(*cand_id)
+            (cand_scope == scope && cand_data.as_ref() == data && accept(*cand_id))
+                .then_some(*cand_id)
         })
+    }
+
+    /// Forget `id`'s entry under `fingerprint`, shrinking a spilled
+    /// bucket and the map once they have drained well below their
+    /// capacity, so a long churn leaves no high-water backing behind.
+    fn forget(&mut self, fingerprint: u64, id: SemanticNodeId) {
+        let Some(bucket) = self.index.get_mut(&fingerprint) else {
+            return;
+        };
+        bucket.retain(|(_, _, cand_id)| *cand_id != id);
+        if bucket.is_empty() {
+            self.index.remove(&fingerprint);
+        } else if bucket.spilled() && bucket.capacity() > bucket.len().saturating_mul(4) {
+            bucket.shrink_to_fit();
+        }
+        let floor = 16usize.max(self.index.len());
+        if self.index.capacity() > floor.saturating_mul(4) {
+            self.index.shrink_to(floor.saturating_mul(2));
+        }
     }
 }
 
@@ -199,12 +276,19 @@ pub(super) const CHUNK_BITS: u32 = 8;
 pub(super) const CHUNK_LEN: usize = 1 << CHUNK_BITS;
 const CHUNK_MASK: u64 = (CHUNK_LEN as u64) - 1;
 
-/// Storage for `CHUNK_LEN` consecutive ids. Index-aligned `nodes` / `scopes`:
-/// `Some` is a live slot, `None` a released one (or, in the chunk still
-/// receiving ids, one not handed out yet — [`ArenaInner::next_id`] tells).
+/// Storage for `CHUNK_LEN` consecutive ids. Index-aligned `nodes` / `scopes`
+/// / `refs` / `fingerprints`: `Some` is a live slot, `None` a released one
+/// (or, in the chunk still receiving ids, one not handed out yet —
+/// [`ArenaInner::next_id`] tells).
 struct Chunk {
     nodes: Box<[Option<Arc<SemanticNodeData>>]>,
     scopes: Box<[Option<NodeScopeId>]>,
+    /// Each live slot's counted edges (see the module docs, **Ownership**),
+    /// or [`DYING`] / [`PERMANENT`].
+    refs: Box<[AtomicU32]>,
+    /// Each live slot's structural fingerprint: its dedup bucket key, read
+    /// back by destruction to forget the entry without re-hashing.
+    fingerprints: Box<[u64]>,
     /// Slots of this chunk still holding a payload; the chunk is dropped
     /// when it reaches zero.
     live: usize,
@@ -215,6 +299,8 @@ impl Chunk {
         Self {
             nodes: (0..CHUNK_LEN).map(|_| None).collect(),
             scopes: (0..CHUNK_LEN).map(|_| None).collect(),
+            refs: (0..CHUNK_LEN).map(|_| AtomicU32::new(0)).collect(),
+            fingerprints: vec![0; CHUNK_LEN].into_boxed_slice(),
             live: 0,
         }
     }
@@ -226,7 +312,15 @@ enum Slot<'a> {
     Unallocated,
     /// Handed out and released (its chunk may be gone).
     Released,
-    Live(&'a Arc<SemanticNodeData>, &'a NodeScopeId),
+    Live(LiveSlot<'a>),
+}
+
+/// A slot holding its payload: possibly dying, never released yet.
+struct LiveSlot<'a> {
+    payload: &'a Arc<SemanticNodeData>,
+    scope: &'a NodeScopeId,
+    refs: &'a AtomicU32,
+    fingerprint: u64,
 }
 
 /// Interior state of [`NodeArena`]. Held behind an `RwLock` so reads
@@ -254,13 +348,25 @@ impl ArenaInner {
         };
         let index = (id.0 & CHUNK_MASK) as usize;
         match (&chunk.nodes[index], &chunk.scopes[index]) {
-            (Some(payload), Some(scope)) => Slot::Live(payload, scope),
+            (Some(payload), Some(scope)) => Slot::Live(LiveSlot {
+                payload,
+                scope,
+                refs: &chunk.refs[index],
+                fingerprint: chunk.fingerprints[index],
+            }),
             _ => Slot::Released,
         }
     }
 
-    /// Hand out the next id for `(payload, scope)`.
-    fn allocate(&mut self, payload: Arc<SemanticNodeData>, scope: NodeScopeId) -> SemanticNodeId {
+    /// Hand out the next id for `(payload, scope)` with `refs` counted
+    /// edges already attributed to it.
+    fn allocate(
+        &mut self,
+        payload: Arc<SemanticNodeData>,
+        scope: NodeScopeId,
+        fingerprint: u64,
+        refs: u32,
+    ) -> SemanticNodeId {
         let id = SemanticNodeId(self.next_id);
         self.next_id += 1;
         let chunk = self
@@ -270,29 +376,29 @@ impl ArenaInner {
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
         chunk.scopes[index] = Some(scope);
+        *chunk.refs[index].get_mut() = refs;
+        chunk.fingerprints[index] = fingerprint;
         chunk.live += 1;
         self.live += 1;
         id
     }
 
-    /// Release `id`'s slot; `true` when it held a payload. Drops the chunk
-    /// when that was its last live slot.
-    fn release(&mut self, id: SemanticNodeId) -> bool {
+    /// Release `id`'s slot, handing back the payload it held so the caller
+    /// drops it outside the arena's locks. Drops the chunk when that was its
+    /// last live slot.
+    fn release(&mut self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
         let key = id.0 >> CHUNK_BITS;
-        let Some(chunk) = self.chunks.get_mut(&key) else {
-            return false;
-        };
+        let chunk = self.chunks.get_mut(&key)?;
         let index = (id.0 & CHUNK_MASK) as usize;
-        if chunk.nodes[index].take().is_none() {
-            return false;
-        }
+        let payload = chunk.nodes[index].take()?;
         chunk.scopes[index] = None;
+        *chunk.refs[index].get_mut() = 0;
         chunk.live -= 1;
         self.live -= 1;
         if chunk.live == 0 {
             self.chunks.remove(&key);
         }
-        true
+        Some(payload)
     }
 
     /// Every live `(id, payload, scope)` in ascending id order.
@@ -481,42 +587,353 @@ pub fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
     (structural_fingerprint(data, scope) & SHARD_MASK) as usize
 }
 
-pub(crate) struct NodeArena {
+/// The shared state of one arena: slot storage, the dedup index and the
+/// destruction queue. Held by `Arc` so the roots that own nodes
+/// ([`super::node_roots`]) release them without borrowing the store.
+pub(crate) struct ArenaCore {
+    /// Process-unique identity: a root minted by one arena is refused by
+    /// every other, so overlapping ids of two stores never alias.
+    identity: u64,
     /// Global dense storage for node data + sidecar. `RwLock` so readers
-    /// (`get`, `scope`) are concurrent and writers (intern-miss) briefly
-    /// serialize to push a fresh slot.
+    /// (`get`, `scope`, count updates) are concurrent and writers
+    /// (intern-miss, destruction) briefly serialize.
     inner: parking_lot::RwLock<ArenaInner>,
     /// Sharded dedup indexes. Each shard owns the fingerprint-range whose
-    /// low bits land on it.
+    /// low bits land on it. They own nothing (see **Ownership**).
     shards: [parking_lot::Mutex<ShardIndex>; NUM_SHARDS],
+    /// The ONE payload every released slot resolves to through
+    /// [`NodeArena::get`] — an `Opaque(Miss)` node ("this value's
+    /// resolution answered nothing"), never in the dedup index. Mirrors the
+    /// `SemanticGraphRead::node_data` fabrication for an unknown id, so a
+    /// consumer still holding a released id reads an unresolved value.
+    released_placeholder: Arc<SemanticNodeData>,
+    /// Set (and never cleared) by the first slot released, by a close
+    /// sweep or by its count. Until then every id ever handed out is live,
+    /// so the store's warm-read liveness guards are one relaxed load.
+    released_any: AtomicBool,
+    /// Dying nodes awaiting destruction.
+    pending: parking_lot::Mutex<Vec<SemanticNodeId>>,
+    /// Whether a thread is draining [`Self::pending`]; the one drainer
+    /// destroys what every other releaser queues, iteratively.
+    draining: AtomicBool,
+}
+
+impl Default for ArenaCore {
+    fn default() -> Self {
+        static NEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
+        Self {
+            identity: NEXT_IDENTITY.fetch_add(1, Ordering::Relaxed),
+            inner: parking_lot::RwLock::new(ArenaInner::default()),
+            shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
+            released_placeholder: Arc::new(SemanticNodeData::Opaque(
+                crate::semantic_query::QueryError::Miss,
+            )),
+            released_any: AtomicBool::new(false),
+            pending: parking_lot::Mutex::new(Vec::new()),
+            draining: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Count one more edge on a live slot. `false` when the node is dying.
+fn increment(refs: &AtomicU32) -> bool {
+    let mut current = refs.load(Ordering::Relaxed);
+    loop {
+        match current {
+            DYING => return false,
+            PERMANENT => return true,
+            // `PERMANENT - 1 + 1` saturates into the permanent state rather
+            // than wrapping onto `DYING`.
+            _ => match refs.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            },
+        }
+    }
+}
+
+/// Release one counted edge of a live slot; `true` when it was the last,
+/// so the node is now dying and must be queued for destruction.
+fn decrement(refs: &AtomicU32) -> bool {
+    let mut current = refs.load(Ordering::Relaxed);
+    loop {
+        let next = match current {
+            PERMANENT => return false,
+            DYING | 0 => {
+                verter_debug_assert!(false, "released an edge the node never counted");
+                return false;
+            }
+            1 => DYING,
+            _ => current - 1,
+        };
+        match refs.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => return next == DYING,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+impl ArenaCore {
+    /// The arena's process-unique identity.
+    pub(super) fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// Whether any slot was ever released.
+    pub(super) fn released_any(&self) -> bool {
+        self.released_any.load(Ordering::Relaxed)
+    }
+
+    /// Count one root (or edge) on `id`. Refused for an id never handed
+    /// out, a released slot and a dying node: a root is only ever taken on
+    /// a node something already keeps alive.
+    pub(super) fn acquire(&self, id: SemanticNodeId) -> Result<(), EdgeRefusal> {
+        if id.0 >= UNALLOCATABLE_ID_FLOOR {
+            return Err(EdgeRefusal::Unallocated);
+        }
+        let inner = self.inner.read();
+        match inner.slot(id) {
+            Slot::Unallocated => Err(EdgeRefusal::Unallocated),
+            Slot::Released => Err(EdgeRefusal::Stale),
+            Slot::Live(slot) if increment(slot.refs) => Ok(()),
+            Slot::Live(_) => Err(EdgeRefusal::Stale),
+        }
+    }
+
+    /// Release one root (or edge) on `id`, destroying the node — and,
+    /// iteratively, every child whose last edge it held — when it was the
+    /// last. A slot a close already released is a no-op.
+    pub(super) fn release(&self, id: SemanticNodeId) {
+        self.release_all(std::iter::once(id));
+    }
+
+    /// Release several roots (or edges) at once, then destroy whatever
+    /// that left dying.
+    pub(super) fn release_all(&self, ids: impl IntoIterator<Item = SemanticNodeId>) {
+        let dying = self.release_counts(ids);
+        if !dying.is_empty() {
+            self.pending.lock().extend(dying);
+            self.drain();
+        }
+    }
+
+    /// Release one count of each of `ids`, returning the nodes whose last
+    /// count it was. A count above one falls under the read lock alone. The
+    /// LAST count falls under the node's dedup shard lock, which also
+    /// forgets its dedup entry in the same step: a dedup candidate is
+    /// therefore never dying, so an intern hit needs no count check, and a
+    /// hit racing the final release either upgrades first (the release then
+    /// leaves the node alive) or misses and mints a fresh node.
+    fn release_counts(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> SmallVec<[SemanticNodeId; 8]> {
+        let mut last: SmallVec<[(SemanticNodeId, u64); 8]> = SmallVec::new();
+        {
+            let inner = self.inner.read();
+            for id in ids {
+                let Slot::Live(slot) = inner.slot(id) else {
+                    continue;
+                };
+                let mut current = slot.refs.load(Ordering::Relaxed);
+                loop {
+                    match current {
+                        PERMANENT => break,
+                        DYING | 0 => {
+                            verter_debug_assert!(false, "released a count the node never held");
+                            break;
+                        }
+                        1 => {
+                            last.push((id, slot.fingerprint));
+                            break;
+                        }
+                        _ => match slot.refs.compare_exchange_weak(
+                            current,
+                            current - 1,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(observed) => current = observed,
+                        },
+                    }
+                }
+            }
+        }
+        let mut dying: SmallVec<[SemanticNodeId; 8]> = SmallVec::new();
+        for (id, fingerprint) in last {
+            // Shard before arena lock: the order the intern miss takes them.
+            let mut shard = self.shards[(fingerprint & SHARD_MASK) as usize].lock();
+            let died = {
+                let inner = self.inner.read();
+                match inner.slot(id) {
+                    Slot::Live(slot) => decrement(slot.refs),
+                    _ => false,
+                }
+            };
+            if died {
+                shard.forget(fingerprint, id);
+                dying.push(id);
+            }
+        }
+        dying
+    }
+
+    /// Count the edge to every child `data` retains, all or none: the
+    /// first child that cannot be counted releases the edges already
+    /// taken and refuses the payload.
+    fn acquire_children(&self, data: &SemanticNodeData) -> Result<(), EdgeRefusal> {
+        let mut counted: SmallVec<[SemanticNodeId; 16]> = SmallVec::new();
+        let mut refusal = None;
+        {
+            let inner = self.inner.read();
+            data.for_each_retained_child(|child| {
+                if refusal.is_some() || child.0 >= UNALLOCATABLE_ID_FLOOR {
+                    return;
+                }
+                match inner.slot(child) {
+                    Slot::Live(slot) if increment(slot.refs) => counted.push(child),
+                    Slot::Unallocated => refusal = Some(EdgeRefusal::Unallocated),
+                    Slot::Live(_) | Slot::Released => refusal = Some(EdgeRefusal::Stale),
+                }
+            });
+        }
+        match refusal {
+            None => Ok(()),
+            Some(refusal) => {
+                self.release_all(counted);
+                Err(refusal)
+            }
+        }
+    }
+
+    /// The child ids `data` retains that carry a counted edge.
+    fn counted_children(data: &SemanticNodeData) -> SmallVec<[SemanticNodeId; 16]> {
+        let mut children = SmallVec::new();
+        data.for_each_retained_child(|child| {
+            if child.0 < UNALLOCATABLE_ID_FLOOR {
+                children.push(child);
+            }
+        });
+        children
+    }
+
+    /// Accept a dedup candidate for an intern. A candidate is never dying
+    /// (its last count falls under this shard's lock, which forgets it), so
+    /// without a root scope any candidate serves; under one, the scope roots
+    /// it unless it already holds it.
+    fn accept_hit(
+        &self,
+        id: SemanticNodeId,
+        roots: Option<&super::node_roots::ScopeRoots>,
+    ) -> bool {
+        match roots {
+            Some(roots) => roots.root_with(id, || self.acquire(id).is_ok()),
+            None => true,
+        }
+    }
+
+    /// Destroy queued dying nodes until the queue is empty. Exactly one
+    /// thread drains at a time; a releaser that finds another draining
+    /// leaves its node queued for it, and a release made by destruction
+    /// itself (a child's last edge) is queued and picked up by the same
+    /// loop, so destruction never recurses.
+    fn drain(&self) {
+        loop {
+            if self
+                .draining
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                return;
+            }
+            loop {
+                let next = self.pending.lock().pop();
+                match next {
+                    Some(id) => self.destroy(id),
+                    None => break,
+                }
+            }
+            self.draining.store(false, Ordering::Release);
+            // A node queued after the last pop but before the flag cleared
+            // found the drain still running; take it now.
+            if self.pending.lock().is_empty() {
+                return;
+            }
+        }
+    }
+
+    /// Destroy one dying node, whose dedup entry its last release already
+    /// forgot: drop its payload and scope and release the edges to its
+    /// children, queueing any child that was their last. The payload is
+    /// dropped with no arena lock held.
+    fn destroy(&self, id: SemanticNodeId) {
+        let dying = {
+            let inner = self.inner.read();
+            matches!(inner.slot(id), Slot::Live(slot) if slot.refs.load(Ordering::Acquire) == DYING)
+        };
+        if !dying {
+            return;
+        }
+        self.released_any.store(true, Ordering::Release);
+        let payload = self.inner.write().release(id);
+        if let Some(payload) = payload {
+            let orphaned = self.release_counts(Self::counted_children(&payload));
+            if !orphaned.is_empty() {
+                self.pending.lock().extend(orphaned);
+            }
+            drop(payload);
+        }
+    }
+
+    /// Dying nodes queued and not destroyed yet.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn pending_len(&self) -> usize {
+        self.pending.lock().len()
+    }
+
+    /// `id`'s counted edges: `None` for an id that holds no payload, the
+    /// count otherwise (`u32::MAX - 1` permanent, `u32::MAX` dying).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn refs(&self, id: SemanticNodeId) -> Option<u32> {
+        let inner = self.inner.read();
+        match inner.slot(id) {
+            Slot::Live(slot) => Some(slot.refs.load(Ordering::Acquire)),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) struct NodeArena {
+    core: Arc<ArenaCore>,
     /// Optional contention instrumentation. When present,
     /// `push_impl` records per-call counters and `inner.write()`
     /// wait time so downstream passes have evidence-grade contention
     /// data. `None` for test-default arenas constructed via
     /// `Default::default()`.
     pub(super) provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
-    /// The ONE payload every released slot resolves to through [`Self::get`]
-    /// — an `Opaque(Miss)` node ("this value's resolution answered
-    /// nothing"), never in the dedup index. Mirrors the
-    /// `SemanticGraphRead::node_data` fabrication for an unknown id, so a
-    /// consumer still holding a released id reads an unresolved value.
-    released_placeholder: Arc<SemanticNodeData>,
 }
 
 impl Default for NodeArena {
     fn default() -> Self {
         Self {
-            inner: parking_lot::RwLock::new(ArenaInner::default()),
-            shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
+            core: Arc::new(ArenaCore::default()),
             provenance: None,
-            released_placeholder: Arc::new(SemanticNodeData::Opaque(
-                crate::semantic_query::QueryError::Miss,
-            )),
         }
     }
 }
 
 impl NodeArena {
+    /// The shared core the roots of this arena hold.
+    pub(super) fn core(&self) -> &Arc<ArenaCore> {
+        &self.core
+    }
+
     /// Intern `data` with the `Global` scope tag. Helper intermediates and
     /// purely structural nodes use this path — most existing interning
     /// sites fall into this bucket.
@@ -563,12 +980,18 @@ impl NodeArena {
     /// authority. Split out from [`push_impl`] so tests can force a
     /// fingerprint — driving two distinct payloads into one bucket — and
     /// assert the content-`Eq` split (collision safety).
+    ///
+    /// The returned id is rooted by the root scope active on this thread
+    /// for this arena, when there is one (see **Ownership**).
     fn intern_with_fingerprint(
         &self,
         data: SemanticNodeData,
         scope: NodeScopeId,
         fingerprint: u64,
     ) -> SemanticNodeId {
+        let core = &*self.core;
+        let roots = super::node_roots::current_scope(&self.core);
+        let roots = roots.as_deref();
         // Capture the variant bucket before moving `data` so the
         // contention instrumentation can bucket per-variant pushes.
         let discriminant = data.node_tag().bucket_index();
@@ -586,17 +1009,26 @@ impl NodeArena {
             } else {
                 None
             };
-            let shard = self.shards[shard_idx].lock();
+            let shard = core.shards[shard_idx].lock();
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
-            if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
+            if let Some(existing) =
+                shard.lookup(fingerprint, &data, &scope, |id| core.accept_hit(id, roots))
+            {
                 (existing, false, 0u64)
             } else {
                 drop(shard);
                 #[cfg(any(test, feature = "test-support"))]
                 assert_retained_walk_is_complete(&data);
+                // Count the edges to the payload's children BEFORE the
+                // payload can become visible, so no child is destroyed
+                // under a parent that names it. A child that cannot be
+                // counted refuses the payload as a typed operand error.
+                if let Err(refusal) = core.acquire_children(&data) {
+                    return self.push_impl(refusal.refusal_payload(), scope);
+                }
                 // Miss: re-acquire the shard (to serialize concurrent
                 // misses for the same key on this shard) and then
                 // briefly acquire inner.write() to allocate.
@@ -605,45 +1037,44 @@ impl NodeArena {
                 } else {
                     None
                 };
-                let mut shard = self.shards[shard_idx].lock();
+                let mut shard = core.shards[shard_idx].lock();
                 let lock_wait = lock_start
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
                 crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
-                if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
-                    // Another thread beat us to it.
+                if let Some(existing) =
+                    shard.lookup(fingerprint, &data, &scope, |id| core.accept_hit(id, roots))
+                {
+                    // Another thread beat us to it; its node already counts
+                    // these children, so the edges taken above go back.
+                    drop(shard);
+                    core.release_all(ArenaCore::counted_children(&data));
                     (existing, false, 0u64)
                 } else {
+                    let permanent = is_permanent_vocabulary(&data, &scope);
+                    let refs = if permanent {
+                        PERMANENT
+                    } else {
+                        u32::from(roots.is_some())
+                    };
                     let write_start = Instant::now();
-                    let mut inner = self.inner.write();
+                    let mut inner = core.inner.write();
                     let wait = write_start.elapsed().as_nanos() as u64;
-                    // The id this payload would take. Ids are monotonic and
-                    // never reused (storage is chunked, not a vector), so the
-                    // next id to hand out is the allocation point the
-                    // acyclicity rule reads; a released child sits below it
-                    // and is no forward reference.
-                    let id = SemanticNodeId(inner.next_id);
-                    if names_forward_child(&data, id) {
-                        drop(inner);
-                        drop(shard);
-                        return self.push_impl(
-                            SemanticNodeData::Opaque(
-                                crate::semantic_query::QueryError::ForeignSemanticOperand,
-                            ),
-                            scope,
-                        );
-                    }
                     // ONE payload allocation, shared by refcount between the
                     // arena's slot storage and the dedup bucket — the payload
                     // is never deep-cloned into the index.
                     let payload = Arc::new(data);
-                    let id = inner.allocate(Arc::clone(&payload), scope.clone());
+                    let id = inner.allocate(Arc::clone(&payload), scope.clone(), fingerprint, refs);
                     drop(inner);
                     shard
                         .index
                         .entry(fingerprint)
                         .or_default()
                         .push((payload, scope, id));
+                    drop(shard);
+                    if let (Some(roots), false) = (roots, permanent) {
+                        roots.adopt_counted(id);
+                    }
                     (id, true, wait)
                 }
             }
@@ -668,10 +1099,10 @@ impl NodeArena {
     /// out; the shared `Opaque(Miss)` placeholder for a RELEASED id (see
     /// [`Self::release_canonical`]); the interned payload otherwise.
     pub(super) fn get(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        let inner = self.inner.read();
+        let inner = self.core.inner.read();
         match inner.slot(id) {
-            Slot::Live(payload, _) => Some(Arc::clone(payload)),
-            Slot::Released => Some(Arc::clone(&self.released_placeholder)),
+            Slot::Live(slot) => Some(Arc::clone(slot.payload)),
+            Slot::Released => Some(Arc::clone(&self.core.released_placeholder)),
             Slot::Unallocated => None,
         }
     }
@@ -679,16 +1110,16 @@ impl NodeArena {
     /// Whether `id` names a slot that still holds its interned payload —
     /// `false` for an id never handed out and for a released slot.
     pub(super) fn is_live(&self, id: SemanticNodeId) -> bool {
-        let inner = self.inner.read();
+        let inner = self.core.inner.read();
         matches!(inner.slot(id), Slot::Live(..))
     }
 
     /// Return the recorded origin scope for `id` — `None` for invalid
     /// ids and released slots, `Some(scope)` for everything else.
     pub(super) fn scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
-        let inner = self.inner.read();
+        let inner = self.core.inner.read();
         match inner.slot(id) {
-            Slot::Live(_, scope) => Some(scope.clone()),
+            Slot::Live(slot) => Some(slot.scope.clone()),
             _ => None,
         }
     }
@@ -697,19 +1128,19 @@ impl NodeArena {
     /// released ids. Equals [`Self::live_len`] until the first release. This
     /// is an id count, not storage: see [`Self::storage_slots`].
     pub(super) fn len(&self) -> usize {
-        self.inner.read().next_id as usize
+        self.core.inner.read().next_id as usize
     }
 
     /// Slots the arena physically holds right now: every live chunk's
     /// [`CHUNK_LEN`]. Bounded by the live set (times the chunk size), unlike
     /// [`Self::len`]; the figure the retention snapshot reports as storage.
     pub(super) fn storage_slots(&self) -> usize {
-        self.inner.read().chunks.len() * CHUNK_LEN
+        self.core.inner.read().chunks.len() * CHUNK_LEN
     }
 
     /// Number of slots that still hold a payload — the retained node set.
     pub(super) fn live_len(&self) -> usize {
-        self.inner.read().live
+        self.core.inner.read().live
     }
 
     /// Release every node the closed `canonical_id` retained: the nodes
@@ -744,7 +1175,7 @@ impl NodeArena {
     pub(super) fn release_canonical(&self, canonical_id: &str, below: u64) -> Vec<SemanticNodeId> {
         let mut released: Vec<(SemanticNodeId, u64)> = Vec::new();
         {
-            let inner = self.inner.read();
+            let inner = self.core.inner.read();
             let mut dead: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
             // Only nodes interned before the close are the closed content's;
             // a node at or past `below` belongs to what the reload interned.
@@ -820,30 +1251,32 @@ impl NodeArena {
             } else {
                 None
             };
-            let mut shard = self.shards[shard_index].lock();
+            let mut shard = self.core.shards[shard_index].lock();
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
             for (fingerprint, id) in victims {
-                let Some(bucket) = shard.index.get_mut(&fingerprint) else {
-                    continue;
-                };
-                bucket.retain(|(_, _, cand_id)| *cand_id != id);
-                if bucket.is_empty() {
-                    shard.index.remove(&fingerprint);
-                }
+                shard.forget(fingerprint, id);
             }
         }
         // Now drop the payloads (and any chunk that empties). A slot already
         // released by a concurrent call is skipped so `live` stays exact.
-        let mut inner = self.inner.write();
+        // The payloads leave the slots under the write lock and are dropped
+        // after it, like a destroyed node's.
+        self.core.released_any.store(true, Ordering::Release);
         let mut ids: Vec<SemanticNodeId> = Vec::with_capacity(released.len());
-        for (id, _) in released {
-            if inner.release(id) {
-                ids.push(id);
+        let mut payloads: Vec<Arc<SemanticNodeData>> = Vec::with_capacity(released.len());
+        {
+            let mut inner = self.core.inner.write();
+            for (id, _) in released {
+                if let Some(payload) = inner.release(id) {
+                    ids.push(id);
+                    payloads.push(payload);
+                }
             }
         }
+        drop(payloads);
         ids
     }
 
@@ -867,7 +1300,7 @@ impl NodeArena {
     /// into the audit context, each shard lock acquisition is recorded.
     pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
         let timing_on = verter_execution::request_context::current_timing_enabled();
-        for shard in self.shards.iter() {
+        for shard in self.core.shards.iter() {
             let lock_start = if timing_on {
                 Some(Instant::now())
             } else {
@@ -898,11 +1331,11 @@ impl NodeArena {
     /// index. Returns `false` if `id` has no dense slot or no bucket entry.
     #[cfg(test)]
     pub(super) fn debug_bucket_shares_arena_arc(&self, id: SemanticNodeId) -> bool {
-        let arena_arc = match self.inner.read().slot(id) {
-            Slot::Live(arc, _) => Arc::clone(arc),
+        let arena_arc = match self.core.inner.read().slot(id) {
+            Slot::Live(slot) => Arc::clone(slot.payload),
             _ => return false,
         };
-        for shard in self.shards.iter() {
+        for shard in self.core.shards.iter() {
             let shard = shard.lock();
             for bucket in shard.index.values() {
                 for (cand_arc, _scope, cand_id) in bucket.iter() {
@@ -1270,6 +1703,50 @@ mod arena_intern_tests {
         ));
     }
 
+    /// A collision bucket that churned returns its backing capacity even
+    /// while one colliding node stays alive in it: destroying the others
+    /// shrinks the spilled bucket instead of pinning its high-water mark.
+    /// Discriminating against forgetting entries without shrinking (the
+    /// held sentinel keeps the bucket, so a drained-map check misses it).
+    #[test]
+    fn a_churned_collision_bucket_releases_its_capacity_around_a_held_node() {
+        use crate::semantic_query::LiteralValue;
+        const CHURN: usize = 4_096;
+        let arena = NodeArena::default();
+        let forced_fp = 0x00C0_FFEE_u64;
+        let bucket_capacity = || {
+            arena.core.shards[(forced_fp & SHARD_MASK) as usize]
+                .lock()
+                .index
+                .get(&forced_fp)
+                .map(|bucket| bucket.capacity())
+        };
+        let literal = |n: f64| SemanticNodeData::Literal(LiteralValue::Number(n));
+        let sentinel = arena.intern_with_fingerprint(literal(-1.0), NodeScopeId::Global, forced_fp);
+        arena.core.acquire(sentinel).unwrap();
+        let churned: Vec<SemanticNodeId> = (0..CHURN)
+            .map(|n| {
+                let id = arena.intern_with_fingerprint(
+                    literal(n as f64),
+                    NodeScopeId::Global,
+                    forced_fp,
+                );
+                arena.core.acquire(id).unwrap();
+                id
+            })
+            .collect();
+        assert!(bucket_capacity().unwrap() > CHURN);
+        arena.core.release_all(churned);
+        assert!(arena.is_live(sentinel));
+        assert!(
+            bucket_capacity().unwrap() <= 4,
+            "the bucket kept {:?} slots for one live node",
+            bucket_capacity()
+        );
+        arena.core.release(sentinel);
+        assert_eq!(bucket_capacity(), None);
+    }
+
     /// Scope is part of identity even inside a collided bucket. The SAME
     /// payload at DIFFERENT scopes, forced into one bucket, must not alias.
     /// Discriminating against dropping the scope compare from the bucket
@@ -1366,7 +1843,7 @@ mod arena_intern_tests {
             }
             last = minted.last().copied();
             assert!(
-                Arc::ptr_eq(&arena.get(minted[0]).unwrap(), &arena.released_placeholder),
+                Arc::ptr_eq(&arena.get(minted[0]).unwrap(), &arena.core.released_placeholder),
                 "cycle {cycle}: a released id reads as the placeholder even after its chunk is gone"
             );
             assert!(!arena.is_live(minted[0]));

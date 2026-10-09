@@ -273,6 +273,63 @@ unchanged child's captured binding slot; the changed parse key prevents reusing
 that child's old skeleton, map, or graph. An unrelated edit may preserve a narrow
 slice hash while still producing a distinct graph artifact key.
 
+## Semantic node ownership
+
+`crates/verter_type_engine/src/semantic_query_memo/{arena,node_roots}.rs`
+own the lifetime of semantic graph nodes. Every arena slot carries a
+reference count of its COUNTED EDGES: one per occurrence of the node among
+the retained children of a live parent
+(`SemanticNodeData::for_each_retained_child`, a multiset — the same walk
+counts on intern and releases on destruction), plus one per explicit root.
+
+- **Edges before visibility.** An intern miss counts the edge to every
+  child before the parent is allocated, all or none. A child that is
+  released or dying refuses the payload as `Opaque(StaleSemanticOperand)`;
+  one never handed out refuses it as `Opaque(ForeignSemanticOperand)` (the
+  acyclicity rule). Ids at or above `UNALLOCATABLE_ID_FLOOR` carry no edge.
+- **Non-owning dedup.** The dedup index owns nothing. A node's LAST count
+  falls under its dedup shard's lock, which forgets the dedup entry in the
+  same step, so a dedup candidate is never dying; an intern hit racing the
+  final release either upgrades first or mints a fresh node. A destroyed id
+  is never handed out again (ids are never reused).
+- **Permanent vocabulary.** The twelve `Primitive(_)` nodes under the
+  `Global` scope are permanent (`PERMANENT` count state); nothing else is.
+- **Iterative destruction.** A count reaching zero marks the node `DYING`
+  and queues it on the arena's one destruction queue; one drainer at a time
+  drops the payload (outside every arena lock) and releases the edges to its
+  children, queueing any child that was their last. No chain depth becomes
+  stack depth, and a release made under a foreign lock never re-enters the
+  arena. Collision buckets and the dedup map shrink as they drain.
+- **Roots** (`node_roots.rs`): `NodeLease` (one node held by a caller
+  outside the store; carries the arena identity, so a lease read against
+  another store is `LeaseError::Foreign`; pins its own handle bytes in the
+  process account as a `Pinned` charge), `NodeRootSet` (a retained
+  holder's multiset of named ids, all or none), and root scopes
+  (`SemanticGraphStore::enter_root_scope`: every intern made on the thread
+  while a scope of the store is active is rooted by it until the scope's
+  last guard drops; nested entries JOIN the active scope; a
+  `RootScopeHandle` enters the same scope on another thread). A root never
+  resurrects: rooting a released, dying or unallocated id is refused.
+- **Unowned interns.** A node interned with no root scope active counts
+  only the edges of its parents. Production computations do not enter root
+  scopes yet and memo candidates, sidecars, the signature kernel and the
+  session caches hold raw ids, so production nodes stay unowned and the
+  close-time sweep (`SemanticGraphStore::release_canonical`, gated by
+  `project_type_store::semantic_activity`) is still the reclamation path.
+  Count-driven reclamation may only become the production path in one
+  cutover that roots every holder of a raw id at once — an id read through
+  a holder that does not count it would otherwise outlive its node.
+
+Guards: the `node_roots` suite (`a_scope_roots_its_interns_until_its_last_guard_drops`,
+`leases_release_to_baseline_in_both_orders`, `a_foreign_lease_is_refused`,
+`a_payload_over_a_dead_or_unallocated_child_is_refused`,
+`a_deep_chain_is_destroyed_without_recursion`,
+`concurrent_intern_and_final_release_never_serve_a_dying_node`,
+`a_root_set_counts_its_multiset`), the arena's
+`a_churned_collision_bucket_releases_its_capacity_around_a_held_node`, and
+the `node_lease_unforgeable` / `root_scope_is_thread_bound` compile
+contracts.
+
 ## Architectural rules (R1–R31)
 
 ### Mutation semantics

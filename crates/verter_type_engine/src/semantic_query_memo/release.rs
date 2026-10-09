@@ -45,8 +45,6 @@
 //! guard rejects any warm result naming a tombstoned id, and a tombstoned
 //! id reads as `Opaque(Miss)`.
 
-use std::sync::atomic::Ordering;
-
 use rustc_hash::FxHashSet;
 
 use super::*;
@@ -113,9 +111,9 @@ impl SemanticGraphStore {
         let started = std::time::Instant::now();
         report.nodes_scanned = self.arena.live_len();
         report.storage_slots_before = self.arena.storage_slots();
-        // Arm the warm-read liveness guard BEFORE any payload is dropped so
-        // a warm hit racing the tombstone cannot serve a released node.
-        self.released_any.store(true, Ordering::Release);
+        // The arena arms the warm-read liveness guard before it drops any
+        // payload, so a warm hit racing the tombstone cannot serve a
+        // released node.
         let released_ids = self.arena.release_canonical(canonical_id, below);
         report.nodes_released = released_ids.len();
         // Possibly empty: a document that interned no node can still be
@@ -291,7 +289,7 @@ impl SemanticGraphStore {
     /// inspected here (they carry no arena id at top level).
     #[inline]
     pub(super) fn result_is_live(&self, result: &QueryResult<SemanticQueryValue>) -> bool {
-        if !self.released_any.load(Ordering::Relaxed) {
+        if !self.arena.core().released_any() {
             return true;
         }
         match result {
@@ -312,7 +310,7 @@ impl SemanticGraphStore {
     /// the close sweep drops it. One relaxed load until the first release.
     #[inline]
     pub fn family_names_released_node(&self, family: &FamilyKey) -> bool {
-        if !self.released_any.load(Ordering::Relaxed) {
+        if !self.arena.core().released_any() {
             return false;
         }
         let mut released = false;
