@@ -1,0 +1,132 @@
+{
+  "id": "identity-case-table.v1",
+  "schema": 1,
+  "contractNode": "VID0",
+  "describesHead": {
+    "landingTitle": "fix(ci): retry marketplace extension installs in the VS Code E2E (#798)",
+    "date": "2026-10-09"
+  },
+  "companionInventory": "identity-inventory.v1.json",
+  "rule": "Each case states its input, the required outcome and the forbidden outcome, and names the node whose test makes it executable. VID0 ships no test; the executable owner adds it. Release strings below are the exact releases a fixture pins; the admitted lines themselves belong to each family's stage-0 lock.",
+  "cases": [
+    {
+      "id": "VC01",
+      "name": "lineage survives edits",
+      "input": "One carrier file, edited twice; the script and template regions survive both edits",
+      "required": "SourceUnitId for each logical role is equal across the three versions; SourceRevision and ContentId differ per version; MapRevision differs exactly when the map construction changes",
+      "forbidden": "A SourceUnitId that changes with revision or content; any constructor deriving SourceUnitId from a path or revision; a lineage repair applied after the unit is minted",
+      "rules": ["R02", "R12"],
+      "existingEvidence": ["verter_identity identity::tests::source_unit_lineage_is_stable_across_revision_and_content", "verter_identity compile-fail source_unit_id_has_no_from_canonical", "verter_compiler assembly::source_unit::tests::content_and_revision_do_not_change_source_unit_id"],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3"
+    },
+    {
+      "id": "VC02",
+      "name": "Vue 2.6 and Vue 3 coexist",
+      "input": "One workspace with package A resolving vue 2.6 and package B resolving vue 3; one .vue file in each with identical bytes",
+      "required": "Both files share one CarrierProfileId; they get two distinct ReleaseIds and two distinct FrameworkProfileIds; their semantic cache keys differ; no code path branches on the family name to tell them apart",
+      "forbidden": "A family-wide 'vue' key shared by both; a behavior branch on major inside one profile; either package silently treated as the other's release",
+      "rules": ["R02", "R05", "R09", "R15"],
+      "existingEvidence": [],
+      "note": "Identity-level only. No Vue 2 vertical is admitted, so the Vue 2.6 profile identity is a fixture value, not a supported product.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3"
+    },
+    {
+      "id": "VC03",
+      "name": "one TSX byte stream, exclusive React and Solid 2 claims",
+      "input": "The same .tsx bytes under a React 19 package and under a Solid 2 package, and once under a React package with a @jsxImportSource solid-js pragma",
+      "required": "One CarrierProfileId (TSX) in every case; the React and Solid 2 claims are two distinct FrameworkProfileIds and mutually exclusive for one attachment; the pragma narrows that one file to Solid 2",
+      "forbidden": "A React profile derived from the Solid claim or the reverse; both claims active on one attachment without a typed ambiguous outcome",
+      "rules": ["R02", "R10"],
+      "existingEvidence": [],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3",
+      "activationOwner": "FWA1",
+      "activationAcceptance": "FWA1-AC2"
+    },
+    {
+      "id": "VC04",
+      "name": "Solid 1 cannot activate Solid 2",
+      "input": "A package whose resolved solid-js is 1.x",
+      "required": "No Solid 2 ReleaseId or FrameworkProfileId can be produced from it; activation reports unsupported-version",
+      "forbidden": "Solid 2 semantics on a Solid 1 package; a dual-version profile",
+      "rules": ["R05", "R06", "R08"],
+      "existingEvidence": [],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3",
+      "activationOwner": "FWA1",
+      "activationAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "VC05",
+      "name": "older htmx majors cannot activate htmx 4",
+      "input": "A package whose resolved htmx.org major is below 4",
+      "required": "No htmx 4 ReleaseId or FrameworkProfileId can be produced from it; an admitted older major gets its own profile, otherwise unsupported-version",
+      "forbidden": "The htmx 4 vocabulary applied to an older major; one profile spanning two majors",
+      "rules": ["R05", "R06"],
+      "existingEvidence": [],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3",
+      "activationOwner": "FWA1",
+      "activationAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "VC06",
+      "name": "floating and untagged identities fail schema validation",
+      "input": "Profile descriptors naming 'latest', 'next', a range such as ^3, a bare family string such as \"vue\", an untagged string id, a descriptor with no major, and a versions array",
+      "required": "Each fails canonical decoding with a typed error",
+      "forbidden": "Any of them decoding into a ReleaseId, FrameworkProfileId or ProjectProfileId; a decoder defaulting the major",
+      "rules": ["R04", "R07"],
+      "existingEvidence": [],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC2"
+    },
+    {
+      "id": "VC07",
+      "name": "nominal distinctness",
+      "input": "A CarrierProfileId passed where a FrameworkProfileId or ProjectProfileId is required; an AttachmentId passed where a RegionId is required",
+      "required": "Compile error",
+      "forbidden": "A type alias, a shared base type or an implicit conversion that accepts it",
+      "rules": ["R01"],
+      "existingEvidence": ["the existing verter_identity compile-fail fixtures prove the same property for other identity pairs"],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "id": "VC08",
+      "name": "source key serialization and collision",
+      "input": "(SourceUnitId, SourceRevision, ContentId) and (SourceUnitId, SourceRevision, MapRevision) tuples, including two tuples whose concatenated payload bytes coincide",
+      "required": "Exact round-trip through the canonical encoding; colliding payloads encode to different bytes and different digests; no backend, engine or provider identity appears in the key",
+      "forbidden": "A key that includes EngineIdentity, ProviderEpoch or a session handle; equality decided by digest alone on a suspected collision",
+      "rules": ["R12", "R13", "R14"],
+      "existingEvidence": ["verter_identity encoding::tests::{golden_bytes_are_pinned, domain_tag_separates_otherwise_identical_payloads, field_order_is_significant}"],
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC4"
+    },
+    {
+      "id": "VC09",
+      "name": "Qwik is Qwik 2 only",
+      "input": "A package resolving @builder.io/qwik 1.x, and one resolving the pinned Qwik 2 core",
+      "required": "Qwik 1 is unsupported-version; Qwik 2 activates the one Qwik profile, so Qwik-2-only rules need no in-profile version gate",
+      "forbidden": "A Qwik 1 package receiving Qwik 2 semantics; a Qwik profile whose behavior branches on major",
+      "rules": ["R06", "R11"],
+      "existingEvidence": [],
+      "executableOwner": "QWK0",
+      "receivingAcceptance": "QWK0-AC1",
+      "activationOwner": "FWA1",
+      "activationAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "VC10",
+      "name": "resolved, not declared, and incremental",
+      "input": "A package declaring react ^18 || ^19 with 18.3 installed, then upgraded to 19",
+      "required": "unsupported-version before the upgrade, then the React 19 profile; incremental activation after the edit equals fresh activation",
+      "forbidden": "Activation from the declared range; a stale profile after the upgrade",
+      "rules": ["R06", "R08", "R09"],
+      "existingEvidence": [],
+      "executableOwner": "FWA1",
+      "receivingAcceptance": "FWA1-AC5"
+    }
+  ]
+}

@@ -1,0 +1,1014 @@
+{
+  "id": "identity-inventory.v1",
+  "schema": 1,
+  "contractNode": "VID0",
+  "finalOwner": "expansion.kernel: typed immutable universal catalog and demand-selected kernel services",
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "describesHead": {
+    "landingTitle": "fix(ci): retry marketplace extension installs in the VS Code E2E (#798)",
+    "date": "2026-10-09"
+  },
+  "companionCaseTable": "identity-case-table.v1.json",
+  "inherits": {
+    "nodes": [
+      "UAK0",
+      "UAK1"
+    ],
+    "files": [
+      "tests/kernel/UAK0/products/owner-consumer-inventory.v1.json",
+      "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "tests/kernel/UAK1/products/constitution-inventory.v1.json",
+      "tests/kernel/UAK1/products/firewall-route-ledger.v1.json"
+    ],
+    "rule": "UAK0 boundaries B01-B06, outcomes O01-O13, consumers C01-C17, seams S01-S13 and routes D01-D19, and UAK1 outcomes U01-U12 and routes K01-K04, keep their owners. VID0 references them by id and adds no second owner. VID0 adds identity rows I01-I12, law rules R01-R16, outcomes V-O01-V-O12, consumers V-C01-V-C11 and displaced routes V-D01-V-D06."
+  },
+  "identities": [
+    {
+      "id": "I01",
+      "name": "SourceUnitId",
+      "axis": "stable source-unit lineage",
+      "disposition": "imported",
+      "home": "crates/verter_identity/src/identity.rs",
+      "derivedFrom": [
+        "SourceId",
+        "logical role"
+      ],
+      "neverContains": [
+        "SourceRevision",
+        "ContentId",
+        "MapRevision",
+        "any profile, project or backend identity"
+      ],
+      "currentState": "typed digest newtype minted only by SourceUnitId::from_lineage; SourceUnitId has no from_canonical (compile-fail fixture source_unit_id_has_no_from_canonical)",
+      "owner": "verter_identity",
+      "ownerKind": "retained seam (UAK0 S08); lineage repair implemented by B4R0"
+    },
+    {
+      "id": "I02",
+      "name": "SourceRevision, ContentId, MapRevision",
+      "axis": "exact version, exact bytes and exact map construction of one unit",
+      "disposition": "imported",
+      "home": "crates/verter_identity/src/identity.rs, crates/verter_identity/src/mapping.rs",
+      "derivedFrom": [
+        "source version facts",
+        "exact bytes",
+        "map-construction descriptor"
+      ],
+      "neverContains": [
+        "SourceUnitId lineage inputs are neighbours, never folded into one another"
+      ],
+      "currentState": "typed digest newtypes; neighbours of SourceUnitId",
+      "owner": "verter_identity",
+      "ownerKind": "retained seam (UAK0 S08)"
+    },
+    {
+      "id": "I03",
+      "name": "CarrierProfileId",
+      "axis": "syntax carrier: bytes, geometry, parse and recovery",
+      "disposition": "new",
+      "home": "crates/verter_identity/src/successor/",
+      "derivedFrom": [
+        "carrier family key",
+        "carrier syntax-schema epoch (ProfileSchemaEpoch)"
+      ],
+      "neverContains": [
+        "ReleaseId",
+        "FrameworkProfileId",
+        "ProjectProfileId",
+        "ConfiguredProjectId",
+        "SourceUnitId",
+        "file path or extension spelling"
+      ],
+      "currentState": "absent; carried by the syntax half of FileLanguage::Framework { adapter_id, language_id }, ScriptFlavor::AdapterModule and LanguageId (UAK0 B01, D08)",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "id": "I04",
+      "name": "ReleaseId",
+      "axis": "exact semantic release declared by one manifest",
+      "disposition": "new",
+      "home": "crates/verter_identity/src/successor/",
+      "derivedFrom": [
+        "framework family key",
+        "exact major",
+        "admitted release line pinned by that family's stage-0 lock",
+        "ProfileSchemaEpoch"
+      ],
+      "neverContains": [
+        "a range",
+        "a versions array",
+        "latest, next, canary or any floating tag",
+        "an implied major",
+        "CarrierProfileId"
+      ],
+      "currentState": "absent; every adapter implies its family's current major (route V-D01)",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC2"
+    },
+    {
+      "id": "I05",
+      "name": "FrameworkProfileId",
+      "axis": "semantic (framework) profile: the meaning of one exact release over one or more carriers",
+      "disposition": "new",
+      "home": "crates/verter_identity/src/successor/",
+      "derivedFrom": [
+        "exactly one ReleaseId",
+        "the ordered set of CarrierProfileIds it claims",
+        "ProfileSchemaEpoch"
+      ],
+      "neverContains": [
+        "a second ReleaseId",
+        "SourceUnitId",
+        "ProjectProfileId",
+        "ConfiguredProjectId",
+        "the display family alone"
+      ],
+      "currentState": "absent; carried by FrameworkAdapterId(Arc<str>), FrameworkAdapterDescriptor.id, the open proto ComponentSelector.framework_adapter_id string and FrameworkTag (UAK0 B02)",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "id": "I06",
+      "name": "AttachmentId and RegionId",
+      "axis": "attachment: one semantic claim bound to one addressed region of one source unit",
+      "disposition": "new",
+      "home": "crates/verter_identity/src/successor/",
+      "derivedFrom": [
+        "AttachmentId = SourceUnitId + RegionId + FrameworkProfileId",
+        "RegionId = SourceUnitId + carrier-minted region role"
+      ],
+      "neverContains": [
+        "SourceRevision or ContentId (an edit keeps the attachment when the region survives)",
+        "a byte offset as identity"
+      ],
+      "currentState": "absent; embedded and attached regions are addressed by compiler-local roles and spans",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "id": "I07",
+      "name": "ProjectProfileId",
+      "axis": "project-profile overlay over semantic profiles",
+      "disposition": "new",
+      "home": "crates/verter_identity/src/successor/",
+      "derivedFrom": [
+        "project-profile family key",
+        "exact ReleaseId of the meta-framework release",
+        "ProfileSchemaEpoch"
+      ],
+      "neverContains": [
+        "CarrierProfileId or FrameworkProfileId it overlays (it references them, never re-mints them)",
+        "ConfiguredProjectId",
+        "a TypeScript program identity"
+      ],
+      "currentState": "absent; carried by the LSP ProjectRegistry (UAK0 B03, D19)",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "id": "I08",
+      "name": "ConfiguredProjectId",
+      "axis": "one configured project instance (one project configuration file and its derived membership)",
+      "disposition": "new",
+      "home": "crates/verter_identity/src/successor/",
+      "derivedFrom": [
+        "canonical configuration identity",
+        "ConfigurationRevision basis is a neighbour, never folded in"
+      ],
+      "neverContains": [
+        "ProjectProfileId",
+        "FrameworkProfileId",
+        "backend/process identity"
+      ],
+      "currentState": "absent; ProjectRegistry roots (D19), the untyped ProjectStableKey (V-D06) and the binding-owned project string inside CertifiedTypeEngineBinding. ProjectId(u32) is a positional per-snapshot index, not an identity.",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC1",
+      "derivationOwner": "PM1",
+      "derivationAcceptance": "PM1-AC1"
+    },
+    {
+      "id": "I09",
+      "name": "CatalogSnapshot identity",
+      "axis": "snapshot: the one immutable registration catalog a host was built with",
+      "disposition": "new",
+      "home": "the CatalogSnapshot type (CAT0 contract)",
+      "derivedFrom": [
+        "ordered registered CarrierProfileIds, FrameworkProfileIds, ProjectProfileIds and backend registrations",
+        "ProfileSchemaEpoch"
+      ],
+      "neverContains": [
+        "workspace, project or source revisions",
+        "process or backend identity"
+      ],
+      "currentState": "absent; split over LanguageRegistry, CarrierGrammarAuthority, ImmutableCapabilityCatalog, FrameworkAdapterRegistry and two generated TS mirrors (UAK0 B04)",
+      "owner": "CPF1",
+      "successorPath": [
+        "VID0",
+        "CAT0",
+        "CPF1"
+      ],
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "I10",
+      "name": "CapabilityId",
+      "axis": "capability: one feature a profile provides, qualified by its FrameworkProfileId or CarrierProfileId",
+      "disposition": "retag",
+      "home": "crates/verter_language/src/ids.rs (existing type, reused; no second CapabilityId)",
+      "derivedFrom": [
+        "profile identity",
+        "capability key"
+      ],
+      "neverContains": [
+        "a process-wide framework name gate"
+      ],
+      "currentState": "CapabilityId(Arc<str>), an untagged interned string gating GatedCandidate rows (UAK0 D09)",
+      "owner": "COX0",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "COX0"
+      ],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "I11",
+      "name": "ProfileSchemaEpoch",
+      "axis": "schema epoch of the canonical descriptor behind I03-I09",
+      "disposition": "new",
+      "home": "crates/verter_identity/src/successor/",
+      "derivedFrom": [
+        "the identity's domain tag version, as every digest identity already carries (verter.identity.*.v1)"
+      ],
+      "neverContains": [
+        "a wall-clock or build timestamp"
+      ],
+      "currentState": "absent for profiles; existing digest identities version their domain tag",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC2"
+    },
+    {
+      "id": "I12",
+      "name": "CertifiedTypeEngineBinding",
+      "axis": "certified TypeScript backend binding: project binding, observed profile, input basis, serving engine identity and lease",
+      "disposition": "imported unchanged",
+      "home": "crates/verter_session/src/semantic_capability.rs",
+      "derivedFrom": [
+        "CertifiedTypeEngineBinding::certify (the only constructor)"
+      ],
+      "neverContains": [
+        "a successor BackendInstanceEpoch or provider epoch defined beside it"
+      ],
+      "currentState": "typed, private-field binding; ProviderEpoch (verter_identity, minted by verter_type_runtime provider_hub) and EngineIdentity are its existing serving facts",
+      "owner": "verter_session",
+      "ownerKind": "retained seam (UAK0 S10)"
+    }
+  ],
+  "lawRules": [
+    {
+      "id": "R01",
+      "group": "orthogonality",
+      "rule": "I01-I12 are distinct nominal types. No identity is a type alias of another, and none converts into another implicitly.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "id": "R02",
+      "group": "orthogonality",
+      "rule": "Each identity is minted from the inputs its row lists and nothing else. Carrier, release, attachment, project profile, configured project, snapshot and capability vary independently: changing one never changes another.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3"
+    },
+    {
+      "id": "R03",
+      "group": "orthogonality",
+      "rule": "The display family (a FrameworkTag value, an adapter spelling, a file extension) is presentation only. It is never a semantic dispatch key and never a cache key.",
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "R04",
+      "group": "release",
+      "rule": "One manifest declares exactly one ReleaseId. A manifest naming two releases, or a versions array, is a structural manifest failure.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC2"
+    },
+    {
+      "id": "R05",
+      "group": "release",
+      "rule": "Separate majors are separate manifests and separate FrameworkProfileIds. Two majors of one family never share a profile, a cache key or a vocabulary table.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC3"
+    },
+    {
+      "id": "R06",
+      "group": "release",
+      "rule": "There is no implicit default major. A release that cannot be resolved to an exact admitted ReleaseId yields a typed unsupported-version outcome and is never coerced to the nearest or newest release.",
+      "executableOwner": "FWA1",
+      "receivingAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "R07",
+      "group": "release",
+      "rule": "'latest', 'next', canary and other floating tags, ranges and untagged strings never decode into a ReleaseId or any profile identity.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC2"
+    },
+    {
+      "id": "R08",
+      "group": "release",
+      "rule": "Activation reads the resolved installed version, never the declared range. A profile activates only on its exact release.",
+      "executableOwner": "FWA1",
+      "receivingAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "R09",
+      "group": "multi-version",
+      "rule": "Each workspace package resolves its own release. Two packages in one workspace may hold different releases of one family; each gets its own FrameworkProfileId and its own cache entries.",
+      "executableOwner": "FWA1",
+      "receivingAcceptance": "FWA1-AC5"
+    },
+    {
+      "id": "R10",
+      "group": "multi-version",
+      "rule": "When two active profiles claim the same attachment and no per-file narrowing (a pragma or carrier rule) selects one, the outcome is typed ambiguous. No first-registered, first-loaded or newest profile wins.",
+      "executableOwner": "COX0",
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "R11",
+      "group": "multi-version",
+      "rule": "A family whose admitted line is one major admits only that major. The Qwik profile admits Qwik 2 only; a resolved Qwik 1 package is unsupported-version, so Qwik-2-only behavior needs no in-profile version gate.",
+      "executableOwner": "QWK0",
+      "receivingAcceptance": "QWK0-AC1"
+    },
+    {
+      "id": "R12",
+      "group": "serialization",
+      "rule": "Cache and audit keys over source text use (SourceUnitId, SourceRevision, ContentId) and, for maps, (SourceUnitId, SourceRevision, MapRevision). They round-trip through the canonical tagged, length-delimited encoding exactly.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC4"
+    },
+    {
+      "id": "R13",
+      "group": "serialization",
+      "rule": "Collision safety comes from the encoding, not from the digest: two tuples whose concatenated payloads coincide still encode to different bytes, and a suspected digest collision compares full canonical bytes.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC4"
+    },
+    {
+      "id": "R14",
+      "group": "serialization",
+      "rule": "Backend and process identity (CertifiedTypeEngineBinding, EngineIdentity, ProviderEpoch, session handles) stays binding-owned. It never enters a source, carrier, profile or catalog key.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC4"
+    },
+    {
+      "id": "R15",
+      "group": "serialization",
+      "rule": "Semantic caches are keyed by the exact FrameworkProfileId they compute under; syntax artifacts are keyed by CarrierProfileId and never by a semantic profile. A family-wide key is forbidden.",
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "R16",
+      "group": "placement",
+      "rule": "Profile identities are not threaded into HostConfig, CompileProfile or CodegenOptions. Consumers read them from the catalog and the demand plan.",
+      "executableOwner": "VID0T",
+      "receivingAcceptance": "VID0T-AC5"
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "V-O01",
+      "outcome": "The typed identity set I03-I08 and I11 exists once, in verter_identity, with nominal distinctness",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC1",
+      "refines": "UAK0 O01"
+    },
+    {
+      "id": "V-O02",
+      "outcome": "Schema decoding rejects 'latest', untagged strings, an implicit default major and versions arrays",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC2"
+    },
+    {
+      "id": "V-O03",
+      "outcome": "The VID0 case table runs as table-driven tests",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC3"
+    },
+    {
+      "id": "V-O04",
+      "outcome": "Source cache/audit key serialization and collision safety, with backend identity outside the keys",
+      "owner": "VID0T",
+      "successorPath": [
+        "VID0",
+        "VID0T"
+      ],
+      "receivingAcceptance": "VID0T-AC4"
+    },
+    {
+      "id": "V-O05",
+      "outcome": "FileLanguage producers emit CarrierProfileId for syntax and hand semantic claims to the demand plan; consumers move atomically",
+      "owner": "CPF1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "CPF1"
+      ],
+      "receivingAcceptance": "CPF1-AC2",
+      "refines": "UAK0 C02, C03"
+    },
+    {
+      "id": "V-O06",
+      "outcome": "Per-package release admission against exact ReleaseIds, with unsupported-version and off outcomes",
+      "owner": "FWA1",
+      "successorPath": [
+        "VID0",
+        "FWA1"
+      ],
+      "receivingAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "V-O07",
+      "outcome": "Typed ambiguity when two active profiles claim one attachment",
+      "owner": "COX0",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "COX0"
+      ],
+      "receivingAcceptance": "COX0-AC2",
+      "refines": "UAK0 O03"
+    },
+    {
+      "id": "V-O08",
+      "outcome": "The TypeInfoRequest selector names a typed FrameworkProfileId instead of an open adapter string",
+      "owner": "TIF1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "TIF1"
+      ],
+      "receivingAcceptance": "TIF1-AC2",
+      "refines": "UAK0 B06"
+    },
+    {
+      "id": "V-O09",
+      "outcome": "ConfiguredProjectId and ProjectProfileId derived from project state",
+      "owner": "PM1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "PM1"
+      ],
+      "receivingAcceptance": "PM1-AC1",
+      "refines": "UAK0 O10"
+    },
+    {
+      "id": "V-O10",
+      "outcome": "AttachmentId/RegionId minted for embedded regions",
+      "owner": "EMB0I",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "EMB0I"
+      ],
+      "receivingAcceptance": "EMB0I-AC1"
+    },
+    {
+      "id": "V-O11",
+      "outcome": "The catalog snapshot identity, registered once at the composition root",
+      "owner": "CPF1",
+      "successorPath": [
+        "VID0",
+        "CAT0",
+        "CPF1"
+      ],
+      "receivingAcceptance": "CPF1-AC2",
+      "refines": "UAK0 O02"
+    },
+    {
+      "id": "V-O12",
+      "outcome": "Executable validator over this inventory and its negative controls",
+      "owner": "UAI0",
+      "successorPath": [
+        "VID0",
+        "UAI0"
+      ],
+      "receivingAcceptance": "UAI0-AC-R1"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "V-C01",
+      "consumer": "Artifact and source-environment cache keys that carry a FileLanguage row",
+      "symbols": [
+        "FileArtifactKey.file_language_id",
+        "SourceEnvIdentity.file_language_id",
+        "CandidateSlotKey.file_language_id",
+        "FileSourceEnv.file_language_id (fact)",
+        "FrameworkArtifactId.{adapter_id, language_id}",
+        "CarrierParseKey.{adapter_id, language_id}"
+      ],
+      "paths": [
+        "crates/verter_session_query/src/source/artifact_key.rs",
+        "crates/verter_session_query/src/source/env_identity.rs",
+        "crates/verter_session/src/framework/script_facts.rs",
+        "crates/verter_session/src/host_construction.rs",
+        "crates/verter_session_query/src/facts/version.rs",
+        "crates/verter_session/src/carrier_publication_store/mod.rs",
+        "crates/verter_session_query/src/source/framework_parse.rs"
+      ],
+      "consumes": [
+        "I03",
+        "I05"
+      ],
+      "owner": "CPF1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "CPF1"
+      ],
+      "receivingAcceptance": "CPF1-AC2",
+      "note": "Within UAK0 D08/C03. Syntax artifacts move to CarrierProfileId; script facts that depend on a semantic profile move to its FrameworkProfileId (R15)."
+    },
+    {
+      "id": "V-C02",
+      "consumer": "FileLanguage producers: static and registered classification",
+      "symbols": [
+        "LanguageRegistry::classify_static",
+        "HostLanguageClassifier::classify_registered",
+        "classify_ffi_file_language",
+        "direct classify_static callers in verter_scheduler, verter_workspace, verter_session_query, verter_session, verter_semantic_source, verter_compiler and verter_tsc"
+      ],
+      "paths": [
+        "crates/verter_language/src/registry.rs",
+        "crates/verter_session/src/framework/language_classifier.rs",
+        "crates/verter_ffi/src/convert/input.rs"
+      ],
+      "consumes": [
+        "I03"
+      ],
+      "owner": "CPF1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "CPF1"
+      ],
+      "receivingAcceptance": "CPF1-AC2",
+      "note": "Within UAK0 D07/D08 and C03 (verter_tsc stays C17). Classification yields a CarrierProfileId; the semantic claim is DEM0's SemanticClaimPlan."
+    },
+    {
+      "id": "V-C03",
+      "consumer": "Carrier frontends and compiler assembly that mint SourceId/SourceUnitId",
+      "symbols": [
+        "assembly::source_unit::carrier_source_id",
+        "VueAssemblyTag",
+        "SvelteAssemblyTag",
+        "VueCustomBlockSource"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/assembly/source_unit.rs",
+        "crates/verter_compiler/src/assembly/vue_module.rs",
+        "crates/verter_compiler/src/assembly/svelte_module.rs",
+        "crates/verter_compiler/src/framework_common/vue_bridge.rs"
+      ],
+      "consumes": [
+        "I01"
+      ],
+      "owner": "CPF1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "CPF1"
+      ],
+      "receivingAcceptance": "CPF1-AC2",
+      "note": "See displaced route V-D04."
+    },
+    {
+      "id": "V-C04",
+      "consumer": "Framework activation record",
+      "symbols": [
+        "FrameworkActivation.admittedRelease"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/project_capabilities.rs"
+      ],
+      "consumes": [
+        "I04",
+        "I05"
+      ],
+      "owner": "FWA1",
+      "successorPath": [
+        "VID0",
+        "FWA1"
+      ],
+      "receivingAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "V-C05",
+      "consumer": "Framework-surface executor and request validation reading the selector's adapter id",
+      "symbols": [
+        "ComponentSelector.framework_adapter_id",
+        "executor FrameworkAdapterId::new(&selector.framework_adapter_id)",
+        "request_validation empty-adapter check"
+      ],
+      "paths": [
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "crates/verter_session/src/typeinfo/framework_surface/executor.rs",
+        "crates/verter_session/src/typeinfo/request_validation.rs"
+      ],
+      "consumes": [
+        "I05"
+      ],
+      "owner": "TIF1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "TIF1"
+      ],
+      "receivingAcceptance": "TIF1-AC2"
+    },
+    {
+      "id": "V-C06",
+      "consumer": "Per-profile capability masks and participation",
+      "symbols": [
+        "CapabilityId",
+        "GatedCandidate"
+      ],
+      "paths": [
+        "crates/verter_language/src/ids.rs",
+        "crates/verter_language/src/registry.rs"
+      ],
+      "consumes": [
+        "I05",
+        "I10"
+      ],
+      "owner": "COX0",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "COX0"
+      ],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "V-C07",
+      "consumer": "Workspace index contributions keyed by profile",
+      "symbols": [
+        "semantic contribution keys"
+      ],
+      "paths": [
+        "crates/verter_session/src"
+      ],
+      "consumes": [
+        "I05",
+        "I06"
+      ],
+      "owner": "IDX0",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "IDX0"
+      ],
+      "receivingAcceptance": "IDX0-AC2"
+    },
+    {
+      "id": "V-C08",
+      "consumer": "Project-profile overlays",
+      "symbols": [
+        "ProjectProfileId consumers"
+      ],
+      "paths": [
+        "crates/verter_session/src"
+      ],
+      "consumes": [
+        "I07"
+      ],
+      "owner": "PPR0T",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "PPR0T"
+      ],
+      "receivingAcceptance": "PPR0T-AC1"
+    },
+    {
+      "id": "V-C09",
+      "consumer": "LSP project registry callers",
+      "symbols": [
+        "ProjectRegistry callers"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/config.rs"
+      ],
+      "consumes": [
+        "I08"
+      ],
+      "owner": "PM1",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "PM1"
+      ],
+      "receivingAcceptance": "PM1-AC1",
+      "note": "UAK0 C16, referenced."
+    },
+    {
+      "id": "V-C10",
+      "consumer": "LSP document classification by editor languageId and carrier structure",
+      "symbols": [
+        "document_file_language",
+        "carrier_structure FileLanguage producers",
+        "FileLanguage::vue() literals in verter_lsp"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/documents/mod.rs",
+        "crates/verter_lsp/src/documents/carrier_structure.rs",
+        "crates/verter_lsp/src/lib.rs",
+        "crates/verter_lsp/src/workspace_scanner.rs"
+      ],
+      "consumes": [
+        "I03",
+        "I05"
+      ],
+      "owner": "COX0",
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "COX0"
+      ],
+      "receivingAcceptance": "COX0-AC2",
+      "note": "Within UAK0 C06/D10."
+    },
+    {
+      "id": "V-C11",
+      "consumer": "Vue owner-asset key built from the installed vue package version",
+      "symbols": [
+        "vue_assets owner_asset_key"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/vue_assets.rs"
+      ],
+      "consumes": [
+        "I04"
+      ],
+      "owner": "FWA1",
+      "successorPath": [
+        "VID0",
+        "FWA1"
+      ],
+      "receivingAcceptance": "FWA1-AC1",
+      "note": "An exact-version asset key obeys R15; the release comes from the activation record instead of a second package.json read."
+    }
+  ],
+  "displacedRoutes": [
+    {
+      "id": "V-D01",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Implicit default major: a framework adapter identity names a family and silently means its current major",
+      "symbols": [
+        "FrameworkAdapterId::vue()",
+        "FrameworkAdapterId::svelte()",
+        "FrameworkAdapterDescriptor (no release field)",
+        "FrameworkTag::{Vue, Svelte, React, Solid} (family only)"
+      ],
+      "paths": [
+        "crates/verter_language/src/ids.rs",
+        "crates/verter_session/src/framework/descriptor.rs",
+        "crates/verter_session/src/framework/registry.rs"
+      ],
+      "disposition": "replace",
+      "successor": "every activation carries an exact admitted ReleaseId; anything else is unsupported-version",
+      "deletionOwner": "FWA1",
+      "productionCapable": true,
+      "successorPath": [
+        "VID0",
+        "FWA1"
+      ],
+      "receivingAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "V-D02",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Open adapter-id string in the public TypeInfo selector",
+      "symbols": [
+        "ComponentSelector.framework_adapter_id (proto field 4, open string)"
+      ],
+      "paths": [
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "crates/verter_session/src/typeinfo/framework_surface/executor.rs",
+        "crates/verter_session/src/typeinfo/request_validation.rs"
+      ],
+      "disposition": "replace",
+      "successor": "a typed FrameworkProfileId selector in TypeInfoRequest; an unknown or untagged id is a typed request error",
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "TIF1"
+      ],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "V-D03",
+      "category": "central-framework-switch",
+      "unit": "Wire FrameworkTag used as an adapter identity",
+      "symbols": [
+        "FrameworkAdapterRegistry::tag_disposition",
+        "FrameworkSurfacePayload.framework"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/registry.rs",
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto"
+      ],
+      "disposition": "retag",
+      "successor": "FrameworkTag stays a display-family wire tag with pre-allocated values; the exact profile travels as FrameworkProfileId beside it (R03)",
+      "deletionOwner": "REG0",
+      "productionCapable": true,
+      "successorPath": [
+        "VID0",
+        "REG0"
+      ],
+      "receivingAcceptance": "REG0-AC2"
+    },
+    {
+      "id": "V-D04",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Per-producer SourceId domains for one carrier file",
+      "symbols": [
+        "verter.compiler.assembly.logical_source.v1",
+        "verter.compiler.vue.main.assembly.v1",
+        "verter.compiler.svelte.main.assembly.v1",
+        "verter.compiler.vue.custom_blocks.source.v1"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/assembly/source_unit.rs",
+        "crates/verter_compiler/src/assembly/vue_module.rs",
+        "crates/verter_compiler/src/assembly/svelte_module.rs",
+        "crates/verter_compiler/src/framework_common/vue_bridge.rs"
+      ],
+      "disposition": "replace",
+      "successor": "one SourceId minter per logical source, so a unit's lineage is the same in projection, runtime assembly and custom-block products",
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "CPF1"
+      ],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "V-D05",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Svelte release admission by string prefix in the LSP asset loader",
+      "symbols": [
+        "resolve_svelte_package: version.split('.').next() != Some(\"5\")"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/svelte_assets.rs"
+      ],
+      "disposition": "replace",
+      "successor": "the Svelte asset loader reads the admitted ReleaseId from the activation record; an unadmitted major is unsupported-version there, not a string check here",
+      "deletionOwner": "FWA1",
+      "productionCapable": true,
+      "successorPath": [
+        "VID0",
+        "FWA1"
+      ],
+      "receivingAcceptance": "FWA1-AC1"
+    },
+    {
+      "id": "V-D06",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Untyped configured-project stable key",
+      "symbols": [
+        "ProjectStableKey::{Configured, Fallback}(Hash16)",
+        "to_hex_tag / parse_hex_tag"
+      ],
+      "paths": [
+        "crates/verter_session_query/src/resolution/project_stable_key.rs"
+      ],
+      "disposition": "retag",
+      "successor": "ConfiguredProjectId through the canonical encoding for configured projects; the fallback arm becomes PM1's inferred-project identity, never a second configured-project key",
+      "deletionOwner": "PM1",
+      "productionCapable": true,
+      "successorPath": [
+        "VID0",
+        "VID0T",
+        "PM1"
+      ],
+      "receivingAcceptance": "PM1-AC1"
+    }
+  ],
+  "referencedRoutes": [
+    {
+      "id": "D05",
+      "why": "is_vue/is_svelte dispatch on display family (R03)",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D06",
+      "why": "hard-coded registrations without a release (R04)",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D07",
+      "why": "extension table as identity (R03)",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D08",
+      "why": "conflated FileLanguage and untagged adapter/language ids (I03, I05)",
+      "owner": "CPF1"
+    },
+    {
+      "id": "D09",
+      "why": "untagged CapabilityId and process-wide framework gates (I10)",
+      "owner": "COX0"
+    },
+    {
+      "id": "D19",
+      "why": "ProjectRegistry as project authority (I07, I08)",
+      "owner": "PM1"
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "unit": "Framework release identity in kernel identities, keys and wire types",
+      "evidence": "No identity, cache key or proto field carries a framework release. Two LSP loaders read a framework package version: svelte_assets gates on major 5 by string prefix (route V-D05) and vue_assets folds the exact version into an asset key (consumer V-C11). The Svelte runes/legacy choice is a per-file mode inside one release.",
+      "consequence": "Nothing to delete for versions arrays or family-wide release keys; V-D01 records the implicit major and V-D05 the one ad-hoc admission."
+    },
+    {
+      "unit": "A successor backend or provider epoch beside CertifiedTypeEngineBinding",
+      "evidence": "No BackendInstanceEpoch type exists. ProviderEpoch (verter_identity, minted by the verter_type_runtime provider hub) and EngineIdentity are the binding's existing serving facts.",
+      "consequence": "R14 is a preservation rule; VID0T-AC4 proves the keys exclude them."
+    }
+  ],
+  "transferredObligations": [
+    {
+      "obligation": "Identity newtypes, schema epochs and the executable case table",
+      "receiver": "VID0T",
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "obligation": "Serialization and collision tests for (SourceUnitId, SourceRevision, ContentId/MapRevision)",
+      "receiver": "VID0T",
+      "receivingAcceptance": "VID0T-AC4"
+    },
+    {
+      "obligation": "Inventory validator over tests/kernel/VID0/products/ and its negative controls: missing inventory member, unknown or pathless owner, missing receiving AC, conflicting assignment",
+      "receiver": "UAI0",
+      "receivingAcceptance": "UAI0-AC-R1"
+    },
+    {
+      "obligation": "Post-L4 drift reconciliation of the identity owners named here",
+      "receiver": "UAI0"
+    }
+  ]
+}
