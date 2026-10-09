@@ -225,21 +225,14 @@ impl FunctionFlowGraphStore {
         self.entries.len()
     }
 
-    /// What the name indexes of the retained bundles' skeletons hold, each
-    /// index counted once however many bundles share it.
-    pub(crate) fn skeleton_name_index_occupancy(
-        &self,
-    ) -> verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy {
-        let mut seen = rustc_hash::FxHashSet::default();
-        let mut occupancy =
-            verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy::default();
-        for entry in self.entries.iter() {
-            let index = &entry.value().skeleton().name_index;
-            if seen.insert(index.storage_identity()) {
-                occupancy.accumulate(&index.occupancy());
-            }
-        }
-        occupancy
+    /// Every retained bundle (test-support): a reader a test holds past the
+    /// bundles' eviction.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retained_bundles_for_test(&self) -> Vec<Arc<FlowGraphBundle>> {
+        self.entries
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect()
     }
 
     /// Number of graph builds performed (observability; the
@@ -522,14 +515,6 @@ impl FlowSliceStores {
     /// Number of retained graph bundles (retention observability).
     pub fn graphs_entry_count(&self) -> usize {
         self.graphs.entry_count()
-    }
-
-    /// What the name indexes of the retained graph bundles' skeletons hold
-    /// (retention observability; a production occupancy count).
-    pub fn skeleton_name_index_occupancy(
-        &self,
-    ) -> verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy {
-        self.graphs.skeleton_name_index_occupancy()
     }
 
     /// Evict every flow-slice artifact of `canonical_id` (the standard

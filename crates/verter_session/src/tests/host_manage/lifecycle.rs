@@ -1104,15 +1104,19 @@ fn a_whole_host_reset_drops_the_component_meta_view_bookkeeping() {
     );
 }
 
-/// The shared closure-capture summaries and the skeleton name indexes a
-/// host retains are production occupancy, counted in every build: once a
-/// props demand infers a function's return through a file whose functions
-/// capture from the frames around them, the retention snapshot reports
-/// that file's one shared summary — exactly what the file's index holds,
-/// counted once although every function entry shares it — and the name
-/// indexes of the flow graphs built for it. A retired version stays
-/// counted while a live root still addresses it; once the files and the
-/// roots are released, both drain.
+/// The shared closure-capture summaries and the skeleton name indexes are
+/// production occupancy, counted in every build for as long as their
+/// backing storage lives: once a props demand infers a function's return
+/// through a file whose functions capture from the frames around them, the
+/// retention snapshot reports that file's one shared summary — exactly what
+/// the file's index holds, counted once although every function entry
+/// shares it — and the name indexes of the flow graphs built for it. A
+/// function index and graph readers held past the file's removal, the
+/// retired versions' reclamation and the host's close keep exactly their
+/// storage counted; once they drop, both drain.
+///
+/// The counts are per process, so this test needs its own process
+/// (nextest).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn retention_snapshot_counts_capture_summaries_and_name_indexes_until_released() {
@@ -1174,28 +1178,53 @@ defineProps<ReturnType<typeof make>>()
         "the flow graphs' skeleton name indexes are counted: {:?}",
         held.skeleton_name_indexes
     );
-    drop(index);
+    let graphs = host
+        .project_type_store()
+        .flow_slice()
+        .graphs()
+        .retained_bundles_for_test();
+    assert!(!graphs.is_empty(), "the return inference built flow graphs");
+    let mut read = verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy::default();
+    for graph in &graphs {
+        read.accumulate(&graph.skeleton().name_index.occupancy());
+    }
+    assert!(read.names > 0 && read.backing_bytes > 0);
 
+    // The readers outlive the files, their retired versions and the host's
+    // caches: the storage they hold stays counted, exactly.
     assert!(host.remove("/src/Consumer.vue").is_some());
     assert!(host.remove("/src/make.ts").is_some());
     host.reclaim_retired_artifacts();
-    // A retired version a live root still addresses keeps its summary,
-    // still counted once.
-    let removed = host.retention_snapshot();
-    assert!(removed.capture_summary_files <= 1);
-    assert!(removed.capture_summaries.total() <= own.total());
     host.close();
     host.reclaim_retired_artifacts();
-    let closed = host.retention_snapshot();
     assert_eq!(
-        closed.capture_summaries,
-        verter_session_query::function_program::CaptureSummaryCounts::default(),
-        "releasing the files drains their capture summaries"
+        host.project_type_store().flow_slice().graphs_entry_count(),
+        0
     );
-    assert_eq!(closed.capture_summary_files, 0);
+    let detached = host.retention_snapshot();
     assert_eq!(
-        closed.skeleton_name_indexes,
+        detached.capture_summaries, own,
+        "the summary a held index reads stays counted, once"
+    );
+    assert_eq!(detached.capture_summary_files, 1);
+    assert_eq!(
+        detached.skeleton_name_indexes, read,
+        "the name indexes held graph readers read stay counted"
+    );
+
+    drop(index);
+    let index_released = host.retention_snapshot();
+    assert_eq!(
+        index_released.capture_summaries,
+        verter_session_query::function_program::CaptureSummaryCounts::default(),
+        "releasing the last index drains its capture summary"
+    );
+    assert_eq!(index_released.capture_summary_files, 0);
+    assert_eq!(index_released.skeleton_name_indexes, read);
+    drop(graphs);
+    assert_eq!(
+        host.retention_snapshot().skeleton_name_indexes,
         verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy::default(),
-        "releasing the files drains their flow graphs' name indexes"
+        "releasing the last graph reader drains its name indexes"
     );
 }

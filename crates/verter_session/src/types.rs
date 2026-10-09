@@ -3930,15 +3930,20 @@ pub struct HostRetentionSnapshot {
     pub shape_cache_entries: usize,
     /// Flow-slice graph bundles.
     pub flow_graphs: usize,
-    /// Occupancy of the name indexes of the retained flow-slice graph
-    /// bundles' skeletons, each index counted once.
+    /// Occupancy of the flow skeletons' name indexes resident in the
+    /// process, each backing allocation counted once from its build until
+    /// its last owner or reader drops it — a graph cache entry, or only a
+    /// reader that outlived its eviction. Per process, like the retention
+    /// account: every host contributes.
     pub skeleton_name_indexes: verter_session_query::flow::skeleton::SkeletonNameIndexOccupancy,
-    /// Occupancy of the shared closure-capture summaries of the function
-    /// program indexes the artifact store's live and retained versions have
-    /// built: one summary per parsed file version, shared by every function
-    /// entry of that file and counted once.
+    /// Occupancy of the shared closure-capture summaries resident in the
+    /// process: one summary per parsed file version, shared by every
+    /// function entry of that file and counted once, from its build until
+    /// the last index, artifact version or reader holding it drops it —
+    /// including after source removal and retired-artifact reclamation.
+    /// Per process, like the retention account: every host contributes.
     pub capture_summaries: verter_session_query::function_program::CaptureSummaryCounts,
-    /// Distinct capture summaries [`Self::capture_summaries`] sums.
+    /// Resident capture summaries [`Self::capture_summaries`] sums.
     pub capture_summary_files: usize,
     /// Flow-slice hash-node entries.
     pub flow_hash_entries: usize,
