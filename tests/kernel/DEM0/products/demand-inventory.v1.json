@@ -1,0 +1,272 @@
+{
+  "id": "demand-inventory.v1",
+  "schema": 1,
+  "contractNode": "DEM0",
+  "finalOwner": "expansion.kernel: typed immutable universal catalog and demand-selected kernel services",
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "describesHead": {
+    "landingTitle": "docs(arch): define the declarative configuration envelope and captured (#809)",
+    "date": "2026-10-09"
+  },
+  "companionCaseTable": "demand-case-table.v1.json",
+  "inherits": {
+    "nodes": ["UAK0", "UAK1", "VID0", "CAT0", "CFG0"],
+    "files": [
+      "tests/kernel/UAK0/products/owner-consumer-inventory.v1.json",
+      "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "tests/kernel/UAK1/products/constitution-inventory.v1.json",
+      "tests/kernel/VID0/products/identity-inventory.v1.json",
+      "tests/kernel/CAT0/products/catalog-inventory.v1.json",
+      "tests/kernel/CFG0/products/configuration-inventory.v1.json"
+    ],
+    "rule": "UAK0, VID0, CAT0 and CFG0 rows keep their owners; DEM0 references them by id. UAK0 O03 (demand-selected activation and per-profile capability masks, COX0-AC2) and boundary B05 (DemandPlan, DEM0 -> COX0) are the outcome this decision splits into plan stages P1-P5; it does not move them. DEM0 adds plan stages P1-P5, contract rules DR01-DR30, outcomes DEM-O01-DEM-O10, consumers DEM-C01-DEM-C08 and displaced routes DEM-D01-DEM-D06, and maps each charter deletion category to its recorded and referenced routes (categoryCoverage)."
+  },
+  "subblocks": [
+    { "n": 1, "subblock": "Captured selection inputs", "stage": "P1", "rules": ["DR01", "DR02", "DR03", "DR04", "DR05"] },
+    { "n": 2, "subblock": "Pre-projection SourceActivationPlan", "stage": "P2", "rules": ["DR06", "DR07", "DR08", "DR09", "DR10"] },
+    { "n": 3, "subblock": "Post-snapshot SemanticClaimPlan", "stage": "P3", "rules": ["DR11", "DR12", "DR13", "DR14"] },
+    { "n": 4, "subblock": "Capability-level CapabilityDemandPlan and DemandPlan submission", "stage": "P4", "rules": ["DR15", "DR16", "DR17", "DR18", "DR19", "DR20"] },
+    { "n": 5, "subblock": "Conflict/ambiguity resolution and epoch transitions", "stage": "P2-P4", "rules": ["DR21", "DR22", "DR23", "DR24", "DR25"] },
+    { "n": 6, "subblock": "Zero-work and cancellation audit", "stage": "P2-P5", "rules": ["DR26", "DR27", "DR28", "DR29", "DR30"] }
+  ],
+  "planStages": [
+    {
+      "id": "P1",
+      "name": "SelectionInputs",
+      "computedFrom": "captured inputs only: CatalogSnapshot identity, frameworks section value fingerprint, FrameworkActivation records. Host client capabilities are not a member; they ride the COX0D participation mask into P4",
+      "fixedFor": "one activation epoch",
+      "existsAtHead": false,
+      "owner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "P2",
+      "name": "SourceActivationPlan",
+      "computedFrom": "P1 plus parse-domain facts of one (SourceUnitId, SourceRevision, ContentId)",
+      "fixedFor": "one parse/transform generation",
+      "existsAtHead": false,
+      "owner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "P3",
+      "name": "SemanticClaimPlan",
+      "computedFrom": "P2 plus the published project snapshot",
+      "fixedFor": "one project snapshot",
+      "existsAtHead": false,
+      "owner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "P4",
+      "name": "CapabilityDemandPlan",
+      "computedFrom": "P3 plus one request's operation descriptor, normalized root context and the COX0D participation mask, whose identity includes the host's declared client capabilities",
+      "fixedFor": "one request",
+      "existsAtHead": false,
+      "owner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "P5",
+      "name": "DemandPlan",
+      "computedFrom": "composition of P1-P4, submitted through the engine-owned ExecutionSubmission port",
+      "fixedFor": "one request",
+      "existsAtHead": false,
+      "owner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
+    }
+  ],
+  "contractRules": [
+    { "id": "DR01", "group": "selection-inputs", "rule": "SelectionInputs is a closed captured tuple of three members: CatalogSnapshot identity (VID0 I09), the frameworks section of the effective configuration with its value fingerprint (CFG0 CR14, CR16), and the owning package's FrameworkActivation records (FWA1). Nothing else activates. The host's declared client capabilities are not a member and have no activation identity. COX0D owns that vocabulary (provider unavailable, unsupported client feature, disabled optional visual layer) inside the participation mask. The mask, mode and those capabilities enter at P4 (DR15); their identity is the mask identity, so a change mints a new demand epoch only (DR21).", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR02", "group": "selection-inputs", "rule": "Every member is read through its owner's captured snapshot. Selection reads no file, manifest, lockfile, environment variable, process flag or editor setting directly. An uncaptured member is NeedInputs (CFG0 CR23), never absent.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR03", "group": "selection-inputs", "rule": "Spelling never activates: a file extension, import specifier string, adapter spelling, file-name probe or display family is not a selection input (VID0 R03, CAT0 CR10). Only decoded typed identities and owner-proven facts are.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC1" },
+    { "id": "DR04", "group": "selection-inputs", "rule": "Process-wide admission is not selection: --frameworks, FrameworkOptions and the NAPI/WASM frameworks option never filter the catalog (CAT0 CR11). Their successor is the frameworks section supplied through the user layer (CFG0 CR05, CR22).", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC1" },
+    { "id": "DR05", "group": "selection-inputs", "rule": "The selection-input identity is the canonical tagged encoding (VID0 R12, R13) of each member identity in a fixed member order. It carries no path string and no backend or process identity (VID0 R14). The configuration member is the frameworks value fingerprint only, not the whole effective configuration and not CFG0 CR14's consulted-row query key. The catalog member is the whole CatalogSnapshot identity (VID0 I09): a catalog re-version mints a new identity even when the rows a decode consulted are unchanged.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR06", "group": "source-activation", "rule": "Stage one runs per (SourceUnitId, SourceRevision, ContentId) before any framework projection, script-fact capture or TypeInfo work. It selects the unit's CarrierProfileId from the catalog T01 claim and, per region, the candidate FrameworkProfileIds the activation records and per-file narrowing allow.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR07", "group": "source-activation", "rule": "Stage one reads only SelectionInputs and parse-domain facts of the same revision: the carrier region inventory, a @jsxImportSource pragma, and EAK1 projection-time role evidence from canonical package exports. It never calls TypeScript, the shared type resolver, TypeInfo or any semantic oracle.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR08", "group": "source-activation", "rule": "Each region's stage-one outcome is exactly one of Selected { profile }, Dormant { reason: Off | Inactive | UnsupportedVersion | NotClaimed }, Ambiguous { claims } or Unproven { needs }. Off, Inactive and UnsupportedVersion come from the FWA1 activation record.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR09", "group": "source-activation", "rule": "The stage-one plan fixes the parse/transform generation. Its identity is (SourceUnitId, SourceRevision, ContentId, CarrierProfileId, ordered per-region outcomes, selection-input identity). Syntax artifacts stay keyed by carrier profile (VID0 R15); a profile outcome enters an artifact key only for artifacts that profile computes.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR10", "group": "source-activation", "rule": "A carrier with no profile claim (plain ts, js) has an empty region outcome set, and stage one does no work beyond reading the catalog row.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC4" },
+    { "id": "DR11", "group": "semantic-claim", "rule": "Stage two runs after the project snapshot containing the stage-one generation is published. It mints one AttachmentId per (SourceUnitId, RegionId, FrameworkProfileId) for every Selected region (VID0 I06), using post-snapshot facts: resolved imports, canonical role provenance that needs resolution, and project membership (PM1).", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR12", "group": "semantic-claim", "rule": "Post-snapshot facts never mutate the current parse/transform generation. Stage two confirms a stage-one selection or withdraws it for that snapshot (Withdrawn { cause }); it never adds a profile, changes the carrier or re-runs a stage-one projection under the same generation.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" },
+    { "id": "DR13", "group": "semantic-claim", "rule": "A post-snapshot fact that would change a stage-one input reaches stage one only as a new SelectionInputs and a new activation epoch (DR21). The old generation is never edited in place.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" },
+    { "id": "DR14", "group": "semantic-claim", "rule": "A semantic claim names its project profile when one applies (VID0 I07, PPR0T rows) and never re-mints the semantic profile it overlays.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR15", "group": "capability-demand", "rule": "A request names one operation descriptor and one normalized root context from the READS envelope (SKR-READS) and, for TypeInfo, the TIF0 operation descriptors. Stage four intersects the operation's profile-qualified capability cells (VID0 I10) with the confirmed P3 claims and with the participation mask (COX0D). That mask is the identity of the COX0D mode and of the host's declared client capabilities. Neither is a SelectionInputs member and neither enters the activation epoch.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR16", "group": "capability-demand", "rule": "Every capability declares its exact fact demands (fact kinds and query families it reads, keyed by profile). A capability that cannot state them is a construction failure of its catalog row. Demand never expands to all capabilities of a profile or all profiles of a file.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR17", "group": "capability-demand", "rule": "DemandPlan carries a closed demand purpose: Interactive, DiagnosticsPublication, BatchCheck, IndexContribution, Compile or Explain. Purpose is part of the plan identity and selects the budget profile (SKR-READS BudgetProfile); it never selects a different semantic answer.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR18", "group": "capability-demand", "rule": "Batch membership is the set of (SourceUnitId, RegionId, CapabilityId, fact demand) entries. Batch order is the canonical encoding order of those entries (CAT0 CR05), never arrival, discovery or completion order.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR19", "group": "capability-demand", "rule": "Profile identity for refusal reuse is (demand purpose, BudgetProfile identity, ordered FrameworkProfileId set, normalized root context, demand epoch, root source identity). The demand epoch is DR21's. The root source identity is VID0 R12: (SourceUnitId, SourceRevision, ContentId), or (SourceUnitId, SourceRevision, MapRevision) when the root is a map. An eligible isolated-root refusal is reused only under that exact identity. A refusal warmed under one demand epoch or one root source identity is not reusable under another (DR25, DC05). It stays a refusal and is never read as exact absence. A dependency admitted under a root needs no second root permit. A capture-off request performs no observation-only work.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR20", "group": "capability-demand", "rule": "DemandPlan is submitted through the engine-owned ExecutionSubmission port (crates/verter_type_engine/src/resolver_core/request_ports.rs): attach_engine() returns an EngineBinding<MacroMirrors> holding engine resources only. Host-owned stores travel through HostAttachmentPort, never through the binding or the plan. UAO0 re-validates purpose, batch membership and order and refusal reuse against SKR-PARALLEL's final submission semantics (UAO0-AC-R3); a mismatch returns to DEM0 as an amendment.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR21", "group": "epoch", "rule": "An activation epoch is the selection-input identity. Its closed member list is DR01's three: the frameworks value fingerprint, the activation record and the catalog identity. A change to one of those members mints a new activation epoch. A demand epoch is the activation epoch plus the participation mode and mask identity. The host's declared client capabilities are inside that mask, so a change to them mints a new demand epoch only, as does any other participation change. A change that leaves every member identity unchanged mints neither (CFG0 CR16).", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" },
+    { "id": "DR22", "group": "ambiguity", "rule": "Ambiguity is decided per region keyed by (SourceUnitId, RegionId) (VID0 R10). Two active profiles claiming one region with no per-file narrowing and no declared T06 relation is Ambiguous { claims } (CAT0 CR14). Registration, load, discovery and completion order never decide. An ambiguous region serves no profile-specific result and reports the ambiguity once per activation epoch. A participation-only change mints a demand epoch (DR21) and does not report that ambiguity again.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR23", "group": "ambiguity", "rule": "A declared T06 relation decides deterministically: exclusive keeps the ambiguity, coexisting selects both claims on disjoint capabilities, nested selects the outer claim for the region and the inner claim for its child regions.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DR24", "group": "epoch", "rule": "A missing package or unresolved installed version is Unproven { needs }: never Inactive, never cached as a warm negative, never replaced by a name-based guess (FWA1 abort). When PM later proves the version, a new epoch selects or rejects the profile.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" },
+    { "id": "DR25", "group": "epoch", "rule": "Under either epoch, work admitted under an older epoch completes ReturnOnly or is cancelled; it is never published warm and never served after a newer epoch has been observed. Work not admitted when its epoch is superseded is never admitted. Only the newest epoch's plan runs.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" },
+    { "id": "DR26", "group": "zero-work", "rule": "A Dormant, Ambiguous, Unproven or Withdrawn region performs zero framework projection, script-fact, TypeInfo and index work for that profile (UAK0 Z01).", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC4" },
+    { "id": "DR27", "group": "zero-work", "rule": "A selected but unrequested profile performs zero capability work. The carrier parse runs only when another demand needs the carrier (UAK0 Z02); selection alone never triggers it.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC4" },
+    { "id": "DR28", "group": "zero-work", "rule": "Activation and demand planning emit exactly one audit record per plan, not one per epoch. A stage-one plan is one source unit under one activation epoch (DR06, DR09), so that epoch emits one ActivationPlanned { epoch, selected, dormant, ambiguous, unproven } for each source unit it plans, and the counts are that plan's regions only. Stage four emits one DemandPlanned { purpose, capabilities, facts } per demand plan (one request or one batch). Dormant work is counted, never executed. Audit capture is optional detail; required plan state survives capture off.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC4" },
+    { "id": "DR29", "group": "cancellation", "rule": "Cancellation is observed at plan boundaries and at the engine CancellationCheckpoint. A cancelled plan publishes nothing, leaves no warm entry and no refusal, and a retry answers what a fresh host answers.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" },
+    { "id": "DR30", "group": "cancellation", "rule": "Degraded outcomes (Unproven, Ambiguous, cancelled, superseded, budget-exceeded) are ReturnOnly. They never warm a plan cache or a result cache.", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" }
+  ],
+  "outcomes": [
+    { "id": "DEM-O01", "outcome": "Captured SelectionInputs and its identity (subblock 1; DR01-DR05)", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DEM-O02", "outcome": "Pre-projection SourceActivationPlan (subblock 2; DR06-DR10)", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DEM-O03", "outcome": "Post-snapshot SemanticClaimPlan (subblock 3; DR11-DR14)", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DEM-O04", "outcome": "CapabilityDemandPlan with exact per-capability fact demands (subblock 4; DR15, DR16)", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DEM-O05", "outcome": "DemandPlan purpose, batch membership and order, refusal-reuse profile identity and ExecutionSubmission submission (subblock 4; DR17-DR20)", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DEM-O06", "outcome": "Per-region ambiguity resolution and activation-epoch transitions (subblock 5; DR21-DR25)", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC3" },
+    { "id": "DEM-O07", "outcome": "Zero work, plan audit records and cancellation for dormant and unrequested profiles (subblock 6; DR26-DR30)", "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC4" },
+    { "id": "DEM-O08", "outcome": "FrameworkActivation records (active | inactive | unsupported-version | off, admitted release, mode, provenance) read by P1", "owner": "FWA1", "successorPath": ["DEM0", "IDX0D", "PM0", "PM1", "PM3", "FWA1"], "receivingAcceptance": "FWA1-AC1" },
+    { "id": "DEM-O09", "outcome": "Canonical package/export role evidence read by P2 (projection-time) and P3 (post-snapshot)", "owner": "EAK1", "successorPath": ["DEM0", "TIF0", "EAK1"], "receivingAcceptance": "EAK1-AC2" },
+    { "id": "DEM-O10", "outcome": "Executable ownership validator over tests/kernel/DEM0/products/ (the DC01-DC05 fixtures are a transferred obligation under UAO0-AC-R2)", "owner": "UAO0", "successorPath": ["DEM0", "UAO0"], "receivingAcceptance": "UAO0-AC-R1" }
+  ],
+  "consumers": [
+    { "id": "DEM-C01", "consumer": "Session script-fact resolution and synth-path provider selection (resolve_script_facts_inner, ActiveProviderIndex::active_for at host construction)", "reads": ["P2", "P4"], "paths": ["crates/verter_session/src/framework/script_facts.rs", "crates/verter_session/src/host_construction.rs"], "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DEM-C02", "consumer": "Framework-surface executor and the TypeInfoRequest entry (resolve_framework_surface_with_audit, request validation, adapter lookup)", "reads": ["P3", "P4"], "paths": ["crates/verter_session/src/typeinfo/framework_surface/executor.rs", "crates/verter_session/src/typeinfo/request_validation.rs"], "owner": "TIF1", "successorPath": ["DEM0", "TIF0", "TIF1"], "receivingAcceptance": "TIF1-AC2" },
+    { "id": "DEM-C03", "consumer": "Compiler requests consuming demanded fact families (DemandSet over P4 fact demands)", "reads": ["P4"], "paths": ["crates/verter_compiler/src"], "owner": "CMP1", "successorPath": ["DEM0", "CMP0", "CMP1"], "receivingAcceptance": "CMP1-AC2" },
+    { "id": "DEM-C04", "consumer": "Workspace index contributions submitted under the IndexContribution purpose", "reads": ["P3", "P5"], "paths": [], "pathsNote": "No production index exists at this head (UAK0 empty population); the per-request scan is UAK0 D18.", "owner": "IDX0", "successorPath": ["DEM0", "IDX0"], "receivingAcceptance": "IDX0-AC2" },
+    { "id": "DEM-C05", "consumer": "Nuxt project-profile applicability attached to semantic claims (DR14)", "reads": ["P3"], "paths": ["crates/verter_lsp/src/config.rs", "crates/verter_lsp/src/workspace_state.rs"], "owner": "NUX0", "successorPath": ["DEM0", "COX0", "NUX0"], "receivingAcceptance": "NUX0-AC1" },
+    { "id": "DEM-C06", "consumer": "LSP workspace scanner provider sync and carrier publication, declared under the BatchCheck purpose", "reads": ["P5"], "paths": ["crates/verter_lsp/src/workspace_scanner.rs"], "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
+    { "id": "DEM-C07", "consumer": "Host audit runtime receiving ActivationPlanned and DemandPlanned records (DR28)", "reads": ["P2", "P4"], "paths": ["crates/verter_session/src/host_audit_runtime.rs"], "owner": "COX0", "successorPath": ["DEM0", "COX0"], "receivingAcceptance": "COX0-AC4" },
+    { "id": "DEM-C08", "consumer": "Embedded-language region geometry consuming nested-claim selection (DR23)", "reads": ["P3"], "paths": ["crates/verter_language/src/embedded/"], "pathsNote": "The module directory is new in EMB0I; absent at this head.", "owner": "EMB0I", "successorPath": ["DEM0", "EAK0", "EMB0", "EMB0I"], "receivingAcceptance": "EMB0I-AC1" }
+  ],
+  "referencedConsumers": [
+    { "id": "C06", "node": "UAK0", "why": "verter_lsp server, document registry and feature routing read B05 (DemandPlan)", "owner": "COX0", "receivingAcceptance": "COX0-AC2" },
+    { "id": "C07", "node": "UAK0", "why": "Editor clients read B05 participation", "owner": "COX0", "receivingAcceptance": "COX0-AC2" },
+    { "id": "C08", "node": "UAK0", "why": "MCP component tools, including get_framework_surface, which derives its adapter id from the classifier", "owner": "TIF1", "receivingAcceptance": "TIF1-AC2" },
+    { "id": "C09", "node": "UAK0", "why": "NAPI and WASM framework-surface and TypeInfo bindings", "owner": "TIF1", "receivingAcceptance": "TIF1-AC2" },
+    { "id": "V-C04", "node": "VID0", "why": "FrameworkActivation.admittedRelease, the record P1 reads", "owner": "FWA1", "receivingAcceptance": "FWA1-AC1" },
+    { "id": "V-C06", "node": "VID0", "why": "Capability masks over CapabilityId and GatedCandidate", "owner": "COX0", "receivingAcceptance": "COX0-AC2" },
+    { "id": "CAT-C02", "node": "CAT0", "why": "ProjectCapabilitySnapshot and gated classifier rows are activation state, not registration", "owner": "FWA1", "receivingAcceptance": "FWA1-AC1" },
+    { "id": "CF-C01", "node": "CFG0", "why": "The frameworks switch read into P1", "owner": "FWA1", "receivingAcceptance": "FWA1-AC3" }
+  ],
+  "displacedRoutes": [
+    {
+      "id": "DEM-D01",
+      "category": "eager-or-single-claim-selector",
+      "unit": "LSP diagnostics publication runs every diagnostic producer per publish, including an eager component-meta resolution for projection-limit diagnostics, regardless of request or participation",
+      "symbols": ["compute_verter_diagnostics_for_with_views", "publish_full_diagnostics_with_audit", "run_linter", "component_usage_diagnostics", "VerterHost::get_component_meta"],
+      "paths": ["crates/verter_lsp/src/server_utils.rs", "crates/verter_lsp/src/server/sync_orchestration.rs"],
+      "disposition": "replace",
+      "successor": "a DiagnosticsPublication DemandPlan whose capabilities come from the participation mask and whose component information is demanded per capability (DR15-DR17, DR27)",
+      "deletionOwner": "COX0",
+      "receivingAcceptance": "COX0-AC1",
+      "productionCapable": true,
+      "successorPath": ["DEM0", "COX0"]
+    },
+    {
+      "id": "DEM-D02",
+      "category": "eager-or-single-claim-selector",
+      "unit": "Admission-driven reclassification in the host language classifier: an unadmitted vertical's carrier routes like an unregistered extension (script_ts) and its adapter modules become plain scripts",
+      "symbols": ["HostLanguageClassifier::classify", "HostLanguageClassifier::classify_registered", "HostLanguageClassifier::is_unadmitted_carrier", "admission_resolved"],
+      "paths": ["crates/verter_session/src/framework/language_classifier.rs"],
+      "disposition": "replace",
+      "successor": "the carrier keeps its CarrierProfileId; an off or inactive profile is Dormant in the SourceActivationPlan (DR04, DR08, DR26)",
+      "deletionOwner": "COX0",
+      "receivingAcceptance": "COX0-AC1",
+      "productionCapable": true,
+      "successorPath": ["DEM0", "COX0"]
+    },
+    {
+      "id": "DEM-D03",
+      "category": "eager-or-single-claim-selector",
+      "unit": "Framework-surface executor plans and resolves every surface kind (ALL_FRAMEWORK_SURFACE_KINDS) for each request; the wire carries no requested-kind demand",
+      "symbols": ["execute_framework_surface", "ALL_FRAMEWORK_SURFACE_KINDS", "PlannedDemand"],
+      "paths": ["crates/verter_session/src/typeinfo/framework_surface/executor.rs", "crates/verter_session/src/framework/descriptor.rs"],
+      "disposition": "replace",
+      "successor": "TypeInfo operations demand only the requested facets through P4 (DR16)",
+      "deletionOwner": "TIF1",
+      "receivingAcceptance": "TIF1-AC1",
+      "productionCapable": true,
+      "successorPath": ["DEM0", "TIF0", "TIF1"]
+    },
+    {
+      "id": "DEM-D04",
+      "category": "central-framework-switch",
+      "unit": "Spelling-based framework role recognition in the component-meta resolver: a DefineSlots dependency is ignored when import_source == \"vue\" and type_name == \"Slot\"",
+      "symbols": ["should_ignore_external_macro_type"],
+      "paths": ["crates/verter_session/src/resolver_core/component_meta/direct_macro.rs"],
+      "disposition": "replace",
+      "successor": "canonical package/export role evidence (EAK1); no import-source spelling compare",
+      "deletionOwner": "EAK1",
+      "receivingAcceptance": "EAK1-AC1",
+      "productionCapable": true,
+      "successorPath": ["DEM0", "TIF0", "EAK1"]
+    },
+    {
+      "id": "DEM-D05",
+      "category": "eager-or-single-claim-selector",
+      "unit": "Nuxt server/client component detection by file-name suffix (.server.vue, .client.vue)",
+      "symbols": ["is_ssr_file", "is_client_only_file"],
+      "paths": ["crates/verter_lsp/src/config.rs"],
+      "disposition": "replace",
+      "successor": "Nuxt project-profile applicability from captured Nuxt facts, attached to the semantic claim (DR03, DR14)",
+      "deletionOwner": "NUX0",
+      "receivingAcceptance": "NUX0-AC1",
+      "productionCapable": true,
+      "successorPath": ["DEM0", "COX0", "NUX0"]
+    },
+    {
+      "id": "DEM-D06",
+      "category": "eager-or-single-claim-selector",
+      "unit": "LSP did_open/did_change schedule full native semantic enrichment and imported-carrier API prewarm unconditionally, with no participation or demand gate",
+      "symbols": ["handle_did_open", "schedule_semantic_analysis", "sync_imported_carrier_api_lightweight"],
+      "paths": ["crates/verter_lsp/src/server/lifecycle.rs", "crates/verter_lsp/src/documents/analysis.rs"],
+      "disposition": "replace",
+      "successor": "an Interactive or DiagnosticsPublication DemandPlan; disabled participation does no hidden processing (DR26, DR27)",
+      "deletionOwner": "COX0",
+      "receivingAcceptance": "COX0-AC1",
+      "productionCapable": true,
+      "successorPath": ["DEM0", "COX0"]
+    }
+  ],
+  "referencedRoutes": [
+    { "id": "D09", "node": "UAK0", "category": "untagged-coordinate-or-public-identity", "why": "Process-flag admission (--frameworks, FrameworkOptions, NAPI/WASM frameworks) and untagged CapabilityId; DR04 names the successor", "owner": "COX0", "receivingAcceptance": "COX0-AC1" },
+    { "id": "D10", "node": "UAK0", "category": "central-framework-switch", "why": "Per-framework LSP branches (carrier_kind_for_language, is_svelte branches in nav_features, rename_plan, cursor_context, server_utils, the Vue-only auto-import arm)", "owner": "COX0", "receivingAcceptance": "COX0-AC1" },
+    { "id": "D11", "node": "UAK0", "category": "central-framework-switch", "why": "MCP tool gates on !kind.is_vue()", "owner": "COX0", "receivingAcceptance": "COX0-AC1" },
+    { "id": "D18", "node": "UAK0", "category": "duplicate-component-information-authority", "why": "Per-request workspace component scan (build_workspace_components)", "owner": "IDX0", "receivingAcceptance": "IDX0-AC1" },
+    { "id": "D06", "node": "UAK0", "category": "central-framework-switch", "why": "Hard-coded built_in_admitting registrations and the Vue-wired scratch_synthesizing_adapter_id", "owner": "CPF1", "receivingAcceptance": "CPF1-AC1" },
+    { "id": "D07", "node": "UAK0", "category": "central-framework-switch", "why": "classify_static longest-suffix match: one framework per file by extension", "owner": "CPF1", "receivingAcceptance": "CPF1-AC1" },
+    { "id": "D08", "node": "UAK0", "category": "untagged-coordinate-or-public-identity", "why": "FileLanguage::Framework conflates carrier and claim; the claim moves to P2/P3", "owner": "CPF1", "receivingAcceptance": "CPF1-AC1" },
+    { "id": "D12", "node": "UAK0", "category": "duplicate-component-information-authority", "why": "Component-meta resolver authority, including the canonical_source.ends_with(\".vue\") carrier check (DEM-F03)", "owner": "TIF1", "receivingAcceptance": "TIF1-AC1" },
+    { "id": "D14", "node": "UAK0", "category": "duplicate-component-information-authority", "why": "Off-store framework-surface and script-fact result caches", "owner": "TIF1", "receivingAcceptance": "TIF1-AC1" },
+    { "id": "V-D01", "node": "VID0", "category": "untagged-coordinate-or-public-identity", "why": "Implicit default major; activation carries an exact admitted ReleaseId", "owner": "FWA1", "receivingAcceptance": "FWA1-AC1" },
+    { "id": "V-D02", "node": "VID0", "category": "untagged-coordinate-or-public-identity", "why": "Open framework_adapter_id string in ComponentSelector; unknown id is MalformedPayload today", "owner": "TIF1", "receivingAcceptance": "TIF1-AC1" },
+    { "id": "V-D05", "node": "VID0", "category": "untagged-coordinate-or-public-identity", "why": "Svelte release admission by string prefix", "owner": "FWA1", "receivingAcceptance": "FWA1-AC1" },
+    { "id": "CAT-D01", "node": "CAT0", "category": "central-framework-switch", "why": "HostServices::composed composes the catalog and registry from FrameworkOptions and reconciles them by runtime checks", "owner": "CPF1", "receivingAcceptance": "CPF1-AC1" },
+    { "id": "CAT-D02", "node": "CAT0", "category": "central-framework-switch", "why": "FrameworkCapabilityCatalog::admitting filters registration by admission", "owner": "CPF1", "receivingAcceptance": "CPF1-AC1" },
+    { "id": "CAT-D06", "node": "CAT0", "category": "central-framework-switch", "why": "ActiveProviderIndex as a per-file selection authority, including its import-specifier map; P2/P4 replace it", "owner": "COX0", "receivingAcceptance": "COX0-AC1" },
+    { "id": "CF-D05", "node": "CFG0", "category": "central-framework-switch", "why": "detect_ssr_project and detectNuxt file-name probes", "owner": "NUX0", "receivingAcceptance": "NUX0-AC1" }
+  ],
+  "categoryCoverage": [
+    { "category": "central-framework-switch", "recorded": ["DEM-D04"], "referenced": ["D06", "D07", "D10", "D11", "CAT-D01", "CAT-D02", "CAT-D06", "CF-D05"] },
+    { "category": "untagged-coordinate-or-public-identity", "recorded": [], "referenced": ["D08", "D09", "V-D01", "V-D02", "V-D05"], "note": "Selection adds no new public identity route; every untagged selection identity is already owned." },
+    { "category": "duplicate-component-information-authority", "recorded": [], "referenced": ["D12", "D14", "D18"], "note": "DEM-D01 and DEM-D03 are eager demands on the existing authorities, not new authorities." },
+    { "category": "eager-or-single-claim-selector", "recorded": ["DEM-D01", "DEM-D02", "DEM-D03", "DEM-D05", "DEM-D06"], "referenced": [], "note": "This decision's own population: the legacy eager and one-framework-per-file selectors its reconciled contract removes after parity." }
+  ],
+  "findings": [
+    { "id": "DEM-F01", "finding": "ProjectCapabilitySnapshot is always empty in production: host construction (crates/verter_session/src/host_construction.rs) and the default classifier pass ProjectCapabilitySnapshot::empty(), so every gated classifier row resolves to its fallback and no capability bit is ever derived. FWA1's activation record is the first producer.", "route": "CAT-C02", "receiver": "FWA1", "receivingAcceptance": "FWA1-AC1", "successorPath": ["DEM0", "IDX0D", "PM0", "PM1", "PM3", "FWA1"] },
+    { "id": "DEM-F02", "finding": "The ScriptFactSyntaxGate::ImportSpecifier arm and ActiveProviderIndex.by_import_specifier select providers by import-specifier spelling. No production provider uses the arm (only tests and fixtures do), so it is an unused spelling-activation path; DR03 forbids it as a selection input. Its removal from selection belongs to CAT-D06.", "route": "CAT-D06", "receiver": "COX0", "receivingAcceptance": "COX0-AC1", "successorPath": ["DEM0", "COX0"] },
+    { "id": "DEM-F03", "finding": "The component-meta resolver gates direct macro type references on declaration.canonical_source.ends_with(\".vue\"), a carrier decision by path spelling. It belongs to the component-meta resolver population TIF1 deletes.", "route": "D12", "receiver": "TIF1", "receivingAcceptance": "TIF1-AC1", "successorPath": ["DEM0", "TIF0", "TIF1"] },
+    { "id": "DEM-F04", "finding": "ExecutionSubmission, attach_engine and EngineBinding exist at this head as the engine port (request_ports.rs, engine_binding.rs; production impl for RequestBoundAdapter in request_bound.rs). The VerterHost impl is test-support only. DR20 drafts submission against this port, not against a final scheduler.", "route": "DR20", "receiver": "UAO0", "receivingAcceptance": "UAO0-AC-R3", "successorPath": ["DEM0", "UAO0"] },
+    { "id": "DEM-F05", "finding": "The MCP get_framework_surface tool derives the adapter id from language_classifier().classify(canonical).adapter_id() and sends it as a string, so its selection is the classifier's one-framework-per-file answer.", "route": "V-D02", "receiver": "TIF1", "receivingAcceptance": "TIF1-AC1", "successorPath": ["DEM0", "TIF0", "TIF1"] }
+  ],
+  "emptyPopulations": [
+    { "unit": "Successor plan types", "evidence": "No CarrierProfileId, FrameworkProfileId, ProjectProfileId, CatalogSnapshot, DemandPlan, SourceActivationPlan, SemanticClaimPlan or CapabilityDemandPlan exists anywhere under crates/.", "consequence": "P1-P5 are new; COX0 implements them." },
+    { "unit": "FrameworkActivation record", "evidence": "No activation record exists; framework/project_capabilities.rs holds only derived capability bits, always empty in production (DEM-F01).", "consequence": "FWA1 produces the first record (DEM-O08)." },
+    { "unit": "Post-snapshot claim stage", "evidence": "No code distinguishes a pre-projection activation from a post-snapshot claim; classification is a single static step.", "consequence": "No route to delete; P3 is new." },
+    { "unit": "Activation or demand audit counters", "evidence": "No audit event or counter records framework activation, dormancy or demand; the script-fact miss paths are typed outcomes (ScriptFactNotApplicableReason::{ProviderNotRegistered, ProviderGateMiss}).", "consequence": "DR28 records are new; COX0 adds them." },
+    { "unit": "Per-region ambiguity", "evidence": "classify_static returns exactly one FileLanguage per path, so two profiles never claim one region at this head.", "consequence": "DR22 has no displaced route; the ambiguity outcome is new." }
+  ],
+  "transferredObligations": [
+    { "obligation": "Executable inventory validator over tests/kernel/DEM0/products/ and its negative controls: missing inventory member, unknown or pathless owner, missing receiving AC, conflicting assignment", "receiver": "UAO0", "receivingAcceptance": "UAO0-AC-R1", "successorPath": ["DEM0", "UAO0"] },
+    { "obligation": "Executable fixtures DC01 disabled, DC02 selected-but-unrequested, DC03 ambiguous, DC04 missing-package and DC05 rapid-mode-change, with the exact work and audit counts the case table states", "receiver": "UAO0", "receivingAcceptance": "UAO0-AC-R2", "successorPath": ["DEM0", "UAO0"] },
+    { "obligation": "Re-validation of DR17-DR20 (purpose, batch membership and order, refusal reuse) against SKR-PARALLEL's final submission semantics; a mismatch returns to DEM0 as an amendment", "receiver": "UAO0", "receivingAcceptance": "UAO0-AC-R3", "successorPath": ["DEM0", "UAO0"] },
+    { "obligation": "Confirmation of the zero-work cell Z01 against L4-published bench-m3 run summaries", "receiver": "PER0E", "receivingAcceptance": "PER0E-AC1", "successorPath": ["DEM0", "PER0", "PER0E"] }
+  ]
+}
