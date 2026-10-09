@@ -7,7 +7,7 @@
     "date": "2026-10-09"
   },
   "companionInventory": "typeinfo-inventory.v1.json",
-  "rule": "Each case states its input, the required and the forbidden outcome, the rules it exercises, existing evidence, and the node whose test makes it executable. TIF0 ships no test; the executable owner adds it. TC01-TC08 and TC11 are the fixtures the 2026-10-02 amendment moved to UAO0 subblock 3 (UAO0-AC-R2); TIF1 also runs TC08 for its compatibility projections (TIF1-AC3). Quality words are the TR24 vocabulary: Complete, Approximate { cause }, Unavailable { cause }. Every required outcome names the authority of each fact (TR21) and the basis it reports (TR23). Existing evidence pins today's behaviour at the boundary the case replaces; an empty list means no current route exercises it.",
+  "rule": "Each case states its input, the required and the forbidden outcome, the rules it exercises, existing evidence, and the node whose test makes it executable. TIF0 ships no test; the executable owner adds it. TC01-TC08 and TC11 are the fixtures the 2026-10-02 amendment moved to UAO0 subblock 3 (UAO0-AC-R2); TIF1 also runs TC08 for its compatibility projections (TIF1-AC3). Quality words are the TR24 vocabulary: Complete, Approximate { cause }, Unavailable { cause }. Every required outcome names the authority of each fact (TR21). A fact result names the InputBasisId it reports; a composed result names each child's InputBasisId and has no basis field (TR23). Existing evidence pins today's behaviour at the boundary the case replaces; an empty list means no current route exercises it.",
   "cases": [
     {
       "id": "TC01",
@@ -38,9 +38,9 @@
     {
       "id": "TC03",
       "name": "composed framework and TypeScript",
-      "input": "Comp.vue with `defineProps<{ item: Item }>()` where `Item` comes from a package whose declaration only the TypeScript program resolves (a `paths` mapping Verter does not own). A ComponentFacets request asks for props, and a TypeAtPosition request selects `item` in the template.",
-      "required": "The props facet is a Framework fact (FrameworkProfileId, ReleaseId, macro provenance) whose Native child executes through ProjectSemanticDispatch. The member type of `item` is a TypeScript fact with its certified basis, and that child executes only through EngineBackend over CertifiedTypeEngineBinding. TIF1 is the composition owner and executes neither child. The composed result lists both facts with their own authorities and orders them canonically; its QueryIdentity is composed over the composition descriptor and the two child identities. It reports the ordered child bases and carries no SemanticFlightKey.",
-      "forbidden": "Field-wise merge choosing one authority per field; the native engine answering the TypeScript-owned member type; one QueryIdentity for the composed and a child query; a composed InputBasisId or SemanticFlightKey",
+      "input": "Comp.vue with `defineProps<{ item: Item }>()` where `Item` comes from a package whose declaration only the TypeScript program resolves (a `paths` mapping Verter does not own). A ComponentFacets request asks for props. That request matches only OP10's Composed claim (at least one requested facet needs a TypeScript fact), not the Native claim. A TypeAtPosition request selects `item` in the template. The binding of `item` is a framework fact, so the position is framework-bound and the request matches only OP11's Composed claim, not the TypeScriptAuthoritative claim.",
+      "required": "The props facet is a Framework fact (FrameworkProfileId, ReleaseId, macro provenance) whose Native child executes through ProjectSemanticDispatch. The member type of `item` is a TypeScript fact with its certified basis, and that child executes only through EngineBackend over CertifiedTypeEngineBinding. TIF1 is the composition owner and executes neither child. The composed result lists both facts with their own authorities and orders them canonically; its QueryIdentity is composed over the composition descriptor and the two child identities. It carries no basis field and no SemanticFlightKey. Each child result carries its own InputBasisId, and the ordered child bases are that sequence. TypeInfo defines no list, sum or wrapper to hold it. A follow-on NodeRef names a child fact, not the composition container.",
+      "forbidden": "Field-wise merge choosing one authority per field; the native engine answering the TypeScript-owned member type; one QueryIdentity for the composed and a child query; a composed InputBasisId, SemanticFlightKey, or TypeInfo-defined basis carrier; a NodeRef that names the composition container or coerces the child bases into an InputBasisId; matching both of OP10's claims or both of OP11's claims",
       "rules": ["TR16", "TR18", "TR19", "TR20", "TR21", "TR23", "TR28", "TR32"],
       "existingEvidence": [],
       "evidenceNote": "No composed route exists (empty population).",
@@ -65,7 +65,7 @@
       "id": "TC05",
       "name": "stale backend",
       "input": "TC02's TypeAtPosition is answered and warmed. The provider then restarts (new serving session) and, separately, a new snapshot version is published without the client re-requesting.",
-      "required": "The warmed fact is not served for either change: it is Unavailable { StaleBackend } until a request under the live certified basis answers it. The stale answer never publishes and never warms. A retry after resync answers what a fresh host answers.",
+      "required": "The warmed fact is not served for either change: it is Unavailable { StaleBackend } until a request under the live certified basis answers it. The stale answer never publishes and never warms, and StaleBackend publishes no refusal entry (TR31). A retry after resync answers what a fresh host answers.",
       "forbidden": "Serving the old answer under a new serving session or snapshot version; warming an answer computed under a superseded basis",
       "rules": ["TR29", "TR31"],
       "existingEvidence": ["a_superseded_snapshot_is_refused_before_it_can_warm", "a_retained_binding_is_not_admitted_by_a_rotated_serving_session", "the_serving_lease_is_its_own_identity_dimension"],
@@ -76,7 +76,7 @@
     {
       "id": "TC06",
       "name": "changed map",
-      "input": "A TypeAtPosition request on a Vue template expression is answered through the IDE projection map. The `<script>` block is then edited so the template bytes are unchanged but the projection MapRevision changes, and the same position is requested with the old basis.",
+      "input": "A TypeAtPosition request on a Vue template expression is answered through the IDE projection map. The expression is a projected template position in a configured project and its binding is not a framework fact, so the position is not framework-bound and the request matches only OP11's TypeScriptAuthoritative claim. The `<script>` block is then edited so the template bytes are unchanged but the projection MapRevision changes, and the same position is requested with the old basis.",
       "required": "The old-basis request is refused (StaleSelector / changed map). A request with the new basis maps the position through the new MapRevision and answers fresh. No fact computed against the old map is served.",
       "forbidden": "Approximate re-mapping of the old position; clamping to the nearest token; serving the old fact because the template bytes are equal",
       "rules": ["TR07", "TR30"],
@@ -141,7 +141,7 @@
       "id": "TC11",
       "name": "refusal reuse is not absence",
       "input": "An isolated-root ResolveSymbol whose expansion exceeds its budget is refused. It is repeated under the same budget profile and root; then under a larger budget; then after an edit to a declaration it read.",
-      "required": "The same-profile repeat returns the stored refusal with zero producer work and stays a refusal. The larger budget recomputes and answers. The edit invalidates the refusal. At no point does the refusal read as an absent symbol.",
+      "required": "The same-profile repeat returns the stored refusal with zero producer work and stays a refusal. That stored refusal is the TR31 refusal-class entry; no fact, provenance or partial value is stored. The larger budget recomputes and answers. The edit invalidates the refusal. At no point does the refusal read as an absent symbol.",
       "forbidden": "A refusal served as 'not found'; a refusal inherited by a different budget, root or demand epoch; a stale refusal after the edit",
       "rules": ["TR03", "TR25", "TR31"],
       "existingEvidence": [],
@@ -154,7 +154,7 @@
       "id": "TC12",
       "name": "churn is not a miss",
       "input": "A ResolveSymbol request issued while the host is under sustained mutation, so no current store view settles within the retry budget.",
-      "required": "Unavailable { UnsettledInput }, ReturnOnly, distinguishable on the wire from an unresolved name. A request after the host settles answers fresh.",
+      "required": "Unavailable { UnsettledInput }, ReturnOnly, distinguishable on the wire from an unresolved name. UnsettledInput is not an eligible refusal and publishes no refusal entry (TR31). A request after the host settles answers fresh.",
       "forbidden": "A null payload identical to 'could not be resolved'; a warm entry from the torn view",
       "rules": ["TR27", "TR31"],
       "existingEvidence": [],
