@@ -4,6 +4,7 @@ import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
 import {
   loadManifest,
   loadProducts,
@@ -167,25 +168,13 @@ test("ARH7-ratification dirty twin: an invented product schema is rejected", () 
 });
 
 test("ARH7 CI: architecture-health filter still selects the train home and vscode sources", () => {
-  const ci = fs.readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const start = ci.indexOf("\n            arch:\n");
-  assert.notEqual(start, -1, "ci.yml must declare the arch filter");
-  const rest = ci.slice(start + 1);
-  const next = rest.search(/\n            [a-z_]+:\n/);
-  const block = next === -1 ? rest : rest.slice(0, next);
-  const paths = [...block.matchAll(/- '([^']+)'/g)].map((m) => m[1]);
-  assert.ok(
-    paths.includes("tests/architecture-health/**"),
-    `arch filter omits tests/architecture-health/**: ${paths.join(", ")}`,
-  );
-  assert.ok(
-    paths.includes("examples/reference/**"),
-    `arch filter omits examples/reference/**: ${paths.join(", ")}`,
-  );
-  assert.ok(
-    paths.includes("packages/vue-vscode/**"),
-    `arch filter omits packages/vue-vscode/**, the ARH7 live-source join: ${paths.join(", ")}`,
-  );
+  for (const [input, role] of [
+    ["tests/architecture-health/ARH7/verify.mjs", "tests/architecture-health/**"],
+    ["examples/reference/README.md", "examples/reference/**"],
+    ["packages/vue-vscode/src/extension.ts", "packages/vue-vscode/**, the ARH7 live-source join"],
+  ]) {
+    assert.equal(matchPathFilters([input]).hits.arch, true, `arch filter omits ${role}`);
+  }
 });
 
 test("ARH7-verify CLI: the manifest verify command runs validate() and exits 0", () => {
