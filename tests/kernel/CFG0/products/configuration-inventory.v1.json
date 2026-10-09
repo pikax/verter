@@ -135,7 +135,7 @@
           "workspace-root file body"
         ],
         "forbiddenIn": [
-          "any other file, including an extends target of the workspace-root file and a nested root:true file; overrides; profiles (Invalid(ScopeRestrictedKey)). A nested root does not read the workspace-root coexistence section; its workspace-scope choice comes only from the user layer."
+          "any other file, including an extends target of the workspace-root file and a nested root:true file; overrides; profiles (Invalid(ScopeRestrictedKey)). A coexistence key in a nested root file makes that file Invalid, and every scope that reads it is Invalid with no user-layer or default fallback. A nested root file with no coexistence key does not read the workspace-root coexistence section; its workspace-scope choice comes only from the user layer."
         ],
         "consumer": "CF-C08"
       }
@@ -191,109 +191,109 @@
       "id": "CR01",
       "group": "envelope",
       "rule": "verter.config.jsonc carries a required version; only 1 is admitted. A missing or unknown version is Invalid(UnsupportedSchemaVersion), never read as the nearest known version.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR02",
       "group": "envelope",
       "rule": "The top-level key set is closed: envelope keys ($schema, version, root, extends, overrides, profiles), base sections (frameworks, embedded, coexistence) and catalog-registered product sections. Any other key is Invalid(UnknownKey). $schema is never fetched.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR03",
       "group": "envelope",
       "rule": "A product section is an opaque typed slot with exactly one downstream schema owner; the envelope knows its name and owner, never its fields. Registering a section name is a catalog row, not an envelope version change.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR04",
       "group": "envelope",
       "rule": "Framework family, release, profile, embedded kind, dialect and capability-cell spellings decode once at capture into typed identities; a spelling that does not decode is Invalid and is never kept or matched later (VID0 R03, R07). A release spelling that decodes to a ReleaseId the catalog does not admit stays in the configuration; activation yields unsupported-version (VID0 R06). Consulted catalog rows are part of the CR14 key.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR05",
       "group": "precedence",
       "rule": "Layers apply in one total order, lowest first: catalog defaults, the host-supplied user layer, then the configuration chain outermost first.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR06",
       "group": "precedence",
       "rule": "The chain is every verter.config.jsonc from the stop directory down to the configured file's directory; the stop directory is the nearest root:true file or the workspace root, whichever is nearer. Nothing above the workspace root is read.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR07",
       "group": "precedence",
       "rule": "A file expands to its extends targets in declared order, each expanded depth-first, then its own body; the body wins over what it extends.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR08",
       "group": "precedence",
       "rule": "An overrides entry is { files: [glob...], excludedFiles?: [glob...], ...sections }. files is required and non-empty. Globs are relative (* one segment, ** across segments, ? one non-slash); no braces, absolutes, .. or in-pattern negation. A broken pattern is Invalid(InvalidOverrideSelector). A file matches any files glob and no excludedFiles glob. The anchor is the directory of the source file that authored the entry, including through extends; not the workspace root, the extending file or the configured file. Inside one body: top-level sections < project-profile section < framework-profile section < matching overrides entries in array order (each entry's profiles directly after it). A nested file's lowest rank beats its parent's highest. Discovery, load, registration and pattern order never decide.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR09",
       "group": "precedence",
-      "rule": "extends entries are relative paths or package specifiers resolved through PM2 to a .jsonc file. Outside the workspace root is Invalid(OutsideWorkspace); a proven-absent target is Invalid(MissingExtends), an unproven one NeedInputs; root in an extended file is Invalid(RootInExtended); a cycle is Cycle { chain }.",
-      "owner": "G01"
+      "rule": "extends entries are relative paths or package specifiers resolved through PM2 to a .jsonc file. A relative target is outside when its normalized workspace-root-relative path leaves the root. A package specifier is outside when the canonical file identity PM2 returns lies outside the workspace root: the comparison uses that identity, not the unresolved specifier text and not a realpath computed beside PM2. A link: or workspace symlink follows that same identity. Outside is Invalid(OutsideWorkspace); a proven-absent target is Invalid(MissingExtends), an unproven one NeedInputs; root in an extended file is Invalid(RootInExtended); a cycle is Cycle { chain }.",
+      "owner": "CFG1"
     },
     {
       "id": "CR10",
       "group": "precedence",
       "rule": "profiles keys decode to ProjectProfileId or FrameworkProfileId (VID0 I07, I05) and apply only where that profile is active in the demand plan; two framework profiles active on one region stay VID0's typed ambiguity (R10), never a merge.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR11",
       "group": "provenance",
       "rule": "Base sections merge by key: objects recursively, scalars and arrays replace. Every leaf records its winning contribution and the shadowed ones as source unit, source revision, JSON pointer and span.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR12",
       "group": "provenance",
       "rule": "Product sections are not merged by the envelope: the consumer receives the ordered contributions (rank, source unit, source revision, content, JSON pointer, span, exact authored value) and reports each as applied, shadowed or rejected. Nothing is dropped silently.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR13",
       "group": "identity",
       "rule": "A configuration file is identified by SourceUnitId and ContentId (VID0 I01, I02); no path string is a configuration identity. SourceRevision is the unit's revision authority (VID0 I02) and joins ContentId in the CR14 cache key; it does not stand in for the bytes.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR14",
       "group": "identity",
-      "rule": "An effective-configuration query key is the chain's ordered (SourceUnitId, SourceRevision, ContentId) triples with the extends closure (VID0 R12), the user-layer revision, the workspace-root-relative path of the configured file and of each declaring config, the active profile identities, the section, and the identity of each catalog or registry row the decode consulted (VID0 I09). It does not carry the whole CatalogSnapshot: only a change to a consulted row misses the cache. Two revisions with identical bytes do not alias. Encoding is the canonical tagged encoding (VID0 R12, R13). The key is independent of ConfiguredProjectId. Value fingerprints omit SourceRevision.",
-      "owner": "G01"
+      "rule": "An effective-configuration query key is the chain's ordered (SourceUnitId, SourceRevision, ContentId) triples with the extends closure (VID0 R12), the user-layer revision, the workspace-root-relative path of the configured file and of each declaring config, the active profile identities, the section, and the identity of each catalog or registry row the decode consulted (VID0 I09). It does not carry the whole CatalogSnapshot: only a change to a consulted row misses the cache. An admission row is not a consulted decode row (CR04): withdrawing admission of a ReleaseId the spelling still decodes to leaves the key unchanged and the configuration Complete; activation observes that row and reports unsupported-version (FWA1-AC6). Two revisions with identical bytes do not alias. Encoding is the canonical tagged encoding (VID0 R12, R13). The key is independent of ConfiguredProjectId. Value fingerprints omit SourceRevision.",
+      "owner": "CFG1"
     },
     {
       "id": "CR15",
       "group": "read-set",
       "rule": "Every result records its read set: each probed path present (ContentId and SourceRevision) or proven absent, each package-specifier resolution proof, the user-layer revision, the CatalogSnapshot identity, the consulted catalog or registry row identities and each captured snapshot consumed.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR16",
       "group": "invalidation",
-      "rule": "Invalidation is per (section, profile) on two content-addressed digests. The value fingerprint covers ordered decoded contributions (rank, source unit, JSON pointer, exact authored value) and excludes spans, comments and SourceRevision; a consumer recomputes only when one it read changes. The span anchor covers contribution spans; a consumer that publishes diagnostics or provenance re-anchors when it changes and does not recompute. A comment changes ContentId, changes a span anchor only when a contribution span in that section moves, and never changes a value fingerprint. Edit and revert restore both digests.",
-      "owner": "G01"
+      "rule": "Invalidation is per (section, profile) on two content-addressed digests. The value fingerprint covers ordered decoded contributions (rank, source unit, JSON pointer, exact authored value) and excludes spans, comments and SourceRevision; a consumer recomputes only when one it read changes. The span anchor covers contribution spans; a consumer that publishes diagnostics or provenance re-anchors when it changes and does not recompute. A comment changes ContentId and that unit's SourceRevision, changes a span anchor only when a contribution span in that section moves, and never changes a value fingerprint. When SourceRevision or ContentId changes, published provenance and diagnostics are re-stamped with the new identities even if neither digest changes; re-stamping does not recompute. Edit and revert restore both digests.",
+      "owner": "CFG1"
     },
     {
       "id": "CR17",
       "group": "invalidation",
       "rule": "Invalid, Cycle, NeedInputs, Uncaptured, cancelled and superseded results return to the caller and never warm a cache (ReturnOnly).",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR18",
       "group": "placement",
       "rule": "Profile identities and configuration values are not threaded into HostConfig, CompileProfile or CodegenOptions (VID0 R16; UAK0 S13); consumers read configuration on demand.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR19",
@@ -317,13 +317,13 @@
       "id": "CR22",
       "group": "host",
       "rule": "The user layer is an explicit host input (client user settings, or a path passed on the command line). No code reads $HOME, XDG or other ambient global configuration; the workspace root bounds every read.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR23",
       "group": "host",
       "rule": "A host without a filesystem supplies prepared inputs (workspace root, each config file as bytes or proven absent, the user layer, captured snapshots). The core runs the same parser and merger; JavaScript never pre-merges Verter configuration. A path neither supplied nor proven absent is NeedInputs { paths }, never absent and never an empty success.",
-      "owner": "G01"
+      "owner": "CFG1"
     },
     {
       "id": "CR24",
@@ -336,27 +336,43 @@
     {
       "id": "CF-O01",
       "outcome": "Versioned verter.config.jsonc envelope with a closed top-level key set and decode-once spellings (subblock 1; CR01-CR04)",
-      "owner": null,
-      "openGap": "G01"
+      "owner": "CFG1",
+      "successorPath": [
+        "CFG0",
+        "CFG1"
+      ],
+      "receivingAcceptance": "CFG1-AC1"
     },
     {
       "id": "CF-O02",
       "outcome": "Root/extends/override/profile precedence with leaf provenance for base sections (subblock 2; CR05-CR11)",
-      "owner": null,
-      "openGap": "G01"
+      "owner": "CFG1",
+      "successorPath": [
+        "CFG0",
+        "CFG1"
+      ],
+      "receivingAcceptance": "CFG1-AC2"
     },
     {
       "id": "CF-O03",
       "outcome": "Opaque product sections delivered as ordered contributions with exact source and provenance (subblock 3; CR03, CR12)",
-      "owner": null,
-      "openGap": "G01",
+      "owner": "CFG1",
+      "successorPath": [
+        "CFG0",
+        "CFG1"
+      ],
+      "receivingAcceptance": "CFG1-AC2",
       "note": "Section-name registration is a catalog row owned by CAT0 (contract) and implemented under CAT0's binding; UAO0 reconciles the two. No CFG0 successor path reaches the catalog implementation node."
     },
     {
       "id": "CF-O04",
       "outcome": "Fail-closed envelope outcomes: unknown key, unsupported version, unknown framework release or profile key, root in extended, outside workspace, Cycle, NeedInputs (subblock 4; CR09, outcome table)",
-      "owner": null,
-      "openGap": "G01"
+      "owner": "CFG1",
+      "successorPath": [
+        "CFG0",
+        "CFG1"
+      ],
+      "receivingAcceptance": "CFG1-AC1"
     },
     {
       "id": "CF-O05",
@@ -371,14 +387,22 @@
     {
       "id": "CF-O06",
       "outcome": "Effective-configuration key, read set and per-(section, profile) invalidation; degraded results never warm (subblock 5; CR13-CR17)",
-      "owner": null,
-      "openGap": "G01"
+      "owner": "CFG1",
+      "successorPath": [
+        "CFG0",
+        "CFG1"
+      ],
+      "receivingAcceptance": "CFG1-AC3"
     },
     {
       "id": "CF-O07",
       "outcome": "NAPI/WASM prepared-input layers run through the one core merger (subblock 6; CR23)",
-      "owner": null,
-      "openGap": "G01"
+      "owner": "CFG1",
+      "successorPath": [
+        "CFG0",
+        "CFG1"
+      ],
+      "receivingAcceptance": "CFG1-AC4"
     },
     {
       "id": "CF-O08",
@@ -448,8 +472,12 @@
     {
       "id": "CF-O14",
       "outcome": "User layer as an explicit host input with a host-supplied revision; no ambient global configuration (CR22)",
-      "owner": null,
-      "openGap": "G01"
+      "owner": "CFG1",
+      "successorPath": [
+        "CFG0",
+        "CFG1"
+      ],
+      "receivingAcceptance": "CFG1-AC4"
     }
   ],
   "consumers": [
@@ -847,7 +875,7 @@
         "crates/verter_mcp/src/server.rs"
       ],
       "disposition": "replace",
-      "successor": "the lint section of the effective configuration; .verterrc.json is never merged beside verter.config.jsonc. Its ssr key waits on G01.",
+      "successor": "the lint section of the effective configuration; .verterrc.json is never merged beside verter.config.jsonc. Its ssr key has no successor key yet; CFG1 owns the envelope.",
       "deletionOwner": "LNTCFG0",
       "receivingAcceptance": "LNTCFG0-AC1",
       "productionCapable": true,
@@ -1165,10 +1193,19 @@
       "note": "This decision's own displaced-route population beyond the three charter categories."
     }
   ],
-  "openGaps": [
+  "openGaps": [],
+  "closedGaps": [
     {
       "id": "G01",
       "unit": "verter.config.jsonc envelope loader",
+      "disposition": "closed",
+      "ruling": "cfg0-envelope-loader-owner",
+      "owner": "CFG1",
+      "predecessors": [
+        "CFG0",
+        "BR0"
+      ],
+      "landsAfter": "CFG0",
       "covers": [
         "CF-O01",
         "CF-O02",
@@ -1178,31 +1215,50 @@
         "CF-O07",
         "CF-O14"
       ],
-      "rules": [
-        "CR01",
-        "CR02",
-        "CR03",
-        "CR04",
-        "CR05",
-        "CR06",
-        "CR07",
-        "CR08",
-        "CR09",
-        "CR10",
-        "CR11",
-        "CR12",
-        "CR13",
-        "CR14",
-        "CR15",
-        "CR16",
-        "CR17",
-        "CR18",
-        "CR22",
-        "CR23"
+      "acceptance": [
+        {
+          "id": "CFG1-AC1",
+          "covers": [
+            "CF-O01",
+            "CF-O04"
+          ],
+          "scope": "envelope parsing and fail-closed outcomes"
+        },
+        {
+          "id": "CFG1-AC2",
+          "covers": [
+            "CF-O02",
+            "CF-O03"
+          ],
+          "scope": "precedence and provenance"
+        },
+        {
+          "id": "CFG1-AC3",
+          "covers": [
+            "CF-O06"
+          ],
+          "scope": "effective-configuration key, read set and invalidation"
+        },
+        {
+          "id": "CFG1-AC4",
+          "covers": [
+            "CF-O07",
+            "CF-O14"
+          ],
+          "scope": "user layer and NAPI/WASM prepared inputs"
+        }
       ],
-      "evidence": "No production code reads verter.config.* at this head; the only mention is docs/plans/framework-plugin-system.md. No plan node owns the loader.",
-      "disposition": "open; the charter's 2026-10-02 amendment records it and UAO0 reports it as a finding against this binding table without implementing it",
-      "question": "cfg0-envelope-loader-owner",
+      "orderedAfter": [
+        "CENV1C",
+        "FWA1",
+        "LNTCFG0",
+        "FCFG0",
+        "INT5",
+        "EDOC1",
+        "COXD2",
+        "UAO0"
+      ],
+      "evidence": "No production code reads verter.config.* at this head; the only mention is docs/plans/framework-plugin-system.md. The ruling assigns the loader to CFG1. UAO0 does not implement it.",
       "reporter": "UAO0",
       "reporterAcceptance": "UAO0-AC-R1"
     }
@@ -1225,9 +1281,10 @@
     },
     {
       "id": "CF-F03",
-      "finding": "The .verterrc.json ssr key has no successor key; it waits on G01.",
+      "finding": "The .verterrc.json ssr key has no successor key; CFG1 owns the envelope that would carry one.",
       "route": "CF-D01",
-      "receiver": "G01"
+      "receiver": "CFG1",
+      "receivingAcceptance": "CFG1-AC1"
     },
     {
       "id": "CF-F04",
@@ -1241,7 +1298,7 @@
     {
       "unit": "verter.config.* loader",
       "evidence": "No Rust or TypeScript code reads verter.config.*; the only mention is the design note docs/plans/framework-plugin-system.md.",
-      "consequence": "G01."
+      "consequence": "G01 is closed. CFG1 owns the loader; nothing to delete at this head."
     },
     {
       "unit": "Ambient global configuration",
@@ -1271,12 +1328,12 @@
   ],
   "transferredObligations": [
     {
-      "obligation": "Executable inventory validator over tests/kernel/CFG0/products/ and its negative controls: missing inventory member, unknown or pathless owner, missing receiving AC, conflicting assignment; G01 reported as a finding",
+      "obligation": "Executable inventory validator over tests/kernel/CFG0/products/ and its negative controls: missing inventory member, unknown or pathless owner, missing receiving AC, conflicting assignment. G01 is closed and is not reported as an open gap; the loader outcomes bind to CFG1.",
       "receiver": "UAO0",
       "receivingAcceptance": "UAO0-AC-R1"
     },
     {
-      "obligation": "Executable fixtures for precedence (CC01 deterministic monorepo and nested precedence, including declaring-file override anchors, CC02 root stop, CC03 extends order, cycle and escape, CC13 no ambient global configuration), fail-closed unknowns (CC04 undecodable framework release and top-level fields), provenance (CC06 product payloads keep exact provenance) and invalidation (CC07 value fingerprint versus span anchor, CC17 catalog rows invalidate only consulted decodes)",
+      "obligation": "Executable fixtures for precedence (CC01 deterministic monorepo and nested precedence, including declaring-file override anchors, CC02 root stop, CC03 extends order, cycle and escape, CC13 no ambient global configuration), fail-closed unknowns (CC04 undecodable framework release and top-level fields), provenance (CC06 product payloads keep exact provenance) and invalidation (CC07 value fingerprint versus span anchor versus provenance re-stamp, CC17 catalog rows invalidate only consulted decodes and an admission-only change hits the configuration cache)",
       "receiver": "UAO0",
       "receivingAcceptance": "UAO0-AC-R2"
     }

@@ -7,7 +7,7 @@
     "date": "2026-10-09"
   },
   "companionInventory": "configuration-inventory.v1.json",
-  "rule": "Each case states its input, the required outcome and the forbidden outcome, and names the node whose test makes it executable. CFG0 ships no test; the executable owner adds it. Cases owned by UAO0 run under UAO0-AC-R2 and need the G01 loader; UAO0 reports a missing loader as a finding rather than implementing it.",
+  "rule": "Each case states its input, the required outcome and the forbidden outcome, and names the node whose test makes it executable. CFG0 ships no test; the executable owner adds it. Cases owned by UAO0 run under UAO0-AC-R2 and need CFG1's loader (CFG1-AC1 through CFG1-AC4). UAO0 does not implement the loader. CFG1 lands after CFG0.",
   "cases": [
     {
       "id": "CC01",
@@ -107,8 +107,8 @@
       "id": "CC07",
       "name": "irrelevant config does not invalidate unrelated profiles",
       "input": "A monorepo with a Vue 3 package and a Svelte 5 package sharing the root config; edits to (a) profiles.<Svelte 5 framework profile>.lint, (b) the format section, (c) a comment line inserted above the lint section, (d) a comment placed so that no contribution span moves",
-      "required": "(a) recomputes only lint consumers in Svelte 5 scopes; (b) recomputes only format consumers; (c) changes ContentId and the span anchor of every section whose contribution spans move, so those diagnostics re-anchor, and changes no value fingerprint, so no consumer recomputes; (d) changes ContentId only",
-      "forbidden": "A family-wide or file-wide fingerprint that recomputes Vue scopes on a Svelte edit, or lint on a format edit; a comment edit that leaves diagnostics published at the old spans; a comment edit that semantically recomputes a consumer whose values did not change",
+      "required": "(a) recomputes only lint consumers in Svelte 5 scopes; (b) recomputes only format consumers; (c) changes ContentId and SourceRevision, re-stamps both on published provenance and diagnostics, changes the span anchor of every section whose contribution spans move so those diagnostics re-anchor, and changes no value fingerprint so no consumer recomputes; (d) changes ContentId and SourceRevision only: published provenance and diagnostics are re-stamped with the new identities, no span anchor changes, and no consumer recomputes",
+      "forbidden": "A family-wide or file-wide fingerprint that recomputes Vue scopes on a Svelte edit, or lint on a format edit; a comment edit that leaves diagnostics published at the old spans; a comment edit that leaves published provenance citing the previous SourceRevision or ContentId; a comment edit that semantically recomputes a consumer whose values did not change",
       "rules": [
         "CR10",
         "CR14",
@@ -223,9 +223,9 @@
     {
       "id": "CC15",
       "name": "coexistence choices at user and workspace scope",
-      "input": "First, a user-layer coexistence choice official for a lint cell and a workspace-root file body choice verter for the same cell. Separately, the same key only in shared/base.jsonc, which the workspace-root file extends. Separately, the same key in packages/lib/verter.config.jsonc with root true, under a workspace-root file that has no coexistence key.",
-      "required": "The workspace-root body choice wins over the user layer with provenance source. The key in shared/base.jsonc is Invalid(ScopeRestrictedKey), is not inherited, and makes every scope that reads base.jsonc Invalid. The key in the nested root file is Invalid(ScopeRestrictedKey); files under packages/lib do not read the workspace-root coexistence section and take the user-layer choice only. The core writes no choice.",
-      "forbidden": "A nested root or an extends target overriding or supplying a workspace choice; a choice written without consent; treating root true as a coexistence scope",
+      "input": "First, a user-layer coexistence choice official for a lint cell and a workspace-root file body choice verter for the same cell. Separately, the same key only in shared/base.jsonc, which the workspace-root file extends. Separately, the same key in packages/lib/verter.config.jsonc with root true, under a workspace-root file that has no coexistence key. Separately, packages/other/verter.config.jsonc with root true and no coexistence key, under that same workspace-root file.",
+      "required": "The workspace-root body choice wins over the user layer with provenance source. The key in shared/base.jsonc is Invalid(ScopeRestrictedKey), is not inherited, and makes every scope that reads base.jsonc Invalid. The key in packages/lib is Invalid(ScopeRestrictedKey) and makes every scope that reads that file Invalid, with no fallback to the user layer or to defaults. packages/other does not read the workspace-root coexistence section; its files take the user-layer choice only. The core writes no choice.",
+      "forbidden": "A nested root or an extends target overriding or supplying a workspace choice; a user-layer or default fallback for a scope that reads an invalid nested file; a choice written without consent; treating root true as a coexistence scope",
       "rules": [
         "CR05",
         "CR06",
@@ -257,8 +257,8 @@
       "id": "CC17",
       "name": "catalog admission changes invalidate only consulted decodes",
       "input": "A cached Complete for a file whose build section and frameworks.svelte release both decoded against catalog snapshot S. Then the catalog unregisters build. Separately, from S, the catalog withdraws that svelte release while the spelling still decodes to the same ReleaseId. Separately, from S, the catalog registers an unrelated section.",
-      "required": "Unregistering build misses the cache for scopes that consulted the build registration and yields Invalid(UnknownKey); scopes that never consulted build keep their key and the cached Complete. Withdrawing the svelte release misses the cache for scopes that consulted that admission row; the configuration stays Complete and activation becomes unsupported-version. Registering an unrelated section changes no consulted row, so the cached Complete is still served.",
-      "forbidden": "Serving the cached Complete after a consulted row changes; invalidating a scope that did not consult the changed row; caching the Invalid result",
+      "required": "Unregistering build misses the cache for scopes that consulted the build registration and yields Invalid(UnknownKey); scopes that never consulted build keep their key and the cached Complete. Withdrawing the svelte release changes no row the decode consulted, so the configuration cache still hits and stays Complete for the same ReleaseId. FWA1's activation read set includes that admission row, so activation misses and becomes unsupported-version (FWA1-AC6). Registering an unrelated section changes no consulted row, so the cached Complete is still served.",
+      "forbidden": "Serving the cached Complete after a consulted decode row changes; missing the configuration cache on an admission-only withdrawal; invalidating the configuration of a scope that did not consult the changed row; caching the Invalid result",
       "rules": [
         "CR02",
         "CR04",
