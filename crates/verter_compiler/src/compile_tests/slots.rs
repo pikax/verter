@@ -898,10 +898,9 @@ const leftList = computed(() => props.list.filter((v, index) => index % 2 === 0)
         tsx.code
     );
 
-    // Should have clean map body without JSX expression wrapping
+    // Should have clean frame body without JSX expression wrapping
     assert!(
-        tsx.code
-            .contains("=> { return (___VERTER___instance.$slots"),
+        tsx.code.contains("); return (___VERTER___instance.$slots"),
         "slot inside v-for should not have JSX {{...}} wrapping: {}",
         tsx.code
     );

@@ -575,74 +575,171 @@ const el = ref<HTMLDivElement>()
 </script>
 <template><div v-if="isTypeA" ref="el">A</div></template>"#,
     );
-    // Comp function should have condition guard
+    // An element function reads nothing its conditions narrow: its guard only
+    // contributes `| null` to the return type and stays constant-size.
     assert!(
-        code.contains("if(!((isTypeA))) return null;"),
-        "Comp for v-if should have condition guard, got:\n{}",
+        code.contains("if(!___VERTER___flowBranch) return null;"),
+        "element Comp under v-if should have the constant guard, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("if(!((isTypeA))) return null;"),
+        "element Comp must not re-state the condition path, got:\n{}",
         code
     );
 }
 
+/// The `tag_open.start` of the first `<{tag}` in `source`.
+fn tag_offset(source: &str, tag: &str) -> usize {
+    source
+        .find(&format!("<{tag}"))
+        .unwrap_or_else(|| panic!("`<{tag}` is in the source"))
+}
+
 #[test]
 fn comp_v_else_if_negates_prior_siblings() {
-    let (code, _, _tc) = gen_tsx_script_full(
-        r#"<script setup lang="ts">
+    let source = r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const isTypeA = true
 const isTypeB = true
-const el = ref<HTMLDivElement>()
+const el = ref()
 </script>
 <template>
   <div v-if="isTypeA">A</div>
-  <div v-else-if="isTypeB" ref="el">B</div>
-</template>"#,
-    );
-    // v-else-if Comp should negate prior v-if and include own condition
+  <Child v-else-if="isTypeB" ref="el">B</Child>
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let chain = tag_offset(source, "div v-if");
+    let child = tag_offset(source, "Child");
+    // A component function's props read narrowed values: they are captured in
+    // the v-else-if branch of the chain's flow, after the negated v-if.
     assert!(
-        code.contains("!((isTypeA)) && (isTypeB)"),
-        "Comp for v-else-if should negate prior v-if, got:\n{}",
-        code
+        code.contains(&format!(
+            "function ___VERTER___Flow{chain}() {{\n  if (isTypeA) {{\n  return {{ b: 0 }} as const;\n  }} else if (isTypeB) {{\n  const ___VERTER___s{child} = {{ t: Child, p: {{}} }};"
+        )),
+        "the component is captured in the v-else-if branch of its chain, got:\n{code}"
+    );
+    assert!(
+        code.contains(&format!(
+            "function ___VERTER___R{child}() {{ const f = ___VERTER___Flow{chain}(); return f !== null && f.b === 1 ? f : null; }}"
+        )) && code.contains(&format!(
+            "function ___VERTER___Comp{child}() {{ const r = ___VERTER___R{child}(); return r === null ? null : r.c{child}(); }}"
+        )),
+        "the component function reads its branch's record, got:\n{code}"
+    );
+}
+
+#[test]
+fn comp_unconditional_sibling_after_chain_stays_outside_it() {
+    let source = r#"<script setup lang="ts">
+import Foo from './Foo.vue'
+import Bar from './Bar.vue'
+import Baz from './Baz.vue'
+const a = true
+const b = true
+</script>
+<template>
+  <Foo v-if="a" />
+  <Bar v-else-if="b" />
+  <Baz ref="x" />
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let baz = tag_offset(source, "Baz");
+    assert!(
+        !code.contains(&format!("___VERTER___s{baz}")),
+        "an unconditional sibling is not captured in the chain, got:\n{code}"
+    );
+    let comp = code
+        .split(&format!("function ___VERTER___Comp{baz}"))
+        .nth(1)
+        .and_then(|rest| rest.split("\nfunction ").next())
+        .unwrap_or("");
+    assert!(
+        !comp.contains("flowBranch"),
+        "an unconditional sibling's component function has no branch guard, got:\n{code}"
+    );
+}
+
+#[test]
+fn comp_adjacent_top_level_chains_stay_siblings() {
+    let source = r#"<script setup lang="ts">
+import Foo from './Foo.vue'
+import Bar from './Bar.vue'
+const a = true
+const b = true
+</script>
+<template>
+  <Foo v-if="a" ref="x" />
+  <Foo v-else ref="y" />
+  <Bar v-if="b" ref="z" />
+  <Bar v-else ref="w" />
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let first = tag_offset(source, "Foo v-if");
+    let second = tag_offset(source, "Bar v-if");
+    assert!(
+        code.contains(&format!("function ___VERTER___Flow{first}()"))
+            && code.contains(&format!("function ___VERTER___Flow{second}()")),
+        "each top-level chain gets its own flow, got:\n{code}"
     );
 }
 
 #[test]
 fn comp_v_else_negates_all_prior() {
-    let (code, _, _tc) = gen_tsx_script_full(
-        r#"<script setup lang="ts">
+    let source = r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const isTypeA = true
-const el = ref<HTMLDivElement>()
+const el = ref()
 </script>
 <template>
   <div v-if="isTypeA">A</div>
-  <div v-else ref="el">B</div>
-</template>"#,
-    );
-    // v-else Comp should negate all prior conditions
+  <Child v-else ref="el">B</Child>
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let chain = tag_offset(source, "div v-if");
+    let child = tag_offset(source, "Child");
+    // The v-else branch follows the v-if in one statement, so it holds under
+    // the negation; an exhaustive chain needs no fallthrough `return null`.
     assert!(
-        code.contains("if(!(!((isTypeA)))) return null;"),
-        "Comp for v-else should negate prior v-if, got:\n{}",
-        code
+        code.contains(&format!(
+            "function ___VERTER___Flow{chain}() {{\n  if (isTypeA) {{\n  return {{ b: 0 }} as const;\n  }} else {{\n  const ___VERTER___s{child} = {{ t: Child, p: {{}} }};\n  return {{ b: 1, c{child}: () => ___VERTER___instantiateComponent(___VERTER___s{child}.t, ___VERTER___s{child}.p) }} as const;\n  }}\n}}"
+        )),
+        "the component is captured in the v-else branch, got:\n{code}"
     );
 }
 
 #[test]
 fn comp_nested_v_if_combines_parent_and_own() {
-    let (code, _, _tc) = gen_tsx_script_full(
-        r#"<script setup lang="ts">
+    let source = r#"<script setup lang="ts">
 import { ref } from 'vue'
+import Child from './Child.vue'
 const parent = true
 const child = true
-const el = ref<HTMLSpanElement>()
+const el = ref()
 </script>
-<template><div v-if="parent"><span v-if="child" ref="el">nested</span></div></template>"#,
-    );
-    // Nested Comp should combine parent + own condition
-    // The span's Comp should have: if(!((parent) && (child))) return null;
+<template><div v-if="parent"><Child v-if="child" ref="el">nested</Child></div></template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let outer = tag_offset(source, "div");
+    let inner = tag_offset(source, "Child");
+    // The nested chain is an immediately invoked block inside the outer
+    // branch, so the component sees both conditions; each is emitted once.
     assert!(
-        code.contains("(parent) && (child)"),
-        "nested Comp should combine parent + own condition, got:\n{}",
-        code
+        code.contains(&format!(
+            "function ___VERTER___Flow{outer}() {{\n  if (parent) {{\n  const ___VERTER___f{inner} = (() => {{\n  if (child) {{\n  const ___VERTER___s{inner} = {{ t: Child, p: {{}} }};"
+        )),
+        "the nested chain is invoked inside the outer branch, got:\n{code}"
+    );
+    assert!(
+        code.contains(&format!(
+            "function ___VERTER___R{inner}() {{ const p = ___VERTER___R{outer}(); const f = p === null ? null : p.f{inner}; return f !== null && f.b === 0 ? f : null; }}"
+        )),
+        "the nested branch's navigator reads its parent's, got:\n{code}"
+    );
+    assert!(
+        !code.contains("(parent) && (child)"),
+        "no component function re-states its condition path, got:\n{code}"
     );
 }
 
@@ -1075,5 +1172,48 @@ fn define_props_type_content_is_source_mapped() {
     assert!(
         output.contains("Prettify<{ foo: string, bar: number }>"),
         "type content should be in the Prettify wrapper: {output}"
+    );
+}
+
+#[test]
+fn comp_flow_declares_enclosing_v_for_bindings_before_its_conditions() {
+    let source = r#"<script setup lang="ts">
+import Child from './Child.vue'
+const items = [{ ok: true }]
+</script>
+<template>
+  <div v-for="(item, index) in items">
+    <Child v-if="item.ok && index > 0" ref="el" />
+  </div>
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let chain = tag_offset(source, "Child");
+    assert!(
+        code.contains(&format!(
+            "function ___VERTER___Flow{chain}() {{\n  const [item, index] = ___VERTER___flowEach2((items));\n  if (item.ok && index > 0) {{"
+        )),
+        "the flow function declares the v-for aliases before the condition reads them, got:\n{code}"
+    );
+}
+
+#[test]
+fn comp_flow_declares_enclosing_v_slot_bindings_before_its_conditions() {
+    let source = r#"<script setup lang="ts">
+import Parent from './Parent.vue'
+import Child from './Child.vue'
+</script>
+<template>
+  <Parent v-slot="{ shown }">
+    <Child v-if="shown" ref="el" />
+  </Parent>
+</template>"#;
+    let (code, _, _tc) = gen_tsx_script_full(source);
+    let chain = tag_offset(source, "Child");
+    let parent = tag_offset(source, "Parent");
+    assert!(
+        code.contains(&format!(
+            "function ___VERTER___Flow{chain}() {{\n  type __Parent0 = ReturnType<typeof ___VERTER___Comp{parent}>;"
+        )) && code.contains("const { shown } = {} as __SlotProps0;\n  if (shown) {"),
+        "the flow function declares the v-slot bindings before the condition reads them, got:\n{code}"
     );
 }

@@ -218,6 +218,7 @@ mod tests {
             offset: 0,
             expression: None,
             multi_statement: false,
+            statements: None,
             errors: None,
             bindings: None,
             ide_recovery_scope: None,

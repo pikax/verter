@@ -122,6 +122,7 @@ fn two_prop_oxc(
         offset: inner_start,
         expression: None,
         multi_statement: false,
+        statements: None,
         errors: None,
         bindings: Some(BindingExtractionResult {
             bindings: vec![
