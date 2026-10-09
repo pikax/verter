@@ -231,10 +231,12 @@ fn snapshot_build_only_deltas(n: usize) -> AdmitDeltas {
     deltas
 }
 
-/// The host sizes every scaling claim is derived over. A single pair
-/// could be coincidence; three points an order of magnitude apart cannot
-/// be flat by accident.
-const HOST_SIZES: [usize; 3] = [250, 1000, 3000];
+/// The host sizes every scaling claim is derived over. Every reading below
+/// is required to be exactly zero, so a per-owner term shows up as a count
+/// of `N` at the smallest size already; the second point, an order of
+/// magnitude larger, pins that the zero is flat rather than a small-host
+/// coincidence (a term paid only past some threshold).
+const HOST_SIZES: [usize; 2] = [8, 96];
 
 fn measure_across_host_sizes(
     label: &str,

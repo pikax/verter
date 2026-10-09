@@ -213,9 +213,22 @@ pub(super) fn flow_return_outcome_in(
     Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
     crate::host_flow_return_audit::FlowReturnError,
 > {
-    let host = probe_host(project);
+    flow_return_outcome_on_host(&probe_host(project), source, function)
+}
+
+/// [`flow_return_outcome_in`] on `host`, a probe host the caller configured
+/// (a budget set on its stores, say): the probe module is (re)written on it
+/// and `function`'s return read through the audited boundary.
+pub(super) fn flow_return_outcome_on_host(
+    host: &Arc<crate::VerterHost>,
+    source: &str,
+    function: &str,
+) -> Result<
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
+    crate::host_flow_return_audit::FlowReturnError,
+> {
     crate::u6_flow_shape_corpus_tests::upsert(
-        &host,
+        host,
         PROBE_FILE,
         &crate::u6_flow_shape_corpus_tests::module_script(source),
         crate::FileLanguage::script_ts(),
@@ -379,6 +392,66 @@ pub(super) fn tuple_labels(source: &str, probe: &str) -> Vec<Option<String>> {
             ),
         }
     })
+}
+
+/// Every `(function, checker print of its return)` row of `source` whose
+/// body-derived return, read in `project` from ONE host holding the module
+/// once, does not match the print structurally or is not complete (a
+/// degraded value, or no value at all). The module is the checker's own
+/// program: every function is checked in one host, as the checker checks
+/// them in one file, and an answer a row leaves in the host's memo is one
+/// the rows after it can read.
+pub(super) fn return_failures_in_one_host(
+    project: ProbeProject<'_>,
+    source: &str,
+    rows: &[(&str, &str)],
+) -> Vec<String> {
+    let host = probe_host(project);
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(source),
+        crate::FileLanguage::script_ts(),
+    );
+    // Every return is read through the audited boundary first; the
+    // reductions below then run on one dispatch over the host as those
+    // reads left it.
+    let mut failures = Vec::new();
+    let mut results = Vec::with_capacity(rows.len());
+    for (function, checker) in rows {
+        match flow_return_of(&host, function) {
+            Some(result) => results.push((*function, *checker, result)),
+            None => failures.push(format!("`{function}` produced no value")),
+        }
+    }
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _demand_scope = project.ambient_lib.map(|_| {
+        super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
+    });
+    for (function, checker, result) in results {
+        let expected = checker_syntax::parse(checker)
+            .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
+        if let Some(degradation) = result.degradation() {
+            failures.push(format!("`{function}` is degraded: {degradation:?}"));
+        }
+        let node = dispatch
+            .normalize_node_keeping_declaration_refs_for_tests(
+                result.return_type(),
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            )
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("the return of `{function}` reduced to a partial demand"));
+        if !checker_syntax::matches_node(&dispatch, node, &expected, 0) {
+            failures.push(format!(
+                "`ReturnType<typeof {function}>`: the checker answers `{checker}`, the lane measured `{}`",
+                render_node(&dispatch, node, 0)
+            ));
+        }
+    }
+    failures
 }
 
 /// [`mismatches`] with every probe read from ONE host, in row order: each

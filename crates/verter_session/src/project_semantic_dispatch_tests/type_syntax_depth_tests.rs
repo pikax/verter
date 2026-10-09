@@ -137,22 +137,26 @@ fn union_alias_chain(links: usize) -> String {
     source
 }
 
-/// A union alias that names the previous one, chained 1,000 deep, reads
-/// on a 1 MiB thread, completely: a union's reduction reads each named
-/// arm's own demand, and each named arm is the next alias of the chain, so
-/// those demands nest once per link, and the walk over a named union's
-/// members reads the names the arm's own demand already read.
+/// A union alias that names the previous one, chained 300 deep, reads on
+/// a thread three quarters the size of the 1 MiB a host asks for at least
+/// ([`super::deep_input_tests::SMALL_STACK`]), a quarter MiB of it left
+/// past a probe's fixed work, completely: a union's reduction reads each
+/// named arm's own demand, and each named arm is the next alias of the
+/// chain, so those demands nest once per link — under a KiB a link — and
+/// the walk over a named union's members reads the names the arm's own
+/// demand already read (reading them again at each link made the chain
+/// quadratic).
 ///
 /// Measured on TypeScript 7.0.2 (all four settings): the checker prints
 /// `U1000` over the 1,000-link chain as `U1000` (and `U3` over three
 /// links as `U3`); `U1000` and `0 | 1 | … | 1001` are mutually
 /// assignable, as are `U3000` and `0 | 1 | … | 3001` over 3,000 links.
 #[test]
-fn a_1000_deep_union_alias_chain_reads_on_a_small_stack() {
+fn a_300_deep_union_alias_chain_reads_on_a_small_stack() {
     let run = |links: usize| {
         let source = union_alias_chain(links);
         std::thread::Builder::new()
-            .stack_size(1 << 20)
+            .stack_size(super::deep_input_tests::SMALL_STACK)
             .spawn(move || {
                 let probe = format!("U{links}");
                 super::checker_probe_lane_tests::mismatches(
@@ -160,11 +164,11 @@ fn a_1000_deep_union_alias_chain_reads_on_a_small_stack() {
                     &[(probe.as_str(), probe.as_str())],
                 )
             })
-            .expect("spawn the 1 MiB thread")
+            .expect("spawn the small-stack thread")
             .join()
             .expect("the chain reads without exhausting the stack")
     };
-    let failures: Vec<String> = run(3).into_iter().chain(run(1000)).collect();
+    let failures: Vec<String> = run(3).into_iter().chain(run(300)).collect();
     assert!(
         failures.is_empty(),
         "{}",

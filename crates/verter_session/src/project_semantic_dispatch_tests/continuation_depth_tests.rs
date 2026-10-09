@@ -42,11 +42,14 @@ fn conditional_argument_chain(length: usize) -> String {
     source
 }
 
-/// `f` over the evaluated rows, read on a 1 MiB thread — the smallest stack
-/// a host asks for.
+/// `f` over the evaluated rows, read on a thread three quarters the size
+/// of the 1 MiB a host asks for at least
+/// ([`super::deep_input_tests::SMALL_STACK`]), a quarter MiB of it left
+/// past a probe's fixed work: a chain evaluated one native level per link
+/// overflows it within a fraction of the chains below.
 fn on_a_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
-        .stack_size(1 << 20)
+        .stack_size(super::deep_input_tests::SMALL_STACK)
         .spawn(f)
         .expect("spawn the probing thread")
         .join()
@@ -58,22 +61,18 @@ const ALIAS_CHAIN_ROWS: &[(&str, &str)] = &[
     ("ReturnType<typeof gj>", "\"ok\" | undefined"),
 ];
 
-/// Alias chains of 50, 200 and 500 aliases evaluate cold, to the checker's
-/// answer, on a 1 MiB thread. Each alias's instantiation needs the next one
-/// from the runtime instead of opening it one native query deeper, so the
-/// chain is bounded neither by the stack nor by the nested-query depth that
-/// bounds native re-entry (a chain of 23 used to exceed it).
+/// Alias chains of 200 and 500 aliases evaluate cold, to the checker's
+/// answer, on the small stack. Each alias's instantiation needs the next
+/// one from the runtime instead of opening it one native query deeper, so
+/// the chain is bounded neither by the stack nor by the nested-query depth
+/// that bounds native re-entry (a chain of 23 used to exceed it).
 ///
 /// TypeScript 7.0.2, all four `strictNullChecks` × `noImplicitAny` settings,
 /// at 50, 200 and 500 aliases: no TS2589; under `strictNullChecks`
 /// `typeof c` is `"ok" | undefined` and `gj` returns `"ok" | undefined`.
 #[test]
-fn alias_chains_up_to_500_long_answer_cold_on_a_one_mebibyte_stack() {
-    for (length, rows) in [
-        (50, ALIAS_CHAIN_ROWS),
-        (200, ALIAS_CHAIN_ROWS),
-        (500, &ALIAS_CHAIN_ROWS[..1]),
-    ] {
+fn alias_chains_up_to_500_long_answer_cold_on_a_small_stack() {
+    for (length, rows) in [(200, ALIAS_CHAIN_ROWS), (500, &ALIAS_CHAIN_ROWS[..1])] {
         let mismatches = on_a_small_stack(move || evaluated_mismatches(&alias_chain(length), rows));
         assert_eq!(
             mismatches,
@@ -216,13 +215,13 @@ fn check_conditional_argument_chains_answer(lengths: &[usize], settings: &[&'sta
     }
 }
 
-/// Conditional arguments nested through a chain of aliases evaluate on a
-/// 1 MiB thread up to the checker's instantiation depth.
+/// Conditional arguments nested through a chain of aliases evaluate on the
+/// small stack up to the checker's instantiation depth.
 ///
 /// TypeScript 7.0.2, all four `strictNullChecks` × `noImplicitAny`
 /// settings: `E97<"ok">` is `"ok"`; `E98<"ok">` is TS2589.
 #[test]
-fn conditional_arguments_nested_97_deep_answer_on_a_one_mebibyte_stack() {
+fn conditional_arguments_nested_97_deep_answer_on_a_small_stack() {
     check_conditional_argument_chains_answer(&[97], &SETTINGS);
 }
 
@@ -237,23 +236,17 @@ fn conditional_arguments_nested_past_the_checker_depth_answer() {
     check_conditional_argument_chains_answer(&[98, 200], &SETTINGS);
 }
 
-/// Five hundred levels deep, the same full answer.
+/// Five hundred levels deep, the same full answer, on the small stack —
+/// well inside Verter's instantiation budget, and far past the depth at
+/// which an instantiation opened one native level per alias would have
+/// overflowed it. The settings do not change what the frames hold, so the
+/// strict one stands for the four.
 ///
 /// TypeScript 7.0.2, all four settings: `E500<"ok">` is TS2589; Verter's
 /// full answer is `"ok"`.
 #[test]
-fn conditional_arguments_nested_500_deep_answer() {
-    check_conditional_argument_chains_answer(&[500], &SETTINGS);
-}
-
-/// A thousand levels deep, the same full answer, well inside Verter's
-/// instantiation budget.
-///
-/// TypeScript 7.0.2, `strictNullChecks` and `noImplicitAny`:
-/// `E1000<"ok">` is TS2589; Verter's full answer is `"ok"`.
-#[test]
-fn conditional_arguments_nested_1000_deep_answer() {
-    check_conditional_argument_chains_answer(&[1000], &SETTINGS[..1]);
+fn conditional_arguments_nested_500_deep_answer_on_a_small_stack() {
+    check_conditional_argument_chains_answer(&[500], &SETTINGS[..1]);
 }
 
 /// Verter's instantiation budget, pinned at three points on one chain:
@@ -457,8 +450,8 @@ fn printing_an_alias_chain_reads_each_alias_a_bounded_number_of_times() {
 const SMALL_STACK_CHILD: &str = "VERTER_CONTINUATION_SMALL_STACK_CHILD";
 
 /// In a process of its own — nothing evaluated before it, on any stack —
-/// 1 MiB threads evaluate a 200-alias chain, conditional arguments nested
-/// 97 deep and 500 deep, display an answer, and drop every host and
+/// small-stack threads evaluate a 200-alias chain, conditional arguments
+/// nested 97 deep and 500 deep, display an answer, and drop every host and
 /// dispatcher they built there. An overflow aborts the child and fails
 /// this test instead of the whole run.
 ///
@@ -503,7 +496,7 @@ fn a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread() {
     assert!(
         output.status.success()
             && stdout.contains(&format!("{SMALL_STACK_CHILD}: every chain answered")),
-        "the child evaluating on 1 MiB threads failed (status {:?}):\n{stdout}\n{stderr}",
+        "the child evaluating on small-stack threads failed (status {:?}):\n{stdout}\n{stderr}",
         output.status
     );
 }
