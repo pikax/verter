@@ -324,6 +324,7 @@ pub async fn spawn(
                 None,
                 false,
                 None,
+                None,
             )
             .await?;
             Ok(Arc::new(provider))

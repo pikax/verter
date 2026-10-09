@@ -206,10 +206,12 @@ async fn handle_document_highlight_attempt(
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
-            let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_highlights) = tp.get_document_highlights(&tsx_path, offset).await {
+                if let Ok(type_highlights) = tp
+                    .get_document_highlights(&vf_ctx.snapshot.provider_query(), offset)
+                    .await
+                {
                     // Post-await validation (fail closed): highlights produced
                     // against a superseded surface must be dropped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
@@ -272,8 +274,9 @@ async fn handle_document_highlight_attempt(
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
-                if let Ok(type_highlights) =
-                    tp.get_document_highlights(&ctx.tsx_path, tsx_offset).await
+                if let Ok(type_highlights) = tp
+                    .get_document_highlights(&ctx.snapshot.provider_query(), tsx_offset)
+                    .await
                 {
                     // Post-await validation: highlights produced against a
                     // surface that no longer matches must be DROPPED (fail
@@ -312,7 +315,10 @@ pub(super) async fn handle_signature_help(
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
             if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
-                if let Ok(type_sig) = tp.get_signature_help(&vf_ctx.tsx_path, offset).await {
+                if let Ok(type_sig) = tp
+                    .get_signature_help(&vf_ctx.snapshot.provider_query(), offset)
+                    .await
+                {
                     // Post-await validation (fail closed): signature help
                     // produced against a superseded surface must be dropped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
@@ -337,7 +343,10 @@ pub(super) async fn handle_signature_help(
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
-                if let Ok(type_sig) = tp.get_signature_help(&ctx.tsx_path, tsx_offset).await {
+                if let Ok(type_sig) = tp
+                    .get_signature_help(&ctx.snapshot.provider_query(), tsx_offset)
+                    .await
+                {
                     // Post-await validation: signature help produced against a
                     // surface that no longer matches must be DROPPED (fail closed).
                     if !server.provider_context_still_valid(uri, &ctx) {
@@ -574,8 +583,9 @@ async fn handle_code_action_attempt(
                     // a returned foreign-file edit maps through the generation
                     // this request began against.
                     let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                    if let Ok(type_actions) =
-                        tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx).await
+                    if let Ok(type_actions) = tp
+                        .get_code_actions(&ctx.snapshot.provider_query(), so, eo, &diag_ctx)
+                        .await
                     {
                         // Post-await validation (STRICT for code actions: a corrupt
                         // edit is worse than no edit): on a superseded surface drop
@@ -750,7 +760,7 @@ pub(super) async fn raw_provider_code_actions(
         &ctx.mapper,
         &ctx.tsx_line_index,
     );
-    tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx)
+    tp.get_code_actions(&ctx.snapshot.provider_query(), so, eo, &diag_ctx)
         .await
         .unwrap_or_default()
 }
@@ -807,7 +817,9 @@ async fn handle_semantic_tokens_full_attempt(
     if !server.decorations_must_wait() {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
-                if let Ok(type_tokens) = tp.get_semantic_tokens(&ctx.tsx_path).await {
+                if let Ok(type_tokens) =
+                    tp.get_semantic_tokens(&ctx.snapshot.provider_query()).await
+                {
                     // Post-await validation: tokens produced against a surface
                     // that no longer matches must be DROPPED (fail closed) — VS
                     // Code re-requests after the next sync lands.
@@ -918,12 +930,14 @@ async fn handle_inlay_hint_attempt(
     if !typing && inlay_enabled {
         if let Some(tp) = &server.type_provider {
             if let Some(vf_ctx) = server.virtual_file_context(uri) {
-                let tsx_path = vf_ctx.tsx_path.clone();
                 let vf_li = vf_ctx.line_index.clone();
                 let start = vf_li.position_to_offset(&range.start);
                 let end = vf_li.position_to_offset(&range.end);
                 if let (Some(so), Some(eo)) = (start, end) {
-                    if let Ok(type_hints) = tp.get_inlay_hints(&tsx_path, so, eo).await {
+                    if let Ok(type_hints) = tp
+                        .get_inlay_hints(&vf_ctx.snapshot.provider_query(), so, eo)
+                        .await
+                    {
                         // Post-await validation (fail closed): hints produced
                         // against a superseded surface must be dropped.
                         if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
@@ -1009,7 +1023,10 @@ async fn handle_inlay_hint_attempt(
                 })
                 .or_else(|| Some(ctx.tsx_line_index.source_len()));
                 if let (Some(so), Some(eo)) = (start_offset, end_offset) {
-                    match tp.get_inlay_hints(&ctx.tsx_path, so, eo).await {
+                    match tp
+                        .get_inlay_hints(&ctx.snapshot.provider_query(), so, eo)
+                        .await
+                    {
                         // Post-await validation as a match guard: hints produced
                         // against a superseded surface are DROPPED (fail closed) —
                         // the `Ok(_)` arm below logs the drop.

@@ -314,7 +314,11 @@ async fn extension_provider_transport_mock_drives_completion_resolve_and_diagnos
 
     // ── completions ─────────────────────────────────────────────────────
     let completions = provider
-        .get_completions(file, 8, None)
+        .get_completions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            8,
+            None,
+        )
         .await
         .expect("get_completions routes through the mock transport");
 
@@ -356,7 +360,11 @@ async fn extension_provider_transport_mock_drives_completion_resolve_and_diagnos
 
     // ── completion details ──────────────────────────────────────────────
     let enriched = provider
-        .get_completion_details(file, 8, &completions.items)
+        .get_completion_details(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            8,
+            &completions.items,
+        )
         .await
         .expect("get_completion_details routes through the mock transport");
 
@@ -389,7 +397,10 @@ async fn extension_provider_transport_mock_drives_completion_resolve_and_diagnos
         .clone()
         .expect("the enriched item keeps its resolve handle");
     let resolved = provider
-        .resolve_completion(file, resolve_data)
+        .resolve_completion(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            resolve_data,
+        )
         .await
         .expect("resolve_completion routes through the mock transport")
         .expect("the scripted codeActions produce a resolve result");
@@ -462,7 +473,9 @@ async fn extension_provider_resolve_rejects_non_tsserver_handle_without_transpor
 
     let resolved = provider
         .resolve_completion(
-            "/workspace/src/entry.ts",
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                "/workspace/src/entry.ts",
+            ),
             CompletionResolveData::Lsp {
                 label: "myHelper".to_string(),
                 data: json!({ "anything": true }),
@@ -570,7 +583,12 @@ async fn extension_provider_get_code_actions_surfaces_single_and_combined_unused
         end: 11,
     };
     let actions = provider
-        .get_code_actions(file, 6, 11, &[diag])
+        .get_code_actions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            6,
+            11,
+            &[diag],
+        )
         .await
         .expect("get_code_actions routes through the mock transport");
 
@@ -634,36 +652,26 @@ async fn extension_provider_get_code_actions_surfaces_single_and_combined_unused
     );
 }
 
-/// The combined "fix all" branch converts each `getCombinedCodeFix` response's
-/// edit offsets against content current as of THAT response, not a snapshot
-/// taken once before the loop. A concurrent `update_file` landing while the
-/// combined request is in flight must be reflected when the response is parsed.
+/// The combined "fix all" branch decodes each `getCombinedCodeFix` response's
+/// edit offsets against the bytes the file held when THAT request was sent,
+/// never against the cache re-read after the answer: a concurrent
+/// `update_file` landing while the combined request is in flight must not
+/// move the decode under it.
 ///
-/// Discriminating: the combined edit targets a position (line 3) that exists
-/// only in the UPDATED content. A snapshot taken before the loop holds the
-/// original single-line content, for which the line-3 position is past EOF: the
-/// strict checked converter returns `None`, so the edit DROPS fail-closed, the
-/// combined action never surfaces, and the `expect("the combined fix-all action
-/// surfaces")` below panics. The fresh per-response snapshot resolves the
-/// line-3 position to its real byte offset, so the action surfaces and the
-/// assertion pins that real offset.
+/// Discriminating: the combined edit names line 1, columns 7..13 — `unused`
+/// in the bytes the request was sent with. Re-reading the cache after the
+/// answer finds the replacement, whose first line (`line0`) has no column 7:
+/// the strict converter drops the edit and the combined action never
+/// surfaces.
 #[tokio::test]
-async fn extension_provider_combined_fix_uses_content_current_as_of_each_response() {
+async fn extension_provider_combined_fix_decodes_against_the_bytes_it_was_sent_with() {
     let file = "/workspace/src/entry.ts";
     let original = "const unused = 1;\n";
-    // Three lines; the combined edit targets line 3. Byte 12 is the start of the
-    // third line (`line0\n` = 6 bytes, `line1\n` = 6 bytes).
     let updated = "line0\nline1\nDELETE_ME = 1;\n";
-    let line3_start: u32 = 12;
-    assert_eq!(
-        updated.as_bytes()[line3_start as usize],
-        b'D',
-        "byte 12 is the start of the third line in the updated content"
-    );
+    let unused_start = original.find("unused").expect("fixture names unused") as u32;
 
     let transport = ScriptedTsQueryTransport::new();
     transport.push_response("open", json!({}));
-    // Single fix on line 1 — valid against both the original and updated content.
     transport.push_response(
         "getCodeFixes",
         json!([
@@ -686,7 +694,6 @@ async fn extension_provider_combined_fix_uses_content_current_as_of_each_respons
             }
         ]),
     );
-    // Combined response edits LINE 3 — only resolvable against the updated content.
     transport.push_response(
         "getCombinedCodeFix",
         json!({
@@ -695,8 +702,8 @@ async fn extension_provider_combined_fix_uses_content_current_as_of_each_respons
                     "fileName": file,
                     "textChanges": [
                         {
-                            "start": { "line": 3, "offset": 1 },
-                            "end": { "line": 3, "offset": 10 },
+                            "start": { "line": 1, "offset": 7 },
+                            "end": { "line": 1, "offset": 13 },
                             "newText": ""
                         }
                     ]
@@ -725,7 +732,12 @@ async fn extension_provider_combined_fix_uses_content_current_as_of_each_respons
         end: 11,
     };
     let actions = provider
-        .get_code_actions(file, 6, 11, &[diag])
+        .get_code_actions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            6,
+            11,
+            &[diag],
+        )
         .await
         .expect("get_code_actions routes through the mock transport");
 
@@ -735,9 +747,9 @@ async fn extension_provider_combined_fix_uses_content_current_as_of_each_respons
         .expect("the combined fix-all action surfaces");
     assert_eq!(combined.edits.len(), 1, "the combined fix carries its edit");
     assert_eq!(
-        combined.edits[0].start, line3_start,
-        "the combined edit's offset must be computed against content current as of the response \
-         (the line-3 start at byte {line3_start}), not a stale pre-loop snapshot"
+        (combined.edits[0].start, combined.edits[0].end),
+        (unused_start, unused_start + 6),
+        "the combined edit decodes against the bytes its request was sent with"
     );
 }
 
@@ -937,7 +949,13 @@ async fn a_refused_project_propagates_instead_of_reading_as_an_empty_result() {
         .expect("open_file routes through the mock transport");
 
     assert!(
-        provider.get_hover(file, 0).await.is_err(),
+        provider
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+                0
+            )
+            .await
+            .is_err(),
         "hover must propagate the refusal, not answer `no hover here`"
     );
     assert!(
@@ -945,19 +963,43 @@ async fn a_refused_project_propagates_instead_of_reading_as_an_empty_result() {
         "a refused semantic pass must not report a clean file"
     );
     assert!(
-        provider.get_signature_help(file, 0).await.is_err(),
+        provider
+            .get_signature_help(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+                0
+            )
+            .await
+            .is_err(),
         "signature help must propagate the refusal"
     );
     assert!(
-        provider.get_semantic_tokens(file).await.is_err(),
+        provider
+            .get_semantic_tokens(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(file)
+            )
+            .await
+            .is_err(),
         "semantic tokens must propagate the refusal"
     );
     assert!(
-        provider.get_document_highlights(file, 0).await.is_err(),
+        provider
+            .get_document_highlights(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+                0
+            )
+            .await
+            .is_err(),
         "document highlights must propagate the refusal"
     );
     assert!(
-        provider.get_inlay_hints(file, 0, 1).await.is_err(),
+        provider
+            .get_inlay_hints(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+                0,
+                1
+            )
+            .await
+            .is_err(),
         "inlay hints must propagate the refusal"
     );
     // A real diagnostic context: an EMPTY one legitimately short-circuits before
@@ -970,7 +1012,12 @@ async fn a_refused_project_propagates_instead_of_reading_as_an_empty_result() {
     };
     assert!(
         provider
-            .get_code_actions(file, 0, 1, std::slice::from_ref(&diag))
+            .get_code_actions(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+                0,
+                1,
+                std::slice::from_ref(&diag)
+            )
             .await
             .is_err(),
         "the primary `getCodeFixes` query is what produces the quick fixes: answering \
@@ -1315,14 +1362,22 @@ async fn completion_details_propagate_a_refusal_instead_of_returning_the_previou
         .await
         .expect("open_file routes through the mock transport");
     let completions = provider
-        .get_completions(file, 0, None)
+        .get_completions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            0,
+            None,
+        )
         .await
         .expect("the completion list itself succeeded");
     assert_eq!(completions.items.len(), 1);
 
     assert!(
         provider
-            .get_completion_details(file, 0, &completions.items)
+            .get_completion_details(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+                0,
+                &completions.items
+            )
             .await
             .is_err(),
         "a refused enrichment must propagate: answering with the items the previous \
@@ -1370,7 +1425,7 @@ async fn semantic_tokens_decode_2020_and_remap_into_verter_legend_space() {
     let provider = ExtensionTypeProvider::with_transport(transport, "/workspace");
     provider.open_file(file, content).await.expect("open");
     let tokens = provider
-        .get_semantic_tokens(file)
+        .get_semantic_tokens(&crate::type_provider::traits::ProviderQuery::at_engine_surface(file))
         .await
         .expect("semantic tokens");
 
@@ -1434,7 +1489,7 @@ async fn semantic_tokens_drop_unmappable_classifications_instead_of_guessing() {
     let provider = ExtensionTypeProvider::with_transport(transport, "/workspace");
     provider.open_file(file, content).await.expect("open");
     let tokens = provider
-        .get_semantic_tokens(file)
+        .get_semantic_tokens(&crate::type_provider::traits::ProviderQuery::at_engine_surface(file))
         .await
         .expect("semantic tokens");
 
@@ -1469,7 +1524,11 @@ async fn inlay_hints_use_absolute_utf16_request_offsets_and_return_byte_position
     let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/workspace");
     provider.open_file(file, content).await.expect("open");
     let hints = provider
-        .get_inlay_hints(file, 3, content.len() as u32)
+        .get_inlay_hints(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(file),
+            3,
+            content.len() as u32,
+        )
         .await
         .expect("inlay hints");
 

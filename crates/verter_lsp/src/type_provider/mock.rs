@@ -12,7 +12,7 @@ mod inner {
 
     use crate::server::test_support::{RequestBarrier, RequestBarriers};
     use crate::type_provider::protocol::*;
-    use crate::type_provider::traits::{ProviderFuture, TypeProvider};
+    use crate::type_provider::traits::{ProviderFuture, ProviderQuery, TypeProvider};
 
     /// Test-side mint for the branded provider display signature.
     ///
@@ -1098,7 +1098,7 @@ mod inner {
 
         fn get_completions(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
@@ -1106,7 +1106,11 @@ mod inner {
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
 
-        fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        fn get_hover(
+            &self,
+            _query: &ProviderQuery,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Option<HoverInfo>> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
@@ -1118,7 +1122,7 @@ mod inner {
 
         fn get_definition(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let msg = self.error_message.clone();
@@ -1127,7 +1131,7 @@ mod inner {
 
         fn get_type_definition(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let msg = self.error_message.clone();
@@ -1136,7 +1140,7 @@ mod inner {
 
         fn get_references(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let msg = self.error_message.clone();
@@ -1145,7 +1149,7 @@ mod inner {
 
         fn get_rename_locations(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<RenameLocation>> {
             let msg = self.error_message.clone();
@@ -1154,7 +1158,7 @@ mod inner {
 
         fn get_signature_help(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Option<SignatureHelp>> {
             let msg = self.error_message.clone();
@@ -1163,7 +1167,7 @@ mod inner {
 
         fn get_code_actions(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _start_offset: u32,
             _end_offset: u32,
             _diagnostics: &[ProviderDiagnosticContext],
@@ -1172,14 +1176,17 @@ mod inner {
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
 
-        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        fn get_semantic_tokens(
+            &self,
+            _query: &ProviderQuery,
+        ) -> ProviderFuture<'_, Vec<SemanticToken>> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
 
         fn get_document_highlights(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
             let msg = self.error_message.clone();
@@ -1188,7 +1195,7 @@ mod inner {
 
         fn get_inlay_hints(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _start_offset: u32,
             _end_offset: u32,
         ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -1198,7 +1205,7 @@ mod inner {
 
         fn resolve_completion(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _data: CompletionResolveData,
         ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
             let msg = self.error_message.clone();
@@ -1582,10 +1589,11 @@ mod inner {
 
         fn get_completions(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
+            let path = query.path();
             let (items, on_query, block, fail) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetCompletions {
@@ -1642,7 +1650,12 @@ mod inner {
             }))
         }
 
-        fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        fn get_hover(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Option<HoverInfo>> {
+            let path = query.path();
             let (result, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetHover {
@@ -1734,7 +1747,12 @@ mod inner {
             })
         }
 
-        fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        fn get_definition(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let path = query.path();
             let (result, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDefinition {
@@ -1784,9 +1802,10 @@ mod inner {
 
         fn get_type_definition(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetTypeDefinition {
                 path: path.to_string(),
@@ -1815,7 +1834,12 @@ mod inner {
             }))
         }
 
-        fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        fn get_references(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let path = query.path();
             let (result, on_query) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetReferences {
@@ -1847,9 +1871,10 @@ mod inner {
 
         fn get_rename_locations(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+            let path = query.path();
             let (result, block) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetRenameLocations {
@@ -1883,9 +1908,10 @@ mod inner {
 
         fn get_signature_help(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+            let path = query.path();
             let (result, on_query, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetSignatureHelp {
@@ -1921,11 +1947,12 @@ mod inner {
 
         fn get_code_actions(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             start_offset: u32,
             end_offset: u32,
             diagnostics: &[ProviderDiagnosticContext],
         ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetCodeActions {
                 path: path.to_string(),
@@ -1943,7 +1970,11 @@ mod inner {
             self.barriered(Box::pin(async move { Ok(result) }))
         }
 
-        fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        fn get_semantic_tokens(
+            &self,
+            query: &ProviderQuery,
+        ) -> ProviderFuture<'_, Vec<SemanticToken>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetSemanticTokens {
                 path: path.to_string(),
@@ -1960,9 +1991,10 @@ mod inner {
 
         fn get_document_highlights(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetDocumentHighlights {
                 path: path.to_string(),
@@ -1980,10 +2012,11 @@ mod inner {
 
         fn get_inlay_hints(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             start_offset: u32,
             end_offset: u32,
         ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetInlayHints {
                 path: path.to_string(),
@@ -2002,9 +2035,10 @@ mod inner {
 
         fn resolve_completion(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             data: CompletionResolveData,
         ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::ResolveCompletion {
                 path: path.to_string(),

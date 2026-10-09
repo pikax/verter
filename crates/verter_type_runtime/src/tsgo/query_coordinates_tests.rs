@@ -5,6 +5,7 @@
 //! the typed conflict — never a mix of the two documents.
 
 use super::*;
+use crate::provider_query::{ConflictKind, DeliveredSurfaceId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use verter_tsgo_api::jsonrpc::framing::{encode_message, MessageFramer};
 
@@ -114,7 +115,10 @@ async fn hover_range_decodes_from_the_dispatched_bytes_across_a_content_replacem
             )
             .await;
     };
-    let (hover, ()) = tokio::join!(provider.get_hover(&file, offset), engine_side);
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(&ProviderQuery::at_engine_surface(&file), offset),
+        engine_side
+    );
     let hover = hover.expect("hover").expect("an answered hover");
     assert_eq!(
         (hover.range_start, hover.range_end),
@@ -157,7 +161,10 @@ async fn references_into_another_file_decode_from_that_files_dispatched_bytes() 
             )
             .await;
     };
-    let (locations, ()) = tokio::join!(provider.get_references(&origin, 29), engine_side);
+    let (locations, ()) = tokio::join!(
+        provider.get_references(&ProviderQuery::at_engine_surface(&origin), 29),
+        engine_side
+    );
     let locations = locations.expect("references");
     let start = beta_offset(DISPATCHED);
     assert_eq!(locations.len(), 1);
@@ -193,72 +200,239 @@ async fn out_of_band_bytes_republished_under_an_answer_are_a_typed_conflict() {
             )
             .await;
     };
-    let (hover, ()) = tokio::join!(provider.get_hover(&file, offset), engine_side);
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(&ProviderQuery::at_engine_surface(&file), offset),
+        engine_side
+    );
     let error = hover.expect_err("moved out-of-band bytes must not decode");
     assert!(error.query_conflict, "typed conflict, got {error}");
 }
 
-#[tokio::test]
-async fn the_writer_refuses_a_query_whose_requested_file_moved_before_its_frame() {
-    let (stdin, mut engine_stdin) = tokio::io::duplex(64 * 1024);
-    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-    let ledger = Arc::new(DeliveryLedger::default());
-    let (_control_tx, control_rx) = mpsc::unbounded_channel();
-    let (_normal_tx, normal_rx) = mpsc::channel(1);
-    let (_background_tx, background_rx) = mpsc::channel(1);
-    tokio::spawn(stdin_writer_loop(
-        stdin,
-        control_rx,
-        stdin_rx,
-        normal_rx,
-        background_rx,
-        None,
-        Arc::new(AtomicBool::new(false)),
-        std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
-        Arc::clone(&ledger),
-    ));
+/// A stdin writer driven directly, so a test controls exactly which lane
+/// messages precede a query frame.
+struct Writer {
+    lane: mpsc::Sender<StdinMessage>,
+    ledger: Arc<DeliveryLedger>,
+    engine_stdin: tokio::io::DuplexStream,
+    /// The lanes this test never uses, held open so the writer keeps running.
+    _idle: (
+        mpsc::UnboundedSender<StdinMessage>,
+        mpsc::Sender<StdinMessage>,
+        mpsc::Sender<StdinMessage>,
+    ),
+}
 
-    let key = contents_key(&path("a.ts"));
-    // The query converts against what the engine holds now: nothing.
-    let converted = ledger.requested(&key, Some(Arc::from(DISPATCHED)));
+impl Writer {
+    fn spawn() -> Self {
+        let (stdin, engine_stdin) = tokio::io::duplex(64 * 1024);
+        let (lane, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+        let ledger = Arc::new(DeliveryLedger::default());
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (normal_tx, normal_rx) = mpsc::channel(1);
+        let (background_tx, background_rx) = mpsc::channel(1);
+        tokio::spawn(stdin_writer_loop(
+            stdin,
+            control_rx,
+            stdin_rx,
+            normal_rx,
+            background_rx,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+            Arc::clone(&ledger),
+        ));
+        Self {
+            lane,
+            ledger,
+            engine_stdin,
+            _idle: (control_tx, normal_tx, background_tx),
+        }
+    }
 
-    // A delivery of the same document is placed first.
-    let versions = Arc::new(Mutex::new(HashMap::new()));
-    let (done, delivered) = oneshot::channel();
-    stdin_tx
-        .send(StdinMessage::Document(
-            b"Content-Length: 2\r\n\r\n{}".to_vec(),
-            Box::new(DocumentDelivery {
-                versions: versions.lock_owned().await,
-                contents: Arc::new(Mutex::new(HashMap::new())),
-                accepted: Arc::new(StdMutex::new(HashMap::new())),
-                key: key.clone(),
-                value: Some((1, Arc::from(REPLACED))),
-                done,
-                diagnostics: None,
-            }),
-        ))
-        .await
-        .unwrap();
-    let (placed, bound) = oneshot::channel();
-    stdin_tx
-        .send(StdinMessage::Query(
-            b"QUERY-FRAME".to_vec(),
-            Box::new(QueryAnchor {
-                path: key.clone(),
-                requested: converted,
+    /// Place a delivery of `content` for `key` and wait for it to flush.
+    async fn deliver(&self, key: &str, content: &str) {
+        let versions = Arc::new(Mutex::new(HashMap::new()));
+        let (done, delivered) = oneshot::channel();
+        self.lane
+            .send(StdinMessage::Document(
+                b"DELIVERY;".to_vec(),
+                Box::new(DocumentDelivery {
+                    versions: versions.lock_owned().await,
+                    contents: Arc::new(Mutex::new(HashMap::new())),
+                    accepted: Arc::new(StdMutex::new(HashMap::new())),
+                    key: key.to_string(),
+                    value: Some((1, Arc::from(content))),
+                    done,
+                    diagnostics: None,
+                }),
+            ))
+            .await
+            .unwrap();
+        delivered.await.expect("the delivery is flushed");
+    }
+
+    /// Enqueue `query` on `key`; the frame is the bytes it converted against.
+    async fn query(&self, query: &ProviderQuery, key: &str) -> QueryPlaced {
+        let prepared = self.ledger.prepare(query, key).expect("prepare");
+        let (placed, bound) = oneshot::channel();
+        self.lane
+            .send(StdinMessage::Query(Box::new(QueryAnchor {
+                prepared,
+                frame: Box::new(|requested| {
+                    Ok(requested.map(|bytes| format!("QUERY[{bytes}];").into_bytes()))
+                }),
                 placed,
-            }),
-        ))
-        .await
-        .unwrap();
-    delivered.await.expect("the delivery is flushed");
-    let refused = bound.await.expect("the writer answers the anchor");
-    assert_eq!(refused.unwrap_err().path(), key);
+            })))
+            .await
+            .unwrap();
+        bound.await.expect("the writer answers the anchor")
+    }
 
-    // Only the delivery reached the engine; the stale query frame did not.
-    drop(stdin_tx);
-    let mut written = Vec::new();
-    engine_stdin.read_to_end(&mut written).await.unwrap();
-    assert_eq!(written, b"Content-Length: 2\r\n\r\n{}");
+    async fn written(mut self) -> String {
+        drop(self.lane);
+        drop(self._idle);
+        let mut written = Vec::new();
+        self.engine_stdin.read_to_end(&mut written).await.unwrap();
+        String::from_utf8(written).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_query_converts_against_whatever_delivery_the_writer_placed_before_its_frame() {
+    let writer = Writer::spawn();
+    let key = contents_key(&path("a.ts"));
+    writer.deliver(&key, DISPATCHED).await;
+    // A replay of the same bytes reaches the writer just ahead of the frame,
+    // then a genuine edit: the frame converts against what precedes it.
+    writer.deliver(&key, DISPATCHED).await;
+    let bound = writer
+        .query(&ProviderQuery::at_engine_surface(&key), &key)
+        .await
+        .expect("placed")
+        .expect("never a conflict on a wire-ordered route")
+        .expect("not declined");
+    assert_eq!(bound.requested().map(|b| &**b), Some(DISPATCHED));
+    writer.deliver(&key, REPLACED).await;
+    let bound = writer
+        .query(&ProviderQuery::at_engine_surface(&key), &key)
+        .await
+        .expect("placed")
+        .expect("bound")
+        .expect("not declined");
+    assert_eq!(bound.requested().map(|b| &**b), Some(REPLACED));
+    assert_eq!(
+        writer.written().await,
+        format!("DELIVERY;DELIVERY;QUERY[{DISPATCHED}];DELIVERY;QUERY[{REPLACED}];")
+    );
+}
+
+#[tokio::test]
+async fn a_query_intending_bytes_the_engine_no_longer_holds_never_reaches_it() {
+    let writer = Writer::spawn();
+    let key = contents_key(&path("a.ts"));
+    writer.deliver(&key, DISPATCHED).await;
+    // The requester captured A and computed its position against it…
+    let intending = ProviderQuery::intending(
+        &key,
+        DeliveredSurfaceId {
+            generation: 1,
+            content_epoch: 1,
+            incarnation: 1,
+        },
+        Arc::from(DISPATCHED),
+    );
+    // …but B reaches the engine before the frame.
+    writer.deliver(&key, REPLACED).await;
+    let refused = writer.query(&intending, &key).await.expect("answered");
+    assert_eq!(
+        refused.unwrap_err().kind(),
+        ConflictKind::IntendedSurface,
+        "A's position is never evaluated against B"
+    );
+    // A delivered back before the frame is exactly what it intends.
+    writer.deliver(&key, DISPATCHED).await;
+    writer
+        .query(&intending, &key)
+        .await
+        .expect("answered")
+        .expect("A binds")
+        .expect("not declined");
+    assert_eq!(
+        writer.written().await,
+        format!("DELIVERY;DELIVERY;DELIVERY;QUERY[{DISPATCHED}];")
+    );
+}
+
+#[tokio::test]
+async fn signature_help_over_republished_out_of_band_bytes_is_a_typed_conflict() {
+    let (provider, mut engine) = provider();
+    let file = path("Comp.vue.tsx");
+    provider.load_file(&file, DISPATCHED).await.expect("load");
+
+    let engine_side = async {
+        let request = engine.expect("textDocument/signatureHelp").await;
+        provider
+            .load_file(&file, REPLACED)
+            .await
+            .expect("republish");
+        engine
+            .answer(
+                &request,
+                serde_json::json!({
+                    "signatures": [{ "label": "beta(): void", "parameters": [] }],
+                    "activeSignature": 0,
+                }),
+            )
+            .await;
+    };
+    let (help, ()) = tokio::join!(
+        provider.get_signature_help(&ProviderQuery::at_engine_surface(&file), 3),
+        engine_side
+    );
+    let error = help.expect_err("an answer evaluated over moved bytes must not succeed");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+}
+
+#[tokio::test]
+async fn a_disk_target_rewritten_after_dispatch_is_a_typed_conflict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("b.ts");
+    std::fs::write(&target, DISPATCHED).expect("write target");
+    let target = target.to_string_lossy().to_string();
+    let (provider, mut engine) = provider();
+    let origin = path("a.ts");
+    provider
+        .update_file(&origin, "import { beta } from './b';\nbeta;\n")
+        .await
+        .expect("open origin");
+    engine.expect("textDocument/didOpen").await;
+
+    let engine_side = async {
+        let references = engine.expect("textDocument/references").await;
+        // The engine evaluated the disk bytes; a writer replaces them before
+        // the answer is decoded.
+        std::fs::write(&target, REPLACED).expect("rewrite target");
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .and_then(|file| {
+                file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            })
+            .expect("pin modification time after dispatch");
+        engine
+            .answer(
+                &references,
+                serde_json::json!([{
+                    "uri": TsgoTypeProvider::path_to_uri(&target),
+                    "range": beta_range(),
+                }]),
+            )
+            .await;
+    };
+    let (locations, ()) = tokio::join!(
+        provider.get_references(&ProviderQuery::at_engine_surface(&origin), 29),
+        engine_side
+    );
+    let error = locations.expect_err("the target's bytes are not the evaluated ones");
+    assert!(error.query_conflict, "typed conflict, got {error}");
 }

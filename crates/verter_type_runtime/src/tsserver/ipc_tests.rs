@@ -941,12 +941,9 @@ fn test_parse_tsserver_location_without_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
-    // Without content, should use packed fallback (0-based)
-    let expected_start = ((2 - 1) << 16) | ((7 - 1) & 0xFFFF);
-    assert_eq!(
-        parsed.start, expected_start,
-        "without content, should use packed fallback"
+    assert!(
+        parse_one_tsserver_location(&loc, &cache).is_none(),
+        "a location in a file with no resolved bytes drops; it is never packed"
     );
 }
 
@@ -975,8 +972,11 @@ fn test_parse_tsserver_location_line_10_not_packed() {
     assert!(parsed.start < 200, "start should be a small byte offset");
 }
 
+/// The parser decodes only through the bytes the caller resolved for the
+/// answer: a target present on disk but absent from the resolved map is never
+/// read after the answer arrived.
 #[test]
-fn test_parse_tsserver_location_without_cache_reads_disk_content() {
+fn test_parse_tsserver_location_never_reads_disk_after_the_answer() {
     let temp_root = unique_temp_dir("verter-tsserver-location-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
@@ -992,9 +992,7 @@ fn test_parse_tsserver_location_without_cache_reads_disk_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
-    assert_eq!(parsed.start, 27);
-    assert_eq!(parsed.end, 32);
+    assert!(parse_one_tsserver_location(&loc, &cache).is_none());
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
@@ -1015,17 +1013,11 @@ fn test_parse_tsserver_rename_span_with_content() {
     assert!(parsed.start < 100, "must not be packed");
 }
 
-/// A cross-file rename span whose GROUP file is absent from the in-memory contents cache must
-/// resolve its byte offsets against THAT file's own on-disk content (the per-target disk
-/// fallback) — the SAME content resolution `parse_tsserver_locations` gives references and the
-/// tsgo rename path gives its workspace edits.
-///
-/// Fails if a cache-miss span packs a 0-based `(line << 16) | col` sentinel the merge layer cannot
-/// map to a real range, silently dropping the cross-file edit (incomplete rename). The renamed
-/// symbol sits on line 3 (1-based), NOT line 0, so a packed line:col fallback is unmistakably
-/// distinguishable from the real byte offset.
+/// A rename span decodes only through the bytes the caller resolved for the
+/// answer: a group file present on disk but absent from the resolved map is
+/// never read after the answer arrived, and its spans drop.
 #[test]
-fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
+fn test_parse_tsserver_rename_span_never_reads_disk_after_the_answer() {
     let temp_root = unique_temp_dir("verter-tsserver-rename-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
@@ -1033,33 +1025,14 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
     let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
     std::fs::write(&file_path, content).unwrap();
     let file_key = file_path.to_string_lossy().replace('\\', "/");
-    // CACHE MISS for this path → forces the per-target disk fallback.
     let cache = HashMap::new();
 
-    // tsserver positions are 1-based: `renamed` is on line 3, column 14.
     let span = serde_json::json!({
         "start": { "line": 3, "offset": 14 },
         "end": { "line": 3, "offset": 21 },
     });
 
-    let parsed = parse_one_tsserver_rename_span(&span, &file_key, &cache).unwrap();
-    let want_start = content.find("renamed").unwrap() as u32;
-    let want_end = want_start + "renamed".len() as u32;
-    assert_eq!(
-        (parsed.start, parsed.end),
-        (want_start, want_end),
-        "cross-file rename span must resolve against the target's own disk content (byte offsets \
-         {want_start}..{want_end}), not pack a line-0 sentinel — got {}..{}",
-        parsed.start,
-        parsed.end,
-    );
-    // Discriminating negative: assert the offset is the real byte offset, not the packed
-    // line:col fallback `(2 << 16) | 13`.
-    let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
-    assert_ne!(
-        parsed.start, packed_start,
-        "must NOT be the packed (line<<16)|col fallback (the dropped/corrupting path)"
-    );
+    assert!(parse_one_tsserver_rename_span(&span, &file_key, &cache).is_none());
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
@@ -3281,24 +3254,20 @@ fn parse_tsserver_file_code_edits_drops_inverted_span() {
     );
 }
 
-/// A code-edit whose target file is absent from the contents cache but PRESENT on disk resolves its
-/// byte offsets against THAT file's own on-disk content (the per-target disk fallback), matching the
-/// rename/location paths' content resolution.
+/// A code edit decodes only through the bytes the caller resolved for the
+/// answer: a target present on disk but absent from the resolved map is never
+/// read after the answer arrived, and its edit drops.
 #[test]
-fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
+fn parse_tsserver_file_code_edits_never_read_disk_after_the_answer() {
     let temp_root = unique_temp_dir("verter-tsserver-codeedit-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
     let file_path = temp_root.join("child.ts");
     let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
     std::fs::write(&file_path, content).unwrap();
-    // The fn canonicalizes `fileName`; feed the already-canonical form so the on-disk read targets
-    // the file we wrote (forward slashes, lowercase drive letter on Windows).
     let file_key = verter_span::path::canonicalize_path(&file_path.to_string_lossy());
-    // CACHE MISS for this path → forces the per-target disk fallback.
     let cache: HashMap<String, Arc<str>> = HashMap::new();
 
-    // tsserver positions are 1-based: `renamed` is on line 3, column 14.
     let changes = vec![serde_json::json!({
         "fileName": file_key,
         "textChanges": [
@@ -3311,25 +3280,7 @@ fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
     })];
 
     let edits = parse_tsserver_file_code_edits(&changes, &cache).unwrap();
-    let want_start = content.find("renamed").unwrap() as u32;
-    let want_end = want_start + "renamed".len() as u32;
-    assert_eq!(edits.len(), 1, "the disk-resolved edit must survive");
-    assert_eq!(
-        (edits[0].start, edits[0].end),
-        (want_start, want_end),
-        "the edit must resolve against the target's own disk content (byte offsets {want_start}..\
-         {want_end}), not a packed sentinel — got {}..{}",
-        edits[0].start,
-        edits[0].end,
-    );
-    assert_eq!(edits[0].new_text, "renamedSymbol");
-    // Discriminating negative: assert the offset is the real byte offset, not the packed
-    // line:col fallback `(2 << 16) | 13`.
-    let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
-    assert_ne!(
-        edits[0].start, packed_start,
-        "must NOT be the packed (line<<16)|col fallback (the corrupting path)"
-    );
+    assert!(edits.is_empty(), "{edits:?}");
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
@@ -3899,6 +3850,7 @@ impl RealReloadHarness {
             Some(&carrier_store_dir.to_string_lossy()),
             false,
             None,
+            None,
         )
         .await
         .expect("spawn real reload tsserver");
@@ -4285,7 +4237,15 @@ async fn real_publication_refresh_admits_plugin_carriers() {
         real.provider.applied_content(&path),
         crate::traits::AppliedContent::Applied(Arc::from(after))
     );
-    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    let hover = real
+        .provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(&path),
+            15,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         hover.contents.contains("receipt: string"),
         "{}",
@@ -4335,7 +4295,15 @@ async fn real_close_of_a_file_tsserver_does_not_hold_open_succeeds() {
 
     // The engine is still the one that served before the closes.
     real.provider.open_file(&path, content).await.unwrap();
-    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    let hover = real
+        .provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(&path),
+            15,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         hover.contents.contains("closedTwice: number"),
         "{}",

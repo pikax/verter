@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::protocol::*;
+pub use crate::provider_query::ProviderQuery;
 
 /// The configured project that owns a file: its root directory AND the config
 /// file that defines it.
@@ -326,9 +327,18 @@ pub trait TypeProvider: Send + Sync {
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()>;
 
+    /// Completions at `offset` in `query`'s file.
+    ///
+    /// Every positional query takes the requester's [`ProviderQuery`]: the
+    /// file, the provider surface the requester computed `offset` against,
+    /// and the surfaces it will map foreign locations through. Wrappers pass
+    /// it through (stamping their admission); the adapter binds it at the
+    /// request frame's wire position and decodes every range through that
+    /// binding, refusing with a typed conflict when the engine holds other
+    /// bytes than the query intends.
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult>;
@@ -338,7 +348,7 @@ pub trait TypeProvider: Send + Sync {
     /// The default implementation returns the original items unchanged.
     fn get_completion_details<'a>(
         &'a self,
-        _path: &'a str,
+        _query: &'a ProviderQuery,
         _offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
@@ -355,7 +365,11 @@ pub trait TypeProvider: Send + Sync {
     /// generated-file byte range. `contents` remains the rendered whole-blob
     /// for passthrough consumers; markdown is NOT the semantic carrier, and
     /// recovering structure by parsing it is forbidden.
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>>;
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>>;
 
     /// Mint the witness that authorizes constructing a [`DisplaySignature`].
     ///
@@ -393,22 +407,33 @@ pub trait TypeProvider: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>>;
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>>;
 
-    fn get_type_definition(&self, path: &str, offset: u32)
-        -> ProviderFuture<'_, Vec<TypeLocation>>;
+    fn get_type_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>>;
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>>;
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>>;
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>>;
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>>;
 
@@ -424,23 +449,23 @@ pub trait TypeProvider: Send + Sync {
     /// short-circuit to an empty result rather than issuing a useless round-trip.
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>>;
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>>;
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>>;
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>>;
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>>;
@@ -452,7 +477,7 @@ pub trait TypeProvider: Send + Sync {
     /// The default returns `None` (provider does not implement resolve).
     fn resolve_completion(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         Box::pin(async { Ok(None) })

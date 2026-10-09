@@ -269,6 +269,27 @@ pub(crate) struct AppliedReceipt {
     pub(crate) disposition: crate::traits::FileLoadDisposition,
 }
 
+/// The serving incarnation and generated-unit project a read was admitted
+/// under, stamped onto its [`crate::provider_query::ProviderQuery`].
+pub(crate) struct QueryStamp {
+    incarnation: ProviderEpoch,
+    project: Option<Arc<str>>,
+}
+
+impl QueryStamp {
+    /// `query` admitted under this stamp.
+    pub(crate) fn admit(
+        &self,
+        query: &crate::provider_query::ProviderQuery,
+    ) -> crate::provider_query::ProviderQuery {
+        let admitted = query.admitted_to(self.incarnation);
+        match &self.project {
+            Some(project) => admitted.admitted_into(Arc::clone(project)),
+            None => admitted,
+        }
+    }
+}
+
 /// One serving incarnation.
 struct Serving<P: ?Sized> {
     provider: Arc<P>,
@@ -858,7 +879,7 @@ where
         run: F,
     ) -> Result<T, TypeProviderError>
     where
-        F: FnOnce(Arc<P>) -> Fut,
+        F: FnOnce(Arc<P>, QueryStamp) -> Fut,
         Fut: Future<Output = Result<T, TypeProviderError>>,
     {
         self.run_guarded_with_fallback(fp, || Ok(fail_closed()), run)
@@ -866,6 +887,11 @@ where
     }
 
     /// Diagnostics cannot equate quarantine with a completed, clean check.
+    ///
+    /// A read is admitted and settled on what decides its project membership —
+    /// the serving incarnation, the publication and the project generation —
+    /// never on the workspace content generation, so an unrelated document's
+    /// edit while the read is in flight neither re-issues nor refuses it.
     async fn run_guarded_with_fallback<T, F, Fut>(
         &self,
         fp: QueryFingerprint,
@@ -873,7 +899,7 @@ where
         run: F,
     ) -> Result<T, TypeProviderError>
     where
-        F: FnOnce(Arc<P>) -> Fut,
+        F: FnOnce(Arc<P>, QueryStamp) -> Fut,
         Fut: Future<Output = Result<T, TypeProviderError>>,
     {
         if self.state.shared.serving_epoch().is_none() {
@@ -887,14 +913,9 @@ where
             .map_err(TypeProviderError::admission)?;
         }
         let serving = self.serving_for_query().await?;
-        let admission = admission::generated_request(
-            &self.state.shared,
-            Some(&serving),
-            &fp.path,
-            None,
-            fp.scope.as_deref(),
-        )
-        .map_err(TypeProviderError::admission)?;
+        let admission =
+            admission::generated_query(&self.state.shared, &serving, &fp.path, fp.scope.as_deref())
+                .map_err(TypeProviderError::admission)?;
         let quarantined = self
             .state
             .shared
@@ -914,18 +935,32 @@ where
             return fail_closed();
         }
         let guard = InFlightGuard::begin(Arc::clone(&self.state.shared.query_watch), fp);
-        let result = run(serving.provider).await;
+        let stamp = QueryStamp {
+            incarnation: serving.epoch,
+            project: admission
+                .as_ref()
+                .map(|admission| Arc::from(admission.witness.project())),
+        };
+        let result = run(serving.provider, stamp).await;
         // Settle FIRST, and only a settlement the serving epoch accepted counts
         // as a success: an answer the epoch discarded proves nothing about the
         // request and must not erase its crash strikes.
         let settled = self.settle(serving.epoch, result).and_then(|value| {
             if let Some(admission) = &admission {
-                admission::check_current(&self.state.shared, admission)
+                admission::check_query_current(&self.state.shared, admission)
                     .map_err(TypeProviderError::admission)?;
             }
             Ok(value)
         });
-        guard.complete(settled.is_ok());
+        // A coordinate conflict is the engine answering (or the query being
+        // refused before it reached the engine) over bytes the requester did
+        // not intend — never evidence that the request harms the engine, so it
+        // is not a crash-attributable error.
+        guard.complete(
+            settled
+                .as_ref()
+                .map_or_else(|error| error.query_conflict, |_| true),
+        );
         settled
     }
 

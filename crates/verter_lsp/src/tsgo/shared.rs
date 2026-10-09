@@ -66,7 +66,7 @@ use verter_type_runtime::protocol::{
     InlayHint, ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp,
     TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation, TypeProviderError,
 };
-use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
+use verter_type_runtime::traits::{ProviderFuture, ProviderQuery, TypeProvider};
 use verter_type_runtime::tsgo::{
     javascript_carrier_semantic_diagnostics_enabled, position_carrier_diagnostics,
     select_configured_project_carrier, TsgoTypeProvider,
@@ -1143,98 +1143,110 @@ impl TypeProvider for TsgoSharedProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
         self.features
-            .get_completions(path, offset, trigger_character)
+            .get_completions(query, offset, trigger_character)
     }
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        self.features.get_completion_details(path, offset, items)
+        self.features.get_completion_details(query, offset, items)
     }
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        self.features.resolve_completion(path, data)
+        self.features.resolve_completion(query, data)
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        self.features.get_hover(path, offset)
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        self.features.get_hover(query, offset)
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.features.get_definition(path, offset)
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.features.get_definition(query, offset)
     }
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.features.get_type_definition(path, offset)
+        self.features.get_type_definition(query, offset)
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.features.get_references(path, offset)
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.features.get_references(query, offset)
     }
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        self.features.get_rename_locations(path, offset)
+        self.features.get_rename_locations(query, offset)
     }
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        self.features.get_signature_help(path, offset)
+        self.features.get_signature_help(query, offset)
     }
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         self.features
-            .get_code_actions(path, start_offset, end_offset, diagnostics)
+            .get_code_actions(query, start_offset, end_offset, diagnostics)
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        self.features.get_semantic_tokens(path)
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        self.features.get_semantic_tokens(query)
     }
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        self.features.get_document_highlights(path, offset)
+        self.features.get_document_highlights(query, offset)
     }
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         self.features
-            .get_inlay_hints(path, start_offset, end_offset)
+            .get_inlay_hints(query, start_offset, end_offset)
     }
 
     fn shutdown(&self) -> ProviderFuture<'_, ()> {

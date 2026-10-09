@@ -131,7 +131,10 @@ async fn initialized_non_owning_transport_serves_hover_without_initialize_or_chi
 
     let offset = source.find("label").unwrap() as u32;
     let hover = provider
-        .get_hover(path, offset)
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(path),
+            offset,
+        )
         .await
         .expect("hover request")
         .expect("hover result");
@@ -380,9 +383,8 @@ async fn silence_watchdog_stays_disarmed_during_deliberate_teardown() {
 /// Decode the JSON body of a framed stdin message.
 fn frame_body(msg: &StdinMessage) -> serde_json::Value {
     let bytes = match msg {
-        StdinMessage::Frame(bytes)
-        | StdinMessage::Document(bytes, _)
-        | StdinMessage::Query(bytes, _) => bytes,
+        StdinMessage::Frame(bytes) | StdinMessage::Document(bytes, _) => bytes,
+        StdinMessage::Query(_) => panic!("a query frame exists only once the writer places it"),
         StdinMessage::Shutdown => panic!("expected a framed message, got a control signal"),
     };
     let text = String::from_utf8(bytes.clone()).expect("frame is utf8");
@@ -1328,7 +1330,13 @@ async fn test_tsgo_hover_on_ts_file() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // Hover on "msg" (offset 6 on line 0)
-    let hover = provider.get_hover(&file_path, 6).await.unwrap();
+    let hover = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+            6,
+        )
+        .await
+        .unwrap();
 
     // Clean up
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1377,7 +1385,12 @@ async fn test_tsgo_survives_workspace_configuration() {
     tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
     // If tsgo crashed, this will fail with a pipe error.
-    let hover_result = provider.get_hover(&file_path, 6).await;
+    let hover_result = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+            6,
+        )
+        .await;
 
     // Clean up
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1877,7 +1890,7 @@ fn test_parse_lsp_location() {
 }
 
 #[test]
-fn test_parse_lsp_location_without_inline_content_reads_disk_content() {
+fn test_parse_lsp_location_never_reads_disk_after_the_answer() {
     let temp_root = unique_temp_dir("verter-tsgo-location-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
@@ -1893,9 +1906,10 @@ fn test_parse_lsp_location_without_inline_content_reads_disk_content() {
         }
     });
 
-    let loc = parse_one_lsp_location(&json, |_| None).unwrap();
-    assert_eq!(loc.start, 27);
-    assert_eq!(loc.end, 32);
+    assert!(
+        parse_one_lsp_location(&json, |_| None).is_none(),
+        "a target the caller resolved no bytes for drops instead of reading disk"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
@@ -4012,11 +4026,26 @@ async fn e2e_concurrent_requests_complete_without_deadlock() {
     // Fire 5 concurrent hover requests at different offsets
     let (r1, r2, r3, r4, r5) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         tokio::join!(
-            provider.get_hover(&file_path, 6),
-            provider.get_hover(&file_path, 22),
-            provider.get_hover(&file_path, 0),
-            provider.get_hover(&file_path, 15),
-            provider.get_hover(&file_path, 10),
+            provider.get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+                6
+            ),
+            provider.get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+                22
+            ),
+            provider.get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+                0
+            ),
+            provider.get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+                15
+            ),
+            provider.get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+                10
+            ),
         )
     })
     .await
@@ -4282,9 +4311,18 @@ async fn spawn_resolve_responder(
     pending: Arc<PendingRequestTable>,
     seen: Arc<std::sync::atomic::AtomicUsize>,
 ) {
+    // This responder stands in for the stdin writer, so it places query frames
+    // itself — against an empty surface, as nothing was delivered.
+    let ledger = DeliveryLedger::default();
     while let Some(msg) = stdin_rx.recv().await {
-        let StdinMessage::Frame(bytes) = msg else {
-            break;
+        let bytes = match msg {
+            StdinMessage::Frame(bytes) => bytes,
+            StdinMessage::Query(anchor) => {
+                let mut bytes = Vec::new();
+                anchor.place(&mut bytes, &ledger);
+                bytes
+            }
+            _ => break,
         };
         // Frame = `Content-Length: N\r\n\r\n{json}`; the body is the JSON tail.
         let text = String::from_utf8_lossy(&bytes);
@@ -4359,7 +4397,11 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
 
     let detailed = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        provider.get_completion_details("/proj/file.tsx", 0, &items),
+        provider.get_completion_details(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/proj/file.tsx"),
+            0,
+            &items,
+        ),
     )
     .await
     .expect("enrichment must not hang")
@@ -4437,7 +4479,11 @@ async fn get_completion_details_enriches_full_small_list() {
         .collect();
     let detailed = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        provider.get_completion_details("/proj/file.tsx", 0, &items),
+        provider.get_completion_details(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/proj/file.tsx"),
+            0,
+            &items,
+        ),
     )
     .await
     .expect("must not hang")
@@ -4467,8 +4513,9 @@ async fn spawn_label_details_only_responder(
     while let Some(msg) = stdin_rx.recv().await {
         let bytes = match msg {
             StdinMessage::Frame(bytes) => bytes,
-            StdinMessage::Query(bytes, anchor) => {
-                anchor.place(&bytes, &mut Vec::new(), &ledger);
+            StdinMessage::Query(anchor) => {
+                let mut bytes = Vec::new();
+                anchor.place(&mut bytes, &ledger);
                 bytes
             }
             _ => break,
@@ -4534,7 +4581,10 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        provider.resolve_completion("/proj/file.tsx", handle),
+        provider.resolve_completion(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/proj/file.tsx"),
+            handle,
+        ),
     )
     .await
     .expect("resolve must not hang")
@@ -4575,48 +4625,88 @@ async fn contents_cache_miss_fails_closed_without_fabricating_positions() {
         "/w/Missing.vue.tsx"
     };
 
-    let hover = provider.get_hover(path, 10).await;
+    let hover = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(path),
+            10,
+        )
+        .await;
     assert!(
         matches!(hover, Ok(None)),
         "hover on a contents-cache miss fails closed, got {hover:?}"
     );
-    let completions = provider.get_completions(path, 10, None).await.unwrap();
+    let completions = provider
+        .get_completions(
+            &crate::provider_query::ProviderQuery::at_engine_surface(path),
+            10,
+            None,
+        )
+        .await
+        .unwrap();
     assert!(
         completions.items.is_empty() && !completions.is_incomplete,
         "completions on a miss fail closed, got {completions:?}"
     );
     assert!(
-        provider.get_definition(path, 10).await.unwrap().is_empty(),
+        provider
+            .get_definition(
+                &crate::provider_query::ProviderQuery::at_engine_surface(path),
+                10
+            )
+            .await
+            .unwrap()
+            .is_empty(),
         "definition on a miss fails closed"
     );
     assert!(
         provider
-            .get_type_definition(path, 10)
+            .get_type_definition(
+                &crate::provider_query::ProviderQuery::at_engine_surface(path),
+                10
+            )
             .await
             .unwrap()
             .is_empty(),
         "type definition on a miss fails closed"
     );
     assert!(
-        provider.get_references(path, 10).await.unwrap().is_empty(),
+        provider
+            .get_references(
+                &crate::provider_query::ProviderQuery::at_engine_surface(path),
+                10
+            )
+            .await
+            .unwrap()
+            .is_empty(),
         "references on a miss fails closed"
     );
     assert!(
         provider
-            .get_rename_locations(path, 10)
+            .get_rename_locations(
+                &crate::provider_query::ProviderQuery::at_engine_surface(path),
+                10
+            )
             .await
             .unwrap()
             .is_empty(),
         "rename locations on a miss fail closed"
     );
-    let signature_help = provider.get_signature_help(path, 10).await;
+    let signature_help = provider
+        .get_signature_help(
+            &crate::provider_query::ProviderQuery::at_engine_surface(path),
+            10,
+        )
+        .await;
     assert!(
         matches!(signature_help, Ok(None)),
         "signature help on a miss fails closed, got {signature_help:?}"
     );
     assert!(
         provider
-            .get_document_highlights(path, 10)
+            .get_document_highlights(
+                &crate::provider_query::ProviderQuery::at_engine_surface(path),
+                10
+            )
             .await
             .unwrap()
             .is_empty(),
@@ -4657,7 +4747,14 @@ async fn contents_cache_hit_still_sends_the_hover_request() {
         .await
         .expect("load cached contents");
 
-    let hover_task = tokio::spawn(async move { provider.get_hover(path, 6).await });
+    let hover_task = tokio::spawn(async move {
+        provider
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(path),
+                6,
+            )
+            .await
+    });
 
     // The didOpen + hover frames must arrive on the wire.
     let mut framer = MessageFramer::new();
@@ -5502,7 +5599,12 @@ async fn tsgo_semantic_tokens_arrive_in_verter_legend_space() {
     provider.open_file(&file_path, content).await.unwrap();
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    let tokens = provider.get_semantic_tokens(&file_path).await.unwrap();
+    let tokens = provider
+        .get_semantic_tokens(&crate::provider_query::ProviderQuery::at_engine_surface(
+            &file_path,
+        ))
+        .await
+        .unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
 
     assert!(
@@ -5595,7 +5697,11 @@ async fn tsgo_inlay_hints_appear_for_inferred_types() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let hints = provider
-        .get_inlay_hints(&file_path, 0, content.len() as u32)
+        .get_inlay_hints(
+            &crate::provider_query::ProviderQuery::at_engine_surface(&file_path),
+            0,
+            content.len() as u32,
+        )
         .await
         .unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
@@ -5647,7 +5753,9 @@ async fn non_owning_transport_semantic_tokens_fail_closed_until_witness_legend_a
 
     // No legend yet: fail closed — empty result, nothing on the wire.
     let tokens = provider
-        .get_semantic_tokens(path)
+        .get_semantic_tokens(&crate::provider_query::ProviderQuery::at_engine_surface(
+            path,
+        ))
         .await
         .expect("fail-closed call succeeds");
     assert!(
@@ -5696,7 +5804,9 @@ async fn non_owning_transport_semantic_tokens_fail_closed_until_witness_legend_a
     });
 
     let tokens = provider
-        .get_semantic_tokens(path)
+        .get_semantic_tokens(&crate::provider_query::ProviderQuery::at_engine_surface(
+            path,
+        ))
         .await
         .expect("mapped tokens");
     let _relay_side = server.await.expect("scripted engine");

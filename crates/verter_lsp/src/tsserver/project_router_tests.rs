@@ -992,7 +992,10 @@ async fn query_racing_an_unrelated_edit_is_answered_by_one_engine_call() {
         }),
     );
     let hover = router
-        .get_hover(&companion, 3)
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&companion),
+            3,
+        )
         .await
         .expect("a content-only drift must not surface as unavailable semantics");
     assert_eq!(
@@ -1029,7 +1032,13 @@ async fn query_racing_an_unrelated_edit_is_answered_by_one_engine_call() {
         }),
     );
     assert!(
-        router.get_hover(&companion, 3).await.is_err(),
+        router
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(&companion),
+                3
+            )
+            .await
+            .is_err(),
         "a withdrawn owner must refuse, never serve the stale answer"
     );
     assert_eq!(

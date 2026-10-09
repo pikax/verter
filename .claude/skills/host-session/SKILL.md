@@ -346,28 +346,38 @@ reaches the engine (`admit_current_unit`), and a carrier write the hub refused
 on a drifted basis is re-applied (`settle_under_fresh_admission`,
 `rearm_admitted_state`) because nothing else re-drives it. A refusal on an
 unmoved basis, a withdrawn owner, or a spent budget is returned unchanged.
-**Query-bound provider coordinates.** Every tsserver and tsgo positional query converts its request offset and
-decodes every response range from one `verter_type_runtime::provider_query::
-ProviderQuery` capability, never from a second read of a live content cache.
-Each engine incarnation's transport owns a `DeliveryLedger`: the bytes the
-engine holds, recorded at the wire position of the frame that delivered them
-(tsserver records under the same lock that places the frame on its single
-FIFO stdin; tsgo's stdin writer, which alone orders its priority lanes,
-records a document frame as it places it). A query binds at its own frame's
-position: tsserver converts the request under that lock; tsgo converts first
-and the writer refuses the frame with the typed `ProviderQueryConflict`
-(`TypeProviderError::query_conflict`) if a delivery of the requested file was
-placed in between. The capability retains the requested bytes and an O(1)
-persistent snapshot of every delivered file, so a definition/references/rename
-target decodes through its own bytes as the request met them; an undelivered
-target falls back to its disk bytes, as the engine reads it. Bytes an engine
-reads out of band — the tsserver plugin's carrier store, a `load_file` on
-either adapter (a non-owning tsgo attach's relay-injected carriers) — carry no
-wire position: a query that decoded through one re-checks that entry's stamp
-after the answer (`DeliveryLedger::settle`) and returns the typed conflict if
-it was republished. An out-of-band record never displaces a protocol buffer,
-and identical bytes keep their stamp. A query on a file with neither delivered
-nor disk bytes sends nothing (no fabricated position).
+**Query-bound provider coordinates.** Every positional `TypeProvider` query takes one
+`verter_type_runtime::provider_query::ProviderQuery` capability in place of a bare path. The LSP
+mints it from the request's captured provider surface (`ProviderSurfaceSnapshot::provider_query`:
+the provider path, the `DeliveredSurfaceId` and the exact bytes its offset was computed against)
+and, for navigation/rename, the captured `ProviderLifecycleRoot` as its `IntendedTargets` (the
+surface every foreign location is mapped through). Wrappers thread it unchanged; the router stamps
+the project it admitted the query into and the hub stamps the serving incarnation
+(`QueryAdmission`). Callers with no captured surface (component-meta, oracle, tests) mint
+`ProviderQuery::at_engine_surface`. Each engine incarnation's transport owns a `DeliveryLedger`:
+the bytes the engine holds, recorded at the wire position of the frame that delivered them. A
+query binds at its own frame's position — tsserver under the lock that places the frame on its
+single FIFO stdin, tsgo inside the stdin writer that alone orders its priority lanes — and
+converts its request against exactly the bytes held there; it is refused with the typed
+`ProviderQueryConflict` (`TypeProviderError::query_conflict`) only when those bytes are not the
+ones the capability intends (a delivery the requester has not seen, even one that later returns
+to the captured bytes). The binding (`BoundQuery`) retains the requested bytes and an O(1)
+persistent snapshot of every delivered file; every response range — highlights included —
+decodes through it, a foreign target only through bytes equal to the requester's intended surface
+for it. A target the engine read from disk decodes through its disk bytes only when the file was
+last modified before dispatch, otherwise the query conflicts; a target with no bytes drops its
+locations (never packed offsets). Bytes an engine reads out of band carry no wire position. On
+tsserver the carrier store the plugin reads is their publisher (`CarrierStorePublications`, every
+writer's commits, installed at spawn): each ready row carries a non-reusable publication epoch
+(`ReadyFile::published_epoch`, kept across identical republication); a query observes the store's
+position before dispatch, refuses if the publisher contradicts the request file's bytes, and at
+settlement requires every out-of-band file it decoded through to be attested with exactly the
+retained bytes at a publication no later than that position — an unpublished file must be
+unchanged on disk since dispatch. Without a publisher (a tsgo `load_file`), the local record's
+stamp settles it. Every route settles, including completions, completion details/resolve and
+signature help. The LSP's bounded provider recovery re-binds a conflicted query to the surface it
+records now (no resync); the hub never counts a conflict as crash evidence. A query on a file with
+neither delivered nor disk bytes sends nothing (no fabricated position).
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
 before receiving them, and the install announces exactly what it dropped

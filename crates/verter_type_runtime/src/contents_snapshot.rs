@@ -95,6 +95,35 @@ pub fn targeted_contents_snapshot(
         .collect()
 }
 
+/// Add the disk bytes of every `paths` entry the snapshot lacks — for a
+/// provider whose engine reads unopened targets from disk and that keeps no
+/// delivery ledger to resolve them through. A missing file stays absent, so
+/// its locations drop.
+pub fn fill_missing_from_disk(
+    snapshot: &mut HashMap<String, Arc<str>>,
+    paths: impl IntoIterator<Item = String>,
+) {
+    for path in paths {
+        if snapshot.contains_key(&path) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            snapshot.insert(path, Arc::from(content));
+        }
+    }
+}
+
+/// Canonical target files of a tsserver location batch (definition /
+/// references), keyed exactly as `parse_tsserver_locations` looks their
+/// content up.
+pub fn tsserver_location_target_paths(locations: &[serde_json::Value]) -> HashSet<String> {
+    locations
+        .iter()
+        .filter_map(|location| location.get("file").and_then(|file| file.as_str()))
+        .map(verter_span::path::canonicalize_path)
+        .collect()
+}
+
 /// Canonical target paths referenced by a tsserver code-fix `changes` array
 /// (shared by `getCodeFixes` items and `getCombinedCodeFix` responses). Each
 /// entry's `fileName` is canonicalized exactly as `parse_tsserver_file_code_edits`

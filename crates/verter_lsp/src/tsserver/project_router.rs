@@ -43,7 +43,7 @@ use crate::tsgo::project_binding::{
 };
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{
-    CarrierActivation, CarrierScriptKind, ProviderFuture, TypeProvider,
+    CarrierActivation, CarrierScriptKind, ProviderFuture, ProviderQuery, TypeProvider,
 };
 
 use super::resilient::{self, TsserverEngineInputs};
@@ -154,6 +154,11 @@ type AdmittedCarrierBatch = (
 );
 
 impl RequestRoute {
+    /// `query` admitted into the project this route bound it to.
+    fn admit(&self, query: &ProviderQuery) -> ProviderQuery {
+        query.admitted_into(Arc::from(self.witness.project()))
+    }
+
     fn check(&self) -> Result<(), TypeProviderError> {
         self.hub.check_query(&self.witness).map_err(|reason| {
             project_refusal(&self.path, &format!("request binding expired: {reason:?}"))
@@ -1294,16 +1299,17 @@ impl TypeProvider for ProjectTsserverProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         let trigger_character = trigger_character.map(str::to_string);
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route.hub.get_completions(
-                    &path,
+                    &route.admit(&query),
                     offset,
                     trigger_character.as_deref()
                 ))
@@ -1313,24 +1319,31 @@ impl TypeProvider for ProjectTsserverProvider {
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
         Box::pin(async move {
             {
-                routed_query!(self, path, |route| route
+                routed_query!(self, query.path(), |route| route
                     .hub
-                    .get_completion_details(path, offset, items))
+                    .get_completion_details(&route.admit(query), offset, items))
             }
         })
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        let path = path.to_string();
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
-                routed_query!(self, &path, |route| route.hub.get_hover(&path, offset))
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_hover(&route.admit(&query), offset))
             }
         })
     }
@@ -1344,82 +1357,100 @@ impl TypeProvider for ProjectTsserverProvider {
         })
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let path = path.to_string();
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
-                routed_query!(self, &path, |route| route.hub.get_definition(&path, offset))
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_definition(&route.admit(&query), offset))
             }
         })
     }
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route
                     .hub
-                    .get_type_definition(&path, offset))
+                    .get_type_definition(&route.admit(&query), offset))
             }
         })
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let path = path.to_string();
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
-                routed_query!(self, &path, |route| route.hub.get_references(&path, offset))
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_references(&route.admit(&query), offset))
             }
         })
     }
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route
                     .hub
-                    .get_rename_locations(&path, offset))
+                    .get_rename_locations(&route.admit(&query), offset))
             }
         })
     }
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route
                     .hub
-                    .get_signature_help(&path, offset))
+                    .get_signature_help(&route.admit(&query), offset))
             }
         })
     }
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route.hub.get_code_actions(
-                    &path,
+                    &route.admit(&query),
                     start_offset,
                     end_offset,
                     &diagnostics
@@ -1428,41 +1459,46 @@ impl TypeProvider for ProjectTsserverProvider {
         })
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        let path = path.to_string();
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
-                routed_query!(self, &path, |route| route.hub.get_semantic_tokens(&path))
+                routed_query!(self, &path, |route| route
+                    .hub
+                    .get_semantic_tokens(&route.admit(&query)))
             }
         })
     }
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route
                     .hub
-                    .get_document_highlights(&path, offset))
+                    .get_document_highlights(&route.admit(&query), offset))
             }
         })
     }
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route.hub.get_inlay_hints(
-                    &path,
+                    &route.admit(&query),
                     start_offset,
                     end_offset
                 ))
@@ -1472,15 +1508,16 @@ impl TypeProvider for ProjectTsserverProvider {
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             {
                 routed_query!(self, &path, |route| route
                     .hub
-                    .resolve_completion(&path, data.clone()))
+                    .resolve_completion(&route.admit(&query), data.clone()))
             }
         })
     }

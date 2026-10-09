@@ -22,12 +22,14 @@ use crate::tsserver::ipc::{
     completion_entry_details_to_resolve_result, concat_display_parts, dedup_error_codes,
     enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
     parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
-    parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_locations,
-    parse_tsserver_rename_spans, quickinfo_wire_pos_to_byte_offset,
+    parse_tsserver_diagnostic, parse_tsserver_highlight_span, parse_tsserver_inlay_hint,
+    parse_tsserver_locations, parse_tsserver_rename_spans, quickinfo_wire_pos_to_byte_offset,
     stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
-use crate::type_provider::traits::{ConfiguredOwnerAuthority, ProviderFuture, TypeProvider};
+use crate::type_provider::traits::{
+    ConfiguredOwnerAuthority, ProviderFuture, ProviderQuery, TypeProvider,
+};
 
 #[path = "extension_provider_binding.rs"]
 mod binding;
@@ -234,6 +236,40 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
     }
 }
 
+/// The bytes a query on `file` converts its request position against, read
+/// once and retained for the decode of every range in the same file: the
+/// cache is never re-read for coordinates after the extension answers. A
+/// query intending other bytes than these is refused before it is sent.
+async fn retained_request(
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    query: &ProviderQuery,
+    file: &str,
+) -> Result<Option<Arc<str>>, TypeProviderError> {
+    let held = contents.lock().await.get(file).cloned();
+    query.check_intended(file, held.as_ref())?;
+    Ok(held)
+}
+
+/// `snapshot` with the request file's retained bytes in place of whatever the
+/// cache holds for it now, and every target the cache lacks read from disk.
+fn decode_contents(
+    mut snapshot: HashMap<String, Arc<str>>,
+    file: &str,
+    requested: Option<&Arc<str>>,
+    targets: impl IntoIterator<Item = String>,
+) -> HashMap<String, Arc<str>> {
+    match requested {
+        Some(bytes) => {
+            snapshot.insert(file.to_string(), Arc::clone(bytes));
+        }
+        None => {
+            snapshot.remove(file);
+        }
+    }
+    verter_type_runtime::contents_snapshot::fill_missing_from_disk(&mut snapshot, targets);
+    snapshot
+}
+
 impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
     fn provider_id(&self) -> &'static str {
         "extension"
@@ -346,20 +382,20 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let trigger = trigger_character.map(|s| s.to_string());
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let mut args = serde_json::json!({
@@ -401,22 +437,22 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
             if items.is_empty() {
                 return Ok(Vec::new());
             }
 
-            let (line, col) = {
-                let cache = self.contents.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &self.contents;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             // tsserver-family `completionEntryDetails` keys on the entry name plus
@@ -480,17 +516,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        let file = Self::normalize_path(path);
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         let witness = self.provider_wire_witness();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let result = self
@@ -528,18 +568,15 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     // The quickinfo body's `start`/`end` map onto byte offsets
                     // through the synced content snapshot; without one the
                     // range fails closed to `None` (never fabricated).
-                    let (range_start, range_end) = {
-                        let cache = contents_cache.lock().await;
-                        match cache.get(&file) {
-                            Some(content) => {
-                                let index = SourceIndex::new_utf16(content);
-                                (
-                                    quickinfo_wire_pos_to_byte_offset(&index, body.get("start")),
-                                    quickinfo_wire_pos_to_byte_offset(&index, body.get("end")),
-                                )
-                            }
-                            None => (None, None),
+                    let (range_start, range_end) = match requested.as_deref() {
+                        Some(content) => {
+                            let index = SourceIndex::new_utf16(content);
+                            (
+                                quickinfo_wire_pos_to_byte_offset(&index, body.get("start")),
+                                quickinfo_wire_pos_to_byte_offset(&index, body.get("end")),
+                            )
                         }
+                        None => (None, None),
                     };
 
                     Ok(Some(HoverInfo {
@@ -635,16 +672,20 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let result = self
@@ -658,13 +699,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
-            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
-            // pointer-map clone (`Arc<str>` values).
+            // The request file decodes through its retained bytes; another target through the
+            // cache, else its disk bytes.
+            let targets = result
+                .as_array()
+                .or_else(|| result.get("refs").and_then(|v| v.as_array()))
+                .map(|arr| {
+                    verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
+                })
+                .unwrap_or_default();
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(&guard, &targets)
             };
+            let cache_snapshot =
+                decode_contents(cache_snapshot, &file, requested.as_ref(), targets);
             let locs = result
                 .as_array()
                 .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
@@ -676,18 +725,18 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let result = self
@@ -701,13 +750,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
-            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
-            // pointer-map clone (`Arc<str>` values).
+            // The request file decodes through its retained bytes; another target through the
+            // cache, else its disk bytes.
+            let targets = result
+                .as_array()
+                .or_else(|| result.get("refs").and_then(|v| v.as_array()))
+                .map(|arr| {
+                    verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
+                })
+                .unwrap_or_default();
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(&guard, &targets)
             };
+            let cache_snapshot =
+                decode_contents(cache_snapshot, &file, requested.as_ref(), targets);
             let locs = result
                 .as_array()
                 .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
@@ -717,16 +774,20 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let result = self
@@ -740,13 +801,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
-            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
-            // pointer-map clone (`Arc<str>` values).
+            // The request file decodes through its retained bytes; another target through the
+            // cache, else its disk bytes.
+            let targets = result
+                .as_array()
+                .or_else(|| result.get("refs").and_then(|v| v.as_array()))
+                .map(|arr| {
+                    verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
+                })
+                .unwrap_or_default();
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(&guard, &targets)
             };
+            let cache_snapshot =
+                decode_contents(cache_snapshot, &file, requested.as_ref(), targets);
             let locs = result
                 .get("refs")
                 .and_then(|v| v.as_array())
@@ -759,18 +828,18 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let result = self
@@ -800,6 +869,8 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     &target_paths,
                 )
             };
+            let cache_snapshot =
+                decode_contents(cache_snapshot, &file, requested.as_ref(), target_paths);
             let locs = {
                 // Bind a `Copy` `&HashMap` so each per-target closure can capture the cache by
                 // shared reference.
@@ -834,18 +905,18 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let result = self
@@ -982,12 +1053,13 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         // Mirror the out-of-process tsserver path: key the fixes off the
         // diagnostic error codes, short-circuiting when none are numeric.
@@ -996,16 +1068,14 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             if error_codes.is_empty() {
                 return Ok(vec![]);
             }
-            let (sl, sc, el, ec) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => {
-                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
-                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
-                        (sl, sc, el, ec)
-                    }
-                    None => (1, start_offset + 1, 1, end_offset + 1),
+            let requested = retained_request(&contents_cache, &query, &file).await?;
+            let (sl, sc, el, ec) = match requested.as_deref() {
+                Some(c) => {
+                    let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
+                    let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
+                    (sl, sc, el, ec)
                 }
+                None => (1, start_offset + 1, 1, end_offset + 1),
             };
 
             let result = self
@@ -1049,6 +1119,12 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     &single_fix_paths,
                 )
             };
+            let single_fix_snapshot = decode_contents(
+                single_fix_snapshot,
+                &file,
+                requested.as_ref(),
+                single_fix_paths,
+            );
 
             // Single-fix actions first, then their combined "fix all" companions.
             let mut actions: Vec<TypeCodeAction> = raw_fixes
@@ -1072,6 +1148,13 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     .get("fixAllDescription")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                // Each combined request is its own query: its edits name the
+                // bytes held when it is sent, and a file that no longer holds
+                // the intended bytes skips this follow-up.
+                let Ok(combined_requested) = retained_request(&contents_cache, &query, &file).await
+                else {
+                    continue;
+                };
                 if let Ok(body) = self
                     .query("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
                     .await
@@ -1090,6 +1173,12 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                             &target_paths,
                         )
                     };
+                    let combined_snapshot = decode_contents(
+                        combined_snapshot,
+                        &file,
+                        combined_requested.as_ref(),
+                        target_paths,
+                    );
                     if let Some(action) = parse_tsserver_combined_code_fix(
                         &body,
                         fix_all_title.as_deref(),
@@ -1105,15 +1194,12 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        let file = Self::normalize_path(path);
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let content = {
-                let cache = contents_cache.lock().await;
-                cache.get(&file).cloned()
-            };
-            let Some(content) = content else {
+            let Some(content) = retained_request(&contents_cache, &query, &file).await? else {
                 return Ok(vec![]);
             };
             let end_line = content.lines().count() as u32 + 1;
@@ -1162,18 +1248,18 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &contents_cache;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let result = self
@@ -1190,49 +1276,25 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
             match result {
                 Ok(body) => {
-                    let highlights = body
+                    // Spans are lines and columns in the retained request bytes;
+                    // without them nothing decodes (never a packed offset).
+                    let Some(content) = requested else {
+                        return Ok(vec![]);
+                    };
+                    let index = SourceIndex::new_utf16(&content);
+                    Ok(body
                         .as_array()
                         .into_iter()
-                        .flat_map(|groups| {
-                            groups.iter().flat_map(|group| {
-                                group
-                                    .get("highlightSpans")
-                                    .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flat_map(|spans| {
-                                        spans.iter().filter_map(|span| {
-                                            let start = span.get("start")?;
-                                            let end = span.get("end")?;
-                                            let sl = start.get("line")?.as_u64()? as u32;
-                                            let so = start.get("offset")?.as_u64()? as u32;
-                                            let el = end.get("line")?.as_u64()? as u32;
-                                            let eo = end.get("offset")?.as_u64()? as u32;
-                                            let kind = span
-                                                .get("kind")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("none");
-                                            let hl_kind = match kind {
-                                                "writtenReference" => {
-                                                    TypeDocumentHighlightKind::Write
-                                                }
-                                                _ => TypeDocumentHighlightKind::Read,
-                                            };
-                                            let s = ((sl.saturating_sub(1)) << 16)
-                                                | ((so.saturating_sub(1)) & 0xFFFF);
-                                            let e = ((el.saturating_sub(1)) << 16)
-                                                | ((eo.saturating_sub(1)) & 0xFFFF);
-                                            Some(TypeDocumentHighlight {
-                                                start: s,
-                                                end: e,
-                                                kind: hl_kind,
-                                            })
-                                        })
-                                    })
-                            })
+                        .flatten()
+                        .flat_map(|group| {
+                            group
+                                .get("highlightSpans")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
                         })
-                        .collect();
-
-                    Ok(highlights)
+                        .filter_map(|span| parse_tsserver_highlight_span(span, &index))
+                        .collect())
                 }
                 Err(e) => Err(e),
             }
@@ -1241,16 +1303,19 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
             let (start, length, content_snapshot) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
+                match retained_request(&contents_cache, &query, &file)
+                    .await?
+                    .as_ref()
+                {
                     Some(c) => {
                         let Some(start) = byte_offset_to_tsserver_absolute_offset(c, start_offset)
                         else {
@@ -1302,10 +1367,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
             // The extension is a tsserver-family provider — it resolves through
             // `completionEntryDetails`. A non-tsserver resolve key cannot have
@@ -1323,12 +1389,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             // Re-issue at the SAME completion-site position the entry came from;
             // tsserver keys the entry's auto-import `codeActions` on
             // (position, name, source/data).
-            let (line, col) = {
-                let cache = self.contents.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let requested = &self.contents;
+            let requested = retained_request(requested, &query, &file).await?;
+            let (line, col) = match requested.as_deref() {
+                Some(c) => byte_offset_to_tsserver_pos(c, offset),
+                None => (1, offset + 1),
             };
 
             let entry = build_entry_names_entry(&name, source.as_deref(), data.as_ref());
@@ -1363,6 +1428,8 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     &target_paths,
                 )
             };
+            let cache_snapshot =
+                decode_contents(cache_snapshot, &file, requested.as_ref(), target_paths);
             Ok(completion_entry_details_to_resolve_result(
                 detail,
                 &file,
