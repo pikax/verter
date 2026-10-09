@@ -1316,10 +1316,15 @@ pub type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 /// Finalize a structural cache carrier after every self-root, fence, prelude,
 /// and traced fact has been merged.
 ///
-/// A carrier wider than one evidence page carries its self-roots as one
-/// strict-world witness, minted only after every root validates in the exact
-/// effective view. Every carrier, however wide, is then sealed whole (paged
-/// when wide) — width is never a refusal.
+/// A carrier whose top level is wider than one evidence page carries its
+/// self-roots as one strict-world witness, minted only after every root
+/// validates in the exact effective view, and loses every precise root fact,
+/// a paged one included. A carrier whose width is already held by evidence
+/// pages keeps its precise roots: strict root validation reads through the
+/// pages, and a precise root stays valid in any view that agrees on the
+/// root's content, where a witness is bound to the one view that minted it.
+/// Every carrier, however wide, is then sealed whole (paged when wide) —
+/// width is never a refusal.
 pub(crate) fn bound_completed_structural_carrier(
     view: &dyn StoreView,
     mut facts: Vec<FactVersionRef>,
@@ -1353,12 +1358,24 @@ pub(crate) fn bound_completed_structural_carrier(
             .mint_strict_self_root_world(&root_refs)
             .ok_or(NonAdmissionReason::UnresolvedProvenance)?;
 
-        facts.retain(|fact| match fact {
-            FactVersionRef::FileWholeHash { canonical_id, .. } => !self_root_canonicals
+        // The witness replaces every precise root fact, including one held
+        // on an evidence page; the remaining entries are sealed (and paged)
+        // again below.
+        let is_self_root = |fact: &FactVersionRef| match fact {
+            FactVersionRef::FileWholeHash { canonical_id, .. } => self_root_canonicals
                 .binary_search_by(|root| root.as_ref().cmp(canonical_id.as_str()))
                 .is_ok(),
-            _ => true,
-        });
+            _ => false,
+        };
+        facts = if facts.iter().any(is_paged_entry) {
+            signature_entries(&facts)
+                .filter(|fact| !is_self_root(fact))
+                .cloned()
+                .collect()
+        } else {
+            facts.retain(|fact| !is_self_root(fact));
+            facts
+        };
         facts.push(FactVersionRef::StrictSelfRootWorld(world));
         self_root_canonicals.clear();
     }
@@ -1367,6 +1384,11 @@ pub(crate) fn bound_completed_structural_carrier(
         seal_canonical_signature(facts),
         Arc::from(self_root_canonicals),
     ))
+}
+
+/// Whether `fact` is an evidence page of a wide signature.
+fn is_paged_entry(fact: &FactVersionRef) -> bool {
+    matches!(fact, FactVersionRef::Receipt(receipt) if receipt.is_page())
 }
 
 /// A cache entry's dependency signature — the path-precise fact

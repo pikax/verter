@@ -488,6 +488,76 @@ fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
     );
 }
 
+/// A traced set wider than one page whose facts sit on evidence pages.
+/// `root` is placed among `ProjectGeneration` fillers wide enough to page.
+fn paged_traced_set(root: FactVersionRef) -> Arc<[FactVersionRef]> {
+    let mut traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH + 76)
+        .map(|generation| FactVersionRef::ProjectGeneration {
+            generation: generation as u64,
+        })
+        .collect();
+    traced.push(root);
+    let sealed = verter_session_query::facts::fact_read_set::seal_canonical_signature(traced);
+    assert!(
+        sealed
+            .iter()
+            .all(|fact| !matches!(fact, FactVersionRef::FileWholeHash { .. })),
+        "fixture: the root fact must sit on an evidence page, not at the top level",
+    );
+    sealed
+}
+
+/// The torn-read rejection holds when the traced set is wide: a disagreeing
+/// self-root `FileWholeHash` held on an evidence page is still a torn read.
+#[test]
+fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_on_an_evidence_page() {
+    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let traced = paged_traced_set(FactVersionRef::FileWholeHash {
+        canonical_id: "/w/a.ts".to_string(),
+        hash: [0x99; 16],
+    });
+    assert_eq!(
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
+            .unwrap_err(),
+        verter_audit::NonAdmissionReason::SelfRootConflict,
+        "a paged traced FileWholeHash disagreeing with the observed self-root is a torn read",
+    );
+}
+
+/// An agreeing self-root fact held on an evidence page keeps its precise
+/// root: the carrier's width is already held by pages, so no strict-world
+/// witness — bound to the one view that minted it — replaces the root, and
+/// every traced fact is kept.
+#[test]
+fn a_paged_agreeing_self_root_keeps_its_precise_root() {
+    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let traced = paged_traced_set(FactVersionRef::FileWholeHash {
+        canonical_id: "/w/a.ts".to_string(),
+        hash: [0x11; 16],
+    });
+    let (facts, roots) =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
+            .expect("an agreeing paged self-root builds a carrier");
+    assert_eq!(roots.as_ref(), [Arc::<str>::from("/w/a.ts")]);
+    let entries: Vec<FactVersionRef> = ReadSetSignature::new(facts).entries().cloned().collect();
+    assert!(!entries
+        .iter()
+        .any(|fact| matches!(fact, FactVersionRef::StrictSelfRootWorld(_))));
+    assert!(entries.iter().any(|fact| matches!(
+        fact,
+        FactVersionRef::FileWholeHash { canonical_id, hash }
+            if canonical_id == "/w/a.ts" && *hash == [0x11; 16]
+    )));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|fact| matches!(fact, FactVersionRef::ProjectGeneration { .. }))
+            .count(),
+        FACT_PAGE_WIDTH + 76,
+        "every other traced fact is kept",
+    );
+}
+
 /// The producer merges the traced cross-file fact set after the
 /// self-roots — a traced `Parse` fact for a non-self-root canonical is
 /// preserved verbatim.
@@ -571,6 +641,44 @@ fn oversized_self_root_set_builds_a_bounded_carrier() {
             .iter()
             .any(|fact| matches!(fact, FactVersionRef::StrictSelfRootWorld(_))),
         "the bounded carrier must retain a strict-world witness",
+    );
+}
+
+/// When the self-roots themselves overflow the top level, the strict-world
+/// witness replaces every precise root fact — one held on a traced evidence
+/// page included — and keeps every other traced fact.
+#[test]
+fn an_oversized_root_set_strips_a_paged_root_fact_beside_its_witness() {
+    let observed: Vec<(Arc<str>, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
+        .map(|index| {
+            (
+                Arc::from(format!("/w/root-{index}.ts")),
+                [(index % 251) as u8; 16],
+            )
+        })
+        .collect();
+    let traced = paged_traced_set(FactVersionRef::FileWholeHash {
+        canonical_id: "/w/root-0.ts".to_string(),
+        hash: [0; 16],
+    });
+    let (facts, roots) =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
+            .expect("an agreeing paged root builds a carrier");
+    assert!(roots.is_empty(), "the roots ride the strict-world witness");
+    let entries: Vec<FactVersionRef> = ReadSetSignature::new(facts).entries().cloned().collect();
+    assert!(
+        !entries
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::FileWholeHash { .. })),
+        "no precise root fact survives beside the witness, on a page or not",
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|fact| matches!(fact, FactVersionRef::ProjectGeneration { .. }))
+            .count(),
+        FACT_PAGE_WIDTH + 76,
+        "every other traced fact is kept",
     );
 }
 

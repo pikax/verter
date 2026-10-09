@@ -20,13 +20,24 @@
 //! consumed result — it names no computation and carries no cost identity —
 //! but it validates, projects and is shared exactly as a receipt is, so a
 //! wide signature stays complete without any consumer learning a second
-//! evidence shape. Its storage is charged to the process retention account
-//! for exactly as long as the page lives.
+//! evidence shape.
+//!
+//! A page's storage is charged to the retention account for exactly as long
+//! as the page lives, once, however many signatures share it. It is born a
+//! [`ChargeClass::Pinned`] obligation of the live signature that sealed it.
+//! The first cache admission that retains a signature holding the page
+//! claims it ([`reserve_retained_with_evidence`]): the page's bytes join that
+//! admission's refusable [`ChargeClass::Retained`] reservation — so a wide
+//! candidate is refused for its whole footprint like any other entry — and
+//! the page's pin is exchanged for its share of the granted reservation.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use super::version::{CompactionDomain, FactAttribution, FactVersionRef};
+use crate::retention::{
+    ChargeClass, RetentionAdmission, RetentionCharge, SemanticRetentionAccount,
+};
 
 /// What one shared evidence holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -55,11 +66,12 @@ pub struct ResultEvidence {
     aggregated: Arc<[CompactionDomain]>,
     /// Whether a reachable fact is resolution evidence.
     resolution_evidence: bool,
-    /// A page's reservation against the process retention account, held
-    /// for exactly as long as the page lives (every signature, candidate
-    /// and refusal summary sharing it shares this one charge). `None` for
-    /// a result's evidence.
-    retention: Option<crate::retention::RetentionCharge>,
+    /// A page's reservation against the retention account, held for
+    /// exactly as long as the page lives (every signature, candidate and
+    /// refusal summary sharing it shares this one charge): pinned until a
+    /// cache admission claims it, retained from then on. `None` for a
+    /// result's evidence.
+    retention: Option<parking_lot::Mutex<RetentionCharge>>,
 }
 
 /// Every canonical the facts reachable from a receipt name, ordered.
@@ -106,15 +118,21 @@ impl CanonicalSet {
     /// shared, plus what each other set holds that it lacks (found by a
     /// difference walk that skips the structure the two share), plus each
     /// own canonical it lacks.
-    fn union_of(consumed: &[&CanonicalSet], own: &[&str]) -> Self {
+    ///
+    /// Also answers the estimated bytes of the storage the union owns
+    /// beyond the set it shares: a slot per inserted canonical, and the
+    /// string each newly allocated own canonical holds.
+    fn union_of(consumed: &[&CanonicalSet], own: &[&str]) -> (Self, usize) {
+        let mut owned_bytes = 0;
         let Some(largest) = consumed.iter().copied().max_by_key(|set| set.len()) else {
             let mut set = imbl::OrdSet::new();
             for canonical in own {
                 if !set.contains(*canonical) {
+                    owned_bytes += SET_SLOT_BYTES + ARC_STR_HEADER_BYTES + canonical.len();
                     set.insert(Arc::from(*canonical));
                 }
             }
-            return Self(set);
+            return (Self(set), owned_bytes);
         };
         let mut set = largest.0.clone();
         for other in consumed {
@@ -128,16 +146,18 @@ impl CanonicalSet {
                     imbl::ordset::DiffItem::Remove(_) => None,
                 })
                 .collect();
+            owned_bytes += added.len() * SET_SLOT_BYTES;
             for canonical in added {
                 set.insert(canonical);
             }
         }
         for canonical in own {
             if !set.contains(*canonical) {
+                owned_bytes += SET_SLOT_BYTES + ARC_STR_HEADER_BYTES + canonical.len();
                 set.insert(Arc::from(*canonical));
             }
         }
-        Self(set)
+        (Self(set), owned_bytes)
     }
 }
 
@@ -179,12 +199,37 @@ fn take_consumed(facts: &mut Arc<[FactVersionRef]>, owned: &mut Vec<Arc<ResultEv
     }
 }
 
-/// Estimated resident bytes one entry of an evidence page keeps alive.
-const PAGE_ENTRY_BYTES: usize = 64;
+/// Estimated bytes one canonical's slot in a [`CanonicalSet`] occupies:
+/// the element and its share of the tree node holding it.
+const SET_SLOT_BYTES: usize = 2 * std::mem::size_of::<Arc<str>>();
 
-/// Estimated resident bytes of one evidence page beyond its entries: the
-/// shared evidence header, its digest and its summaries.
-const PAGE_OVERHEAD_BYTES: usize = 128;
+/// The reference counts heading a shared allocation.
+const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
+
+/// The header of one newly allocated `Arc<str>`.
+const ARC_STR_HEADER_BYTES: usize = ARC_HEADER_BYTES;
+
+/// Estimated resident bytes an evidence page owns: its shared header, its
+/// entry array, the strings its own facts hold, its aggregated domains and
+/// the canonical-set storage it does not share with the pages it holds.
+fn page_storage_bytes(
+    facts: &[FactVersionRef],
+    aggregated: usize,
+    canonical_set_bytes: usize,
+) -> usize {
+    let owned_strings: usize = facts
+        .iter()
+        .filter_map(FactVersionRef::canonical_id)
+        .map(str::len)
+        .sum();
+    ARC_HEADER_BYTES
+        + std::mem::size_of::<ResultEvidence>()
+        + ARC_HEADER_BYTES
+        + std::mem::size_of_val(facts)
+        + owned_strings
+        + aggregated * std::mem::size_of::<CompactionDomain>()
+        + canonical_set_bytes
+}
 
 /// A receipt for a completed result: its evidence, shared.
 ///
@@ -210,21 +255,29 @@ impl ResultReceipt {
     /// nothing is re-sorted, deduplicated or dropped.
     ///
     /// The page's storage is pinned against the process retention account
-    /// for the page's whole life: a page exists only because a live
-    /// signature holds it, so it is charged unconditionally and released by
-    /// its last holder's drop, once, however many candidates, refusal
-    /// summaries or enclosing signatures share it.
+    /// from birth: a page exists only because a live signature holds it.
+    /// A cache admission retaining it later exchanges the pin for a share
+    /// of its refusable reservation ([`reserve_retained_with_evidence`]);
+    /// either way the charge is released by the page's last holder's drop,
+    /// once, however many candidates, refusal summaries or enclosing
+    /// signatures share it.
     #[must_use]
     pub fn page(facts: Vec<FactVersionRef>) -> Self {
-        let bytes = PAGE_OVERHEAD_BYTES + facts.len() * PAGE_ENTRY_BYTES;
-        let charge = crate::retention::SemanticRetentionAccount::process_local().pin(bytes);
-        Self::seal(facts, EvidenceKind::Page, Some(charge))
+        Self::page_on(facts, &SemanticRetentionAccount::process_local())
+    }
+
+    /// [`Self::page`], pinned against `account`.
+    pub(crate) fn page_on(
+        facts: Vec<FactVersionRef>,
+        account: &Arc<SemanticRetentionAccount>,
+    ) -> Self {
+        Self::seal(facts, EvidenceKind::Page, Some(account))
     }
 
     fn seal(
         facts: Vec<FactVersionRef>,
         kind: EvidenceKind,
-        retention: Option<crate::retention::RetentionCharge>,
+        page_account: Option<&Arc<SemanticRetentionAccount>>,
     ) -> Self {
         let mut digester = xxhash_rust::xxh3::Xxh3::new();
         kind.hash(&mut digester);
@@ -272,7 +325,14 @@ impl ResultReceipt {
                 }
             }
         }
-        let canonicals = CanonicalSet::union_of(&consumed, &own);
+        let (canonicals, canonical_set_bytes) = CanonicalSet::union_of(&consumed, &own);
+        let retention = page_account.map(|account| {
+            parking_lot::Mutex::new(account.pin(page_storage_bytes(
+                &facts,
+                aggregated.len(),
+                canonical_set_bytes,
+            )))
+        });
         Self(Arc::new(ResultEvidence {
             facts: facts.into(),
             kind,
@@ -298,13 +358,24 @@ impl ResultReceipt {
     }
 
     /// Bytes this evidence holds charged against the retention account: a
-    /// page's pin, shared by every holder; `0` for a result's evidence.
+    /// page's charge, shared by every holder; `0` for a result's evidence.
     #[must_use]
     pub fn retained_charge_bytes(&self) -> usize {
         self.0
             .retention
             .as_ref()
-            .map_or(0, crate::retention::RetentionCharge::bytes)
+            .map_or(0, |charge| charge.lock().bytes())
+    }
+
+    /// The class of a page's charge: [`ChargeClass::Pinned`] until a cache
+    /// admission claims it, [`ChargeClass::Retained`] after. `None` for a
+    /// result's evidence.
+    #[must_use]
+    pub fn retained_charge_class(&self) -> Option<ChargeClass> {
+        self.0
+            .retention
+            .as_ref()
+            .map(|charge| charge.lock().class())
     }
 
     /// The result's own facts and the receipts of what it consumed.
@@ -415,6 +486,63 @@ impl ReceiptWalk {
         }
         true
     }
+}
+
+/// Reserve a cache candidate's retained bytes against `account`: its own
+/// `own_bytes` together with every evidence page `signatures` hold (pages of
+/// pages included) that no earlier admission claimed, as ONE refusable
+/// [`ChargeClass::Retained`] reservation — so a wide candidate is refused,
+/// as oversized or under pressure, for everything it would newly retain.
+///
+/// On admission each claimed page's pin is exchanged for its share of the
+/// reservation, which the page then holds for the rest of its life; the
+/// returned charge holds `own_bytes`. A page another admission claimed
+/// first, concurrently, keeps that claim and its share is released here.
+/// The reservation is taken before any pin is released, so a page is never
+/// uncharged during the exchange. On refusal nothing changes: every page
+/// stays pinned by the live signatures holding it.
+pub fn reserve_retained_with_evidence(
+    account: &Arc<SemanticRetentionAccount>,
+    own_bytes: usize,
+    signatures: &[&[FactVersionRef]],
+) -> RetentionAdmission {
+    let mut seen: rustc_hash::FxHashSet<*const ResultEvidence> = rustc_hash::FxHashSet::default();
+    let mut claim: Vec<(&parking_lot::Mutex<RetentionCharge>, usize)> = Vec::new();
+    let mut stack: Vec<&[FactVersionRef]> = signatures.to_vec();
+    while let Some(level) = stack.pop() {
+        for fact in level {
+            let FactVersionRef::Receipt(page) = fact else {
+                continue;
+            };
+            if !page.is_page() || !seen.insert(Arc::as_ptr(&page.0)) {
+                continue;
+            }
+            if let Some(cell) = page.0.retention.as_ref() {
+                let charge = cell.lock();
+                if charge.class() != ChargeClass::Retained {
+                    claim.push((cell, charge.bytes()));
+                }
+            }
+            stack.push(&page.0.facts);
+        }
+    }
+    let evidence_bytes: usize = claim.iter().map(|(_, bytes)| bytes).sum();
+    let mut charge = match account.reserve(ChargeClass::Retained, own_bytes + evidence_bytes) {
+        RetentionAdmission::Admitted(charge) => charge,
+        refused @ RetentionAdmission::Refused(_) => return refused,
+    };
+    for (cell, bytes) in claim {
+        let share = charge.split_off(bytes);
+        let mut held = cell.lock();
+        let released = if held.class() == ChargeClass::Retained {
+            share
+        } else {
+            std::mem::replace(&mut *held, share)
+        };
+        drop(held);
+        drop(released);
+    }
+    RetentionAdmission::Admitted(charge)
 }
 
 /// Drop from `facts` every receipt another receipt in `facts` directly

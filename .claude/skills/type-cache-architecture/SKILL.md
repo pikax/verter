@@ -946,9 +946,23 @@ deterministic (cut points are positions in the canonical order), lossless,
 validated leaf by leaf through the same receipt walk as a consumed result's
 receipt, projected into reverse-index registration through their canonical
 summaries, and shared by `Arc` with every candidate, refusal summary and
-enclosing signature that absorbs them. Each page pins its storage against the
-process retention account for its whole life (one charge, however many
-holders), so candidate footprints count a page entry once, not its contents.
+enclosing signature that absorbs them. Each page holds ONE retention charge for
+its whole life, sized by what it stores (entry array, owned fact strings, the
+canonical-set storage it does not share), however many holders share it. A page
+is born `Pinned` (the live signature that sealed it owns it); the first cache
+admission retaining a signature that holds it claims it through
+`receipt::reserve_retained_with_evidence`: the candidate's own bytes and every
+unclaimed page's bytes are ONE refusable `Retained` reservation (so a wide
+candidate is refused as `Oversized`/under pressure for what it would newly
+retain, and its complete value is delivered uncached), and each claimed page's
+pin is exchanged for its split-off share. A later candidate sharing a claimed
+page is not charged for it again; the page's charge drains when its last holder
+drops. Candidate footprints therefore count a page entry once, not its contents.
+Self-root discrimination reads through pages: a disagreeing traced
+`FileWholeHash` on a page is a `SelfRootConflict`. A carrier whose width is
+held by pages keeps its precise self-roots (validated strictly through the
+pages); only a carrier whose TOP level overflows trades them for a
+`StrictSelfRootWorld`, which is bound to the view that minted it.
 `ReadSetSignature { facts }` is a complete rail; `entries()` reads it with its
 pages read through. Producers still consume a hierarchical fact (a consumed
 result's receipt, a downstream `semantic_hash`) instead of flattening

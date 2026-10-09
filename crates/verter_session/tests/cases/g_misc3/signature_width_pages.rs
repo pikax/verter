@@ -29,13 +29,21 @@ impl StoreView for TestView {
     }
 }
 
+/// `count` facts in their canonical order: the zero-padded names sort as
+/// their indices do, so fact `i` sits on page `i / FACT_PAGE_WIDTH` of the
+/// sealed signature and the last facts sit on its last, partial page.
 fn wide_facts(prefix: &str, count: usize) -> Vec<FactVersionRef> {
-    (0..count)
+    let facts: Vec<FactVersionRef> = (0..count)
         .map(|i| FactVersionRef::FileWholeHash {
-            canonical_id: format!("/src/{prefix}_{i}.ts"),
+            canonical_id: format!("/src/{prefix}_{i:07}.ts"),
             hash: [(i % 256) as u8; 16],
         })
-        .collect()
+        .collect();
+    assert!(
+        facts.windows(2).all(|pair| pair[0] < pair[1]),
+        "fixture: input order is the canonical order the pages are cut in"
+    );
+    facts
 }
 
 #[test]
@@ -64,8 +72,9 @@ fn signatures_around_and_beyond_one_page_are_admitted_whole() {
     }
 }
 
-/// An edit to the first fact, a fact at a page boundary, and the very last
-/// fact each miss the warm read — paging never lets a fact go unvalidated.
+/// An edit to the first fact, the facts either side of every page boundary,
+/// and the first and very last fact of the last, partial page each miss the
+/// warm read — paging never lets a fact go unvalidated.
 #[test]
 fn an_edit_on_any_page_including_the_last_misses_the_warm_read() {
     let cache = ValidatedFactCache::<String, usize>::default();
@@ -76,7 +85,10 @@ fn an_edit_on_any_page_including_the_last_misses_the_warm_read() {
         0,
         FACT_PAGE_WIDTH - 1,
         FACT_PAGE_WIDTH,
+        2 * FACT_PAGE_WIDTH - 1,
         2 * FACT_PAGE_WIDTH,
+        3 * FACT_PAGE_WIDTH - 1,
+        3 * FACT_PAGE_WIDTH,
         width - 1,
     ] {
         let mut valid: FxHashSet<FactVersionRef> = facts.iter().cloned().collect();

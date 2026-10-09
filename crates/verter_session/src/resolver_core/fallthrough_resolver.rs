@@ -488,15 +488,12 @@ impl FallthroughResolverState {
     /// Admit one candidate under `key`, charged and bounded (see the type
     /// docs). A refused charge serves the result uncached.
     fn keep(&self, key: FallthroughNodeKey, result: FallthroughNodeResult) {
-        let Some(charge) = self
-            .retention_account
-            .get()
-            .reserve(
-                verter_session_query::retention::ChargeClass::Retained,
-                result.retained_bytes(&key),
-            )
-            .admitted()
-        else {
+        let Some(charge) = verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            self.retention_account.get(),
+            result.retained_bytes(&key),
+            &[&result.facts],
+        )
+        .admitted() else {
             return;
         };
         let mut evicted = Vec::new();

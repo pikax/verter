@@ -1491,33 +1491,188 @@ fn a_level_of_pages_wider_than_one_page_is_indexed_again() {
     );
 }
 
-/// Every page holds a pin against the process retention account sized by
-/// what it stores, shared by every holder of the page.
+fn isolated_account() -> Arc<crate::retention::SemanticRetentionAccount> {
+    crate::retention::SemanticRetentionAccount::new(crate::retention::RetentionLimits::defaults())
+}
+
+/// `count` whole-hash facts whose canonicals are `name_len` bytes long.
+fn long_named_whole_hashes(count: usize, name_len: usize) -> Vec<FactVersionRef> {
+    (0..count)
+        .map(|index| {
+            let stem = format!("/p/{index:07}-");
+            FactVersionRef::FileWholeHash {
+                canonical_id: format!("{stem}{}", "x".repeat(name_len - stem.len())),
+                hash: hash16(1),
+            }
+        })
+        .collect()
+}
+
+/// A page's charge covers what it stores — its entry array, the strings
+/// its facts own and the canonical summary it builds from them — so a
+/// page of long canonicals is charged for every byte of them; the charge
+/// is shared by every holder and released exactly when the last one drops.
 #[test]
 fn every_page_is_charged_for_what_it_stores() {
-    let facts = wide_whole_hashes(FACT_PAGE_WIDTH + 1);
-    let signature = seal(&facts);
-    let pages: Vec<_> = signature
-        .facts
+    let account = isolated_account();
+    let facts = long_named_whole_hashes(FACT_PAGE_WIDTH, 1_000);
+    let strings: usize = facts
         .iter()
-        .filter_map(|entry| match entry {
-            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(pages.len(), 2);
-    let charged: Vec<usize> = pages
-        .iter()
-        .map(|page| page.retained_charge_bytes())
-        .collect();
+        .filter_map(FactVersionRef::canonical_id)
+        .map(str::len)
+        .sum();
+    let page = crate::facts::fact_cache::ResultReceipt::page_on(facts.clone(), &account);
+    let charged = page.retained_charge_bytes();
+    let stored_at_least = std::mem::size_of_val(facts.as_slice()) + 2 * strings;
     assert!(
-        charged[0] > charged[1] && charged[1] > 0,
-        "a full page is charged more than a one-fact page, and neither is free: {charged:?}"
+        charged >= stored_at_least,
+        "a page is charged at least its entries, their strings and its canonical summary: \
+         charged {charged}, stores at least {stored_at_least}"
     );
+    assert_eq!(account.snapshot().pinned_bytes, charged);
+
+    let one = crate::facts::fact_cache::ResultReceipt::page_on(facts[..1].to_vec(), &account);
+    assert!(
+        one.retained_charge_bytes() > 0 && one.retained_charge_bytes() < charged,
+        "a one-fact page is charged, and less than a full one"
+    );
+    drop(one);
+    assert_eq!(account.snapshot().pinned_bytes, charged);
+
+    let second_holder = page.clone();
+    drop(page);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        charged,
+        "a page another holder keeps stays charged"
+    );
+    drop(second_holder);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        0,
+        "the last holder's drop releases the page's charge"
+    );
+
     let result = crate::facts::fact_cache::ResultReceipt::new(facts[..2].to_vec());
     assert_eq!(
         result.retained_charge_bytes(),
         0,
         "a result's evidence is not a page and holds no page charge"
     );
+}
+
+/// A signature's pages, sealed against `account`, in their top-level order.
+fn pages_on(
+    facts: Vec<FactVersionRef>,
+    account: &Arc<crate::retention::SemanticRetentionAccount>,
+) -> Vec<FactVersionRef> {
+    facts
+        .chunks(FACT_PAGE_WIDTH)
+        .map(|run| {
+            FactVersionRef::Receipt(crate::facts::fact_cache::ResultReceipt::page_on(
+                run.to_vec(),
+                account,
+            ))
+        })
+        .collect()
+}
+
+fn page_classes(signature: &[FactVersionRef]) -> Vec<Option<crate::retention::ChargeClass>> {
+    signature
+        .iter()
+        .map(|entry| match entry {
+            FactVersionRef::Receipt(page) => page.retained_charge_class(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A cache admission retaining a wide signature claims its pages into its
+/// own refusable reservation: the pages' pins become retained bytes, a
+/// second candidate sharing them is not charged for them again, and the
+/// pages stay charged after the candidates that claimed them are gone, until
+/// the last holder drops.
+#[test]
+fn a_retained_candidate_claims_its_pages_once_into_its_refusable_reservation() {
+    use crate::retention::{ChargeClass, RetentionAdmission};
+    let account = isolated_account();
+    let signature = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &account);
+    let page_bytes = account.snapshot().pinned_bytes;
+    assert!(page_bytes > 0);
+
+    let first =
+        match crate::facts::receipt::reserve_retained_with_evidence(&account, 100, &[&signature]) {
+            RetentionAdmission::Admitted(charge) => charge,
+            RetentionAdmission::Refused(refusal) => panic!("refused: {refusal}"),
+        };
+    assert_eq!(
+        first.bytes(),
+        100,
+        "the candidate's own charge holds its own bytes"
+    );
+    let after_claim = account.snapshot();
+    assert_eq!(
+        after_claim.pinned_bytes, 0,
+        "every page's pin was exchanged"
+    );
+    assert_eq!(after_claim.retained_bytes, 100 + page_bytes);
+    assert!(page_classes(&signature)
+        .iter()
+        .all(|class| *class == Some(ChargeClass::Retained)));
+
+    let second = crate::facts::receipt::reserve_retained_with_evidence(&account, 40, &[&signature])
+        .admitted()
+        .expect("admitted");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        140 + page_bytes,
+        "a page is charged once however many candidates retain it"
+    );
+
+    drop(first);
+    drop(second);
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        page_bytes,
+        "a live signature keeps its claimed pages charged"
+    );
+    drop(signature);
+    let drained = account.snapshot();
+    assert_eq!(
+        (drained.retained_bytes, drained.pinned_bytes),
+        (0, 0),
+        "the last holder's drop drains every page charge"
+    );
+}
+
+/// A wide candidate is refused for the whole footprint it would retain —
+/// its pages included — and a refusal leaves every page pinned by the live
+/// signature, nothing retained.
+#[test]
+fn a_wide_candidate_is_refused_for_its_pages_and_the_refusal_changes_nothing() {
+    use crate::retention::{ChargeClass, RetentionAdmission, RetentionLimits, RetentionRefusal};
+    let probe = isolated_account();
+    let probe_pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &probe);
+    let page_bytes = probe.snapshot().pinned_bytes;
+    drop(probe_pages);
+
+    let account = crate::retention::SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: page_bytes,
+        ..RetentionLimits::defaults()
+    });
+    let signature = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &account);
+    match crate::facts::receipt::reserve_retained_with_evidence(&account, 1, &[&signature]) {
+        RetentionAdmission::Refused(RetentionRefusal::Oversized { requested, .. }) => {
+            assert_eq!(requested, 1 + page_bytes);
+        }
+        other => {
+            panic!("a candidate over the entry limit only with its pages is refused: {other:?}")
+        }
+    }
+    let after = account.snapshot();
+    assert_eq!(after.retained_bytes, 0);
+    assert_eq!(after.pinned_bytes, page_bytes);
+    assert!(page_classes(&signature)
+        .iter()
+        .all(|class| *class == Some(ChargeClass::Pinned)));
 }
