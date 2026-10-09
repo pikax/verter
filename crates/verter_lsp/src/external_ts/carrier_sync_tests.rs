@@ -611,7 +611,8 @@ fn recorded_ide_surface_hash_equals_the_receipt_stamped_committed_surface() {
         canonical,
         &mut companions,
         None,
-    );
+    )
+    .expect("an unpinned record is never superseded");
 
     let receipt = PendingProviderReady::authorize(
         &test_binding("/workspace/tsconfig.json"),
@@ -815,7 +816,8 @@ fn an_api_surface_recorded_ahead_of_its_publication_is_not_delivered() {
             canonical,
             &mut companions,
             None,
-        );
+        )
+        .expect("an unpinned record is never superseded");
         let snapshot = store
             .current_snapshot(api_path)
             .expect("the publish path records the API surface");
@@ -911,7 +913,8 @@ fn an_unresolved_carriers_live_ide_path_is_not_membership_delivery() {
         canonical,
         &mut companions,
         None,
-    );
+    )
+    .expect("an unpinned record is never superseded");
     let surface = store
         .current_snapshot(ide_path)
         .expect("the publish path records the IDE surface");
@@ -2776,6 +2779,168 @@ async fn a_cold_ide_cache_never_shrinks_the_advertised_companion_set() {
     assert!(
         carrier_ready_in_store(&ws_root, &tsconfig, &ide_path),
         "the IDE companion must be advertised even though the caller had no IDE output in hand"
+    );
+}
+
+/// The ready row the store publishes for `provider` under `tsconfig` — the
+/// bytes, version and map the cross-process plugin serves for that path.
+fn ready_row(
+    ws_root: &str,
+    tsconfig: &str,
+    provider: &str,
+) -> Option<crate::external_ts::carrier_publish_store::ReadyFile> {
+    let manifest = read_store_manifest_strict(ws_root)
+        .unwrap_or_else(|detail| panic!("the store oracle must read the manifest: {detail}"))?;
+    manifest
+        .projects
+        .get(tsconfig)?
+        .ready_files
+        .get(provider)
+        .cloned()
+}
+
+/// An edit that lands between an open carrier's compile pin and the fenced IDE
+/// record makes the compiled companions belong to a revision the editor no
+/// longer holds. The pass must publish NOTHING to the store: the refused record
+/// leaves every LSP-side record on the previous revision, so a stale store row
+/// (the moved revision's carrier geometry under a regressed version) would
+/// disagree with them, and an edit back to the committed text (insert then
+/// undo) would find the carrier "already published" and never repair it — the
+/// provider would keep serving the moved revision's bytes under the live
+/// revision's source map.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compile_of_a_moved_revision_publishes_nothing_to_the_store() {
+    use tower_lsp_server::ls_types::{TextDocumentItem, Uri};
+
+    const SOURCE_A: &str = "<script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+    const SOURCE_B: &str = " <script setup lang=\"ts\">\nconst msg = 'revision-a'\n</script>\n\
+                            <template><div>{{ msg }}</div></template>\n";
+
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec![ws_root.clone()],
+            default_resolve_extensions: None,
+        }));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs));
+    let documents = crate::documents::DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = format!("file:///{source}").parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SOURCE_A.to_string(),
+    });
+    assert!(
+        documents.canonical_id_to_uri(&source).is_some(),
+        "precondition: the carrier is open under its canonical id"
+    );
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let (_ws, snap) = ws_and_snapshot(
+        &ws_root,
+        &[(tsconfig.as_str(), r#"["**/*"]"#)],
+        &[source.as_str()],
+    );
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let membership = || CarrierMembershipCtx {
+        coordinator: &coord,
+        provider_delivery: CarrierProviderDelivery::StoreBacked,
+        activate_provider_member: false,
+    };
+
+    // 1. Revision A publishes under a pin that is still current.
+    let (pin_uri, pin_revision) = documents.open_compile_pin(&source);
+    let (pin_uri, pin_revision) = (
+        pin_uri.expect("the open carrier has a uri"),
+        pin_revision.expect("the open carrier has a revision"),
+    );
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: documents.provider_surfaces(),
+        documents: Some(&documents),
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        open_pin: Some((&pin_uri, &pin_revision)),
+        membership: Some(membership()),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::Published {
+        committed_state, ..
+    } = decision
+    else {
+        panic!("revision A, compiled under a current pin, publishes");
+    };
+    let ide_path = committed_state
+        .ide_path
+        .expect("the carrier has an IDE path");
+    let published_a = ready_row(&ws_root, &tsconfig, &ide_path)
+        .expect("revision A's IDE companion is a ready row");
+
+    // 2. A compile pins revision A again, then an edit to revision B lands
+    //    before the record: the pin no longer matches the live document.
+    let (stale_uri, stale_revision) = documents.open_compile_pin(&source);
+    let (stale_uri, stale_revision) = (stale_uri.unwrap(), stale_revision.unwrap());
+    let _ = documents.did_change(&uri, 2, SOURCE_B);
+    assert!(
+        !documents.compile_pin_is_current(&source, Some((&stale_uri, &stale_revision))),
+        "precondition: the interleaved edit moved the document past the pin"
+    );
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: documents.provider_surfaces(),
+        documents: Some(&documents),
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        open_pin: Some((&stale_uri, &stale_revision)),
+        membership: Some(membership()),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("a compile of a moved revision must not publish");
+    };
+    assert_eq!(
+        admission.settle(not_owned, &source, None),
+        SettleClass::Superseded,
+        "the moved revision is a superseded pass, queued so the live one publishes on its own"
+    );
+    assert_eq!(
+        ready_row(&ws_root, &tsconfig, &ide_path),
+        Some(published_a),
+        "the store must keep serving the last revision the LSP recorded; a refused \
+         IDE record that still reaches the store leaves the provider on bytes no \
+         LSP-side record describes"
     );
 }
 

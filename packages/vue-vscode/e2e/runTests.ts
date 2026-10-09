@@ -534,7 +534,7 @@ async function main() {
         if (typeProvider === "shared-tsgo") {
           const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
           console.log(`  Provisioning ${extension} into the isolated test profile...`);
-          provisionVsCodeExtension({
+          await provisionVsCodeExtension({
             cliArgs: resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath),
             extension,
             extensionsDir: profile.extensionsDir,

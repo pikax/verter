@@ -18,6 +18,7 @@ use oxc_ast::ast::{
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
+use verter_semantic::analysis::flow::{expression_runs_effects, inline_class_evaluation};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
 
@@ -143,17 +144,31 @@ impl<'s> Lowerer<'s> {
         // class site's own footprint, never as sites of their own, so the
         // class value as a whole is what the selection names.
         let selection = self.selection.take();
+        // A local class DECLARATION read as a value whose class-evaluation
+        // positions ran inline at its statement: those effects already
+        // applied there, once, so this read neither re-applies them nor
+        // re-scans them.
+        let evaluated_at_statement = class.r#type == oxc_ast::ast::ClassType::ClassDeclaration
+            && self.lowering_local_classes.last() == Some(&class.span.start)
+            && self
+                .walks
+                .with_node_stack(class.span(), || inline_class_evaluation(class))
+                .is_some();
         let heritage = class
             .heritage
             .as_ref()
             .map(|heritage| &heritage.expression)
             .map(|base| SliceClassHeritage {
-                base: Box::new(self.lower_expr(
-                    unwrap_parenthesized(base),
-                    ExprMode::BindingInit {
-                        preserve_literal: true,
-                    },
-                )),
+                base: Box::new(if evaluated_at_statement {
+                    self.lower_evaluated_heritage(base)
+                } else {
+                    self.lower_expr(
+                        unwrap_parenthesized(base),
+                        ExprMode::BindingInit {
+                            preserve_literal: true,
+                        },
+                    )
+                }),
                 type_arguments: class
                     .heritage
                     .as_ref()
@@ -423,10 +438,12 @@ impl<'s> Lowerer<'s> {
         // unprovable one flags the enclosing statement's typed gap. The
         // `extends` value lowered above as a value of its own, which
         // answers for its own effects.
-        let mut scanner = LeafCallScanner::default();
-        self.walks
-            .with_node_stack(class.span(), || scanner.visit_class_after_heritage(class));
-        self.drain_leaf_call_scanner(scanner);
+        if !evaluated_at_statement {
+            let mut scanner = LeafCallScanner::default();
+            self.walks
+                .with_node_stack(class.span(), || scanner.visit_class_after_heritage(class));
+            self.drain_leaf_call_scanner(scanner);
+        }
         let name: Arc<str> = match (&class.id, assigned_name) {
             (Some(id), _) => Arc::from(id.name.as_str()),
             (None, Some(assigned)) => Arc::from(assigned),
@@ -447,6 +464,42 @@ impl<'s> Lowerer<'s> {
             members: Arc::from(lowered.into_boxed_slice()),
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
         }))
+    }
+
+    /// The VALUE of an `extends` expression whose effects already applied
+    /// at the class statement: a sequence's last operand, an `=`
+    /// assignment's right-hand side. A value that would still run an effect
+    /// is the typed unmodelled expression, never a second application.
+    fn lower_evaluated_heritage(&mut self, base: &Expression<'_>) -> SliceExpr {
+        let mut value = unwrap_parenthesized(base);
+        loop {
+            match value {
+                Expression::SequenceExpression(sequence) => match sequence.expressions.last() {
+                    Some(last) => value = unwrap_parenthesized(last),
+                    None => break,
+                },
+                Expression::AssignmentExpression(assignment)
+                    if assignment.operator == oxc_syntax::operator::AssignmentOperator::Assign =>
+                {
+                    value = unwrap_parenthesized(&assignment.right)
+                }
+                _ => break,
+            }
+        }
+        if self
+            .walks
+            .with_node_stack(value.span(), || expression_runs_effects(value))
+        {
+            return SliceExpr::Gap(
+                verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
+            );
+        }
+        self.lower_expr(
+            value,
+            ExprMode::BindingInit {
+                preserve_literal: true,
+            },
+        )
     }
 
     /// The members one method or accessor group contributes.

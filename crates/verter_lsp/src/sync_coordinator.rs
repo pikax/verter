@@ -2167,6 +2167,9 @@ async fn sync_file(
                 canonical_id,
                 Some(&deps.pending_snapshot_provider_sync),
             );
+            if class == crate::external_ts::SettleClass::Superseded {
+                return SyncFileOutcome::Retry;
+            }
             if class.runs_buffer_cleanup() {
                 if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
                     if !preserve_open_unresolved_carrier(
