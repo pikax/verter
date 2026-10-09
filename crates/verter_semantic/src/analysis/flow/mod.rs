@@ -48,7 +48,12 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::function_program::{FunctionCaptures, FunctionProgramEntry};
 
+pub mod class_evaluation;
 pub mod value_descent;
+
+pub use class_evaluation::{
+    expression_runs_effects, inline_class_evaluation, InlineClassEvaluation,
+};
 
 pub use value_descent::{
     chain_is_call_valued, expression_contains_call, object_entry_descent, object_entry_key,
@@ -1416,7 +1421,8 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
     // BLOCK, which no index record serves. A class holding either records
     // itself as an unserved callable; any other adds no callable of its
     // own. A class DECLARATION binds a name instead and is never walked
-    // here.
+    // here (`visit_statement` records its inline class-evaluation
+    // positions).
     //
     // The class's VALUE positions read this frame: its decorators, its
     // `extends` value, its computed keys and its static initializers run
@@ -1501,6 +1507,23 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                         None,
                         false,
                     );
+                }
+                // The class-evaluation positions that run inline are this
+                // frame's footprint, in source order: the `extends` value
+                // as a root site, each static block as a nested block.
+                if let Some(inline) = inline_class_evaluation(class) {
+                    if let Some(heritage) = inline.heritage {
+                        self.open_root_site(heritage);
+                    }
+                    for block in inline.static_blocks {
+                        self.open_region(
+                            SkeletonRegionKind::Block,
+                            verter_span::Span::new(block.span.start, block.span.end),
+                            None,
+                        );
+                        self.visit_statement_list(&block.body);
+                        self.close_region();
+                    }
                 }
             }
             // A local `enum` / `namespace` / `import =` declares a VALUE
