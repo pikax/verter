@@ -141,6 +141,69 @@
         }
       }
     },
+    "tsrust": {
+      "kind": "checker",
+      "name": "ts-rust",
+      "project": "pingdotgg/ts-rust",
+      "license": "MIT AND Apache-2.0",
+      "pin": "v0.1.0",
+      "commit": "72b339e412f2560549033cea8db337b1bd44c312",
+      "format": "tsc",
+      "argv": [
+        "-p",
+        "{tsconfig}",
+        "--pretty",
+        "false"
+      ],
+      "answers": "a Rust port of tsc 7 with its command line (`tsc-rs`): the measuring program's TS2322 head line prints the probe's type",
+      "smoke": {
+        "argv": [
+          "-p",
+          "{tsconfig}",
+          "--pretty",
+          "false"
+        ],
+        "expect": "smoke.ts(1,14): error TS2322"
+      },
+      "platforms": {
+        "win32-x64": {
+          "source": {
+            "type": "git",
+            "url": "https://github.com/pingdotgg/ts-rust.git",
+            "commit": "72b339e412f2560549033cea8db337b1bd44c312"
+          },
+          "build": [
+            "cargo",
+            "build",
+            "--profile",
+            "goport",
+            "--locked",
+            "-p",
+            "ts_goport",
+            "--bin",
+            "tsgo",
+            "--no-default-features"
+          ],
+          "binary": "target/goport/tsgo.exe"
+        },
+        "darwin-arm64": {
+          "source": {
+            "type": "archive",
+            "url": "https://github.com/pingdotgg/ts-rust/releases/download/v0.1.0/tsc-rs-0.1.0-darwin-arm64.tar.gz",
+            "sha256": "96920e12262ebe390dfa4876c3cf8ed03aa594ce99222a00e0f1517e945ba205"
+          },
+          "binary": "tsc-rs-0.1.0-darwin-arm64/tsc"
+        },
+        "linux-x64": {
+          "source": {
+            "type": "archive",
+            "url": "https://github.com/pingdotgg/ts-rust/releases/download/v0.1.0/tsc-rs-0.1.0-linux-x64.tar.gz",
+            "sha256": "11dc30c9e69082acc9d9e05cd562e1334d361342b09950da58a6709adef4fda2"
+          },
+          "binary": "tsc-rs-0.1.0-linux-x64/tsc"
+        }
+      }
+    },
     "biome": {
       "kind": "linter",
       "name": "Biome",

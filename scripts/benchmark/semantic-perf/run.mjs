@@ -146,7 +146,7 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
   --no-skip-after-kill    re-run every invocation of an arm whose warmup was killed at the memory cap
                           (by default the rest are recorded as skipped: a memory kill is deterministic)
   --oss [a,b]             also run the pinned open-source tools (all, or the named ones: tsz,
-                          bamtiscript, ezno, biome), each in a separate section
+                          bamtiscript, ezno, tsrust, biome), each in a separate section
                           (docs/contributing/semantic-benchmark-oss.md); provisioned into target/oss-tools
                           on first use. The type checkers run whole program on the measuring program beside
                           tsc -p and a one-shot Verter process answering the demand; Biome, which has

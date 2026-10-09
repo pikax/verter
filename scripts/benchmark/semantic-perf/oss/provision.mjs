@@ -153,14 +153,35 @@ function toolchainIdentity(dir, env) {
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
-/** The smoke program: one type error a checker must report on its line. */
+/**
+ * The smoke program: one type error a checker must report on its line. The
+ * library declares the global types tsc requires under `noLib`; without
+ * them tsc reports only TS2318 and never checks `smoke.ts`.
+ */
 export const SMOKE_FILES = {
   "tsconfig.json":
     JSON.stringify(
-      { compilerOptions: { strict: true, noLib: true, noEmit: true }, files: ["smoke.ts"] },
+      {
+        compilerOptions: { strict: true, noLib: true, noEmit: true },
+        files: ["lib.smoke.d.ts", "smoke.ts"],
+      },
       null,
       2,
     ) + "\n",
+  "lib.smoke.d.ts": [
+    "Array<T>",
+    "Boolean",
+    "CallableFunction",
+    "Function",
+    "IArguments",
+    "NewableFunction",
+    "Number",
+    "Object",
+    "RegExp",
+    "String",
+  ]
+    .map((name) => `interface ${name} {}\n`)
+    .join(""),
   "smoke.ts": "export const x: string = 1;\n",
 };
 

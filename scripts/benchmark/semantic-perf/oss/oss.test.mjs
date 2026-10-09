@@ -71,7 +71,7 @@ const reference = (text, codes = [], errorAny = false) => ({
 
 test("every pinned tool names an exact commit, a license and a verified source per platform", () => {
   const tools = loadTools();
-  assert.deepEqual(Object.keys(tools).sort(), ["bamtiscript", "biome", "ezno", "tsz"]);
+  assert.deepEqual(Object.keys(tools).sort(), ["bamtiscript", "biome", "ezno", "tsrust", "tsz"]);
   for (const [id, tool] of Object.entries(tools)) {
     assert.match(tool.commit, /^[0-9a-f]{40}$/, `${id} commit`);
     assert.ok(tool.pin && tool.license && tool.project, `${id} pin, license, project`);
@@ -183,7 +183,7 @@ test("--oss and --biome are opt-in: a default run's options are unchanged", () =
   assert.deepEqual([noDemand.arms, noDemand.oss, noDemand.noDemand], [[], [], true]);
   assert.throws(() => parseArgs(["--no-demand"]), /nothing to run/);
   const tools = loadTools();
-  assert.deepEqual(selectCheckers(tools, []), ["tsz", "bamtiscript", "ezno"]);
+  assert.deepEqual(selectCheckers(tools, []), ["tsz", "bamtiscript", "ezno", "tsrust"]);
   assert.deepEqual(selectCheckers(tools, ["ezno", "tsz"]), ["tsz", "ezno"]);
 });
 

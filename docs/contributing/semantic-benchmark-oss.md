@@ -7,7 +7,7 @@ tools to the same run — all of them, or a comma-separated subset
 
 | Tool | Section |
 |---|---|
-| `tsz`, `bamtiscript`, `ezno` | the type checkers, whole program, on the program tsc's reference answers were measured on, beside `tsc -p` and a one-shot Verter process answering the demand |
+| `tsz`, `bamtiscript`, `ezno`, `tsrust` | the type checkers, whole program, on the program tsc's reference answers were measured on, beside `tsc -p` and a one-shot Verter process answering the demand |
 | `biome` | semantic only: Biome has no type query, so Biome, Verter and tsc answer whether the declared type of `__Probe` is Promise-like, on a paired catalog (`--biome` alone selects just this section) |
 
 Biome cannot join the checkers' section: that section reads each tool's
@@ -60,9 +60,10 @@ The rules of the main benchmark hold for every third-party tool:
 | [tsz](https://github.com/tsz-org/tsz) | v0.1.75 | Apache-2.0 | release archive | release archive | a tsc-compatible CLI: the measuring program's diagnostics, in tsc's format |
 | [bamTiScript](https://github.com/gosuda/bamTiScript) (`bamts`) | commit `60003d0f` (no releases) | MIT | built from source; **does not run**: its file system rejects every Windows drive path (`TS5083: platform path prefix is unsupported`) | built from source | a tsc-compatible CLI (`--noEmit`), as tsz |
 | [Ezno](https://github.com/kaleidawave/ezno) | 0.0.23 | MIT | release binary | built from source at the release commit (no macOS release) | diagnostics only, in its own format (no TypeScript codes); it cannot read the benchmark library (its definition files use their own format), so its rows are findings |
+| [ts-rust](https://github.com/pingdotgg/ts-rust) (`tsc-rs`) | v0.1.0 | MIT AND Apache-2.0 | built from source at the release commit (no Windows release): the shipped `goport` profile, without jemalloc (not used on Windows) | release archive | a Rust port of tsc 7 (`typescript-go`) with its command line: the measuring program's diagnostics, in tsc's format |
 | [Biome](https://biomejs.dev) | 2.5.15 | MIT OR Apache-2.0 | release binary | release binary | no type query; its type inference answers only through type-aware lint rules (`--biome`) |
 
-A checker's language server (tsz and bamTiScript have one) could answer a
+A checker's language server (tsz, bamTiScript and ts-rust have one) could answer a
 per-alias hover, but hover text elides large types and each server prints
 its own form, so the benchmark uses the one channel every CLI shares with
 tsc's reference: diagnostics on the measuring program.
@@ -177,7 +178,8 @@ its pinned sha256; a source build clones the pinned commit, verifies
 and deadline as above, a constructed environment, `CARGO_INCREMENTAL=0`,
 the tool's own `rust-toolchain` file). Every provisioned tool then passes a
 **smoke check** under the supervisor: one one-line program with one type
-error, which it must report. The directory ends with `provenance.json` (what
+error, which it must report (beside a minimal library of the global types
+tsc requires under `noLib`, without which tsc reports only TS2318). The directory ends with `provenance.json` (what
 was fetched or built, the smoke result and the binary's sha256) or
 `unavailable.json` (the platform and the reason), and a run refuses a binary
 whose hash no longer matches its record.
