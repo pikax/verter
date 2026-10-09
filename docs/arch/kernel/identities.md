@@ -73,7 +73,9 @@ never contains. The short form:
   Changing one input changes exactly the identities derived from it, directly
   or through another identity, and nothing else. A new release yields new
   semantic profile, attachment, capability and catalog identities; the carrier,
-  source unit and region stay equal (`VC11`).
+  source unit and region stay equal (`VC11`). VID0T proves the release,
+  profile and attachment half; COX0 (`COX0-AC2`) proves the capability change
+  and CPF1 (`CPF1-AC2`) the catalog change.
 - **R03.** A display family (a `FrameworkTag` value, an adapter spelling, a
   file extension) is presentation only. It is never a dispatch key or a cache
   key.
@@ -163,7 +165,7 @@ deletion owner.
 | `V-D03` | Wire `FrameworkTag` used as an adapter identity in `tag_disposition` | retag: the tag stays a display family; the exact profile travels beside it | REG0 (`REG0-AC2`) |
 | `V-D04` | Four producer-specific `SourceId` domains for one carrier file (compiler assembly logical source, Vue main assembly, Svelte main assembly, Vue custom blocks) | replace with one minter per logical source | CPF1 (`CPF1-AC1`) |
 | `V-D05` | Svelte release admission by string prefix (`major == "5"`) in the LSP asset loader | replace: the loader reads the admitted release from the activation record | FWA1 (`FWA1-AC1`) |
-| `V-D06` | Untyped `ProjectStableKey::{Configured, Fallback}(Hash16)` as the cross-snapshot project key | retag to `ConfiguredProjectId`; the fallback arm becomes PM1's inferred-project identity | PM1 (`PM1-AC1`) |
+| `V-D06` | Untyped `ProjectStableKey::{Configured, Fallback}(Hash16)` as the cross-snapshot project key | retag to `ConfiguredProjectId`; the fallback arm becomes PM1's inferred-project identity | PM1 (`PM1-AC-R1`: the path-derived key is a planted path-only identity) |
 
 The inventory references UAK0's routes for the identity concerns they already
 own, and maps every deletion category this decision must inventory:

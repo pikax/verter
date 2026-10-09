@@ -142,8 +142,13 @@
       "forbidden": "A dependent identity left unchanged, aliasing two releases in one key; a carrier, source or region identity that changes with the release",
       "rules": ["R02", "R05", "R15"],
       "existingEvidence": [],
+      "note": "Split by implementation owner. VID0T proves the carrier/source/region equality and the ReleaseId, FrameworkProfileId and AttachmentId change on the identity types it defines. The profile-qualified CapabilityId change is proved by COX0, which retags CapabilityId, and the CatalogSnapshot identity change by CPF1, which implements the catalog; neither is proved through a substitute encoder in VID0T.",
       "executableOwner": "VID0T",
-      "receivingAcceptance": "VID0T-AC3"
+      "receivingAcceptance": "VID0T-AC3",
+      "capabilityOwner": "COX0",
+      "capabilityAcceptance": "COX0-AC2",
+      "catalogOwner": "CPF1",
+      "catalogAcceptance": "CPF1-AC2"
     }
   ]
 }

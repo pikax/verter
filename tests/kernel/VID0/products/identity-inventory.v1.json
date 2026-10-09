@@ -352,7 +352,11 @@
       "rule": "Each identity is minted from the inputs its row lists in derivedFrom and nothing else. Changing one input changes exactly the identities that derive from it, directly or transitively, and no other: a new ReleaseId yields new FrameworkProfileId, AttachmentId, profile-qualified CapabilityId and CatalogSnapshot identities, while CarrierProfileId, SourceUnitId and RegionId stay equal. Carrier, release, attachment, project profile, configured project, snapshot and capability never vary through an input their row does not list.",
       "executableOwner": "VID0T",
       "receivingAcceptance": "VID0T-AC3",
-      "note": "Case VC11 is the smallest discriminator: carrier and source fixed, ReleaseId changed."
+      "capabilityOwner": "COX0",
+      "capabilityAcceptance": "COX0-AC2",
+      "catalogOwner": "CPF1",
+      "catalogAcceptance": "CPF1-AC2",
+      "note": "Case VC11 is the smallest discriminator: carrier and source fixed, ReleaseId changed. VID0T proves the change on the identities it defines (ReleaseId, FrameworkProfileId, AttachmentId) and the carrier/source/region equality; the profile-qualified CapabilityId change belongs to COX0 (I10) and the CatalogSnapshot identity change to CPF1 (I09)."
     },
     {
       "id": "R03",
@@ -1000,7 +1004,8 @@
         "VID0T",
         "PM1"
       ],
-      "receivingAcceptance": "PM1-AC1"
+      "receivingAcceptance": "PM1-AC-R1",
+      "receivingNote": "ProjectStableKey is hashed from workspace_root and tsconfig_path, a path-only identity. PM1-AC-R1 rejects a planted path-only project identity, so ProjectStableKey surviving beside ConfiguredProjectId fails it; PM1-AC1 (deterministic membership) does not discriminate the retag."
     }
   ],
   "referencedRoutes": [
