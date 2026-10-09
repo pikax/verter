@@ -124,9 +124,7 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
             let candidate = match kind(member) {
                 Some(SemanticNodeData::TemplateLiteral { .. })
                 | Some(SemanticNodeData::IntrinsicApplication { .. }) => {
-                    let binding_guard = self.binding.disable();
                     let step = self.execute_relate_pair(slice, member);
-                    drop(binding_guard);
                     match step {
                         RelationStep::Assignable { .. } => {
                             Some((CaptureTier::TemplateOrMapping, slice))
@@ -336,9 +334,7 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
             let Some(&constraint) = constraints.get(&binding.param) else {
                 continue;
             };
-            let binding_guard = self.binding.disable();
             let step = self.execute_relate_pair(binding.bound, constraint);
-            drop(binding_guard);
             match step {
                 RelationStep::Assignable { .. } => {}
                 RelationStep::NotAssignable => binding.bound = constraint,

@@ -134,6 +134,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             cache_suppress: read.cache_suppress || is_fallback || defensive,
             result_is_partial: read.result_is_partial || defensive,
             partial_reasons,
+            receipt: read.receipt,
         }
     }
 

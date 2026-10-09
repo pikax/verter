@@ -5248,6 +5248,8 @@ impl ResultCompleteness {
     }
 }
 
+pub use crate::project_semantic_dispatch::cost_receipt::ReadReceipt;
+
 /// Returned by cache reads so callers can fold transitive dep facts into
 /// their dependency-fact set for the publish-side completion-fence
 /// revalidation.
@@ -5316,6 +5318,13 @@ pub struct CacheRead<T> {
     /// [`Self::partial_reason_classes`], which substitutes the bridge for
     /// a producer that genuinely could not name one.
     pub partial_reasons: PartialReasonSet,
+    /// **The value's cost receipt.** A stored, joined or freshly built
+    /// result is [`ReadReceipt::Priced`] with what computing it cost: the
+    /// consumer replays it into its connected demand before using the
+    /// value and records it as a prerequisite. Reads that carry no
+    /// computation (recursion carriers, cancellation, typed refusals) are
+    /// [`ReadReceipt::Unpriced`].
+    pub receipt: ReadReceipt,
 }
 
 impl<T> CacheRead<T> {
@@ -5333,6 +5342,23 @@ impl<T> CacheRead<T> {
             cache_suppress: false,
             result_is_partial: false,
             partial_reasons: PartialReasonSet::empty(),
+            receipt: ReadReceipt::Unpriced,
+        }
+    }
+
+    /// The same envelope over `f(value)`: a typed payload read keeps the
+    /// validity, quality and receipt of the stored result it came from.
+    #[inline]
+    #[must_use]
+    pub fn map_value<U>(self, f: impl FnOnce(T) -> U) -> CacheRead<U> {
+        CacheRead {
+            value: f(self.value),
+            dep_signature: self.dep_signature,
+            walker_diagnostics: self.walker_diagnostics,
+            cache_suppress: self.cache_suppress,
+            result_is_partial: self.result_is_partial,
+            partial_reasons: self.partial_reasons,
+            receipt: self.receipt,
         }
     }
 

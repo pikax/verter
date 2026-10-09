@@ -4141,6 +4141,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             cache_suppress: read.cache_suppress || !value.is_decided() || defensive,
             result_is_partial: read.result_is_partial || defensive,
             partial_reasons,
+            receipt: read.receipt,
         }
     }
 }

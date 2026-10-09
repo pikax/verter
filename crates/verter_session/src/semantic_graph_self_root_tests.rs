@@ -857,7 +857,10 @@ fn relation_memo_warm_read_validates_self_root() {
     );
 
     assert!(
-        store.get_relation_payload(ctx, &key).is_none(),
+        store
+            .get_relation_payload(ctx, &key)
+            .map(|served| served.value)
+            .is_none(),
         "the relation memo's warm read MUST validate the stored entry's self-version-rooted \
          carrier strictly — an entry self-rooted on an untracked canonical must miss",
     );
@@ -893,7 +896,9 @@ fn relation_memo_warm_read_serves_validated_entry() {
         host.project_type_store().current_project_generation(),
     );
 
-    let cached = store.get_relation_payload(ctx, &key);
+    let cached = store
+        .get_relation_payload(ctx, &key)
+        .map(|served| served.value);
     assert!(
         matches!(
             cached.as_ref().map(|payload| &payload.outcome),
@@ -928,7 +933,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
 ///    iterates an empty fact rail and accepts vacuously. Stale-by-
 ///    generation entry warm-hits.
 ///
-/// DISCRIMINATES: pre-fix, `graph.get_validated(&key, &host)` returns
+/// DISCRIMINATES: pre-fix, `graph.get_validated(&key, &host).map(|served| served.value)` returns
 /// `Some(...)` because the bare bump leaves the entry physically
 /// resident and `validate_with_self_roots` accepts an empty fact rail.
 /// Post-fix, `dep_signature_to_fact_signature(&output.dep_signature)`

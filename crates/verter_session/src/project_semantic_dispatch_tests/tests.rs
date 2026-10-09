@@ -1523,6 +1523,10 @@ fn scc_member_drain_inherits_the_root_candidate_without_a_race() {
     let member = graph
         .relation_published_carrier(&member_key)
         .expect("member publication");
+    assert!(
+        Arc::ptr_eq(&member.cost_receipt, &root.cost_receipt),
+        "an SCC member shares the component root's sealed receipt"
+    );
     assert_eq!(
         (
             member.read_set_signature.facts,
@@ -1649,6 +1653,7 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
         assert_eq!(exact_root.validated_at_generation, root_generation);
         let warmed = graph
             .get_relation_payload(&warm_host, &root_key)
+            .map(|served| served.value)
             .expect("the sibling must validate in the warm reader's generation");
         assert_eq!(warmed.outcome, RelationOutcome::NotAssignable);
         barrier.wait();
@@ -2354,6 +2359,78 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
     assert!(
         completed.graph_carrier.is_none(),
         "an over-cap carrier must not be broadcast or published",
+    );
+}
+
+/// A budget-refused build whose tracer finalised cleanly but whose observed
+/// self-roots conflict — one canonical seen at two whole hashes — carries
+/// its traced facts on a broadcast-only carrier, which never certifies a
+/// sealed refusal: the strict self-roots a delivery would validate were
+/// never completed. The same refusal over consistent self-roots does.
+#[test]
+fn a_torn_self_root_never_certifies_a_refusal() {
+    use verter_type_engine::project_semantic_dispatch::finalised_build_certifies_refusal_for_tests;
+    let canonical = "/w/refusal-roots.ts";
+    let host = host();
+    upsert_ts(&host, canonical, "export type Root = string;\n");
+    let before = host
+        .ensure_indexed_ready(canonical)
+        .expect("the root is indexed")
+        .whole_hash;
+    upsert_ts(&host, canonical, "export type Root = number;\n");
+    let after = host
+        .ensure_indexed_ready(canonical)
+        .expect("the root is indexed")
+        .whole_hash;
+    assert_ne!(before, after);
+    let refused = |roots: Vec<(Arc<str>, _)>| {
+        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
+            (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
+        output.mark_partial_with(
+            verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+        );
+        output.observed_self_roots = roots;
+        output
+    };
+    let traced = || {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(Vec::new()))
+    };
+
+    let torn = || {
+        refused(vec![
+            (Arc::from(canonical), before),
+            (Arc::from(canonical), after),
+        ])
+    };
+    let broadcast = finalise_traced_build_output(
+        &host,
+        torn(),
+        traced(),
+        &host.provenance.engine,
+        &CarrierNormalizationPrelude::none(),
+        false,
+    );
+    assert!(
+        broadcast.graph_carrier.is_some(),
+        "the torn build still broadcasts its traced facts to joiners"
+    );
+    assert!(
+        !finalised_build_certifies_refusal_for_tests(
+            &host,
+            torn(),
+            traced(),
+            &host.provenance.engine
+        ),
+        "a broadcast-only carrier never certifies a refusal"
+    );
+    assert!(
+        finalised_build_certifies_refusal_for_tests(
+            &host,
+            refused(vec![(Arc::from(canonical), after)]),
+            traced(),
+            &host.provenance.engine
+        ),
+        "a refusal over its completed self-roots does"
     );
 }
 
@@ -14974,7 +15051,10 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
         "the raced cold result still returns to its owning request"
     );
     assert!(
-        graph.get_relation_payload(&host, &key).is_none(),
+        graph
+            .get_relation_payload(&host, &key)
+            .map(|served| served.value)
+            .is_none(),
         "an aborted cold binding owner must not resurrect a warm relation entry"
     );
 }
@@ -16109,7 +16189,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
 /// and complete reverse recovery outranks partial recovery.
 #[test]
 fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
-    use super::dispatch_txn::InferenceCandidate;
+    use super::inference::session::InferenceCandidate;
     use verter_type_engine::semantic_query::InferenceCandidatePriority;
 
     let host = host();

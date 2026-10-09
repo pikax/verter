@@ -6986,13 +6986,10 @@ fn indexed_value_step<'a>(
     let input = match indexed_value_disposition(expr) {
         IndexedValueDisposition::Asserted(input) => {
             // The assertion supplies the result; its operand's binding does not.
-            return IndexedValueStep::Lowered(
-                lower_value_expression_with_read_root(input, source, policy, read_root)
-                    .map(IndexedValueExpression::Value)
-                    .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                        PrimitiveName::Any,
-                    ))),
-            );
+            return IndexedValueStep::Lowered(lowered_or_unsupported(
+                lower_value_expression_with_read_root(input, source, policy, read_root),
+                expr,
+            ));
         }
         // `… as const` over a literal keeps the literal it spells, readonly:
         // the operand is inferred in the const context the assertion opens.
@@ -7005,13 +7002,10 @@ fn indexed_value_step<'a>(
             | Expression::BooleanLiteral(_)
             | Expression::TemplateLiteral(_),
         ) if expr_is_const_asserted(expr, source) => {
-            return IndexedValueStep::Lowered(
-                lower_value_expression_with_read_root(expr, source, policy, read_root)
-                    .map(IndexedValueExpression::Value)
-                    .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                        PrimitiveName::Any,
-                    ))),
-            );
+            return IndexedValueStep::Lowered(lowered_or_unsupported(
+                lower_value_expression_with_read_root(expr, source, policy, read_root),
+                expr,
+            ));
         }
         IndexedValueDisposition::Inferred(input) => input,
     };
@@ -7057,12 +7051,27 @@ fn indexed_value_step<'a>(
                 point: unwrapped.span().start,
             }
         }
-        unwrapped => lower_value_expression_with_read_root(unwrapped, source, policy, read_root)
-            .map(IndexedValueExpression::Value)
-            .unwrap_or(IndexedValueExpression::Value(TypeExpr::Primitive(
-                PrimitiveName::Any,
-            ))),
+        unwrapped => lowered_or_unsupported(
+            lower_value_expression_with_read_root(unwrapped, source, policy, read_root),
+            unwrapped,
+        ),
     })
+}
+
+/// A value expression's lowering, or — when value inference exhausted its
+/// work or depth fuse — the typed refusal of an expression outside the
+/// indexed domain. An exhausted fuse is unfinished inference, never an
+/// `any` the expression has: a fabricated `any` argument would complete
+/// its call's inference with no candidate.
+fn lowered_or_unsupported(
+    lowered: InferenceResult<TypeExpr>,
+    expr: &Expression<'_>,
+) -> IndexedValueExpression {
+    lowered
+        .map(IndexedValueExpression::Value)
+        .unwrap_or(IndexedValueExpression::UnsupportedCall {
+            point: expr.span().start,
+        })
 }
 
 /// The authored literal shape of one argument position — the ONE

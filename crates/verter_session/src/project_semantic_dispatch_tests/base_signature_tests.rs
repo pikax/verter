@@ -209,3 +209,86 @@ fn a_builtin_nominal_application_settles_on_its_carrier() {
         other => panic!("Promise<number> settles on its carrier, got {other:?}"),
     }
 }
+
+/// The binder-collection work of inferring `(...a: infer A) => infer R`
+/// from `g<T0, …, Tn-1>(a0: T0, …): [T0, …]`, and the answer.
+fn base_signature_inference(arity: usize) -> (usize, String) {
+    let params: Vec<String> = (0..arity).map(|i| format!("T{i}")).collect();
+    let source = format!(
+        "export declare function g<{}>({}): [{}];\n\
+         export type R = typeof g extends (...a: infer A) => infer R ? R : never;\n",
+        params.join(", "),
+        params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("a{i}: {p}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        params.join(", "),
+    );
+    let canonical = "/w/base_signature_work.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.to_string(),
+            source: Arc::from(source.as_str()),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert the fixture");
+    let before =
+        verter_type_engine::project_semantic_dispatch::build::binder_collection_visits_for_tests();
+    let (outcome, _record) = host
+        .resolve_named_symbol_with_audit(canonical, "R", Some(ProjectionMode::Expanded))
+        .into_parts();
+    let visits =
+        verter_type_engine::project_semantic_dispatch::build::binder_collection_visits_for_tests()
+            - before;
+    let node = outcome.ok().flatten().expect("R resolves");
+    let expr = host
+        .project_node_to_type_expr_for_test(node)
+        .expect("R projects to a TypeExpr");
+    (visits, print(&expr))
+}
+
+/// A generic source inferred through its base signature computes the
+/// clause's base constraints once per signature: the binder-collection
+/// work grows quadratically in the clause length (each of `n` positions
+/// against `n` names), never with a power per position and per round.
+/// Re-deriving the substitution for every parameter and running all
+/// `N - 1` sibling rounds when the first changes nothing made it grow as
+/// `n^4`.
+///
+/// Measured on TypeScript 7.0.2 (the benchmark's `base-signature-*`
+/// scenarios): `R` is `[unknown, …]`, one `unknown` per type parameter.
+#[test]
+fn base_signature_inference_work_grows_quadratically_in_the_clause() {
+    let mut visits = Vec::new();
+    for arity in [10, 50, 100] {
+        let (work, printed) = base_signature_inference(arity);
+        assert_eq!(
+            printed,
+            format!("[{}]", vec!["unknown"; arity].join(", ")),
+            "R over {arity} type parameters: TypeScript 7.0.2 prints one `unknown` per parameter"
+        );
+        assert!(work > 0, "the clause instantiation collects binders");
+        visits.push(work);
+    }
+    // Five times the clause is at most 25 times the work (quadratic, with
+    // slack); a cubic path would be 125 times.
+    assert!(
+        visits[1] <= visits[0] * 30,
+        "10 -> 50 type parameters: {} -> {} binder-collection visits",
+        visits[0],
+        visits[1]
+    );
+    // Twice the clause is at most four times the work; a cubic path would
+    // be eight times.
+    assert!(
+        visits[2] <= visits[1] * 5,
+        "50 -> 100 type parameters: {} -> {} binder-collection visits",
+        visits[1],
+        visits[2]
+    );
+}
