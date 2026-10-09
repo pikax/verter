@@ -414,7 +414,9 @@ fn named_slot_loop_cannot_shadow_the_parent_inference_input() {
     let capture = result
         .find("componentConstructor(MyComp)")
         .expect("parent inference");
-    let child_loop = result.find(".map(").expect("named slot loop");
+    let child_loop = result
+        .find("___VERTER___flowEach")
+        .expect("named slot loop");
     assert!(
         capture < child_loop,
         "the parent input must be captured before the shadowing loop: {result}"
@@ -635,10 +637,10 @@ fn v_slot_with_v_for() {
         &[("items", BindingType::SetupConst)],
     );
     eprintln!("v-for + v-slot output: {}", result);
-    // Both v-for map and v-slot IIFE should be present
+    // Both the v-for frame and the v-slot frame should be present
     assert!(
-        result.contains(".map("),
-        "v-for should produce .map(): {result}"
+        result.contains("___VERTER___flowEach1(___VERTER___v0)"),
+        "v-for should produce a frame: {result}"
     );
     assert!(
         result.contains("extractArgumentsFromRenderSlot"),
