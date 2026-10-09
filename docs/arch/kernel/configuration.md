@@ -28,7 +28,7 @@ The reviewed contract data lives in `tests/kernel/CFG0/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `configuration-inventory.v1.json` | Contract rules `CR01`–`CR24`, outcomes `CF-O01`–`CF-O14`, consumers `CF-C01`–`CF-C19`, retained host inputs `CF-H01`–`CF-H04`, displaced routes `CF-D01`–`CF-D10`, the UAK0 routes it references, coverage of each deletion category, empty populations, closed binding `G01` (owner CFG1), findings and transferred obligations |
+| `configuration-inventory.v1.json` | Contract rules `CR01`–`CR24`, outcomes `CF-O01`–`CF-O14`, consumers `CF-C01`–`CF-C19`, retained host inputs `CF-H01`–`CF-H04`, displaced routes `CF-D01`–`CF-D10`, the UAK0 routes it references, coverage of each deletion category, empty populations, the open binding gap `G01`, findings and transferred obligations |
 | `configuration-case-table.v1.json` | Cases `CC01`–`CC17`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable |
 
 Every `successorPath` starts at CFG0 and follows predecessor edges in the
@@ -350,21 +350,18 @@ their owners and never enter an effective configuration:
   `CompileProfile`. Their option vocabulary is CMP0's; CMP0-F assigns any
   later move to a profile-scoped key.
 
-## Loader owner
+## Open binding gap
 
-**`G01` is closed.** Operator ruling `cfg0-envelope-loader-owner` assigns the
-`verter.config.jsonc` envelope loader to implementation node CFG1. CFG1's
-predecessors are CFG0 and BR0, and CFG1 lands after CFG0. No production code
-reads `verter.config.jsonc` at this head; CFG1 is the owner that will.
-`CFG1-AC1` covers envelope parsing (`CR01`–`CR04`) and fail-closed outcomes
-(`CF-O01`, `CF-O04`). `CFG1-AC2` covers the precedence merge and provenance
-(`CR05`–`CR12`; `CF-O02`, `CF-O03`). `CFG1-AC3` covers the
-effective-configuration key, read set and invalidation (`CR13`–`CR17`;
-`CF-O06`). `CFG1-AC4` covers the user layer and NAPI/WASM prepared inputs
-(`CR22`, `CR23`; `CF-O07`, `CF-O14`). UAO0 does not implement the loader.
-CENV1C, FWA1, LNTCFG0, FCFG0, INT5, EDOC1 and COXD2 are ordered after CFG1,
-and so are UAO0's executable configuration cases. Every outcome has one
-implementation owner.
+**`G01` — the envelope loader has no implementation owner.** No production
+code reads `verter.config.jsonc` at this head, and no plan node owns the
+loader: envelope parsing (`CR01`–`CR04`), the base-section schemas, the
+precedence merge (`CR05`–`CR12`), the effective-configuration key and read set
+(`CR13`–`CR17`), the user layer and prepared inputs (`CR22`, `CR23`). The
+charter's 2026-10-02 amendment records this finite gap. It covers `CF-O01`,
+`CF-O02`, `CF-O03`, `CF-O04`, `CF-O06`, `CF-O07` and `CF-O14`. Their
+implementation ownership is unresolved under that exception. UAO0 reports a
+missing loader as a finding against this binding table and does not implement
+it. Every other outcome has one owner.
 
 ## Findings recorded for the receiving owners
 
@@ -377,16 +374,15 @@ implementation owner.
   `workspace/didChangeConfiguration` handler. The VS Code client restarts the
   server for some settings and does nothing for others (`CF-D10`).
 - **The `.verterrc.json` `ssr` key has no successor key.** `CF-D01`'s lint
-  and ignore keys move to `lint`; its `ssr` key waits on CFG1, the envelope
-  owner.
+  and ignore keys move to `lint`; its `ssr` key waits on `G01`.
 - **Settings sent and never read.** `initializationOptions.frameworks` (UAK0
   `D09`) and `initializationOptions.configuration` (UAK0 `D10`).
 
 ## Empty populations
 
 - **No `verter.config.*` loader.** The only mention is a design note in
-  `docs/plans/framework-plugin-system.md`. CFG1 owns the loader; this head
-  has none to delete.
+  `docs/plans/framework-plugin-system.md`. The gap is `G01`; this head has
+  none to delete.
 - **No ambient global configuration.** No production code reads
   `dirs::home_dir`, XDG directories or `~/.config`. `HOME` is read only to
   locate Node (`CF-H03`).
@@ -406,11 +402,11 @@ Evidence selection: the change adds contract text and data only, so existing
 coverage and bounded inspection discriminate it. The diff adds no test.
 
 - **AC1 — ownership contract.** The inventory binds every outcome, consumer
-  and displaced route to one implementation owner, a successor path from CFG0
-  and a receiving acceptance ID. The loader outcomes bind to CFG1 under
-  operator ruling `cfg0-envelope-loader-owner`: `CFG1-AC1` (`CF-O01`,
-  `CF-O04`), `CFG1-AC2` (`CF-O02`, `CF-O03`), `CFG1-AC3` (`CF-O06`) and
-  `CFG1-AC4` (`CF-O07`, `CF-O14`), on the path CFG0 → CFG1.
+  and displaced route to one existing plan node, a successor path from CFG0
+  and a receiving acceptance ID, except the loader outcomes held by `G01`
+  (`CF-O01`, `CF-O02`, `CF-O03`, `CF-O04`, `CF-O06`, `CF-O07`, `CF-O14`).
+  Their implementation ownership is unresolved. UAO0 reports that gap and
+  does not implement the loader.
   The executable validator is UAO0's (`UAO0-AC-R1`), and so are the
   precedence, fail-closed, provenance and invalidation fixtures: `CC01`–`CC04`,
   `CC06`, `CC07` and `CC13` (`UAO0-AC-R2`). Every other case names its own

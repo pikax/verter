@@ -7,7 +7,7 @@
     "date": "2026-10-09"
   },
   "companionInventory": "configuration-inventory.v1.json",
-  "rule": "Each case states its input, the required outcome and the forbidden outcome, and names the node whose test makes it executable. CFG0 ships no test; the executable owner adds it. Cases owned by UAO0 run under UAO0-AC-R2 and need CFG1's loader (CFG1-AC1 through CFG1-AC4). UAO0 does not implement the loader. CFG1 lands after CFG0.",
+  "rule": "Each case states its input, the required outcome and the forbidden outcome, and names the node whose test makes it executable. CFG0 ships no test; the executable owner adds it. Cases owned by UAO0 run under UAO0-AC-R2 and need the G01 loader; UAO0 reports a missing loader as a finding rather than implementing it.",
   "cases": [
     {
       "id": "CC01",
