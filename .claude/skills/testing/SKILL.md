@@ -343,8 +343,9 @@ are structurally eliminated repo-wide.)
   regardless. That plant deliberately bypasses the clippy `disallowed-macros` rail described above: the
   two rails are independent, and this one has to hold on its own for the `#[cfg(debug_assertions)]` and
   overflow-checks classes the clippy ban does not reach.
-- **NOT covered, explicitly.** It is not an optimised build: the profile inherits dev codegen (opt-level 0,
-  no LTO, many codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of scope. It
+- **NOT covered, explicitly.** It is not an optimised build of the workspace: the profile inherits dev
+  codegen (workspace crates at opt-level 0, dependencies at opt-level 2 exactly as `dev`, no LTO, many
+  codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of scope. It
   covers only `verter_shipped_cfg_contract`'s own tests, not the whole workspace — a `debug_assertions`-
   dependent regression in an untested production path elsewhere is not covered by step (b) (step (a) still
   catches a `cfg(debug_assertions)`-hidden COMPILE failure anywhere in the workspace). The real `release`
