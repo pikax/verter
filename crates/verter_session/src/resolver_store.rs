@@ -4323,10 +4323,12 @@ impl StoreViewManager {
     /// until the NEXT store-view request rebuilds and replaces it. For a
     /// host that is closed and never reused (the NAPI finalisation case),
     /// that next request never comes, so the snapshot would stay resident.
-    /// Clearing here releases the memory at reset time. A normal upsert
-    /// does NOT call this: it bumps the token and the next build replaces
-    /// the `Arc` — only closed / fully-cleared hosts need the explicit
-    /// drop.
+    /// Clearing here releases the memory at reset time. A content-changing
+    /// upsert does NOT call this: it bumps the token and the next build
+    /// replaces the `Arc`. A byte-identical upsert does: the scheduler
+    /// re-captured the source through an `Absent` window the token cannot
+    /// see, so a view captured inside it must not stay the warm-hit
+    /// candidate.
     pub(crate) fn clear(&self) {
         let mut state = self.state.lock();
         state.cached = None;
@@ -5162,6 +5164,9 @@ mod store_view_resolution_currency_contract_tests;
 #[cfg(test)]
 #[path = "store_view_resolution_root_tests.rs"]
 mod store_view_resolution_root_tests;
+#[cfg(test)]
+#[path = "store_view_source_root_reuse_tests.rs"]
+mod store_view_source_root_reuse_tests;
 
 #[cfg(test)]
 #[path = "resolve_env_asymmetry_tests.rs"]

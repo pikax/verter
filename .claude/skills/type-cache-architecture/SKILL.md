@@ -281,6 +281,11 @@ slice hash while still producing a distinct graph artifact key.
 `(canonical, content_hash, parse_env_hash, resolve_env_hash, lib_env_hash)`
 quintuple is unchanged. No cache mutation, no semantic invalidation, no
 `bump_store_view_epoch`, no scheduler round-trip beyond the quintuple check.
+The one store-side effect is retiring the `StoreViewManager`'s cached base
+view (`StoreViewManager::clear`): the scheduler still re-captured the source
+through an `Absent` → `Present` window the token cannot see, so a view
+captured inside it must not stay the warm-hit candidate (it would read the
+file as source-less and fail every entry that depends on it).
 
 **R2.** `upsert` means "the source changed." Cache eviction is an explicit
 method with a stated scope; never a side effect of `upsert`.

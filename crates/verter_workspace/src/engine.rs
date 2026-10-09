@@ -2578,6 +2578,24 @@ impl Engine {
             .map(|captured| captured.world)
     }
 
+    /// The world a consumer store view retains: the published world for
+    /// `population`, waiting a writer's window out instead of reporting
+    /// "no world".
+    ///
+    /// A view that captured nothing validates no resolution fact, and a
+    /// cached view keeps that answer for as long as its own token holds —
+    /// an in-flight publication that leaves the world's facts unchanged
+    /// advances nothing that would replace it. Turning momentary
+    /// publication contention into a missing world would therefore reject
+    /// every resolution witness against that view until an unrelated
+    /// mutation happened along.
+    pub(crate) fn capture_view_resolution_world(
+        &self,
+        population: ResolutionPopulation,
+    ) -> Arc<CapturedResolutionWorld> {
+        self.capture_stable_resolution_world(population).world
+    }
+
     /// Capture the current STABLE world, yielding briefly while some writer is
     /// inside the odd-epoch publication window.
     ///

@@ -1814,8 +1814,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     fn capture_resolution_world(
         &self,
     ) -> Option<Arc<crate::resolution_currency::CapturedResolutionWorld>> {
-        self.engine
-            .capture_published_resolution_world(self.engine.default_resolution_population())
+        Some(
+            self.engine
+                .capture_view_resolution_world(self.engine.default_resolution_population()),
+        )
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
