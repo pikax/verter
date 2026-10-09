@@ -1,0 +1,1005 @@
+{
+  "id": "manifest-inventory.v1",
+  "schema": 1,
+  "contractNode": "VIM0",
+  "finalOwner": "expansion.kernel: typed immutable universal catalog and demand-selected kernel services",
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "companionCaseTable": "manifest-case-table.v1.json",
+  "inherits": {
+    "nodes": [
+      "UAK0",
+      "UAK1",
+      "VID0",
+      "CAT0",
+      "DEM0",
+      "PAR0"
+    ],
+    "files": [
+      "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "tests/kernel/UAK1/products/constitution-inventory.v1.json",
+      "tests/kernel/VID0/products/identity-inventory.v1.json",
+      "tests/kernel/CAT0/products/catalog-inventory.v1.json",
+      "tests/kernel/DEM0/products/demand-inventory.v1.json",
+      "tests/kernel/PAR0/products/parser-inventory.v1.json"
+    ],
+    "vocabularies": [
+      "tests/web-product/WDX0/products/evidence-class-policy.v1.json",
+      "performance-gates.toml"
+    ],
+    "rule": "UAK0 routes D01-D19 and outcomes O01-O11, UAK1 rules U01-U08, VID0 identities I01-I12, rules R01-R16 and routes V-D01-V-D06, CAT0 tables T01-T09, rules CR01-CR14 and routes CAT-D01-CAT-D06, DEM0 rules DR01-DR30 and routes DEM-D01-DEM-D06, and PAR0 contracts PD01-PD09 and routes PAR-D01-PAR-D04 keep their owners. WDX0's evidence classes and performance-gates.toml rows are referenced by id. VIM0 adds manifest files MF01-MF05, sections MS01-MS12, rules VM01-VM28, cell tiers CT0-CT4, current authorities G01-G09, outcomes VIM-O01-VIM-O05, consumers VIM-C01-VIM-C10, plan consumers VIM-P01-VIM-P03, the displaced route VIM-D01, findings VIM-F01-VIM-F06 and transferred obligations VIM-T01-VIM-T04."
+  },
+  "layout": {
+    "root": "verticals/<vertical>/<release>/",
+    "rule": "One directory per exact vertical release. <vertical> is the catalog slug of the carrier, semantic profile or project profile; <release> is its exact ReleaseId (VID0), spelled with '.', '-' and '+' only (tracked_paths_are_portable). VIM1 creates the tree.",
+    "owner": "VIM1",
+    "successorPath": [
+      "VIM0",
+      "VIM1"
+    ],
+    "receivingAcceptance": "VIM1-AC-R1"
+  },
+  "manifestFiles": [
+    {
+      "id": "MF01",
+      "subblock": 1,
+      "file": "vertical.toml",
+      "holds": "schema epoch, kind, typed id, exact release, display family, GeometryClass, owner node, claims; the sections MS01-MS12",
+      "rules": [
+        "VM01",
+        "VM02",
+        "VM03",
+        "VM04",
+        "VM05",
+        "VM06",
+        "VM07",
+        "VM08"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "MF02",
+      "subblock": 2,
+      "file": "capabilities.toml",
+      "holds": "one [[cell]] per (CapabilityId, FrameworkProfileId release, CarrierProfileId, host, extension?) with tier CT0-CT4, producer node, receiving acceptance, evidence ids and required flag",
+      "rules": [
+        "VM20",
+        "VM21",
+        "VM25"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "MF03",
+      "subblock": 3,
+      "file": "rules/<rule-pack>.toml",
+      "holds": "CAT0 T08 rows: rule id, profile, rule epoch, applicability, fix and action kinds (LRA0 vocabulary)",
+      "rules": [
+        "VM22"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "MF04",
+      "subblock": 4,
+      "file": "oracles.lock",
+      "holds": "one [[oracle]] per upstream package or corpus: name, exact version, registry or source, integrity digest, role oracle, corpus path and content digest (PAR0 PD04)",
+      "rules": [
+        "VM23"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "MF05",
+      "subblock": 5,
+      "file": "fixtures/manifest.toml",
+      "holds": "one [[fixture]] per fixture: id, repository-relative path, content digest, class positive/negative/recovery/migration, exercised cells or rules, executing acceptance",
+      "rules": [
+        "VM24"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    }
+  ],
+  "geometryClasses": [
+    "dedicated-carrier",
+    "script-carrier",
+    "neutral-carrier",
+    "embedded-syntax",
+    "document-language",
+    "dsl",
+    "overlay",
+    "attachment",
+    "project-overlay"
+  ],
+  "sections": [
+    {
+      "id": "MS01",
+      "table": "[parser]",
+      "renders": "PAR0 PD01 ParserDecision",
+      "kinds": [
+        "carrier"
+      ],
+      "rule": "VM09"
+    },
+    {
+      "id": "MS02",
+      "table": "[activation]",
+      "renders": "DEM0 DR07 stage-one parse-domain fact kinds, DR11 stage-two fact kinds, FWA1 activation source",
+      "kinds": [
+        "semantic-profile",
+        "project-profile"
+      ],
+      "rule": "VM10"
+    },
+    {
+      "id": "MS03",
+      "table": "[[embedding]]",
+      "renders": "CAT0 T05 rows",
+      "kinds": [
+        "carrier"
+      ],
+      "rule": "VM11"
+    },
+    {
+      "id": "MS04",
+      "table": "[[map]]",
+      "renders": "map-chain kinds with ENC0 coordinate kinds at each end",
+      "kinds": [
+        "carrier"
+      ],
+      "rule": "VM11"
+    },
+    {
+      "id": "MS05",
+      "table": "[[typeinfo_role]]",
+      "renders": "public facet, producing construct, native or derived{kind}",
+      "kinds": [
+        "semantic-profile"
+      ],
+      "rule": "VM12"
+    },
+    {
+      "id": "MS06",
+      "table": "[custom_elements]",
+      "renders": "CEF0 producer and consumer dispositions, exactly one row each",
+      "kinds": [
+        "carrier",
+        "semantic-profile",
+        "project-profile"
+      ],
+      "rule": "VM13"
+    },
+    {
+      "id": "MS07",
+      "table": "[[coexistence]]",
+      "renders": "CAT0 T06 relation per peer",
+      "kinds": [
+        "semantic-profile",
+        "project-profile"
+      ],
+      "rule": "VM14"
+    },
+    {
+      "id": "MS08",
+      "table": "[[public_surface]]",
+      "renders": "published surfaces with the PUB0 outcome vocabulary",
+      "kinds": [
+        "carrier",
+        "semantic-profile",
+        "project-profile"
+      ],
+      "rule": "VM15"
+    },
+    {
+      "id": "MS09",
+      "table": "[[budget]]",
+      "renders": "references to performance-gates.toml rows, the MEM0 budget or the owning product catalog",
+      "kinds": [
+        "carrier",
+        "semantic-profile",
+        "project-profile"
+      ],
+      "rule": "VM16"
+    },
+    {
+      "id": "MS10",
+      "table": "[compiler]",
+      "renders": "CAT0 T02: none, or backend plus declared compile capability of this exact release",
+      "kinds": [
+        "carrier"
+      ],
+      "rule": "VM17"
+    },
+    {
+      "id": "MS11",
+      "table": "[[deletion]]",
+      "renders": "displaced route id, owner node, receiving acceptance",
+      "kinds": [
+        "carrier",
+        "semantic-profile",
+        "project-profile"
+      ],
+      "rule": "VM18"
+    },
+    {
+      "id": "MS12",
+      "table": "[[forbidden_dependency]]",
+      "renders": "UAK1 firewall edges for the vertical's crates",
+      "kinds": [
+        "carrier",
+        "semantic-profile",
+        "project-profile"
+      ],
+      "rule": "VM19"
+    }
+  ],
+  "sectionRule": "A section listed for a kind is mandatory. A section that does not apply is written not-applicable with a typed reason, never omitted (VM08). Each section renders a row an earlier decision owns and adds shape, never meaning.",
+  "cellTiers": [
+    {
+      "id": "CT0",
+      "tier": "excluded",
+      "evidenceClass": null,
+      "displays": "excluded, with reason",
+      "requires": "a typed exclusion reason the schema admits for that capability; a migration exclusion names its target"
+    },
+    {
+      "id": "CT1",
+      "tier": "required-unimplemented",
+      "evidenceClass": null,
+      "displays": "not supported",
+      "requires": "nothing; the default state of a required cell"
+    },
+    {
+      "id": "CT2",
+      "tier": "geometry-proof",
+      "evidenceClass": "static-proof",
+      "displays": "proof only; never support",
+      "requires": "static proof of geometry, identity or parser decision"
+    },
+    {
+      "id": "CT3",
+      "tier": "implemented-operation",
+      "evidenceClass": "static-proof",
+      "displays": "implemented, unqualified",
+      "requires": "executed repository tests through the public boundary"
+    },
+    {
+      "id": "CT4",
+      "tier": "qualified-product",
+      "evidenceClass": "runtime-observation",
+      "displays": "supported",
+      "requires": "runtime observation from the vertical's own producing terminal on the named host and profile under a receipt basis"
+    }
+  ],
+  "cellKey": [
+    "CapabilityId (profile-qualified, VID0 I10)",
+    "FrameworkProfileId release",
+    "CarrierProfileId",
+    "host",
+    "extension (optional T09 namespace + exact version)"
+  ],
+  "fullSupportRule": "Full support of a release is derived: every required cell is CT4. It is never authored (VM21).",
+  "rules": [
+    {
+      "id": "VM01",
+      "group": "identity",
+      "rule": "Every manifest file carries schema = ManifestSchemaEpoch; a schema change mints a new epoch."
+    },
+    {
+      "id": "VM02",
+      "group": "identity",
+      "rule": "One manifest is one exact release. A versions array, range, latest/next tag, wildcard or complement is a structural failure; an unsupported version is DEM0's UnsupportedVersion outcome, never a cell."
+    },
+    {
+      "id": "VM03",
+      "group": "identity",
+      "rule": "Keys are typed identities in canonical tagged encoding (VID0 R12, R13). display_family, adapter spellings, FrameworkTag and extensions are presentation only (VID0 R03, CAT0 CR10)."
+    },
+    {
+      "id": "VM04",
+      "group": "identity",
+      "rule": "kind decides the identity of id. A project-profile manifest declares no carrier, parser or compiler; a carrier manifest declares no semantic facet."
+    },
+    {
+      "id": "VM05",
+      "group": "identity",
+      "rule": "geometry is one value of the closed GeometryClass."
+    },
+    {
+      "id": "VM06",
+      "group": "identity",
+      "rule": "Every owner, producer, deletion and acceptance reference names an existing plan node and acceptance ID; prose, retired block names and people are not owners."
+    },
+    {
+      "id": "VM07",
+      "group": "identity",
+      "rule": "claims reference existing manifests by typed id; a dangling claim fails as CAT0 CR07."
+    },
+    {
+      "id": "VM08",
+      "group": "sections",
+      "rule": "Closed schema: unknown keys, extra/ext/x-*/metadata bags, untyped maps and free-form tables fail. The only extension point is a typed T09 contribution row (CAT0 CR04)."
+    },
+    {
+      "id": "VM09",
+      "group": "sections",
+      "rule": "[parser] and [compiler] share no key. A parser entry naming a backend or compile capability, a compiler entry naming a grammar or ParserId, or compile capability inferred from a parser is conflation (UAK1 U03). DK5 is kind no-parser with no frontend."
+    },
+    {
+      "id": "VM10",
+      "group": "sections",
+      "rule": "[activation] stage-one fact kinds are parse-domain only (DEM0 DR07); the activation source is FWA1's record and a second source fails."
+    },
+    {
+      "id": "VM11",
+      "group": "sections",
+      "rule": "Every embedding names a map-chain kind [[map]] defines; every map names ENC0 coordinate kinds at both ends."
+    },
+    {
+      "id": "VM12",
+      "group": "sections",
+      "rule": "Every published facet has one typeinfo_role row; a derived row names its derivation kind."
+    },
+    {
+      "id": "VM13",
+      "group": "sections",
+      "rule": "[custom_elements] has exactly one producer and one consumer row, each a CEF0 disposition or not-applicable with a typed reason. A missing row fails and is never read as no custom elements."
+    },
+    {
+      "id": "VM14",
+      "group": "sections",
+      "rule": "Every peer that can claim one of the manifest's carriers has a [[coexistence]] row, or the overlap is a typed ambiguity (CAT0 CR14, DEM0 DR22). Two relations for one peer fail (CR07)."
+    },
+    {
+      "id": "VM15",
+      "group": "sections",
+      "rule": "Every listed surface uses the PUB0 outcome vocabulary; a registered handler with no implemented cell is a boolean capability lie (UAK1 U07)."
+    },
+    {
+      "id": "VM16",
+      "group": "sections",
+      "rule": "A budget is a reference to a ratified row by id. A manifest-declared threshold, a self-picked gate or an omitted gate a required cell needs is a self-selected performance gate."
+    },
+    {
+      "id": "VM17",
+      "group": "sections",
+      "rule": "[compiler] = none is normal (UAK1 U02); a backend declares compile capability for this exact release only."
+    },
+    {
+      "id": "VM18",
+      "group": "sections",
+      "rule": "Every [[deletion]] names an earlier-recorded route id, one owner node and its receiving acceptance."
+    },
+    {
+      "id": "VM19",
+      "group": "sections",
+      "rule": "[[forbidden_dependency]] restates UAK1 firewall edges; the firewall stays UAM0's."
+    },
+    {
+      "id": "VM20",
+      "group": "capabilities",
+      "rule": "A cell is data: tier, producer node, receiving acceptance and evidence ids. A note-only row is a prose-only capability row; notes never carry meaning."
+    },
+    {
+      "id": "VM21",
+      "group": "capabilities",
+      "rule": "The required capability list is normative per schema epoch, kind and GeometryClass, with one cell per required capability for every published host and carrier. A manifest cannot drop a required cell, exclude it without an admitted reason, or declare full support while a required cell is below CT4."
+    },
+    {
+      "id": "VM22",
+      "group": "capabilities",
+      "rule": "rules/*.toml rows are CAT0 T08 rows in LRA0's vocabulary."
+    },
+    {
+      "id": "VM23",
+      "group": "capabilities",
+      "rule": "oracles.lock pins are exact with integrity digests; the manifest release, every compatibility value a cell cites and the oracle pin agree. An oracle is never a dependency or an authority (PAR0 PD04)."
+    },
+    {
+      "id": "VM24",
+      "group": "capabilities",
+      "rule": "Every fixture has a content digest and an executing acceptance."
+    },
+    {
+      "id": "VM25",
+      "group": "capabilities",
+      "rule": "Tier promotion follows evidence: CT2 static proof, CT3 executed public-boundary tests, CT4 runtime observation from the vertical's own terminal (WDX0 claim laws). A geometry proof, installed parser, syntax highlighting or upstream install never promotes above CT2."
+    },
+    {
+      "id": "VM26",
+      "group": "generation",
+      "rule": "Manifests are the only authority. Catalog rows, capability matrix, TS mirrors, docs support tables, the compile capability table and per-family capability matrices are rendered consumers; a hand edit fails freshness and a second hand-maintained truth fails."
+    },
+    {
+      "id": "VM27",
+      "group": "generation",
+      "rule": "Manifests are data: no script, expression, regex, template, code path, hook or plugin reference; loading executes nothing. Tables are ordered by canonical key encoding; two clean renders are byte-identical."
+    },
+    {
+      "id": "VM28",
+      "group": "generation",
+      "rule": "A project profile has one ProjectProfileId per exact release; incompatible majors (Tailwind v3, v4) are separate manifests. A migration names source and target ProjectProfileIds and never mints a merged identity; both active in one scope is DEM0's typed ambiguity. A geometry that cannot be written under VM01-VM28 rescopes the schema by amendment, never by an untyped escape."
+    }
+  ],
+  "currentAuthorities": [
+    {
+      "id": "G01",
+      "unit": "Hand-maintained capability matrix",
+      "paths": [
+        "packages/framework-conformance-harness/evidence/capability-matrix.tsv"
+      ],
+      "shape": "34 rows keyed by cell_id; display framework column; untagged compatibility_domain (core@3.6.0-rc.3, svelte@5.56.8, 'anything other than ...'); target_disposition; target_maturity; owner and acceptance_id naming retired program blocks",
+      "disposition": "displaced (VIM-D01)"
+    },
+    {
+      "id": "G02",
+      "unit": "Rust hand mirror of G01",
+      "symbols": [
+        "verter_compiler::compile_request::capability::{CapabilityCell, CapabilityDisposition}"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/compile_request/capability.rs",
+        "crates/verter_session/src/host_resolve/compile_request_build.rs"
+      ],
+      "guards": [
+        "capability_matrix_compile_request_coverage::every_tsv_row_has_a_registered_verification",
+        "capability_matrix_compile_request_coverage::cell_ids_match_the_committed_matrix"
+      ],
+      "disposition": "displaced (VIM-D01)"
+    },
+    {
+      "id": "G03",
+      "unit": "Oracle pins and closures",
+      "paths": [
+        "packages/framework-conformance-harness/evidence/oracles/vue/{package.json,package-lock.json,closure.tsv}",
+        "packages/framework-conformance-harness/evidence/oracles/svelte/{package.json,package-lock.json,closure.tsv}",
+        "packages/framework-conformance-harness/evidence/generate-oracle-closures.mjs"
+      ],
+      "shape": "vue 3.6.0-rc.5 and svelte 5.56.10 with npm integrity digests",
+      "disposition": "stays as the seed MF04 cites by path and digest (VIM-C03)"
+    },
+    {
+      "id": "G04",
+      "unit": "Official-case seed ledgers",
+      "paths": [
+        "packages/framework-conformance-harness/evidence/vue-official-cases.tsv",
+        "packages/framework-conformance-harness/evidence/svelte-official-cases.tsv",
+        "packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs"
+      ],
+      "guards": [
+        "official_parse_manifest_guard"
+      ],
+      "disposition": "stays as the seed MF05 cites (VIM-C03)"
+    },
+    {
+      "id": "G05",
+      "unit": "Official option inventories",
+      "paths": [
+        "packages/framework-conformance-harness/evidence/vue-options.tsv",
+        "packages/framework-conformance-harness/evidence/svelte-options.tsv"
+      ],
+      "disposition": "stays as the seed MF02 cells cite (VIM-C03)"
+    },
+    {
+      "id": "G06",
+      "unit": "Closed tag disposition table",
+      "symbols": [
+        "FrameworkAdapterRegistry::tag_disposition",
+        "TagDisposition"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/registry.rs"
+      ],
+      "guards": [
+        "framework_registry_complete"
+      ],
+      "disposition": "referenced: VID0 V-D03 (REG0)"
+    },
+    {
+      "id": "G07",
+      "unit": "Generated client mirrors",
+      "paths": [
+        "crates/verter_session/src/framework/client_framework_manifest_ts.rs",
+        "crates/verter_session/src/framework/virtual_file_naming_ts.rs"
+      ],
+      "guards": [
+        "client_framework_manifest_ts_is_byte_equal_to_the_rendered_registry",
+        "virtual_file_naming_ts_is_byte_equal_to_the_rendered_descriptor_column"
+      ],
+      "disposition": "referenced: CAT0 CAT-D04 (CPF1)"
+    },
+    {
+      "id": "G08",
+      "unit": "Evidence-class policy",
+      "paths": [
+        "tests/web-product/WDX0/products/evidence-class-policy.v1.json"
+      ],
+      "disposition": "vocabulary referenced by CT2-CT4 and VM25"
+    },
+    {
+      "id": "G09",
+      "unit": "Ratified performance gates",
+      "paths": [
+        "performance-gates.toml"
+      ],
+      "disposition": "vocabulary referenced by MS09 and VM16"
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "VIM-O01",
+      "outcome": "Manifest schema types and structural validator for MF01-MF05 and MS01-MS12; MP01-MP07 accepted and MN01-MN16 rejected each for its own reason",
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "VIM-O02",
+      "outcome": "Deterministic rendering of manifests into catalog rows T01-T09 and PAR0 PD01 decisions",
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC2"
+    },
+    {
+      "id": "VIM-O03",
+      "outcome": "Generated per-surface capability/maturity matrix from MF02, freshness-checked",
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R2"
+    },
+    {
+      "id": "VIM-O04",
+      "outcome": "Executable validator for this inventory: missing member, unknown or pathless owner, missing receiving acceptance, conflicting assignment",
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "VIM-O05",
+      "outcome": "Independent re-validation of the schema, generator determinism and malformed-manifest negatives",
+      "owner": "UAM0",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "UAM0"
+      ],
+      "receivingAcceptance": "UAM0-AC2"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "VIM-C01",
+      "consumer": "Compile-request construction consulting the capability table",
+      "symbols": [
+        "CapabilityCell",
+        "CapabilityDisposition"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/compile_request/capability.rs"
+      ],
+      "consumes": [
+        "MF02",
+        "MS10"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC1",
+      "disposition": "reads the rendered table (VIM-D01)"
+    },
+    {
+      "id": "VIM-C02",
+      "consumer": "Session compile-request mapping onto capability cells",
+      "paths": [
+        "crates/verter_session/src/host_resolve/compile_request_build.rs"
+      ],
+      "consumes": [
+        "MF02"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC2",
+      "disposition": "maps onto rendered cells by typed key"
+    },
+    {
+      "id": "VIM-C03",
+      "consumer": "Harness seeds read into oracles.lock, fixtures/manifest.toml and capability cells",
+      "paths": [
+        "packages/framework-conformance-harness/evidence/"
+      ],
+      "consumes": [
+        "MF02",
+        "MF04",
+        "MF05"
+      ],
+      "owner": "VIM1",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1",
+      "disposition": "seeds cited by path and digest"
+    },
+    {
+      "id": "VIM-C04",
+      "consumer": "Docs framework/version/carrier/host support tables rendered from manifests; a CT2 cell never displays as support",
+      "consumes": [
+        "MF02",
+        "CT0-CT4"
+      ],
+      "owner": "DOC6",
+      "successorPath": [
+        "VIM0",
+        "DOC6"
+      ],
+      "receivingAcceptance": "DOC6-AC1",
+      "secondaryAcceptance": "DOC6-AC2"
+    },
+    {
+      "id": "VIM-C05",
+      "consumer": "Language-service operation rows in the manifest generator",
+      "consumes": [
+        "MF02",
+        "MS08"
+      ],
+      "owner": "LSO9",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "LSO9"
+      ],
+      "receivingAcceptance": "LSO9-AC2"
+    },
+    {
+      "id": "VIM-C06",
+      "consumer": "Diagnostic-family manifest on the same schema",
+      "consumes": [
+        "MF01",
+        "MF03"
+      ],
+      "owner": "NCK4",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "NCK4"
+      ],
+      "receivingAcceptance": "NCK4-AC2"
+    },
+    {
+      "id": "VIM-C07",
+      "consumer": "Enterprise conformance manifest and applicability closure",
+      "consumes": [
+        "MF01",
+        "MF02"
+      ],
+      "owner": "EPR6",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "EPR6"
+      ],
+      "receivingAcceptance": "EPR6-AC2"
+    },
+    {
+      "id": "VIM-C08",
+      "consumer": "Utility-CSS project-profile cells, one ProjectProfileId per Tailwind major",
+      "consumes": [
+        "MF01",
+        "MF02",
+        "VM28"
+      ],
+      "owner": "TW9",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "TW9"
+      ],
+      "receivingAcceptance": "TW9-AC4"
+    },
+    {
+      "id": "VIM-C09",
+      "consumer": "Skill planning and implementation routes reading the vertical manifest",
+      "consumes": [
+        "MF01",
+        "MF02"
+      ],
+      "owner": "SKL0",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "UAM0",
+        "SKL0"
+      ],
+      "receivingAcceptance": "SKL0-AC2"
+    },
+    {
+      "id": "VIM-C10",
+      "consumer": "Cross-family convergence over every manifest",
+      "consumes": [
+        "MF01",
+        "MF02"
+      ],
+      "owner": "UAK2",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "UAM0",
+        "UAK2"
+      ],
+      "receivingAcceptance": "UAK2-AC1"
+    }
+  ],
+  "planConsumers": [
+    {
+      "id": "VIM-P01",
+      "node": "VIM1",
+      "reads": "the whole inventory and case table",
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "VIM-P02",
+      "node": "UAM0",
+      "reads": "rules VM01-VM28 and cases MN01-MN16 for re-validation",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "UAM0"
+      ],
+      "receivingAcceptance": "UAM0-AC2"
+    },
+    {
+      "id": "VIM-P03",
+      "node": "DOC6",
+      "reads": "cell tiers CT0-CT4 and the cell key",
+      "successorPath": [
+        "VIM0",
+        "DOC6"
+      ],
+      "receivingAcceptance": "DOC6-AC2"
+    }
+  ],
+  "displacedRoutes": [
+    {
+      "id": "VIM-D01",
+      "categories": [
+        "duplicate-capability-authority",
+        "central-framework-switch",
+        "untagged-coordinate-public-identity"
+      ],
+      "unit": "capability-matrix.tsv as the hand-maintained compile capability and maturity authority (G01), with its hand mirror CapabilityCell/CapabilityDisposition (G02): a closed per-framework enum keyed by a display framework and untagged compatibility_domain strings",
+      "symbols": [
+        "CapabilityCell",
+        "CapabilityDisposition"
+      ],
+      "paths": [
+        "packages/framework-conformance-harness/evidence/capability-matrix.tsv",
+        "crates/verter_compiler/src/compile_request/capability.rs"
+      ],
+      "disposition": "replace: cells move to each release's capabilities.toml and [compiler] section; the table compile requests consult is rendered from them and freshness-checked; the TSV is deleted or becomes a rendered consumer. Hand-maintained mirrors are removed only after the freshness guard proves the replacement (VIM1 charter).",
+      "owner": "VIM1",
+      "productionCapable": true,
+      "successorPath": [
+        "VIM0",
+        "VIM1"
+      ],
+      "receivingAcceptance": "VIM1-AC1"
+    }
+  ],
+  "referencedRoutes": [
+    {
+      "id": "V-D03",
+      "category": "central-framework-switch",
+      "why": "tag_disposition matches FrameworkTag as adapter identity (G06)",
+      "owner": "REG0",
+      "receivingAcceptance": "REG0-AC2"
+    },
+    {
+      "id": "CAT-D04",
+      "category": "duplicate-capability-authority",
+      "why": "client mirror generators read descriptors and the extension table (G07)",
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D01",
+      "category": "central-framework-switch",
+      "why": "closed CarrierGrammarConfig; MS01 renders owner-local grammar rows instead",
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "PAR-D03",
+      "category": "untagged-coordinate-public-identity",
+      "why": "content-only SnapshotKey; MS01 carries ParserId and ParserGrammarEpoch",
+      "owner": "FWC1",
+      "receivingAcceptance": "FWC1-AC5"
+    }
+  ],
+  "categoryCoverage": [
+    {
+      "category": "central-framework-switch",
+      "recorded": [
+        "VIM-D01"
+      ],
+      "referenced": [
+        "D01",
+        "D04",
+        "D07",
+        "CAT-D06",
+        "V-D03",
+        "DEM-D04"
+      ],
+      "why": "CapabilityCell is a closed per-framework enum; every other central switch is already owned."
+    },
+    {
+      "category": "untagged-coordinate-public-identity",
+      "recorded": [
+        "VIM-D01"
+      ],
+      "referenced": [
+        "D08",
+        "V-D01",
+        "V-D02",
+        "PAR-D03"
+      ],
+      "why": "compatibility_domain and framework are untagged strings used as keys."
+    },
+    {
+      "category": "duplicate-component-information-authority",
+      "recorded": [],
+      "referenced": [
+        "D12",
+        "D13",
+        "D14",
+        "D15",
+        "D18"
+      ],
+      "why": "A manifest declares facets and roles; it computes no component information."
+    },
+    {
+      "category": "duplicate-capability-authority",
+      "recorded": [
+        "VIM-D01"
+      ],
+      "referenced": [
+        "CAT-D04"
+      ],
+      "why": "The TSV and its Rust mirror are two hand truths for one capability table."
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "unit": "Vertical manifests",
+      "evidence": "No verticals/ directory, vertical.toml, capabilities.toml, rules/*.toml, oracles.lock or fixtures/manifest.toml exists in the tree.",
+      "consequence": "Nothing to migrate in place; VIM1 creates the tree."
+    },
+    {
+      "unit": "Manifest schema types",
+      "evidence": "No ManifestSchemaEpoch, GeometryClass or manifest parser exists under crates/ or xtask/.",
+      "consequence": "VIM-O01 is new work."
+    },
+    {
+      "unit": "Custom Element dispositions",
+      "evidence": "No producer or consumer disposition row exists for any framework; the CEF0 vocabulary is not yet ratified.",
+      "consequence": "MS06 reserves the slot; CEF0 fills the vocabulary, VIM1 validates presence."
+    },
+    {
+      "unit": "Project-profile and external-contribution rows",
+      "evidence": "CAT0 T04 and T09 have no rows at this head.",
+      "consequence": "MP07 is synthetic."
+    }
+  ],
+  "findings": [
+    {
+      "id": "VIM-F01",
+      "finding": "capability-matrix.tsv names core@3.6.0-rc.3 and svelte@5.56.8 while the oracle package.json files pin vue 3.6.0-rc.5 and svelte 5.56.10. VM23 makes the oracle pin the release and fails the divergence (MN15).",
+      "owner": "VIM1",
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "VIM-F02",
+      "finding": "VueOtherVersion and SvelteOtherVersion encode a version complement as a capability cell. Under VM02 that is DEM0's UnsupportedVersion activation outcome.",
+      "owner": "VIM1",
+      "receivingAcceptance": "VIM1-AC1"
+    },
+    {
+      "id": "VIM-F03",
+      "finding": "The matrix owner and acceptance_id columns name retired blocks (B2, BV1, FC-...). Migration into MF02 rebinds each row to a plan node and acceptance ID (VM06).",
+      "owner": "VIM1",
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "VIM-F04",
+      "finding": "VIM1 declares conflict domains area:verticals, area:xtask, shared:ci-workflow and area:.github; VIM-D01 lives in area:crates/verter_compiler and area:packages/framework-conformance-harness.",
+      "owner": "controller",
+      "receivingAcceptance": null
+    },
+    {
+      "id": "VIM-F05",
+      "finding": "tag_disposition marks React and Solid OutOfScope while the plan carries React and Solid verticals. V-D03 retags the table; a manifest's existence decides a tag's disposition.",
+      "owner": "REG0",
+      "receivingAcceptance": "REG0-AC2"
+    },
+    {
+      "id": "VIM-F06",
+      "finding": "Family delivery locks (for example ANG0 products/angular-capability-matrix.json) each plan a family-local capability matrix. Under VM26 it seeds that family's first manifest and is then a rendered consumer, never a co-authority.",
+      "owner": "VIM1",
+      "receivingAcceptance": "VIM1-AC1"
+    }
+  ],
+  "transferredObligations": [
+    {
+      "id": "VIM-T01",
+      "obligation": "Structural validator: MP01-MP07 validate; MN01-MN16 fail for semantic reasons, not keyword grep",
+      "receiver": "VIM1",
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "VIM-T02",
+      "obligation": "Executable ownership validator over this inventory",
+      "receiver": "VIM1",
+      "receivingAcceptance": "VIM1-AC-R1"
+    },
+    {
+      "id": "VIM-T03",
+      "obligation": "New or extended tests for the AC2 boundaries (identities, provenance, completeness, ordering of rendered rows)",
+      "receiver": "VIM1",
+      "receivingAcceptance": "VIM1-AC2"
+    },
+    {
+      "id": "VIM-T04",
+      "obligation": "Independent re-validation of schema and negatives",
+      "receiver": "UAM0",
+      "receivingAcceptance": "UAM0-AC2"
+    }
+  ]
+}

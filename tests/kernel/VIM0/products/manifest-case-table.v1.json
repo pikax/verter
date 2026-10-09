@@ -1,0 +1,98 @@
+{
+  "id": "manifest-case-table.v1",
+  "schema": 1,
+  "contractNode": "VIM0",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "companionInventory": "manifest-inventory.v1.json",
+  "rule": "Each case names its input, the required and forbidden outcomes, the rules (VM..), files (MF..) and sections (MS..) it exercises, the existing evidence that pins part of it, and the node whose test makes it executable. Positive cases MP.. must validate and render; structural-failure cases MN.. must fail for exactly the named rule, never by keyword match. Synthetic cases are schema fixtures, not support claims: their cells stay at CT0-CT2.",
+  "executableOwner": {"node": "VIM1", "successorPath": ["VIM0", "VIM1"], "receivingAcceptance": "VIM1-AC-R1"},
+  "revalidation": {"node": "UAM0", "successorPath": ["VIM0", "VIM1", "UAM0"], "receivingAcceptance": "UAM0-AC2"},
+  "cases": [
+    {
+      "id": "MP01",
+      "name": "Current Vue 3.6 carrier and semantic profile",
+      "input": "Two manifests. Carrier: kind carrier, geometry dedicated-carrier, [parser] DK4 existing route PAR0 G03 with ParserId and ParserGrammarEpoch, [[embedding]] for script/template/style regions with map-chain kinds, [compiler] backend with VDOM, Vapor and SSR compile capability for the exact release. Semantic profile: kind semantic-profile, release equal to the oracles.lock vue pin, claims the Vue carrier, [[typeinfo_role]] for props/events/slots/expose, [custom_elements] producer and consumer rows, [[public_surface]] for every published surface, cells for every required capability seeded from G01/G05.",
+      "required": "Both validate; rendering yields the T01, T02 and T03 rows for Vue and a compile capability table equal in cell set and dispositions to today's G02 for the pinned release",
+      "forbidden": "A compile capability inferred from the parser section; a cell keyed by the display framework string",
+      "rules": ["VM02", "VM03", "VM04", "VM09", "VM13", "VM17", "VM21", "VM23", "VM26"],
+      "existingEvidence": ["capability_matrix_compile_request_coverage::cell_ids_match_the_committed_matrix", "framework_registry_complete"]
+    },
+    {
+      "id": "MP02",
+      "name": "Current Svelte 5 carrier and semantic profile",
+      "input": "Carrier manifest with [parser] DK4 existing route PAR0 G04 and [compiler] client and server backends; semantic-profile manifest with release equal to the oracles.lock svelte pin, runes facets as typeinfo_role rows and both CE rows",
+      "required": "Both validate; rendered T01/T02/T03 rows match today's registered Svelte rows",
+      "forbidden": "A legacy-mode or other-version cell standing in for an activation outcome",
+      "rules": ["VM02", "VM09", "VM12", "VM13", "VM17", "VM23"],
+      "existingEvidence": ["framework_registry_complete", "client_framework_manifest_ts_is_byte_equal_to_the_rendered_registry"]
+    },
+    {
+      "id": "MP03",
+      "name": "Synthetic neutral HTML carrier",
+      "input": "kind carrier, geometry neutral-carrier, [parser] DK3 fork into PAR0 home H08 with lineage, [compiler] none, [custom_elements] producer not-applicable with reason, consumer row, no semantic facets",
+      "required": "Validates; [compiler] none is a normal state; no semantic-profile section is required or accepted",
+      "forbidden": "A typeinfo_role row on a carrier manifest; an error for the missing backend",
+      "rules": ["VM04", "VM09", "VM13", "VM17"],
+      "existingEvidence": []
+    },
+    {
+      "id": "MP04",
+      "name": "Synthetic React overlay profile",
+      "input": "kind semantic-profile, geometry overlay, claims the TSX script carrier, carrier [parser] untouched (no-parser for the profile), stage-one activation from a @jsxImportSource pragma and canonical role evidence, [compiler] absent, [[coexistence]] rows for Preact and Solid on the same carrier",
+      "required": "Validates; no parser or frontend is registered for the profile; overlap with peers is decided by declared relations",
+      "forbidden": "A React-specific parser; an extension-keyed activation; an overlap without a relation treated as success",
+      "rules": ["VM03", "VM05", "VM09", "VM10", "VM14"],
+      "existingEvidence": []
+    },
+    {
+      "id": "MP05",
+      "name": "Synthetic Lit attachment profile",
+      "input": "kind semantic-profile, geometry attachment on tagged templates in the script carrier, [[embedding]] html`...` and css`...` regions with codecs and map-chain kinds, [custom_elements] producer and consumer rows",
+      "required": "Validates; embeddings name maps with ENC0 coordinate kinds at both ends; Lit is a CE producer",
+      "forbidden": "An embedding without a map; a missing CE producer row read as no custom elements",
+      "rules": ["VM05", "VM11", "VM13"],
+      "existingEvidence": []
+    },
+    {
+      "id": "MP06",
+      "name": "Synthetic Angular template carrier and profile",
+      "input": "Carrier manifest: dedicated-carrier, [parser] DK3 over H08 or DK4 with the expression grammar recorded, [compiler] none. Profile manifest: exact release, FWA1 activation source, standalone-scope facets as typeinfo_role rows (inputs native, model change derived), NgModule scope as CT0 excluded with reason, [[public_surface]] routing TS regions to the tsgo host",
+      "required": "Validates; the NgModule exclusion is a truthful CT0 cell with a reason",
+      "forbidden": "An NgModule or *ngIf cell above CT0; a second activation source",
+      "rules": ["VM09", "VM10", "VM12", "VM15", "VM21"],
+      "existingEvidence": []
+    },
+    {
+      "id": "MP07",
+      "name": "Synthetic project profile (Tailwind 4)",
+      "input": "kind project-profile, geometry project-overlay, one ProjectProfileId for the exact 4.x release, claims the CSS and markup semantic profiles it overlays, no [parser], no [compiler], [custom_elements] not-applicable with reason, budgets by performance-gates.toml row id",
+      "required": "Validates; the profile carries no carrier, parser or compiler",
+      "forbidden": "A [parser] or [compiler] section on a project profile; a manifest-declared threshold",
+      "rules": ["VM04", "VM16", "VM28"],
+      "existingEvidence": []
+    },
+    {"id": "MN01", "name": "Versions array", "input": "release = [\"3.5\", \"3.6\"], or a range, latest tag or 'anything other than 3.6' complement", "required": "Fails with the VM02 reason", "forbidden": "Accepting the first element; minting one cell per element", "rules": ["VM02"], "existingEvidence": []},
+    {"id": "MN02", "name": "Untyped extension bag", "input": "[extra], [metadata], an x-* key or an inline untyped map in any file", "required": "Fails with the VM08 reason", "forbidden": "Ignoring unknown keys", "rules": ["VM08"], "existingEvidence": []},
+    {"id": "MN03", "name": "Missing Custom Element row", "input": "A semantic-profile manifest with [custom_elements] omitted, or with only a producer row", "required": "Fails with the VM13 reason", "forbidden": "Defaulting to not-applicable or no custom elements", "rules": ["VM13"], "existingEvidence": []},
+    {"id": "MN04", "name": "Compiler/parser conflation", "input": "A [parser] entry carrying a compile capability or backend, a [compiler] entry naming a ParserId, or a compile cell justified only by a parser decision", "required": "Fails with the VM09 reason", "forbidden": "Deriving compile capability from tooling support", "rules": ["VM09", "VM17"], "existingEvidence": []},
+    {"id": "MN05", "name": "Prose-only capability row", "input": "A [[cell]] with only a note, or without producer, receiving acceptance or evidence id", "required": "Fails with the VM20 reason", "forbidden": "Rendering the note as a status", "rules": ["VM20"], "existingEvidence": []},
+    {"id": "MN06", "name": "Manifest-owned implementation logic", "input": "A script, expression, regex, template or hook field in any manifest file", "required": "Fails with the VM27 reason; nothing is executed", "forbidden": "Evaluating the field", "rules": ["VM27"], "existingEvidence": []},
+    {"id": "MN07", "name": "Second hand-maintained truth", "input": "A hand-edited rendered capability matrix, mirror or docs table that disagrees with the manifest, or a hand-maintained per-family matrix beside an existing manifest", "required": "Fails freshness with the VM26 reason", "forbidden": "Either copy winning", "rules": ["VM26"], "existingEvidence": ["client_framework_manifest_ts_is_byte_equal_to_the_rendered_registry", "virtual_file_naming_ts_is_byte_equal_to_the_rendered_descriptor_column"]},
+    {"id": "MN08", "name": "Geometry proof shown as support", "input": "A cell at CT4 or CT3 whose only evidence is a static proof, installed parser, syntax highlighting or upstream install", "required": "Fails with the VM25 reason", "forbidden": "Displaying the cell as supported", "rules": ["VM25"], "existingEvidence": []},
+    {"id": "MN09", "name": "Required cell silently removed", "input": "A manifest omitting a required capability's cell for a published host or carrier, or excluding it without an admitted reason", "required": "Fails with the VM21 reason", "forbidden": "Treating the omission as not applicable", "rules": ["VM21"], "existingEvidence": []},
+    {"id": "MN10", "name": "Full support authored over an unimplemented cell", "input": "A manifest field declaring full support while a required cell is CT1-CT3", "required": "Fails with the VM21 reason; full support is derived only", "forbidden": "Accepting an authored support level", "rules": ["VM21"], "existingEvidence": []},
+    {"id": "MN11", "name": "Merged Tailwind identity", "input": "One project-profile manifest claiming Tailwind 3 and 4, or a migration manifest minting a combined ProjectProfileId", "required": "Fails with the VM28 reason; both profiles active in one scope is DEM0's typed ambiguity", "forbidden": "One live workspace identity for both majors", "rules": ["VM02", "VM28"], "existingEvidence": []},
+    {"id": "MN12", "name": "Dynamic plugin", "input": "A manifest naming a loadable module, native library or runtime plugin to supply rows", "required": "Fails with the VM27 reason; an external contribution enters only as a typed T09 row", "forbidden": "Loading the plugin", "rules": ["VM08", "VM27"], "existingEvidence": []},
+    {"id": "MN13", "name": "Second activation source or semantic stage-one evidence", "input": "[activation] naming a lint switch or file-name probe as a source, or a stage-one fact kind that needs TypeScript or TypeInfo", "required": "Fails with the VM10 reason", "forbidden": "Activating from spelling", "rules": ["VM10"], "existingEvidence": []},
+    {"id": "MN14", "name": "Self-selected performance gate", "input": "A [[budget]] with an inline threshold, an unknown gate id, or a required cell with no budget reference where its gate row requires one", "required": "Fails with the VM16 reason", "forbidden": "Gating on the manifest's own number", "rules": ["VM16"], "existingEvidence": []},
+    {"id": "MN15", "name": "Release and oracle pin diverge", "input": "release 3.6.0-rc.3 with an oracles.lock vue pin 3.6.0-rc.5 (the VIM-F01 shape)", "required": "Fails with the VM23 reason", "forbidden": "Either value winning silently", "rules": ["VM23"], "existingEvidence": []},
+    {"id": "MN16", "name": "Unknown or retired owner", "input": "A cell, deletion or owner field naming a retired block (B2, BV1), a person, or a node or acceptance ID that does not exist", "required": "Fails with the VM06 reason", "forbidden": "Accepting free-text ownership", "rules": ["VM06", "VM18"], "existingEvidence": []}
+  ],
+  "workCounters": [
+    {"id": "WC01", "counter": "bytes of two clean renders from the same manifests", "baselineRelation": "byte-identical", "cases": ["MP01", "MP02"], "owner": "VIM1", "receivingAcceptance": "VIM1-AC-R2"},
+    {"id": "WC02", "counter": "vertical code executions while loading or rendering manifests", "baselineRelation": "zero", "cases": ["MN06", "MN12"], "owner": "VIM1", "receivingAcceptance": "VIM1-AC-R1"}
+  ]
+}
