@@ -171,8 +171,8 @@ are deleted in that same change, and no alias of the combined shape survives.
 
 ## Compile-request consumers
 
-`P17` is the compile-request envelope. CMP0 is docs-only (zero production
-lines), so it owns the envelope's contract (`contractOwner`, `CMP0-AC1`,
+`P17` is the compile-request envelope. CMP0's mutation boundary permits only
+contract evidence, so it owns the envelope's contract (`contractOwner`, `CMP0-AC1`,
 `CMP0-AC2`) and cannot receive a production migration. The migration of its
 production consumers belongs to CMP1 (successor path CPF0 → CMP0 → CMP1,
 `CMP1-AC1`). CMP1's compatibility closure makes the typed `CompileRequest`
@@ -185,13 +185,24 @@ what forces every envelope constructor to move.
 | `F-C12` | `verter_napi` `host_compile_request.rs`, `compile_request_response.rs`, `lib.rs`; `verter_wasm` `lib.rs`; `verter_ffi` `convert/input.rs` | CMP0 (`CMP0-AC1`) | CMP1 (`CMP1-AC1`) |
 | `F-C14` | `verter_tsc` `checker.rs`, `main.rs` | CMP0 (`CMP0-AC1`) | CMP1 (`CMP1-AC1`) |
 
-**Receiving-charter amendment `RA01` (required).** CMP1's charter currently
-limits it to `crates/verter_compiler/src` and `crates/verter_semantic/src`,
-with write scope `compile_request/demand/` and `compiler_view/`. None of the
-seven consumer paths is inside it. CMP1 dispatches only after its charter adds
-those paths to its production surfaces and write scope, for the
-envelope-consumer migration only. The inventory records the amendment under
-`receivingCharterAmendments`. The parse cutover of `F-C13` stays CPF1's.
+**Receiving-charter amendment `RA01` (ratified 2026-10-09).** The architect
+ruling `cpf0-p17-implementation-receiver` extends CMP1's production surfaces
+and declared write scope to the seven consumer paths above, solely for the
+envelope migration under `CMP1-AC1` and its in-module tests. It supersedes the
+F10 scope restriction for those paths. The corresponding conflict domains
+are `area:crates/verter_napi`, `area:crates/verter_wasm`,
+`area:crates/verter_ffi` and `area:crates/verter_tsc`, in addition to CMP1's
+existing compiler and semantic domains. Other sibling ownership is unchanged.
+
+CMP1 migrates these consumers in the same cutover that removes mixed
+request/policy admission. Its acceptance exercises the real NAPI, WASM, FFI
+and `verter-tsc` request boundaries, preserving accepted products and typed
+refusals. Structural rejection of the displaced route must also reject a
+negative control attempting legacy admission through the same boundary.
+The inventory records this obligation under `receivingCharterAmendments`;
+the controller owns the receiving charter. This repair authorizes the later
+migration and does not claim it is implemented. The parse cutover of `F-C13`
+stays CPF1's.
 
 ## Displaced routes recorded here
 
@@ -295,12 +306,16 @@ Wall-clock numbers, if any, come from a bench-m3 evidence run and never gate.
 
 Evidence selection: the change adds contract text and data only, so existing
 coverage and bounded inspection discriminate it. The diff adds no test.
+For the compile-request ownership repair, the architect ruling
+`cpf0-r1-test-pin` (2026-10-09) accepts reviewed consistency of the inventory
+and this decision as R1 evidence. Executable ownership validation remains
+UAI0's later obligation under `UAI0-AC-R1`; it is not passing evidence here.
 
 - **AC1 — ownership contract.** The inventory binds every method, product,
   outcome, consumer and displaced route to one existing, production-capable
   plan node, a successor path from CPF0 and a receiving acceptance ID.
-  Contract-only nodes appear as `contractOwner`, never as `owner`; the one
-  receiving charter that does not yet cover its paths carries the explicit
+  Contract-only nodes appear as `contractOwner`, never as `owner`; the
+  receiving scope extension for compile-request consumers is ratified in
   amendment `RA01`. UAK0, UAK1 and VID0 rows are
   referenced, not re-owned. The executable validator is UAI0's
   (`UAI0-AC-R1`).
