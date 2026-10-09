@@ -409,7 +409,7 @@ coverage and bounded inspection discriminate it. The diff adds no test.
   does not implement the loader.
   The executable validator is UAO0's (`UAO0-AC-R1`), and so are the
   precedence, fail-closed, provenance and invalidation fixtures: `CC01`–`CC04`,
-  `CC06`, `CC07` and `CC13` (`UAO0-AC-R2`). Every other case names its own
+  `CC06`, `CC07`, `CC13` and `CC17` (`UAO0-AC-R2`). Every other case names its own
   executable owner.
 - **AC2 — positive contract.** Existing coverage pins the boundaries this
   decision names and the behavior it displaces:
