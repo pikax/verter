@@ -67,6 +67,7 @@ import { biomeRawFileProblems, validateBiome } from "./oss/biome.mjs";
 import { ossRawFileProblems, validateOss } from "./oss/checkers.mjs";
 import { loadTools } from "./oss/provision.mjs";
 import { loadThenableExpected } from "./oss/thenable.mjs";
+import { validateProject } from "./project.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -314,7 +315,8 @@ export function validateRun(
   if (opts.noDemand) {
     if ((opts.arms ?? []).length)
       fail(`--no-demand, yet the demand section has arms ${opts.arms.join(", ")}`);
-    if (!opts.oss && !opts.biome) fail("--no-demand, yet no other section was selected");
+    if (!opts.oss && !opts.biome && !opts.project)
+      fail("--no-demand, yet no other section was selected");
   }
   const invs = run.invocations ?? [];
   if (!invs.length && cellKeys.length && !opts.noDemand)
@@ -477,11 +479,9 @@ export function validateRun(
         "/",
       );
       const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase().replace(/\\/g, "/"));
-      const want = [
-        "lib.bench.d.ts",
-        ...companionFiles(byId.get(inv.scenario)),
-        "scenario.ts",
-      ].map((f) => `${dir}/${f}`.toLowerCase());
+      const want = ["lib.bench.d.ts", ...companionFiles(byId.get(inv.scenario)), "scenario.ts"].map(
+        (f) => `${dir}/${f}`.toLowerCase(),
+      );
       if (roots.length !== want.length || want.some((w) => !roots.includes(w)))
         fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
     }
@@ -688,6 +688,11 @@ async function cli(argv) {
       ...validateOss(run.oss, expected, allScenarios(), run.meta?.options ?? {}, schedule).failures,
     );
   }
+  if (run.project)
+    failures.push(
+      ...validateProject(run.project, expected, allScenarios(), run.meta?.options ?? {}, schedule)
+        .failures,
+    );
   if (run.biome) {
     failures.push(...biomeRawFileProblems(run.biome));
     failures.push(

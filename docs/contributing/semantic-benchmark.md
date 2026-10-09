@@ -545,6 +545,48 @@ arm's REQUIRED-state identity is enforced: a build that retains differently
 fails validation, and a session where an arm has no completed measured
 invocation reports `n/a` with a warning.
 
+## Project workload
+
+The sections above start a fresh process for every demand, which charges a
+whole-program checker its full start-up and a full check for one answer.
+`--project [tools]` (or `--only-project [tools]`, without the demand
+section) gives every tool the whole catalog at once: the selected scenarios
+are combined into ONE project, and each tool answers it with ONE instance.
+
+- **Layout.** Each member scenario lives in its own directory `s/<id>/` of
+  the project, its companion files beside its module, so modules never
+  collide. The module is the measuring program (the scenario plus the
+  reference's measuring suffix); the project's tsconfig lists the library,
+  then every member's files, in catalog order.
+- **Arms.** `tsc -p` (default and `--singleThreaded`) and the selected
+  open-source checkers (every pinned checker when no list is given) check
+  the whole project in one process; each member's answer is read from that
+  one output. A checker without a project command or tsc's diagnostic format
+  (Ezno) is reported as not applicable. **Verter** and the **tsc API** answer
+  every member's `__Probe`, one after another in catalog order, in one live
+  process (a session script: the Verter probe's `session` mode and
+  `tsc-session-probe.mjs`).
+- **What it measures.** A whole-program checker pays for one pass over
+  everything; a demand-driven engine pays for every demand, with whatever its
+  caches share between them. The report gives each arm's whole-process wall
+  time, peak memory and CPU, and for the demand arms the sum of their
+  per-demand engine times, beside every member's answer.
+- **Correctness.** Every member is classified against its standalone
+  measured reference. The tsc arms (`tsc -p` and the tsc API) must reproduce
+  each one in the combined program, or the section fails validation:
+  combining must not change an answer.
+- **Members.** A scenario whose standalone reference has no answer (tsc
+  exhausted the cap or the deadline, or its print is too large to record) is
+  left out: one exhausted demand would end the whole program's run for
+  every tool. Scenarios sharing a global scope (`globalScope` in the
+  catalog: the sizes of one series that merge into the same global interface
+  or enum) cannot share a program, so only the largest selected size joins.
+  Every left-out scenario is listed with its reason.
+- **Limits.** Each process gets the run's memory cap and the run's
+  per-demand deadline for every member (`--timeout-ms` × members, plus one
+  startup allowance). One crash or kill ends that tool's whole project:
+  every member is then reported with that end.
+
 ## Capacity
 
 Every cell has a Capacity row: each arm's outcome at the engine budget (its
@@ -686,7 +728,9 @@ tools, each in its own section: see
 [Open-Source Comparisons](./semantic-benchmark-oss.md).
 `--no-demand` skips this demand section (Verter vs the tsc API) and runs only
 the other selected sections; `--only-oss [tools]` and `--only-biome` are
-`--oss` / `--biome` with it. `--no-tsc` runs no tsc process in any section (the Verter arms stay, classified
+`--oss` / `--biome` with it. `--project [tools]` adds the project workload
+(see Project workload above); `--only-project [tools]` is `--project` with
+`--no-demand`. `--no-tsc` runs no tsc process in any section (the Verter arms stay, classified
 against the measured reference, with nothing compared); an explicit
 `--arms` naming a tsc arm beside it is refused.
 

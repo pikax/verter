@@ -24,6 +24,7 @@ import { interpretMeasurement } from "./reference.mjs";
 import { renderMarkdown } from "./report.mjs";
 import {
   LIB_FILE,
+  parseArgs,
   sameArchitecture,
   schedule,
   scheduleBalanceProblems,
@@ -56,7 +57,19 @@ import {
   sessionsFor,
   tscFiles,
 } from "./sessions.mjs";
-import { summarize, timerResolution } from "./summary.mjs";
+import {
+  composeProject,
+  memberSource,
+  projectArms,
+  projectDeadlineMs,
+  projectFiles,
+  projectJob,
+  projectTsconfigText,
+  readProjectAnswers,
+  summarizeProject,
+  validateProject,
+} from "./project.mjs";
+import { referenceFor, summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
 
@@ -555,6 +568,7 @@ const PACKAGES = [
   "verter_scheduler",
   "verter_compiler",
 ];
+const HERE_DIR = dirname(fileURLToPath(import.meta.url));
 const MEM_MB = 64;
 const PIN = toolchainPin(ROOT);
 const INFRA_MB = 1024;
@@ -2307,4 +2321,239 @@ test("a session invocation whose supervisor file is unreadable is reported", () 
     invocations: [],
   };
   assert.ok(rawFileProblems(run).some((p) => /cannot read .*absent-supervisor/.test(p)));
+});
+
+// ---------------------------------------------------------------- project workload
+
+const REAL_EXPECTED = JSON.parse(readFileSync(join(HERE_DIR, "expected.json"), "utf8"));
+const catalogScenario = (id) => allScenarios().find((s) => s.id === id);
+
+test("a project leaves out what tsc cannot answer alone and keeps one member per global scope", () => {
+  const { members, excluded } = composeProject(scenariosForTier("stress"), REAL_EXPECTED, [
+    "strict",
+  ]);
+  const ids = members.map((m) => m.id);
+  // tsc exhausts the cap on spread-369x271 alone: one exhausted demand would
+  // end the whole program's run for every tool.
+  assert.ok(!ids.includes("spread-369x271"));
+  assert.match(excluded.find((e) => e.id === "spread-369x271").reason, /no answer/);
+  // Sizes of one series share a global interface: only the largest joins.
+  assert.ok(ids.includes("adv-global-registry-2000"));
+  assert.ok(!ids.includes("adv-global-registry-100") && !ids.includes("adv-global-registry-500"));
+  assert.match(
+    excluded.find((e) => e.id === "adv-global-registry-500").reason,
+    /global scope BenchRegistry/,
+  );
+  for (const scope of new Set(members.map((m) => m.globalScope).filter(Boolean)))
+    assert.equal(members.filter((m) => m.globalScope === scope).length, 1, scope);
+  // Members keep catalog order; companions precede their module in the roots.
+  const order = allScenarios().map((s) => s.id);
+  assert.deepEqual(
+    ids,
+    [...ids].sort((a, b) => order.indexOf(a) - order.indexOf(b)),
+  );
+  const roots = JSON.parse(projectTsconfigText(SETTINGS[0], members)).files;
+  const program = catalogScenario("program-module-augmentation");
+  assert.ok(
+    roots.indexOf("s/program-module-augmentation/dep.ts") <
+      roots.indexOf("s/program-module-augmentation/scenario.ts"),
+  );
+  assert.equal(roots[0], "lib.bench.d.ts");
+  assert.equal(roots.length, 1 + projectFiles(members).length);
+  assert.ok(companionFiles(program).every((f) => roots.includes(`s/${program.id}/${f}`)));
+  // Every member is demanded once, in member order, from its own module.
+  const job = projectJob("/p", members, "root-file");
+  assert.deepEqual(
+    job.steps.map((s) => s.requests[0].file),
+    members.map((m) => `s/${m.id}/scenario.ts`),
+  );
+  assert.equal(job.initFile, `s/${members[0].id}/scenario.ts`);
+});
+
+/** tsc's measuring diagnostics for one member, under `prefix` (a path spelling). */
+function measuringLines(scenario, printed, prefix) {
+  const lines = memberSource(scenario).split("\n");
+  const at = (marker) => lines.findIndex((l) => l.includes(marker)) + 1;
+  return [
+    `${prefix}scenario.ts(${at("const __bench_s")},7): error TS2322: Type '[${printed}]' is not assignable to type '[never]'.`,
+    `${prefix}scenario.ts(${at("const __bench_n")},7): error TS2322: Type '"no"' is not assignable to type '"never-check"'.`,
+  ];
+}
+
+test("a whole-program output is read per member, whatever spelling the tool gives its paths", () => {
+  const a = catalogScenario("library-awaited");
+  const b = catalogScenario("program-module-augmentation");
+  const stdout = [
+    ...measuringLines(a, "[string]", "s/library-awaited/"),
+    // An absolute, backslashed, `\\?\`-prefixed spelling (tsz's).
+    ...measuringLines(
+      b,
+      '["a"] | ["b"]',
+      "\\\\?\\D:\\x\\project\\s\\program-module-augmentation\\",
+    ),
+    // Another member's diagnostic never leaks into this one.
+    "s/library-awaited/scenario.ts(1,1): error TS2304: Cannot find name 'x'.",
+  ].join("\n");
+  const answers = readProjectAnswers("tsc", stdout, [a, b]);
+  assert.equal(
+    answers["library-awaited"].answer.digest.sha256,
+    referenceFor(REAL_EXPECTED, a.id, "strict").digest.sha256,
+  );
+  assert.deepEqual(answers["library-awaited"].answer.codes, [2304]);
+  assert.equal(
+    answers["program-module-augmentation"].answer.digest.sha256,
+    referenceFor(REAL_EXPECTED, b.id, "strict").digest.sha256,
+  );
+  assert.deepEqual(answers["program-module-augmentation"].answer.codes, []);
+  // A member with no measuring diagnostic is unreadable, never another's answer.
+  const missing = readProjectAnswers(
+    "tsc",
+    measuringLines(a, "[string]", "s/library-awaited/").join("\n"),
+    [a, b],
+  );
+  assert.ok(missing["program-module-augmentation"].unreadable);
+});
+
+test("--project and --only-project select the project section and its checkers", () => {
+  const plain = parseArgs(["--project"]);
+  assert.deepEqual([plain.project, plain.noDemand], [[], undefined]);
+  const only = parseArgs(["--only-project", "tsrust,tsz"]);
+  assert.deepEqual([only.project, only.noDemand, only.arms], [["tsrust", "tsz"], true, []]);
+  assert.throws(() => parseArgs(["--project", "biome"]), /--project biome: not a pinned checker/);
+});
+
+/** A project section whose every arm reproduces each member's reference. */
+function syntheticProject(ids, options) {
+  const scenarios = ids.map(catalogScenario);
+  const { members, excluded } = composeProject(scenarios, REAL_EXPECTED, ["strict"]);
+  const arms = projectArms(options, []);
+  const deadlineMs = projectDeadlineMs(options, members.length);
+  const plan = schedule(["strict"], arms, options.repeat, options.warmup);
+  const ref = (id) => referenceFor(REAL_EXPECTED, id, "strict");
+  const digest = (id) => ({ sha256: ref(id).digest.sha256, preview: ref(id).digest.preview });
+  const invocations = plan.map((p, index) => {
+    const inv = {
+      index,
+      setting: "strict",
+      arm: p.arm,
+      rep: p.rep,
+      warmup: p.warmup,
+      supervisor: supervisorRecord({
+        timeoutMs: deadlineMs,
+        exitCode: p.arm.startsWith("tsc-m") ? 1 : 0,
+      }),
+    };
+    if (p.arm === "verter" || p.arm === "tsc-api")
+      inv.session = {
+        tool: p.arm === "verter" ? "verter" : "tsc",
+        stage: "complete",
+        peakBytes: 1000,
+        statsErrors: [],
+        answers: Object.fromEntries(
+          members.map((m) => [
+            m.id,
+            {
+              outcome: { kind: "value" },
+              ms: 1,
+              evidence: true,
+              observeError: null,
+              errorType: p.arm === "tsc-api" ? false : null,
+              unknownLeaves: 0,
+              unknownSamples: [],
+              shape: "union",
+              digest: digest(m.id),
+              canonicalError: null,
+            },
+          ]),
+        ),
+      };
+    else
+      inv.readings = Object.fromEntries(
+        members.map((m) => [
+          m.id,
+          { answer: { digest: digest(m.id), errorAny: false, codes: ref(m.id).codes } },
+        ]),
+      );
+    return inv;
+  });
+  const inputs = { "lib.bench.d.ts": REAL_EXPECTED.method.libSha256 };
+  for (const m of members) {
+    inputs[`s/${m.id}/scenario.ts`] = sha256Text(memberSource(m));
+    for (const [name, text] of Object.entries(m.files ?? {}))
+      inputs[`s/${m.id}/${name}`] = sha256Text(text);
+  }
+  inputs["tsconfig.json"] = sha256Text(projectTsconfigText(SETTINGS[0], members));
+  return {
+    scenarios,
+    project: {
+      members: members.map((m) => m.id),
+      excluded,
+      deadlineMs,
+      tools: {},
+      toolsAfter: {},
+      arms,
+      projects: { strict: { setting: "strict", dir: "/p", inputs } },
+      plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
+      invocations,
+    },
+  };
+}
+
+test("the project section validates, and fails when tsc's combined answer is not its standalone one", () => {
+  const options = {
+    settings: "strict",
+    repeat: 2,
+    warmup: 0,
+    timeoutMs: 1000,
+    startupAllowanceMs: 500,
+    memMb: MEM_MB,
+    infraMb: INFRA_MB,
+  };
+  const ids = ["library-awaited", "program-module-augmentation"];
+  const { scenarios, project } = syntheticProject(ids, options);
+  const ok = validateProject(project, REAL_EXPECTED, scenarios, options, schedule);
+  assert.deepEqual(ok.failures, []);
+  const summary = summarizeProject(project, REAL_EXPECTED, scenarios, options);
+  assert.deepEqual(summary.settings.strict.arms.verter.counts, { matched: 2 });
+  assert.deepEqual(summary.settings.strict.arms["tsc-measure"].counts, { reference: 2 });
+  assert.equal(summary.settings.strict.arms.verter.demandTotalMs.median, 2);
+  // The combination changed tsc's answer for one member.
+  const changed = structuredClone(project);
+  changed.invocations.find((i) => i.arm === "tsc-measure").readings[
+    "library-awaited"
+  ].answer.digest = { sha256: "other", preview: "number" };
+  assert.ok(
+    validateProject(changed, REAL_EXPECTED, scenarios, options, schedule).failures.some((f) =>
+      /library-awaited: tsc answered number; the measured reference is/.test(f),
+    ),
+  );
+  // Each process gets the per-demand deadline for every member.
+  const shortDeadline = structuredClone(project);
+  shortDeadline.deadlineMs = 1500;
+  assert.ok(
+    validateProject(shortDeadline, REAL_EXPECTED, scenarios, options, schedule).failures.some((f) =>
+      /not the per-demand deadline for every member/.test(f),
+    ),
+  );
+  // A changed member module is not the catalog's measuring program.
+  const tampered = structuredClone(project);
+  tampered.projects.strict.inputs["s/library-awaited/scenario.ts"] = "x";
+  assert.ok(
+    validateProject(tampered, REAL_EXPECTED, scenarios, options, schedule).failures.some((f) =>
+      /library-awaited's module is not the catalog's measuring program/.test(f),
+    ),
+  );
+  // Verter's answers are classified, never a validation failure.
+  const wrong = structuredClone(project);
+  for (const inv of wrong.invocations.filter((i) => i.arm === "verter"))
+    inv.session.answers["library-awaited"].digest = { sha256: "x", preview: "number" };
+  assert.deepEqual(
+    validateProject(wrong, REAL_EXPECTED, scenarios, options, schedule).failures,
+    [],
+  );
+  assert.equal(
+    summarizeProject(wrong, REAL_EXPECTED, scenarios, options).settings.strict.arms.verter
+      .perMember["library-awaited"].result,
+    "mismatch",
+  );
 });

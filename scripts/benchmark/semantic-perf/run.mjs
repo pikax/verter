@@ -65,6 +65,12 @@ import {
   validateOss,
 } from "./oss/checkers.mjs";
 import { loadTools } from "./oss/provision.mjs";
+import {
+  renderProjectMarkdown,
+  runProject,
+  summarizeProject,
+  validateProject,
+} from "./project.mjs";
 import { loadThenableExpected } from "./oss/thenable.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -160,6 +166,13 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           probes are still built for them
   --only-oss [a,b]        --oss --no-demand
   --only-biome            --biome --no-demand
+  --project [a,b]         also combine the selected scenarios into ONE project and answer it with ONE
+                          instance of each tool: tsc -p and the open-source checkers (all, or the named
+                          ones) check it in one process; Verter and the tsc API answer every scenario's
+                          demand in one live process. Each process gets the per-demand deadline for
+                          every member. Scenarios tsc cannot answer alone, and all but the largest size of
+                          a series sharing a global scope, are left out (reported)
+  --only-project [a,b]    --project --no-demand
   --no-tsc                run no tsc process in any section (the demand section's tsc API and tsc -p
                           arms, the OSS section's tsc -p references, the Biome section's tsc arm):
                           every answer is still classified against the measured reference, but
@@ -290,6 +303,13 @@ export function parseArgs(argv) {
         opts.biome = true;
         if (a === "--only-biome") opts.noDemand = true;
         break;
+      case "--project":
+      case "--only-project": {
+        const list = i + 1 < argv.length && !argv[i + 1].startsWith("--") ? argv[++i] : "";
+        opts.project = [...(opts.project ?? []), ...list.split(",").filter(Boolean)];
+        if (a === "--only-project") opts.noDemand = true;
+        break;
+      }
       case "--no-tsc":
         opts.noTsc = true;
         break;
@@ -336,8 +356,14 @@ export function parseArgs(argv) {
     else opts.oss = checkers;
     if (opts.oss) selectCheckers(loadTools(), opts.oss);
   }
-  if (opts.noDemand && !opts.oss && !opts.biome)
-    throw new Error("--no-demand leaves nothing to run: add --oss and/or --biome");
+  if (opts.project) {
+    const checkers = Object.keys(loadTools()).filter((id) => loadTools()[id].kind === "checker");
+    for (const id of opts.project)
+      if (!checkers.includes(id))
+        throw new Error(`--project ${id}: not a pinned checker; checkers: ${checkers.join(", ")}`);
+  }
+  if (opts.noDemand && !opts.oss && !opts.biome && !opts.project)
+    throw new Error("--no-demand leaves nothing to run: add --oss, --biome and/or --project");
   return opts;
 }
 
@@ -947,6 +973,20 @@ export async function main(argv) {
       })
     : null;
 
+  const projectResult = opts.project
+    ? await runProject({
+        ...shared,
+        tools: tools ?? loadTools(),
+        ids: selectCheckers(tools ?? loadTools(), opts.project),
+        scenarios,
+        expected,
+        verterProbe: binaries.probe.pinned,
+        typescript,
+        libText,
+        jobs: process.env.CARGO_BUILD_JOBS ?? null,
+      })
+    : null;
+
   const binariesAfter = {
     ...(binaries.observe ? { observe: sha256File(binaries.observe.pinned) } : {}),
     probe: sha256File(binaries.probe.pinned),
@@ -1029,10 +1069,24 @@ export async function main(argv) {
     ok &&= biomeResult.validation.ok;
     extraFailures.push(...biomeResult.validation.failures);
   }
+  if (projectResult) {
+    projectResult.summary = summarizeProject(projectResult, expected, scenarios, run.meta.options);
+    projectResult.validation = validateProject(
+      projectResult,
+      expected,
+      scenarios,
+      run.meta.options,
+      schedule,
+    );
+    run.project = projectResult;
+    ok &&= projectResult.validation.ok;
+    extraFailures.push(...projectResult.validation.failures);
+  }
   writeFileSync(join(outDir, "results.json"), JSON.stringify(run, null, 1));
   let markdown = renderMarkdown(run);
   if (run.oss) markdown += "\n" + renderOssMarkdown(run.oss);
   if (run.biome) markdown += "\n" + renderBiomeMarkdown(run.biome);
+  if (run.project) markdown += "\n" + renderProjectMarkdown(run.project);
   writeFileSync(join(outDir, "results.md"), markdown);
   log(`\nsemantic-perf: results ${join(outDir, "results.json")}`);
   log(`semantic-perf: report  ${join(outDir, "results.md")}`);
@@ -1040,7 +1094,7 @@ export async function main(argv) {
     `semantic-perf: validation ${validation.ok ? "PASSED" : "FAILED"} (${validation.failures.length} failure(s))`,
   );
   for (const failure of validation.failures.slice(0, 40)) log(`  - ${failure}`);
-  if (ossResult || biomeResult) {
+  if (ossResult || biomeResult || projectResult) {
     log(
       `semantic-perf: opt-in sections ${extraFailures.length ? "FAILED" : "PASSED"} (${extraFailures.length} failure(s))`,
     );

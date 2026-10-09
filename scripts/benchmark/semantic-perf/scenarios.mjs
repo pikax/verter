@@ -1,5 +1,9 @@
 // The scenario catalog of the equivalent-demand semantic benchmark.
 //
+// `globalScope` names what a scenario adds to the global scope (a global
+// interface, enum or library augmentation): two scenarios with the same one
+// cannot share a program (the project workload keeps one of them).
+//
 // A scenario is ONE TypeScript module (`scenario.ts`) that both arms read
 // byte for byte, and, for the program family, the companion files of its
 // program (`files`: name to text), which every arm reads as root files of the
@@ -473,6 +477,7 @@ export function allScenarios() {
       "",
       "keyof BenchConfig",
       {
+        globalScope: "BenchConfig",
         files: {
           "config-base.ts": "interface BenchConfig { base: string; }\n",
           "config-extra.ts": "interface BenchConfig { extra: number; }\n",
@@ -490,6 +495,7 @@ export function allScenarios() {
       "",
       'string[]["benchFirst"]',
       {
+        globalScope: "Array.benchFirst",
         files: {
           "augment.ts": "export {};\ndeclare global { interface Array<T> { benchFirst: T; } }\n",
         },
@@ -519,6 +525,7 @@ export function allScenarios() {
       'import { describe } from "./service";\n',
       "ReturnType<typeof describe>",
       {
+        globalScope: "BenchUser",
         files: {
           "globals.d.ts":
             'declare const BENCH_ENV: "dev" | "prod";\n' +
@@ -572,6 +579,7 @@ function adversarialScenarios() {
   const add = (id, note, spec) =>
     out.push(
       scenario(`adv-${id}`, "adversarial", note, spec.body, spec.probe, {
+        ...(spec.globalScope ? { globalScope: spec.globalScope } : {}),
         ...(spec.files ? { files: spec.files } : {}),
       }),
     );
@@ -610,7 +618,12 @@ function adversarialScenarios() {
     add(
       `global-registry-${n}`,
       `a global interface merged from ${n} files (scripts and declare global), indexed by its keys`,
-      { files, body: "", probe: 'BenchRegistry[keyof BenchRegistry]["tag"]' },
+      {
+        globalScope: "BenchRegistry",
+        files,
+        body: "",
+        probe: 'BenchRegistry[keyof BenchRegistry]["tag"]',
+      },
     );
   }
 
@@ -638,6 +651,7 @@ function adversarialScenarios() {
       `merged-overload-order-${n}`,
       `a call on an overload set merged from ${n} global interface declarations, every overload applicable`,
       {
+        globalScope: "BenchBus",
         files,
         body:
           `declare const bus: BenchBus;\ndeclare const ev: { ${range(n)
@@ -789,7 +803,7 @@ function adversarialScenarios() {
     add(
       `enum-merge-${n}`,
       `an enum merged across ${n} script files, each member computed from the previous file's`,
-      { files, body: "", probe: "`${BenchFlag}`" },
+      { globalScope: "BenchFlag", files, body: "", probe: "`${BenchFlag}`" },
     );
   }
 
@@ -840,8 +854,7 @@ function adversarialScenarios() {
 
   for (const n of [10, 40, 100]) {
     let body = "interface L0<T> { p0: T }\n";
-    for (let i = 1; i < n; i++)
-      body += `interface L${i}<T> extends L${i - 1}<[T]> { p${i}: T }\n`;
+    for (let i = 1; i < n; i++) body += `interface L${i}<T> extends L${i - 1}<[T]> { p${i}: T }\n`;
     body += `declare const __v: { [K in keyof L${n - 1}<0>]: L${n - 1}<0>[K] };\n`;
     add(
       `heritage-generic-${n}`,
