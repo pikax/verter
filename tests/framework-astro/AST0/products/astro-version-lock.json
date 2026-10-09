@@ -68,6 +68,16 @@
       "note": "not a profile; a resolved 6.x is unsupported-version"
     },
     {
+      "line": "astro 4 and older, including the legacy dist-tag (4.16.19)",
+      "reason": "legacy-major",
+      "note": "not a profile; a resolved 4.x or older is unsupported-version"
+    },
+    {
+      "line": "astro rc dist-tag (3.0.0-rc.11)",
+      "reason": "legacy-major",
+      "note": "a prerelease of a legacy major; never a profile"
+    },
+    {
       "line": "astro canary, experimental--*, next--*, alpha and other non-release dist-tags",
       "reason": "floating-or-canary",
       "note": "R07: never decodes into a release"

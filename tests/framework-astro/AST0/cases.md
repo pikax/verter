@@ -15,7 +15,10 @@ Products:
 - `products/astro-activation-policy.json` (`A`)
 
 The clean twin of every case is the unmodified product set, which the
-validator accepts.
+validator accepts. The clean twin reads the live
+`tests/web-product/WDX1/fixtures/mixed-framework/case.json` `astro@5.0.0` row
+as it stands: that divergence is inventoried in `V#/divergedPins` and is
+accepted until its reconciling owner (AST9) re-pins it.
 
 ## AST0-AC1 — pinned release
 
@@ -28,7 +31,10 @@ validator accepts.
 | `missing-official-source` | delete `V#/admittedReleases/0/source` | every pin names an official source |
 | `two-releases-in-one-manifest` | `V#/admittedReleases/0/version` = `["7.3.7", "7.3.8"]` | one manifest declares exactly one release (R04) |
 | `legacy-major-profile` | `V#/admittedReleases/0/version` = `6.4.8` | Astro 5 and 6 are not profiles |
-| `wdx1-astro-5-0-0-diverged-pin` | the live `tests/web-product/WDX1/fixtures/mixed-framework/case.json` row `astro@5.0.0` (already present at the described head) | diverged pin: the validator reports it until AST9 re-pins the scenario; deleting it from `V#/divergedPins` while the fixture still pins 5.0.0 also fails |
+| `wdx1-diverged-pin-uninventoried` | delete the `astro@5.0.0` entry from `V#/divergedPins` while the live `tests/web-product/WDX1/fixtures/mixed-framework/case.json` row still pins `astro@5.0.0` | a repository pin that differs from the admitted release must be inventoried as a diverged pin with its reconciling owner; the unchanged inventoried row is part of the clean twin and is accepted until AST9 re-pins the scenario |
+| `missing-grammar-oracle` | remove the `@astrojs/compiler-rs` pin from `V#/toolingOracles/pins` | the grammar oracle must be pinned at the ratified 0.5.1 |
+| `stale-grammar-oracle-pin` | `V#/toolingOracles/pins/0/version` = `0.5.0`, with that release's provenance and integrity | exact but differs from the ratified grammar-oracle pin 0.5.1 |
+| `stale-projection-oracle-pin` | the `@astrojs/astro2tsx` pin's version = `0.1.1`, with that release's provenance and integrity | exact but differs from the ratified projection-oracle pin 0.1.2 |
 | `oracle-pin-floating` | `V#/toolingOracles/pins/0/version` = `^0.5.1`, or the `@astrojs/astro2tsx` pin's version = `^0.1.0` | oracle pins are exact; the upstream declared ranges are provenance only |
 | `obsolete-grammar-oracle` | replace the `@astrojs/compiler-rs` pin with `@astrojs/compiler` 4.0.0 | the grammar oracle must match the ratified Astro 7 oracle selection |
 | `missing-projection-oracle` | remove the `@astrojs/astro2tsx` pin | the separate projection oracle must be pinned at 0.1.2 |

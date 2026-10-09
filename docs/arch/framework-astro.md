@@ -185,7 +185,7 @@ Hosts in ruling-1 order:
 | Host | Owned cells (producer, acceptance) |
 | ---- | ---------------------------------- |
 | tsgo | diagnostics (AST6, `AST6-AC1`); hover, definition, references (AST5, `AST5-AC1`); component-tag references (AST5, `AST5-AC2`); island navigation (AST5, `AST5-AC5`); rename (AST5R, `AST5R-AC2`); generated-only suppression (AST6, `AST6-AC2`); `.astro` import surface (AST6, `AST6-AC3`) |
-| verter-lsp | syntax diagnostics, symbols, folding and selection, carrier tokens (AST1S, `AST1S-AC1`–`AC4`); HTML element and attribute completion, slot-name completion (AST5, `AST5-AC3`); partial results after recovery (AST5, `AST5-AC4`); slot rename, unsafe-rename refusal, step-down (AST5R, `AST5R-AC1`/`AC4`/`AC5`); formatting (AST8F, `AST8F-AC1`); lint host (AST8, `AST8-AC2`); lint packs (LAS1–LAS6, each `-AC1`) |
+| verter-lsp | syntax diagnostics, symbols, folding and selection, carrier tokens (AST1S, `AST1S-AC1`–`AC4`); HTML element completion, slot-name completion (AST5, `AST5-AC3`); partial results after recovery (AST5, `AST5-AC4`); slot rename, unsafe-rename refusal, step-down (AST5R, `AST5R-AC1`/`AC4`/`AC5`); formatting (AST8F, `AST8F-AC1`); lint host (AST8, `AST8-AC2`); lint packs (LAS1–LAS6, each `-AC1`) |
 | typescript-plugin | carrier-generic companion delivery (AST6, `AST6-AC6`) |
 | verter-session | props, slots, unsupported facets (AST3, `AST3-AC1`/`AC3`/`AC4`); binding and islands (AST2, `AST2-AC1`/`AC3`); island, realm and route facts (AST4, `AST4-AC1`/`AC3`/`AC4`); style and a11y facts (AST7, `AST7-AC1`/`AC3`); forwarding, transport, render-tree and composed-page contributions (FWD1-ASTRO, TRN1-ASTRO, RND1-ASTRO, CPD1-ASTRO, each `-AC1`) |
 
@@ -194,7 +194,8 @@ Truthful exclusions:
 - **Not received by any acceptance item yet:** TS-region completion (`C10`),
   component-tag definition to a `.astro` target (`C55`), directive-name
   completion (`C21`, also conditional on the projection not typing the
-  directive) and auto-close (`C22`). The AST5 outcome names each, but no AST5
+  directive), HTML attribute-name and attribute-value completion (`C56`) and
+  auto-close (`C22`). The AST5 outcome names each, but no AST5
   acceptance item receives it. Each becomes claimable only through an AST5
   acceptance amendment.
 - **Not claimed by this train:** TS-region signature help, inlay hints,
