@@ -187,7 +187,7 @@ pub use overlay::OverlayStore;
 pub use overlay_residency::OverlayAuthority;
 pub use package_index::PackageIndex;
 pub use project_key::project_stable_key_from_project;
-pub use published_state::{ProjectEnvHashArray, PublishedRoot};
+pub use published_state::{ProjectEnvHashArray, PublishedRoot, WorkspaceAuthority};
 pub use resolution_currency::{
     AdmittedResolution, CapturedResolutionWorld, ContentRevision, OverlayWorkCounts,
     ResolutionEpoch, ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome,

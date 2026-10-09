@@ -1357,6 +1357,9 @@ pub struct FunctionProgramIndex {
     nested: Arc<rustc_hash::FxHashMap<(FunctionProgramKey, verter_span::Span), usize>>,
     /// Indexed declaration/callback expressions, in source order.
     expressions: Arc<[ProgramExpressionRecord]>,
+    /// Each indexed expression's program point → its position in
+    /// `expressions`; where two records share a point the first wins.
+    expressions_by_point: Arc<rustc_hash::FxHashMap<ExpressionPointKey, usize>>,
     /// Every class the file authors: syntactic data recorded by the same
     /// build, prepared into keyed lookups, owned by this index and
     /// released with it.
@@ -1444,12 +1447,22 @@ impl FunctionProgramIndex {
                     .or_insert(ordinal);
             }
         }
+        let mut expressions_by_point = rustc_hash::FxHashMap::with_capacity_and_hasher(
+            expressions.len(),
+            rustc_hash::FxBuildHasher,
+        );
+        for (ordinal, record) in expressions.iter().enumerate() {
+            expressions_by_point
+                .entry(ExpressionPointKey(record.point.clone()))
+                .or_insert(ordinal);
+        }
         FunctionProgramIndex {
             by_key: Arc::new(by_key),
             value_functions: Arc::new(value_functions),
             nested: Arc::new(nested),
             entries: Arc::from(entries.into_boxed_slice()),
             expressions: Arc::from(expressions.into_boxed_slice()),
+            expressions_by_point: Arc::new(expressions_by_point),
             classes: ClassIndex::from_discovery(classes),
         }
     }
@@ -1465,6 +1478,36 @@ std::thread_local! { pub static FUNCTION_KEY_LOOKUP_VISITS: std::cell::Cell<usiz
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! { pub static FUNCTION_VALUE_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+std::thread_local! {
+    /// Point-key comparisons made by [`FunctionProgramIndex::expression`] on
+    /// this thread: every candidate record whose point is compared counts
+    /// once, so an index that compares few candidates per lookup stays
+    /// linear in lookups and a population scan grows with the file.
+    pub static PROGRAM_EXPRESSION_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Expression-point map key. Equality is the only way a lookup decides a
+/// record is the requested one, so each comparison is the unit of lookup work.
+#[derive(Debug, Clone)]
+pub(crate) struct ExpressionPointKey(ProgramExpressionIdentity);
+
+impl PartialEq for ExpressionPointKey {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        PROGRAM_EXPRESSION_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
+        self.0 == other.0
+    }
+}
+
+impl Eq for ExpressionPointKey {}
+
+impl std::hash::Hash for ExpressionPointKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 impl FunctionProgramIndex {
     /// Locate one exact child position in the retained file inventory.
@@ -1564,6 +1607,7 @@ impl FunctionProgramIndex {
                     .into_boxed_slice(),
             ),
             expressions: Arc::clone(&self.expressions),
+            expressions_by_point: Arc::clone(&self.expressions_by_point),
             by_key: Arc::clone(&self.by_key),
             value_functions: Arc::clone(&self.value_functions),
             nested: Arc::clone(&self.nested),
@@ -1583,8 +1627,8 @@ impl FunctionProgramIndex {
         &self,
         point: &ProgramExpressionIdentity,
     ) -> Option<&ProgramExpressionRecord> {
-        self.expressions
-            .iter()
-            .find(|record| &record.point == point)
+        self.expressions_by_point
+            .get(&ExpressionPointKey(point.clone()))
+            .map(|&ordinal| &self.expressions[ordinal])
     }
 }

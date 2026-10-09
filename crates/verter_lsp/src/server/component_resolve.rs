@@ -197,18 +197,20 @@ impl VerterLanguageServer {
     }
 
     /// Run `read` — several reads of one imported child — so that every value
-    /// it returns describes ONE host revision of that child, and record that
-    /// revision as the request's dependency evidence.
+    /// it returns describes ONE committed content of that child, and record
+    /// that content hash as the request's dependency evidence.
     ///
-    /// The revision is sampled on both sides of `read`; equal samples prove no
-    /// re-registration landed between the child reads, so analysis spans are
-    /// never interpreted through another revision's source or geometry. A cold
-    /// child is registered by the read itself, so a moved revision is read once
-    /// more at the revision it settled on. A revision that moves across that
-    /// read too is a concurrent edit: the read yields nothing, and the revision
-    /// it began at is recorded so the request settles `ContentModified` rather
-    /// than answer without the child it asked about.
-    fn read_child_at_one_revision<T>(
+    /// The content hash is sampled on both sides of `read`; equal samples
+    /// prove no commit of other bytes landed between the child reads (an
+    /// eviction re-committing the same bytes is no movement), so analysis
+    /// spans are never interpreted through another content's source or
+    /// geometry. A cold child is registered by the read itself, so a moved
+    /// content is read once more at the content it settled on. Content that
+    /// moves across that read too is a concurrent edit: the read yields
+    /// nothing, and the request is marked unsettled so it answers
+    /// `ContentModified` rather than without the child it asked about —
+    /// whatever content the child ends at.
+    pub(super) fn read_child_at_one_revision<T>(
         &self,
         child_canonical_id: &str,
         mut read: impl FnMut() -> Option<T>,
@@ -216,12 +218,10 @@ impl VerterLanguageServer {
         let revision = || {
             self.documents
                 .host()
-                .registered_source_revision_token(child_canonical_id)
+                .registered_source_whole_hash(child_canonical_id)
         };
-        let mut began_at = None;
         for _ in 0..2 {
             let before = revision();
-            began_at = began_at.or(before);
             let value = read()?;
             #[cfg(test)]
             {
@@ -239,9 +239,7 @@ impl VerterLanguageServer {
                 return Some(value);
             }
         }
-        if let Some(at) = began_at {
-            crate::documents::ForegroundRequest::bracket_dependency(child_canonical_id, at);
-        }
+        crate::documents::ForegroundRequest::mark_dependency_unsettled();
         None
     }
 
