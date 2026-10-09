@@ -383,7 +383,6 @@ fn session_peek_signature_round_trips_admitted_signature() {
     node.publish(&mut state, 42, admission, value([0u8; 16]), 0);
     let observed = node.peek_signature(&state, 42).expect("admitted signature");
     assert_eq!(observed.facts.len(), 1);
-    assert!(!observed.overflowed);
 }
 
 /// The last-good rail rides on the same fact-validated slot as the

@@ -10,8 +10,8 @@
 //!
 //! Signature finalisation ([`SignatureAdmission`]) classifies a tracer
 //! result before the value is even built: an `Ok` signature is
-//! cacheable; intrinsic non-cacheability and overflow are both
-//! non-cacheable with typed reasons. The
+//! cacheable; intrinsic non-cacheability and mutation instability are
+//! both non-cacheable with typed reasons; signature width never is. The
 //! refusal reason ([`NonAdmissionReason`]) lives in the audit leaf
 //! crate so structured refusal events can depend on it without a
 //! back-edge to `verter_session`.
@@ -124,7 +124,7 @@ pub fn propagate_non_admission(reason: NonAdmissionReason) {
 ///
 /// CRITICAL — this gate keys on PARTIALITY, never on bare
 /// `cache_suppress`. A benign non-cacheable result (a `ReturnOnly`
-/// cross-owner-reuse admission, a tracer-signature overflow, an
+/// cross-owner-reuse admission, a fenced serve, an
 /// unrootable self-root) is COMPLETE and MUST still be allowed to warm
 /// its result cache; only a genuine partial is refused here. The
 /// inner-memo `cache_suppress || result_is_partial` gate (the semantic
@@ -154,7 +154,7 @@ pub fn refuse_result_cache_admission_if_partial(value_is_partial: bool) -> bool 
 /// `Cacheable` / `Failed` (they never overflow to `ReturnOnly`); the
 /// `ReturnOnly` arm and the carried `reason` fields are exercised by the
 /// `cache_runtime` tests and constructed by the query-identity cache
-/// families (overflow / forced-refusal / budget-exceeded → `ReturnOnly`).
+/// families (non-cacheable read / forced-refusal / budget-exceeded → `ReturnOnly`).
 #[allow(dead_code)]
 pub enum CacheAdmission<V> {
     /// The result is valid AND cacheable. The runtime builds a

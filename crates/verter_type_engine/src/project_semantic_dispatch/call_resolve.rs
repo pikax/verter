@@ -62,7 +62,6 @@ fn error_leaves_expansion_unknown(error: &QueryError) -> bool {
         QueryError::BudgetExceeded(_)
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
-        | QueryError::SignatureOverflow
         | QueryError::ForeignSemanticOperand
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. } => true,

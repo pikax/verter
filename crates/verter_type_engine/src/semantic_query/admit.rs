@@ -24,7 +24,7 @@
 //! `admit_decision` is ONLY consulted once the cold-build helper has already
 //! produced a SOUND self-version-rooted carrier (the
 //! [`semantic_graph_read_set_signature`](crate::semantic_query_memo::semantic_graph_read_set_signature)
-//! `Some` case). An overflowed tracer or a torn / unrootable self-root
+//! `Some` case). A refused tracer or a torn / unrootable self-root
 //! observation routes to `ReturnOnly` BEFORE `admit_decision` is reached — a
 //! result with no sound carrier can never be `Warm` regardless of taint. So
 //! the function's job is the second, taint-narrowed gate: given a sound

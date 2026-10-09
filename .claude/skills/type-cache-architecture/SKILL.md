@@ -49,9 +49,11 @@ the cache-runtime overhaul and any feature admitting cache entries.
    `resolve_env_hash`, `type_env_hash`, `lib_env_hash`, and
    `project_identity` must not be bundled into a single
    `project_config_hash`.
-5. Empty and overflowed signatures are different states. Empty means
-   dependency-free. Overflowed means valid result, non-cacheable result.
-6. Tracer overflow, budget exhaustion, cancellation, generation
+5. Signature width is never a refusal. Every observed fact is recorded;
+   a signature wider than one evidence page is sealed into immutable,
+   retention-charged pages and validated in full. Empty means
+   dependency-free.
+6. A non-cacheable read, budget exhaustion, cancellation, generation
    supersession, incomplete self-rooting, and unresolved provenance all
    route through `ReturnOnly`.
 7. `ReturnOnly` never publishes a cache entry, never registers
@@ -389,20 +391,18 @@ warm-read validator decides how strictly that self-root is checked:
   artifact), gated by `indexed_surface_is_current` — edge currency plus the
   `project_generation` stamp for surfaces with cross-file edges.
 
-When a completed structural carrier would exceed `FACT_SIGNATURE_CAP` only
-because its explicit self-root tail was appended after tracer finalisation,
-the terminal publisher may replace those precise `FileWholeHash` roots with
-one `StrictSelfRootWorld`. Minting validates every root strictly in the exact
+When a completed structural carrier is wider than one evidence page
+(`FACT_PAGE_WIDTH`) and carries explicit self-roots, the terminal publisher
+replaces those precise `FileWholeHash` roots with one `StrictSelfRootWorld`. Minting validates every root strictly in the exact
 effective view before and after the validation loop. The witness identity is
 the process-unique workspace authority id, its dedicated trackedness
 generation, the captured scheduler/artifact root epochs, and the exact
 `ViewPopulation` (including request-completion id/revision). It is unavailable
 during an authority transition and on an artifact-only backend whose external
 `file_exists` mutations are not completely bridged. A generic Content
-`DomainGeneration` is not a substitute for this witness. Semantic-graph,
-ref-cycle, and materialisation carriers all enforce the cap again after every
-post-finalisation merge; any non-self-root remainder still above the cap is
-typed `ReturnOnly` via `SignatureOverflow`.
+`DomainGeneration` is not a substitute for this witness. Every completed
+carrier is then sealed whole through `seal_canonical_signature` (paged when
+wide); width never makes it `ReturnOnly`.
 
 The own-canonical drain serving the edited file's own caches is retained only
 as a redundant fast eviction now that every query-identity cache validates its
@@ -479,7 +479,7 @@ guards drop. Shape lifecycle validation deliberately keeps the original entry
 guards while testing node liveness, then removes collected keys in order. Dispatch paths without their own cache boundary
 fan dependency signatures into that tracer; they must not maintain a parallel
 TLS accumulator or reconstruct a curated signature after the compute. A
-non-cacheable or overflowing tracer still returns the best computed value to the
+non-cacheable or mutation-unstable tracer still returns the best computed value to the
 caller, carries the typed refusal rail, and skips every warm-cache write.
 The resolved-meta request trace always observes the request-captured owner
 `FileWholeHash` before resolution begins (and uses the session-view hash for an
@@ -936,17 +936,23 @@ Concrete substrate (the per-domain target form):
 - Admission writes use RCU; write contention serialised by
   `StoreViewCompatToken`-keyed singleflight.
 
-Bounded signature size: a `fact_dep_signature` is capped at 1024 entries
-(`FACT_SIGNATURE_CAP`). Beyond that the producer consumes a hierarchical fact
-(downstream materialisation `semantic_hash`) instead of flattening transitive
-facts. The path-precise tracer carries the overflow as a structural bit on the
-[`ReadSetSignature`](../../crates/verter_type_engine/src/fact_signature_helpers.rs)
-carrier: `ReadSetSignature { facts: Arc<[FactVersionRef]>, overflowed: bool }`,
-with `is_cacheable()` returning `!overflowed` (emptiness is NOT a non-cacheable
-condition — only overflow is). Empty and overflow are structurally
-distinguishable at the carrier type; the warm-hit oracle cannot conflate them.
-Overflow produces `FactSignatureOverflow` audit event + candidate is admitted
-as `NonCacheable`.
+Paged signature evidence: a `fact_dep_signature` is never refused for its
+width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
+a producer assembles by hand) cuts a canonical set wider than
+`FACT_PAGE_WIDTH` (1024) into fixed-width contiguous runs, each held by one
+immutable evidence page — a `ResultReceipt` of `EvidenceKind::Page` — and pages
+the level of pages again until the top level fits one page. Pages are
+deterministic (cut points are positions in the canonical order), lossless,
+validated leaf by leaf through the same receipt walk as a consumed result's
+receipt, projected into reverse-index registration through their canonical
+summaries, and shared by `Arc` with every candidate, refusal summary and
+enclosing signature that absorbs them. Each page pins its storage against the
+process retention account for its whole life (one charge, however many
+holders), so candidate footprints count a page entry once, not its contents.
+`ReadSetSignature { facts }` is a complete rail; `entries()` reads it with its
+pages read through. Producers still consume a hierarchical fact (a consumed
+result's receipt, a downstream `semantic_hash`) instead of flattening
+transitive facts: paging bounds a signature's storage, never its honesty.
 
 ### Non-cacheability marking and source evidence
 
@@ -1010,13 +1016,13 @@ Producers convert their finalised fact tracer into a typed admission verdict via
 Two arms:
 
 - `SignatureAdmission::Cacheable(ReadSetSignature)` — the tracer finalised with
-  a bounded path-precise signature. The producer publishes its cache entry
+  its complete (paged when wide) path-precise signature. The producer publishes its cache entry
   under this signature; the warm-hit oracle validates it against the live store
   view on every read.
 - `SignatureAdmission::NonCacheable(NonAdmissionReason)` — the tracer
-  overflowed, the provenance is unresolved, the self-root closure is
-  incomplete, or another structured refusal applies. The verdict carries the
-  typed refusal reason (`SignatureOverflow`, `UnresolvedProvenance`,
+  consumed a non-cacheable read, a domain moved mid-scope, the self-root
+  closure is incomplete, or another structured refusal applies. The verdict
+  carries the typed refusal reason (`MutationUnstable`, `UnresolvedProvenance`,
   `SelfRootConflict`, `RouteGenerationDependency`, `ForcedTestRefusal`,
   `IntrinsicNonCacheable`, etc.) for audit.
 
@@ -1032,7 +1038,7 @@ refuses it. The two consumer families differ in how they route the refusal:
   via a per-thread TLS slot (`cache_runtime::set_return_only_reason` /
   `cache_runtime::take_return_only_reason`) so the reason reaches
   `CacheAdmission::ReturnOnly { reason }` honestly instead of defaulting to
-  `SignatureOverflow`.
+  a generic reason.
 - **Non-cooperative producers that own their carrier slot** (notably
   `CompileSlot.fact_dep_signature: ReadSetSignature` on the compile-tier
   cold-build path) route the `NonCacheable(_)` arm to a **skip-publish
@@ -1041,8 +1047,8 @@ refuses it. The two consumer families differ in how they route the refusal:
   prior successful slot for the same `(canonical, profile)` is ADDITIONALLY
   removed (not just left in place) so the carrier invariant `present in
   compile_slots ⇒ admitted cache entry for the current version` survives a
-  recompute that overflows. The companion scheduler artifact commit is gated on
-  `Cacheable` admission so the overflowed result is not observable through
+  refused recompute. The companion scheduler artifact commit is gated on
+  `Cacheable` admission so the refused result is not observable through
   `try_get_artifact` either.
 
 `SignatureAdmission::into_cacheable()` is a test-fixture / owned projection
@@ -1083,22 +1089,25 @@ Engine; its old direct `file_exists` normalizer is test-only.
 Hard rules:
 
 - Direct construction of `Arc::from(Vec::<FactVersionRef>::new())` outside
-  `ReadSetSignature::empty()` / `ReadSetSignature::overflow()` (allocated
-  through the substrate helper `fact_signature_helpers::empty_fact_signature`)
-  is forbidden. The legacy `finalise_signature_or_empty` helper that collapsed
-  `Overflow → empty signature → publish anyway` was deleted; no caller may
-  resurrect that path.
-- `ReadSetSignature` carries facts + overflow only. The cache entry's
+  `ReadSetSignature::empty()` (allocated through the substrate helper
+  `fact_signature_helpers::empty_fact_signature`) is forbidden. A refusal
+  never becomes an empty signature: a refused compute either keeps its
+  evidence (`NonCacheable(facts)`) or refuses through
+  `SignatureAdmission::NonCacheable`, never an empty rail that would
+  validate vacuously.
+- `ReadSetSignature` carries facts only. The cache entry's
   world-generation lives on `CacheEntry<V>` alongside the value
   (`validated_at_generation`). Conflating generation onto the signature blurs
   the responsibility boundary.
-- Empty and overflow are different states. `ReadSetSignature::empty()` is
-  cacheable (an empty fact rail validates vacuously on warm hits);
-  `ReadSetSignature::overflow()` is not.
+- Width is never a refusal: a signature wider than one evidence page is
+  paged, admitted and validated in full; an edit to a fact on any page —
+  the last included — misses the warm read.
 
-Guards: `empty_and_overflow_are_distinguishable_at_carrier_type`,
-`no_call_site_constructs_empty_signature_from_overflow`,
-`compile_fact_signature_overflow_does_not_publish_compile_slot`.
+Guards: `signatures_around_and_beyond_the_page_width_keep_and_validate_every_fact`,
+`an_edit_on_every_page_including_the_last_invalidates`,
+`validate_with_self_roots_checks_every_page_of_a_wide_carrier`,
+`a_wide_work_refusal_carries_its_whole_proving_prefix`,
+`compile_fact_tracer_refusal_does_not_publish_compile_slot`.
 
 ## Error-Tolerance Non-Admission + §22 Absorption (CRITICAL)
 
@@ -1273,7 +1282,8 @@ fact on read.
 **R23.** Audit events emitted by this refactor on cache subsystem call paths use
 typed `StructuredAuditEvent` variants (`FileArtifactCache`, `FactRegistryWrite`,
 `FactValidationSummary`, `ExportRouteResolved`, `FactSignatureAdmissionRefused`,
-`FactSignatureOverflow`, `ModuleAugmentationStitched`,
+`FactSignatureOverflow` (no producer; retained on the wire),
+`ModuleAugmentationStitched`,
 `ModuleAugmentationIndexShape`, `CacheDrainedAtUpsert`). `Custom` events for the
 new emissions on these paths are forbidden.
 
@@ -1383,7 +1393,7 @@ two rails: `ResolveImportsFactRef::Semantic { .. }` (the session's
 (workspace resolution-currency observations, validated against the store
 view's captured `CapturedResolutionWorld` — see `/host-session`). Both arms
 land in the same `FactVersionRef::ResolveImports` variant, the same
-`ReadSetSignature`, the same `SignatureAdmission` overflow convention, and the
+`ReadSetSignature`, the same `SignatureAdmission` refusal convention, and the
 same `ValidatedFactCache` admission path.
 
 **R27.** All semantic fingerprint computation is **stack-safe**: implemented as
@@ -1618,10 +1628,10 @@ the call site replays both on the CONSUMING thread — for the leader and the
 follower arm alike. Without that replay the compile slot's `ReadSetSignature`
 omits every fact rooted at a TRANSITIVELY reached file, and an edit to such a
 file leaves the warm slot validating (the bundler emits stale runtime prop
-validators). The factless arms are the trap: `FactReadSetFinalise::{Overflow,
-MutationUnstable}` carry NO facts, so replaying either as an empty observation
-set reproduces that stale serve silently. All FOUR factless cases must route to
-`note_non_cacheable_propagation`, never to an empty replay: `Overflowed`,
+validators). The factless arms are the trap: `FactReadSetFinalise::MutationUnstable`
+carries NO facts, so replaying it as an empty observation set reproduces that
+stale serve silently. All THREE factless cases must route to
+`note_non_cacheable_propagation`, never to an empty replay:
 `MutationUnstable`, `Unobserved` (a cancelled / shut-down / faulted /
 re-entrant handoff), and a `RootedNonCacheable` whose fact set is empty — a
 refusal raised before anything was observed. Warm inner memos are

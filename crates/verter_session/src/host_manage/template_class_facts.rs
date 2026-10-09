@@ -50,7 +50,7 @@ pub(crate) struct TemplateClassScriptInputs<'a> {
 /// from. Artifact-cache warmth is deliberately NOT one of them: "the
 /// content-addressed artifact store holds no entry for this content hash yet"
 /// is neither an overlay nor a fenced input, and it appears in no enumerated
-/// `ReturnOnly` trigger (overflow, budget exhaustion, cancellation, generation
+/// `ReturnOnly` trigger (budget exhaustion, cancellation, generation
 /// supersession, incomplete self-rooting, unresolved provenance).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TemplateClassFenceReason {
@@ -185,13 +185,19 @@ pub(crate) fn build_template_class_semantic_facts(
             },
         );
 
+    // A refused read set keeps whatever evidence it has, but marks the facts
+    // `ReturnOnly`: `complete_dependency_signature` and
+    // `owner_only_publication_safe` both withhold a `ReturnOnly` signature
+    // from every rail, so it never authorises a warm read.
     let dependency_signature = match finalise {
         FactReadSetFinalise::Ok(facts) => ReadSetSignature::new(facts),
-        FactReadSetFinalise::NonCacheable(_)
-        | FactReadSetFinalise::Overflow
-        | FactReadSetFinalise::MutationUnstable => {
+        FactReadSetFinalise::NonCacheable(facts) => {
             completeness = TemplateClassFactsCompleteness::ReturnOnly;
-            ReadSetSignature::overflow()
+            ReadSetSignature::new(facts)
+        }
+        FactReadSetFinalise::MutationUnstable => {
+            completeness = TemplateClassFactsCompleteness::ReturnOnly;
+            ReadSetSignature::empty()
         }
     };
     // A FENCED input is return-only: content-override bytes, session-overlay
@@ -1072,8 +1078,7 @@ mod tests {
              a cold artifact store is not a fence",
         );
         assert!(
-            publishable.dependency_signature().facts.is_empty()
-                && !publishable.dependency_signature().overflowed,
+            publishable.dependency_signature().facts.is_empty(),
             "a dependency-free fact set records an EMPTY PRESENT signature",
         );
         assert!(

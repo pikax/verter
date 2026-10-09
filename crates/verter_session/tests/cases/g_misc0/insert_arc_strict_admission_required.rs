@@ -10,9 +10,8 @@
 //! admission to be refused (the cache entry is not recorded, the
 //! `admission_refused_count()` counter advances, and a
 //! `FactSignatureAdmissionRefused { cache_kind: <kind> }` structured
-//! audit event fires). Over-cap signatures (more than
-//! `FACT_SIGNATURE_CAP = 1024` entries) are similarly refused via the
-//! `signature_overflow_count()` path.
+//! audit event fires). Signature width is never refused: a signature
+//! wider than one evidence page is paged and admitted.
 //!
 //! The loose `insert_arc` and `insert` (which falls through to
 //! `insert_arc`) paths bypass this gate.

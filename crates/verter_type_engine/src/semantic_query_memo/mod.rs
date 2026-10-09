@@ -761,10 +761,8 @@ impl SemanticOperandEvidence {
 /// force's typed incomplete refusal — never a silently SHRUNK root set.
 /// A shrunk set would validate at mint/force and let a
 /// `mint -> force -> mint` chain drop a producer root, serving
-/// stale-complete after a dead-operand edit. The one exception is an
-/// OVERFLOWED carrier, which keeps its (partial) evidence so the force
-/// maps the overflow flag to the typed `SignatureOverflow` refusal
-/// instead of the blander incomplete one.
+/// stale-complete after a dead-operand edit. The carrier's evidence pages
+/// are read through, so a wide carrier finds its roots like a narrow one.
 pub fn semantic_operand_evidence(
     read_set: &verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: &[Arc<str>],
@@ -772,18 +770,15 @@ pub fn semantic_operand_evidence(
 ) -> Option<crate::semantic_query::operand::SemanticOperandEvidence> {
     let mut self_roots = Vec::with_capacity(self_root_canonicals.len());
     for canonical in self_root_canonicals {
-        let found = read_set.facts.iter().find_map(|fact| match fact {
+        let found = read_set.entries().find_map(|fact| match fact {
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id,
                 hash,
             } if canonical_id == canonical.as_ref() => Some((Arc::clone(canonical), *hash)),
             _ => None,
         });
-        match found {
-            Some(root) => self_roots.push(root),
-            None if read_set.overflowed => {}
-            None => return None,
-        }
+        let root = found?;
+        self_roots.push(root);
     }
     Some(crate::semantic_query::operand::SemanticOperandEvidence {
         read_set: read_set.clone(),

@@ -3294,11 +3294,10 @@ pub(crate) struct CompileSlot {
     /// the consumer's warm hit misses without any eager invalidation.
     ///
     /// Carrier invariant: `present in compile_slots` implies admitted
-    /// cache entry. A tracer that finalised with `Overflow` MUST NOT
+    /// cache entry. A tracer whose finalise refuses admission MUST NOT
     /// publish here — the cold-build producer refuses the
-    /// `compile_slots.insert` on overflow and returns the freshly
-    /// computed value to its single caller without admitting. An
-    /// empty fact rail (`facts.is_empty() && !overflowed`) is a valid
+    /// `compile_slots.insert` and returns the freshly computed value to
+    /// its single caller without admitting. An empty fact rail is a valid
     /// admitted state: the warm-hit oracle validates vacuously and
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.

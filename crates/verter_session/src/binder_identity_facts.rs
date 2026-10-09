@@ -699,7 +699,7 @@ fn scope_kind_sort_key(kind: &verter_type_engine::semantic_query::BinderScopeKin
 ///
 /// Returns `None` only when the canonical has no servable
 /// [`IndexedReady`] at all. A fenced (non-published) serve or a
-/// non-cacheable / overflowed read set still RETURNS the freshly
+/// non-cacheable / mutation-unstable read set still RETURNS the freshly
 /// computed artifact but admits NOTHING (`ReturnOnly` — the standard
 /// no-warm-for-unrootable rule).
 ///
@@ -871,7 +871,7 @@ pub(crate) fn produce_binder_identity_facts(
     let ((facts, all_pinned), finalise) = dispatch.traced_unbound(cold_body);
     let facts = Arc::new(facts);
     // A fenced serve, an unrecoverable observed-version fact registry,
-    // or a non-cacheable / overflowed read set never enters the shared
+    // or a non-cacheable / mutation-unstable read set never enters the shared
     // store — the fresh artifact is returned without admission.
     let admissible = serve.store_published && all_pinned;
     match finalise {
@@ -891,12 +891,18 @@ pub(crate) fn produce_binder_identity_facts(
                 read_set_signature: ReadSetSignature::new(fact_dep_signature),
             }))
         }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+        // Returned, never admitted: the entry's signature is never
+        // validated, so it carries whatever evidence the read set has.
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+            fact_dep_signature,
+        ) => Some(Arc::new(BinderIdentityFactsEntry {
+            facts,
+            read_set_signature: ReadSetSignature::new(fact_dep_signature),
+        })),
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             Some(Arc::new(BinderIdentityFactsEntry {
                 facts,
-                read_set_signature: ReadSetSignature::overflow(),
+                read_set_signature: ReadSetSignature::empty(),
             }))
         }
     }

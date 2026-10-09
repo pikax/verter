@@ -98,7 +98,10 @@ impl RefusalSummary {
         }
     }
 
-    /// The bytes the summary keeps alive.
+    /// The bytes the summary keeps alive. A wide carrier's evidence pages
+    /// are charged by the pages themselves, once, however many summaries
+    /// and candidates share them, so only the carrier's top-level entries
+    /// are counted here.
     fn retained_bytes(&self) -> usize {
         let self_roots: usize = self
             .self_root_canonicals
@@ -196,8 +199,8 @@ impl SemanticGraphStore {
     }
 
     /// Seal `summary` as the refusal of the isolated root `key` under
-    /// `profile`, entered at `entered`. Refused — nothing kept — for an
-    /// overflowed fact rail, one the retention account declines to keep,
+    /// `profile`, entered at `entered`. Refused — nothing kept — for one
+    /// the retention account declines to keep,
     /// and, decided under the table's lock in the same step as the
     /// insertion, a cancelled evaluation, one the project moved under, or
     /// one the table was cleared under: a torn or superseded evaluation
@@ -212,9 +215,6 @@ impl SemanticGraphStore {
         entered: RefusalEntryState,
         mut summary: RefusalSummary,
     ) -> bool {
-        if summary.carrier.overflowed {
-            return false;
-        }
         match self
             .retention_account()
             .reserve(ChargeClass::Retained, summary.retained_bytes())

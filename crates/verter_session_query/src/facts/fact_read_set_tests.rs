@@ -26,7 +26,9 @@ use std::sync::Arc;
 
 use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ScriptSourceType};
 
-use super::{compare_fact_refs, FactReadSet, FactReadSetFinalise, FACT_SIGNATURE_CAP};
+use super::{
+    compare_fact_refs, FactReadSet, FactReadSetFinalise, FACT_DOMAIN_PRECISE_MAX, FACT_PAGE_WIDTH,
+};
 use crate::facts::fact_cache::{
     AggregateGenerations, AggregatePopulation, AggregateStamp, CompactionDomain, DerivedFactKind,
     DomainGenerationFact, FactVersionRef, ParseEnvHash, ParseFactRef, ResolveImportsFactRef,
@@ -703,48 +705,30 @@ fn absorbing_a_non_canonical_arc_still_produces_the_canonical_union() {
 }
 
 #[test]
-fn absorbed_runs_count_towards_the_signature_cap() {
-    // The cap is a property of the FINALISED set, not of the locally
-    // observed facts: a tracer that ignored absorbed runs when counting
-    // would admit an over-cap signature.
-    let over_cap: Vec<FactVersionRef> = (0..=FACT_SIGNATURE_CAP)
+fn absorbed_runs_count_towards_the_signature_width() {
+    // Width is a property of the FINALISED set, not of the locally
+    // observed facts: an absorbed wide run pages, it is never truncated.
+    let wide: Vec<FactVersionRef> = (0..=FACT_PAGE_WIDTH)
         .map(|index| FactVersionRef::FileWholeHash {
             canonical_id: format!("/p/f-{index:05}.ts"),
             hash: hash16(0),
         })
         .collect();
-    let run: Arc<[FactVersionRef]> = Arc::from(over_cap);
+    let run: Arc<[FactVersionRef]> = Arc::from(wide.clone());
 
     let mut read_set = FactReadSet::new();
     read_set.absorb_canonical_signature(&run);
-    assert_eq!(read_set.len(), FACT_SIGNATURE_CAP + 1);
+    assert_eq!(read_set.len(), FACT_PAGE_WIDTH + 1);
     assert!(!read_set.is_empty());
-    assert!(read_set.would_overflow());
-    assert!(matches!(read_set.finalise(), FactReadSetFinalise::Overflow));
-}
-
-#[test]
-fn absorbed_runs_survive_a_would_overflow_peek() {
-    // `would_overflow` collapses the tracer to canonical form. That must
-    // not lose the absorbed facts for the later `finalise`.
-    let (canonical, local) = split_corpus();
-    let run: Arc<[FactVersionRef]> = Arc::from(canonical.clone());
-    let mut read_set = FactReadSet::new();
-    for fact in &local {
-        read_set.observe(fact.clone());
-    }
-    read_set.absorb_canonical_signature(&run);
-    assert!(!read_set.would_overflow());
-    // Peek twice: the collapse is idempotent.
-    assert!(!read_set.would_overflow());
-    let merged = match read_set.finalise() {
-        FactReadSetFinalise::Ok(signature) => signature,
-        other => panic!("finalised as {other:?}"),
+    let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+        panic!("a wide absorbed run seals into pages, never a refusal");
     };
-    let mut union: Vec<FactVersionRef> = canonical.iter().chain(local.iter()).cloned().collect();
-    union.sort_unstable_by(compare_fact_refs);
-    union.dedup();
-    assert_eq!(merged.as_ref(), union.as_slice());
+    let signature = crate::facts::fact_cache::ReadSetSignature::new(signature);
+    assert_eq!(
+        sorted_entries(&signature.facts),
+        wide,
+        "every absorbed fact survives"
+    );
 }
 
 #[test]
@@ -893,7 +877,7 @@ fn compact_canonical(
 /// negative half below then finds a minted aggregate and fails.
 #[test]
 fn a_domain_with_no_live_producer_never_mints_an_aggregate() {
-    let facts = distinct_content_facts(FACT_SIGNATURE_CAP + 1);
+    let facts = distinct_content_facts(FACT_DOMAIN_PRECISE_MAX + 1);
 
     // NEGATIVE: population supplied, stamp absent. Nothing may mint.
     let (kept, lifted) = compact_canonical(
@@ -959,7 +943,7 @@ fn a_view_derived_domain_mints_under_the_supplied_view_population() {
         view_population: Some(session_overlay_view()),
         ..Default::default()
     };
-    let facts = distinct_content_facts(FACT_SIGNATURE_CAP + 1);
+    let facts = distinct_content_facts(FACT_DOMAIN_PRECISE_MAX + 1);
 
     let FactReadSetFinalise::Ok(signature) = finalise_with_basis(&facts, basis) else {
         panic!("an over-threshold content bucket with a live stamp AND a view population must compact and admit");
@@ -1001,8 +985,8 @@ fn a_view_derived_domain_mints_under_the_supplied_view_population() {
 /// the unconditional fallback
 /// `Some(AggregatePopulation::View(ViewPopulation::Base))` — the
 /// pre-change `_ => Base` catch-all. The domain then mints from a stamp
-/// whose view identity nothing supplied, this finalises `Ok` instead of
-/// `Overflow`, and the assertion fails. (The mint filter's
+/// whose view identity nothing supplied, the signature carries an
+/// aggregate instead of its precise facts, and the assertion fails. (The mint filter's
 /// `population.is_some()` gate cannot be mutated independently: without
 /// a population there is nothing to stamp the aggregate with, so any
 /// mutation of that gate IS this fallback.)
@@ -1015,13 +999,14 @@ fn a_view_derived_domain_stays_precise_without_a_view_population() {
         view_population: None,
         ..Default::default()
     };
-    let facts = distinct_content_facts(FACT_SIGNATURE_CAP + 1);
+    let facts = distinct_content_facts(FACT_DOMAIN_PRECISE_MAX + 1);
 
-    assert!(
-        matches!(
-            finalise_with_basis(&facts, basis),
-            FactReadSetFinalise::Overflow
-        ),
+    let FactReadSetFinalise::Ok(signature) = finalise_with_basis(&facts, basis) else {
+        panic!("an uncompacted wide set seals into pages, never a refusal");
+    };
+    assert_eq!(
+        sorted_entries(&signature),
+        facts,
         "a domain with no view population must not mint an aggregate: the population is what \
          binds the claim to a view, and an aggregate minted without one would be a witness no \
          view can honestly reject"
@@ -1037,7 +1022,7 @@ fn a_view_derived_domain_stays_precise_without_a_view_population() {
 /// aggregates become equal and the inequality assertion fails.
 #[test]
 fn base_and_session_overlay_views_mint_distinguishable_aggregates() {
-    let facts = distinct_content_facts(FACT_SIGNATURE_CAP + 1);
+    let facts = distinct_content_facts(FACT_DOMAIN_PRECISE_MAX + 1);
     let stamp = AggregateStamp::Generation(9);
 
     let base = {
@@ -1129,7 +1114,7 @@ fn workspace_shape_mints_globally_regardless_of_the_view_population() {
         view_population: Some(session_overlay_view()),
         ..Default::default()
     };
-    let facts = distinct_workspace_shape_facts(FACT_SIGNATURE_CAP + 1);
+    let facts = distinct_workspace_shape_facts(FACT_DOMAIN_PRECISE_MAX + 1);
 
     let FactReadSetFinalise::Ok(signature) = finalise_with_basis(&facts, basis) else {
         panic!("an over-threshold workspace-shape bucket with a live stamp must compact");
@@ -1163,7 +1148,7 @@ fn a_resolution_bucket_partitions_by_its_own_population_not_the_view() {
         view_population: Some(session_overlay_view()),
         ..Default::default()
     };
-    let facts = distinct_resolution_facts(FACT_SIGNATURE_CAP + 1, ResolutionPopulation::Base);
+    let facts = distinct_resolution_facts(FACT_DOMAIN_PRECISE_MAX + 1, ResolutionPopulation::Base);
 
     let FactReadSetFinalise::Ok(signature) = finalise_with_basis(&facts, basis) else {
         panic!("an over-threshold resolution bucket with a live stamp must compact");
@@ -1201,7 +1186,8 @@ fn two_populations_in_one_domain_lift_independently() {
         resolution: Some(AggregateStamp::Generation(5)),
         ..Default::default()
     };
-    let mut facts = distinct_resolution_facts(FACT_SIGNATURE_CAP + 1, ResolutionPopulation::Base);
+    let mut facts =
+        distinct_resolution_facts(FACT_DOMAIN_PRECISE_MAX + 1, ResolutionPopulation::Base);
     // Well under the threshold on its own, and it must stay precise.
     // Distinct canonicals from the base run so dedup cannot hide the
     // population axis: these are different facts either way.
@@ -1260,7 +1246,7 @@ fn two_populations_in_one_domain_lift_independently() {
 /// assertion fails while the aggregate assertions stay green.
 #[test]
 fn lifting_one_domain_leaves_every_other_domain_precise() {
-    let mut facts = distinct_content_facts(FACT_SIGNATURE_CAP + 1);
+    let mut facts = distinct_content_facts(FACT_DOMAIN_PRECISE_MAX + 1);
     // A second domain, well under its own threshold.
     let unrelated = distinct_workspace_shape_facts(3);
     facts.extend(unrelated.iter().cloned());
@@ -1290,4 +1276,248 @@ fn lifting_one_domain_leaves_every_other_domain_precise() {
              destroy warm reuse across unrelated edits"
         );
     }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Paged evidence
+// ────────────────────────────────────────────────────────────────────
+
+/// A validator over a live `canonical → whole hash` table: a whole-hash
+/// fact holds when the table still records its hash, and a page or a
+/// receipt holds when every fact it reaches does.
+struct LiveWholeHashes(rustc_hash::FxHashMap<String, [u8; 16]>);
+
+impl crate::facts::fact_cache::FactVersionValidator for LiveWholeHashes {
+    fn validates_fact_version(&self, fact: &FactVersionRef) -> bool {
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                self.0.get(canonical_id.as_str()) == Some(hash)
+            }
+            FactVersionRef::Receipt(receipt) => {
+                receipt.all_leaves(|leaf| self.validates_fact_version(leaf))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A signature's entries with its pages read through, in canonical order
+/// (a level of pages is ordered by page digest, not by what each holds).
+fn sorted_entries(signature: &[FactVersionRef]) -> Vec<FactVersionRef> {
+    let mut entries: Vec<FactVersionRef> = crate::facts::fact_cache::signature_entries(signature)
+        .cloned()
+        .collect();
+    entries.sort_unstable_by(compare_fact_refs);
+    entries
+}
+
+fn wide_whole_hashes(count: usize) -> Vec<FactVersionRef> {
+    (0..count)
+        .map(|index| FactVersionRef::FileWholeHash {
+            canonical_id: format!("/p/wide-{index:07}.ts"),
+            hash: hash16(1),
+        })
+        .collect()
+}
+
+fn live_table(facts: &[FactVersionRef]) -> LiveWholeHashes {
+    LiveWholeHashes(
+        facts
+            .iter()
+            .map(|fact| match fact {
+                FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                    (canonical_id.as_str().to_owned(), *hash)
+                }
+                other => panic!("fixture holds whole-hash facts only, got {other:?}"),
+            })
+            .collect(),
+    )
+}
+
+fn seal(facts: &[FactVersionRef]) -> crate::facts::fact_cache::ReadSetSignature {
+    let mut read_set = FactReadSet::new();
+    for fact in facts.iter().rev() {
+        read_set.observe(fact.clone());
+    }
+    match read_set.finalise() {
+        FactReadSetFinalise::Ok(signature) => {
+            crate::facts::fact_cache::ReadSetSignature::new(signature)
+        }
+        other => panic!("a wide observation set seals into its signature, got {other:?}"),
+    }
+}
+
+/// Width is never a refusal: at, around and well beyond one page, every
+/// observed fact survives into the signature, the top level fits one
+/// page, and the whole set validates against an unchanged world.
+///
+/// Mutation recipe: drop the last run in `page_canonical_at_width` (map
+/// `chunks` to `chunks_exact`) — the 1025 and 3077 rows lose their tail
+/// and the entry comparison fails.
+#[test]
+fn signatures_around_and_beyond_the_page_width_keep_and_validate_every_fact() {
+    for width in [
+        FACT_PAGE_WIDTH - 1,
+        FACT_PAGE_WIDTH,
+        FACT_PAGE_WIDTH + 1,
+        3 * FACT_PAGE_WIDTH + 5,
+    ] {
+        let facts = wide_whole_hashes(width);
+        let signature = seal(&facts);
+        assert!(
+            signature.facts.len() <= FACT_PAGE_WIDTH,
+            "{width}: the top level fits one page, got {}",
+            signature.facts.len()
+        );
+        assert_eq!(
+            signature.facts.iter().any(|entry| matches!(
+                entry,
+                FactVersionRef::Receipt(page) if page.is_page()
+            )),
+            width > FACT_PAGE_WIDTH,
+            "{width}: only a set wider than one page is paged"
+        );
+        assert_eq!(
+            sorted_entries(&signature.facts),
+            facts,
+            "{width}: every fact survives"
+        );
+        assert_eq!(signature.entry_count(), width);
+        assert!(
+            signature.validates(&live_table(&facts)),
+            "{width}: an unchanged world validates the whole signature"
+        );
+    }
+}
+
+/// An edit to ANY page's fact invalidates the signature — the first and
+/// the last fact of every page, and above all the very last fact of the
+/// set, which sits alone at the end of a short final page.
+///
+/// Mutation recipe: make the validator-facing default
+/// `validates_fact_signature` stop after the first entry — every edit
+/// past page one validates and the loop fails on page two.
+#[test]
+fn an_edit_on_every_page_including_the_last_invalidates() {
+    let width = 3 * FACT_PAGE_WIDTH + 5;
+    let facts = wide_whole_hashes(width);
+    let signature = seal(&facts);
+    let mut probes: Vec<usize> = (0..width)
+        .step_by(FACT_PAGE_WIDTH)
+        .flat_map(|start| [start, (start + FACT_PAGE_WIDTH - 1).min(width - 1)])
+        .collect();
+    probes.push(width - 1);
+    for index in probes {
+        let mut live = live_table(&facts);
+        let FactVersionRef::FileWholeHash { canonical_id, .. } = &facts[index] else {
+            unreachable!("fixture holds whole-hash facts only");
+        };
+        live.0.insert(canonical_id.as_str().to_owned(), hash16(2));
+        assert!(
+            !signature.validates(&live),
+            "an edit to fact {index} (page {}) must invalidate the signature",
+            index / FACT_PAGE_WIDTH
+        );
+    }
+}
+
+/// The same observed set always seals to the same pages, whatever order
+/// it was observed in, and a sealed wide signature absorbed into an
+/// enclosing tracer keeps its pages shared rather than copied.
+#[test]
+fn paging_is_deterministic_and_absorbed_pages_are_shared() {
+    let facts = wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3);
+    let forward = {
+        let mut read_set = FactReadSet::new();
+        for fact in &facts {
+            read_set.observe(fact.clone());
+        }
+        let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+            panic!("seals");
+        };
+        signature
+    };
+    let reverse = seal(&facts).facts;
+    assert_eq!(forward, reverse, "paging is a function of the observed set");
+
+    let mut outer = FactReadSet::new();
+    outer.absorb_canonical_signature(&forward);
+    outer.observe(FactVersionRef::ProjectGeneration { generation: 7 });
+    let FactReadSetFinalise::Ok(enclosing) = outer.finalise() else {
+        panic!("seals");
+    };
+    let shared = enclosing
+        .iter()
+        .filter_map(|entry| match entry {
+            FactVersionRef::Receipt(page) if page.is_page() => Some(page),
+            _ => None,
+        })
+        .filter(|page| {
+            forward.iter().any(
+                |inner| matches!(inner, FactVersionRef::Receipt(original) if original.ptr_eq(page)),
+            )
+        })
+        .count();
+    assert_eq!(
+        shared,
+        forward.len(),
+        "the enclosing signature holds the absorbed pages themselves, never a copy"
+    );
+}
+
+/// A level of pages wider than one page is paged again: the index keeps
+/// every entry reachable, in order, under a top level that fits.
+#[test]
+fn a_level_of_pages_wider_than_one_page_is_indexed_again() {
+    let facts = wide_whole_hashes(21);
+    let sealed = super::page_canonical_at_width(facts.clone(), 4);
+    assert!(
+        sealed.len() <= 4,
+        "the index's top level fits: {}",
+        sealed.len()
+    );
+    let depth_two = sealed.iter().any(|entry| match entry {
+        FactVersionRef::Receipt(page) => page
+            .facts()
+            .iter()
+            .any(|inner| matches!(inner, FactVersionRef::Receipt(child) if child.is_page())),
+        _ => false,
+    });
+    assert!(depth_two, "21 entries at width 4 need an index level");
+    assert_eq!(sorted_entries(&sealed), facts);
+    assert!(
+        crate::facts::fact_cache::ReadSetSignature::new(Arc::from(sealed))
+            .validates(&live_table(&facts))
+    );
+}
+
+/// Every page holds a pin against the process retention account sized by
+/// what it stores, shared by every holder of the page.
+#[test]
+fn every_page_is_charged_for_what_it_stores() {
+    let facts = wide_whole_hashes(FACT_PAGE_WIDTH + 1);
+    let signature = seal(&facts);
+    let pages: Vec<_> = signature
+        .facts
+        .iter()
+        .filter_map(|entry| match entry {
+            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pages.len(), 2);
+    let charged: Vec<usize> = pages
+        .iter()
+        .map(|page| page.retained_charge_bytes())
+        .collect();
+    assert!(
+        charged[0] > charged[1] && charged[1] > 0,
+        "a full page is charged more than a one-fact page, and neither is free: {charged:?}"
+    );
+    let result = crate::facts::fact_cache::ResultReceipt::new(facts[..2].to_vec());
+    assert_eq!(
+        result.retained_charge_bytes(),
+        0,
+        "a result's evidence is not a page and holds no page charge"
+    );
 }

@@ -89,6 +89,8 @@ fn a_digest_collision_never_makes_two_evidences_equal() {
             .clone(),
         aggregated: Arc::from(Vec::new()),
         resolution_evidence: false,
+        kind: EvidenceKind::Result,
+        retention: None,
     }));
     assert_ne!(a, forged);
     assert_ne!(a.cmp(&forged), std::cmp::Ordering::Equal);
@@ -165,6 +167,8 @@ fn equal_chains_assembled_apart_compare_without_native_recursion() {
                             canonicals: built.0.canonicals.clone(),
                             aggregated: Arc::clone(&built.0.aggregated),
                             resolution_evidence: false,
+                            kind: EvidenceKind::Result,
+                            retention: None,
                         })),
                     });
                 }

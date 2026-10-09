@@ -566,8 +566,7 @@ impl FallthroughResolverState {
     /// 2. **non-cacheable compute** (`admission.non_cacheable()`) — the compute
     ///    consumed a FENCED (ReturnOnly, `store_published == false`) serve, a
     ///    broken decl-body lease, an unrootable import route, or an
-    ///    unobservable contributor source env; or its observation set
-    ///    overflowed the fact-signature cap. Those reasons are CONTENT-NEUTRAL:
+    ///    unobservable contributor source env. Those reasons are CONTENT-NEUTRAL:
     ///    the artifacts stay published and content-current, so an admitted
     ///    entry would root on the LIVE hashes and revalidate on every warm read
     ///    FOREVER — nothing downstream can reject it. The value is still SERVED

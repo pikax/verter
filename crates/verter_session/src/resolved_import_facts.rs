@@ -385,7 +385,7 @@ impl ResolvedImportFactsDb {
     /// Admit a freshly-resolved payload under the witness the producer
     /// observed. Returns `true` when the candidate entered the slot.
     ///
-    /// Strict admission: an empty or over-cap witness is refused
+    /// Strict admission: an empty witness is refused
     /// (`ReturnOnly`) rather than admitted unrooted.
     ///
     /// The whole insertion runs inside the domain's generation bracket,
@@ -395,7 +395,7 @@ impl ResolvedImportFactsDb {
     /// * a candidate entering the slot ADVANCES — including when it ages
     ///   the oldest candidate out, because eviction happens inside this
     ///   same insertion and so is never an admit-free validity flip;
-    /// * a REFUSED admission (empty or over-cap witness) does not — no
+    /// * a REFUSED admission (an empty witness) does not — no
     ///   membership moved;
     /// * an identical-candidate SKIP does not reach here at all: the
     ///   producer's dedupe returns before calling this, so a

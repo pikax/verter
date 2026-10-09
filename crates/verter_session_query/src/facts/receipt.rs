@@ -14,11 +14,30 @@
 //! a receipt validates exactly when every fact reachable through it
 //! validates, each distinct receipt visited once
 //! ([`ResultReceipt::all_leaves`]).
+//!
+//! The same carrier holds an EVIDENCE PAGE ([`ResultReceipt::page`]): one
+//! fixed-width slice of a signature too wide for one level. A page is not a
+//! consumed result — it names no computation and carries no cost identity —
+//! but it validates, projects and is shared exactly as a receipt is, so a
+//! wide signature stays complete without any consumer learning a second
+//! evidence shape. Its storage is charged to the process retention account
+//! for exactly as long as the page lives.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use super::version::{CompactionDomain, FactAttribution, FactVersionRef};
+
+/// What one shared evidence holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EvidenceKind {
+    /// A completed result's own facts and the receipts of what it consumed.
+    Result,
+    /// One fixed-width page of a signature wider than one level (see
+    /// [`crate::facts::fact_read_set::FACT_PAGE_WIDTH`]): a slice of that
+    /// signature's canonical entries, never a computation's evidence.
+    Page,
+}
 
 /// The evidence one completed result recorded: its own facts and the
 /// receipts of the results it consumed, in canonical order, with the
@@ -26,6 +45,7 @@ use super::version::{CompactionDomain, FactAttribution, FactVersionRef};
 #[derive(Debug)]
 pub struct ResultEvidence {
     facts: Arc<[FactVersionRef]>,
+    kind: EvidenceKind,
     digest: u128,
     /// Every canonical a fact reachable from here names: a persistent set
     /// sharing its structure with the sets of the receipts it consumed.
@@ -35,6 +55,11 @@ pub struct ResultEvidence {
     aggregated: Arc<[CompactionDomain]>,
     /// Whether a reachable fact is resolution evidence.
     resolution_evidence: bool,
+    /// A page's reservation against the process retention account, held
+    /// for exactly as long as the page lives (every signature, candidate
+    /// and refusal summary sharing it shares this one charge). `None` for
+    /// a result's evidence.
+    retention: Option<crate::retention::RetentionCharge>,
 }
 
 /// Every canonical the facts reachable from a receipt name, ordered.
@@ -154,6 +179,13 @@ fn take_consumed(facts: &mut Arc<[FactVersionRef]>, owned: &mut Vec<Arc<ResultEv
     }
 }
 
+/// Estimated resident bytes one entry of an evidence page keeps alive.
+const PAGE_ENTRY_BYTES: usize = 64;
+
+/// Estimated resident bytes of one evidence page beyond its entries: the
+/// shared evidence header, its digest and its summaries.
+const PAGE_OVERHEAD_BYTES: usize = 128;
+
 /// A receipt for a completed result: its evidence, shared.
 ///
 /// Equality, order and hash read the evidence's digest first; two
@@ -170,7 +202,32 @@ impl ResultReceipt {
         facts.sort_unstable();
         facts.dedup();
         drop_subsumed_receipts(&mut facts);
+        Self::seal(facts, EvidenceKind::Result, None)
+    }
+
+    /// One page of a wide signature: `facts`, a contiguous run of that
+    /// signature's canonical (strictly increasing) entries, kept whole —
+    /// nothing is re-sorted, deduplicated or dropped.
+    ///
+    /// The page's storage is pinned against the process retention account
+    /// for the page's whole life: a page exists only because a live
+    /// signature holds it, so it is charged unconditionally and released by
+    /// its last holder's drop, once, however many candidates, refusal
+    /// summaries or enclosing signatures share it.
+    #[must_use]
+    pub fn page(facts: Vec<FactVersionRef>) -> Self {
+        let bytes = PAGE_OVERHEAD_BYTES + facts.len() * PAGE_ENTRY_BYTES;
+        let charge = crate::retention::SemanticRetentionAccount::process_local().pin(bytes);
+        Self::seal(facts, EvidenceKind::Page, Some(charge))
+    }
+
+    fn seal(
+        facts: Vec<FactVersionRef>,
+        kind: EvidenceKind,
+        retention: Option<crate::retention::RetentionCharge>,
+    ) -> Self {
         let mut digester = xxhash_rust::xxh3::Xxh3::new();
+        kind.hash(&mut digester);
         facts.len().hash(&mut digester);
         for fact in &facts {
             fact.hash(&mut digester);
@@ -218,11 +275,36 @@ impl ResultReceipt {
         let canonicals = CanonicalSet::union_of(&consumed, &own);
         Self(Arc::new(ResultEvidence {
             facts: facts.into(),
+            kind,
             digest,
             canonicals,
             aggregated: aggregated.into(),
             resolution_evidence,
+            retention,
         }))
+    }
+
+    /// What this evidence holds: a result's, or one page of a wide
+    /// signature.
+    #[must_use]
+    pub fn kind(&self) -> EvidenceKind {
+        self.0.kind
+    }
+
+    /// Whether this is one page of a wide signature.
+    #[must_use]
+    pub fn is_page(&self) -> bool {
+        self.0.kind == EvidenceKind::Page
+    }
+
+    /// Bytes this evidence holds charged against the retention account: a
+    /// page's pin, shared by every holder; `0` for a result's evidence.
+    #[must_use]
+    pub fn retained_charge_bytes(&self) -> usize {
+        self.0
+            .retention
+            .as_ref()
+            .map_or(0, crate::retention::RetentionCharge::bytes)
     }
 
     /// The result's own facts and the receipts of what it consumed.
@@ -370,6 +452,7 @@ pub fn drop_subsumed_receipts(facts: &mut Vec<FactVersionRef>) {
 impl std::fmt::Debug for ResultReceipt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResultReceipt")
+            .field("kind", &self.0.kind)
             .field("digest", &format_args!("{:032x}", self.0.digest))
             .field("facts", &self.0.facts.len())
             .finish()
@@ -380,6 +463,7 @@ impl PartialEq for ResultReceipt {
     fn eq(&self, other: &Self) -> bool {
         self.ptr_eq(other)
             || (self.0.digest == other.0.digest
+                && self.0.kind == other.0.kind
                 && compare_evidence(&self.0, &other.0) == std::cmp::Ordering::Equal)
     }
 }
@@ -400,6 +484,7 @@ impl Ord for ResultReceipt {
         self.0
             .digest
             .cmp(&other.0.digest)
+            .then_with(|| self.0.kind.cmp(&other.0.kind))
             .then_with(|| compare_evidence(&self.0, &other.0))
     }
 }
@@ -433,7 +518,7 @@ fn compare_evidence(a: &ResultEvidence, b: &ResultEvidence) -> std::cmp::Orderin
                 if x.ptr_eq(y) {
                     continue;
                 }
-                match x.0.digest.cmp(&y.0.digest) {
+                match x.0.digest.cmp(&y.0.digest).then(x.0.kind.cmp(&y.0.kind)) {
                     Ordering::Equal => {}
                     unequal => return unequal,
                 }

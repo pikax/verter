@@ -125,8 +125,8 @@ fn demand_read_fault_reasons(err: &QueryError) -> Option<PartialReasonSet> {
 /// The `cache_suppress` bit is the OR of every nested read's
 /// [`CacheRead::cache_suppress`](crate::semantic_query::CacheRead) observed
 /// while producing this outcome — inner-memo non-cacheability that is BENIGN
-/// (a torn / unrootable self-root, a tracer-signature overflow, a `ReturnOnly`
-/// cross-owner-reuse admission, a fenced serve) but distinct from a partial
+/// (a torn / unrootable self-root, a `ReturnOnly` cross-owner-reuse
+/// admission, a fenced serve) but distinct from a partial
 /// result. A `Complete` outcome can still carry `cache_suppress = true`; that
 /// signal is NOT reconstructible from the node, so it rides the outcome so
 /// [`Self::into_active_query_build_node`] can fold it into the active build
@@ -743,7 +743,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// The third field is the OR of every nested read's `cache_suppress`
     /// observed while producing this outcome (a fenced / torn-self-root /
-    /// tracer-overflow / `ReturnOnly` benign-non-cacheability). It is the
+    /// `ReturnOnly` benign-non-cacheability). It is the
     /// admission signal the `evaluate_deferred_memo` publish gate consults
     /// alongside completeness, and it is NOT reconstructible from the node —
     /// tests that assert the suppress-aggregation contract (e.g. a

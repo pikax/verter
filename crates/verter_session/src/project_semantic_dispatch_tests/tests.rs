@@ -2332,8 +2332,11 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+/// A completed carrier wider than one evidence page — a traced set that
+/// already filled a page, plus the structural self-root merged in after
+/// finalisation — is paged and published whole, never refused for its width.
 #[test]
-fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
+fn semantic_publication_pages_a_post_finalise_wide_carrier() {
     let canonical = "/w/semantic-publish.ts";
     let host = host();
     upsert_ts(&host, canonical, "export type Root = string;\n");
@@ -2341,7 +2344,7 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
         .ensure_indexed_ready(canonical)
         .expect("semantic root is indexed")
         .whole_hash;
-    let traced = crate::semantic_graph_self_root_tests::exact_cap_terminal_witness_facts();
+    let traced = crate::semantic_graph_self_root_tests::page_width_terminal_witness_facts();
     let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
         (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
     output.observed_self_roots = vec![(Arc::<str>::from(canonical), whole_hash)];
@@ -2349,16 +2352,85 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
     let completed = finalise_traced_build_output(
         &host,
         output,
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(traced)),
-        &host.provenance.engine,
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(
+            traced.clone(),
+        )),
         &CarrierNormalizationPrelude::none(),
-        false,
     );
 
-    assert!(completed.cache_suppress);
     assert!(
-        completed.graph_carrier.is_none(),
-        "an over-cap carrier must not be broadcast or published",
+        !completed.cache_suppress,
+        "width is never a refusal: the wide carrier publishes"
+    );
+    let carrier = completed
+        .graph_carrier
+        .expect("the wide carrier is published");
+    assert!(
+        carrier.facts.len() <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
+        "the published carrier's top level fits one page"
+    );
+    let entries: Vec<_> = carrier.entries().cloned().collect();
+    assert!(
+        traced.iter().all(|fact| entries.contains(fact)),
+        "every traced fact survives into the paged carrier"
+    );
+}
+
+/// A work-refused build that read more than one evidence page delivers its
+/// WHOLE proving prefix: the broadcast carrier holds every traced fact, and
+/// the refusal is certified on that complete evidence — never on an empty
+/// or truncated signature.
+#[test]
+fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
+    use verter_type_engine::project_semantic_dispatch::finalised_build_certifies_refusal_for_tests;
+    let canonical = "/w/wide-refusal.ts";
+    let host = host();
+    upsert_ts(&host, canonical, "export type Root = string;\n");
+    let whole_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("the root is indexed")
+        .whole_hash;
+    let traced: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
+        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1)
+            .map(|generation| {
+                verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
+                    generation: generation as u64,
+                }
+            })
+            .collect();
+    let refused = || {
+        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
+            (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
+        output.mark_partial_with(
+            verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
+        );
+        output.observed_self_roots = vec![(Arc::<str>::from(canonical), whole_hash)];
+        output
+    };
+    let finalise = || {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(traced.clone()),
+        )
+    };
+
+    let finalised = finalise_traced_build_output(
+        &host,
+        refused(),
+        finalise(),
+        &CarrierNormalizationPrelude::none(),
+    );
+    assert!(finalised.cache_suppress, "a work refusal is never admitted");
+    let carrier = finalised
+        .graph_carrier
+        .expect("a refused build broadcasts its evidence");
+    let entries: Vec<_> = carrier.entries().cloned().collect();
+    assert!(
+        traced.iter().all(|fact| entries.contains(fact)),
+        "the refusal's proving prefix keeps every fact it read"
+    );
+    assert!(
+        finalised_build_certifies_refusal_for_tests(&host, refused(), finalise()),
+        "a wide refusal over its completed self-roots is certified on its whole evidence"
     );
 }
 
@@ -2406,21 +2478,14 @@ fn a_torn_self_root_never_certifies_a_refusal() {
         &host,
         torn(),
         traced(),
-        &host.provenance.engine,
         &CarrierNormalizationPrelude::none(),
-        false,
     );
     assert!(
         broadcast.graph_carrier.is_some(),
         "the torn build still broadcasts its traced facts to joiners"
     );
     assert!(
-        !finalised_build_certifies_refusal_for_tests(
-            &host,
-            torn(),
-            traced(),
-            &host.provenance.engine
-        ),
+        !finalised_build_certifies_refusal_for_tests(&host, torn(), traced()),
         "a broadcast-only carrier never certifies a refusal"
     );
     assert!(
@@ -2428,7 +2493,6 @@ fn a_torn_self_root_never_certifies_a_refusal() {
             &host,
             refused(vec![(Arc::from(canonical), after)]),
             traced(),
-            &host.provenance.engine
         ),
         "a refusal over its completed self-roots does"
     );

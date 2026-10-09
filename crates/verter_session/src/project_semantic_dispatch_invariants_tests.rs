@@ -1618,18 +1618,14 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     );
 }
 
-/// OVERFLOW non-admission: a relation whose traced read-set overflows
-/// (`FactReadSetFinalise::Overflow`) is RETURNED to the caller but NOT
-/// admitted to the relation memo.
+/// Non-cacheable non-admission: a relation whose cold compute consumed a
+/// non-cacheable read is RETURNED to the caller but NOT admitted to the
+/// relation memo.
 ///
-/// DISCRIMINATES the `Overflow => return (result, fence)` early-return in
-/// `build_relate`: a mutation that admitted regardless of overflow (e.g.
-/// dropped the `Overflow` arm and always published) would
-/// grow `relation_memo_count()` and FAIL the count assertion. The
-/// `relation_force_overflow_observations` test knob forces the overflow
-/// without a pathological multi-file fixture.
+/// DISCRIMINATING: a mutation that admitted regardless of the tracer's
+/// verdict would grow `relation_memo_count()` and FAIL the count assertion.
 #[test]
-fn relation_memo_overflow_returns_result_without_admission() {
+fn relation_memo_non_cacheable_read_returns_result_without_admission() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
@@ -1638,36 +1634,35 @@ fn relation_memo_overflow_returns_result_without_admission() {
     // `Assignable` (identity) — the value is returned to the caller.
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    // Arm the overflow knob: observe CAP+1 synthetic facts during the cold
-    // compute so the read-set finalises `Overflow`. The RAII guard zeroes the
-    // knob on drop (panic-safe) so the forced state never leaks past the test.
-    let _overflow_guard = crate::for_tests::relation_force_overflow_observations_for_tests(
-        &host,
-        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
-    );
-
+    host.test_force
+        .engine
+        .force_fact_tracer_non_cacheable_read
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let before = graph.relation_memo_count();
     let result = dispatch.execute_relate_pair_as_result_for_tests(string, string);
     let after = graph.relation_memo_count();
+    host.test_force
+        .engine
+        .force_fact_tracer_non_cacheable_read
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     // The judgement is still computed and returned to the caller.
     assert!(
         matches!(result, RelationResult::Assignable { .. }),
-        "overflow must still RETURN the computed judgement to the caller; got {result:?}"
+        "a refused relation must still RETURN the computed judgement; got {result:?}"
     );
-    // But it is REFUSED memo admission — the dependency fence cannot be
-    // represented under overflow.
+    // But it is REFUSED memo admission.
     assert_eq!(
         after, before,
-        "OVERFLOW: an overflowed read-set must NOT admit a relation-memo entry \
-         (count must not grow); a mutation that admitted regardless would FAIL here"
+        "a relation whose compute consumed a non-cacheable read must NOT admit a \
+         relation-memo entry (count must not grow)"
     );
     assert!(
         graph
             .get_relation_payload(&host, &dispatch.relate_key_for(string, string))
             .map(|served| served.value)
             .is_none(),
-        "OVERFLOW: no warm entry may be reachable for the overflowed relation"
+        "no warm entry may be reachable for the refused relation"
     );
 }
 

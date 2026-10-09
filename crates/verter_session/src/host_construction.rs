@@ -732,7 +732,6 @@ impl VerterHost {
                 ),
                 decl_lowering_policy.size.resolve(),
             )),
-            compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             relation_knobs: Arc::new(RelationHostKnobs::default()),
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
@@ -743,7 +742,6 @@ impl VerterHost {
             test_force,
             #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
-            signature_overflow_at_install: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
             _test_worker_pool_lease: test_worker_pool_lease,
         };
@@ -1777,9 +1775,6 @@ mod resource_policy_lazy_tests {
 }
 
 impl verter_type_engine::fact_signature_helpers::UnboundBasisOwner for crate::VerterHost {
-    fn signature_overflow_at_install(&self) -> &std::sync::atomic::AtomicU64 {
-        &self.signature_overflow_at_install
-    }
     #[cfg(any(test, feature = "test-support"))]
     fn engine_test_knobs(&self) -> &verter_type_engine::engine_test_knobs::TestKnobs {
         &self.test_force.engine
@@ -1791,8 +1786,6 @@ impl crate::VerterHost {
         &self,
     ) -> verter_type_engine::project_semantic_dispatch::EngineObservers {
         verter_type_engine::project_semantic_dispatch::EngineObservers::new(
-            #[cfg(any(test, feature = "test-support"))]
-            Arc::clone(&self.signature_overflow_at_install),
             Arc::clone(&self.provenance.engine),
             Arc::clone(&self.relation_knobs),
             #[cfg(any(test, feature = "test-support"))]
@@ -1858,21 +1851,11 @@ mod fact_validation_authority {
                 &view, roots, facts,
             )
         }
-        fn record_signature_overflow(&self) {
-            self.signature_overflow_at_install
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        fn tracer_forcing(&self) -> (bool, usize) {
-            (
-                self.test_force
-                    .engine
-                    .force_fact_tracer_non_cacheable_read
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                self.test_force
-                    .engine
-                    .force_fact_tracer_overflow_observations
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            )
+        fn tracer_forcing(&self) -> bool {
+            self.test_force
+                .engine
+                .force_fact_tracer_non_cacheable_read
+                .load(std::sync::atomic::Ordering::Relaxed)
         }
 
         // Component-meta-tier bridges ------------------------------------
