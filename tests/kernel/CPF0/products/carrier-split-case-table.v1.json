@@ -1,0 +1,144 @@
+{
+  "id": "carrier-split-case-table.v1",
+  "schema": 1,
+  "contractNode": "CPF0",
+  "describesHead": {
+    "landingTitle": "docs(arch): ratify orthogonal identities and the exact-release law (#802)",
+    "date": "2026-10-09"
+  },
+  "companionInventory": "carrier-split-inventory.v1.json",
+  "rule": "Each case names its input, the required and forbidden outcomes, the contracts (T..) and capability rows (CR..) it exercises, the existing evidence that already pins part of it, and the node whose test makes it executable. The stub cases (PC03-PC06) are type-level proofs CPF1 compiles in crates/verter_compiler/tests/cases/carrier_frontend_backend_split_proof.rs; the stubs are test-only types, never production registrations. Work counters (WC..) are reported by CPF1 as counts and growth ratios against the baseline commit, measured on the same worker in the same session; timing, allocation and memory figures are evidence only and never gate.",
+  "cases": [
+    {
+      "id": "PC01",
+      "name": "Vue keeps every product through the split",
+      "input": "The pinned Vue corpus through parse, registered geometry, eval source, template facts, IDE projection and a client+server runtime compile",
+      "required": "Authored bytes, parse facts, recovery, diagnostics, registered geometry, IDE companion bytes and maps, runtime bytes and maps, template facts and cache hits are byte-equal to the baseline commit; one frontend parse per parse key",
+      "forbidden": "Any output, map or diagnostic divergence; a second parse of one parse key; a frontend module whose closure reaches an LC module",
+      "contracts": ["T01", "T02"],
+      "capabilityRows": ["CR01", "CR02", "CR03", "CR04", "CR05", "CR06"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/vue_carrier_frontend.rs vue_frontend_parse_matches_existing_constructor_on_kitchen_sink, vue_frontend_recovery_diagnostics_match_existing_constructor",
+        "verter_compiler tests/cases/projection_catalog.rs catalog_vue_projection_matches_the_vue_backend, vue_compile_ide_delegates_to_the_catalog_backend_once",
+        "verter_compiler tests/cases/vue_runtime_backend.rs, vue_projection_backend.rs, vue_semantic_authority.rs",
+        "verter_session compile/map_equality_tests.rs"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "PC02",
+      "name": "Svelte keeps every product through the split",
+      "input": "The pinned Svelte corpus, runes and legacy files, through parse, registered geometry, template facts, IDE projection and a client+server runtime compile",
+      "required": "As PC01, including the official parse-defect codes and their encounter order",
+      "forbidden": "As PC01; a parse-defect code that changes because its selection moved out of the runtime module",
+      "contracts": ["T01", "T02"],
+      "capabilityRows": ["CR01", "CR02", "CR03", "CR04", "CR05", "CR06"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/svelte_carrier_frontend.rs svelte_frontend_parse_matches_existing_constructor_on_kitchen_sink, svelte_frontend_recovery_diagnostics_match_existing_constructor",
+        "verter_compiler tests/cases/svelte_parse_defect_exact_codes.rs, svelte_parse_defect_arbitration_by_encounter_order.rs, svelte_parse_parity_matrix.rs",
+        "verter_compiler tests/cases/projection_catalog.rs catalog_svelte_projection_matches_the_svelte_backend",
+        "verter_compiler tests/cases/svelte_runtime_backend.rs, svelte_projection_backend.rs, svelte_semantic_authority.rs",
+        "verter_svelte_conformance (conformance-tests feature)"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "PC03",
+      "name": "Tooling-only HTML frontend stub",
+      "input": "A test-only HtmlCarrierFrontend implementing CarrierFrontend only, registered as a frontend row with no semantic, projection or compiler-backend row",
+      "required": "The registration compiles and the frontend registry accepts it; parse, registered geometry and parse diagnostics are served; the compiler-backend registry has no row for it",
+      "forbidden": "A RuntimeCompilerBackend, FrameworkHostIntegrationBackend or CarrierCompilerBackend implementation for the stub, including one that returns Unsupported; a runtime accessor on its row (compile error)",
+      "contracts": ["T01", "T03"],
+      "capabilityRows": ["CR01"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/compiler_capability_catalog.rs frontend_only_registration_does_not_require_runtime_backend",
+        "verter_compiler compile-fail frontend_only_has_no_runtime_accessor"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R1"
+    },
+    {
+      "id": "PC04",
+      "name": "Tooling-only Astro frontend and projection stub",
+      "input": "A test-only AstroCarrierFrontend plus AstroProjectionBackend, registered with a frontend row and a projection row and no compiler-backend row",
+      "required": "The registrations compile; an IDE-companion demand is admitted and served through the projection row with no compiler-backend row present",
+      "forbidden": "An IDE demand that requires, consults or refuses because of a missing compiler backend; an Unsupported compiler implementation",
+      "contracts": ["T01", "T03"],
+      "capabilityRows": ["CR01", "CR03"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/compiler_capability_catalog.rs projection_only_registration_does_not_require_runtime_backend",
+        "verter_compiler compile-fail projection_only_has_no_runtime_accessor"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R1"
+    },
+    {
+      "id": "PC05",
+      "name": "Frontend closure is free of runtime codegen",
+      "input": "The Vue, Svelte, HTML-stub and Astro-stub frontend modules",
+      "required": "Each frontend module compiles with no path to compile, compile_transaction, assembly, standalone, svelte::runtime, style_planner, template::code_gen, script codegen or tsc, proven by visibility or module/crate structure",
+      "forbidden": "A frontend that reaches an LC module directly or through a carrier-compiler struct; a name-keyed source scanner standing in for the structural proof",
+      "contracts": ["T01"],
+      "capabilityRows": ["CR01"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/compiler_layer_dependency_closure.rs (crate-level closure only; it states it does not prove an in-crate split)"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R1"
+    },
+    {
+      "id": "PC06",
+      "name": "Compile demand on a carrier without a backend",
+      "input": "A runtime compile demand on the HTML stub; then a mixed demand (IDE companion plus runtime) on the Astro stub",
+      "required": "The runtime product reports capability status UNSUPPORTED; the Astro IDE companion is still produced; no other product changes",
+      "forbidden": "An error diagnostic or failed request on a tooling path; a fallback to another carrier's backend; a partial result promoted warm",
+      "contracts": ["T02", "T03"],
+      "capabilityRows": ["CR03", "CR06"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/projection_catalog.rs runtime_only_bundle_does_not_invoke_projection, rejected_projection_does_not_publish_an_ide_product",
+        "verter_session framework_surface_executor suite (SUPPORTED/PARTIAL/UNSUPPORTED kind status)"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R1"
+    },
+    {
+      "id": "PC07",
+      "name": "Template facts without a compiler",
+      "input": "Vue and Svelte files whose template facts are demanded with no compile demand",
+      "required": "Facts and template-expression diagnostics equal the baseline; no runtime compile entry, compile target or code generator runs",
+      "forbidden": "Facts computed through compile_from_parsed_legacy or any CompileTarget; facts that lose their expression diagnostics",
+      "contracts": ["T01", "T03"],
+      "capabilityRows": ["CR02"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/vue_semantic_authority.rs, svelte_semantic_authority.rs",
+        "verter_compiler registered_carrier_projection take_template_facts_producer_invocations (test-support counter)"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "PC08",
+      "name": "One registration authority",
+      "input": "Duplicate frontend rows for one carrier profile; a compiler-backend row whose carrier has no frontend row",
+      "required": "Both registrations fail construction with a typed duplicate or missing-frontend error",
+      "forbidden": "A combined registry or carrier-compiler struct alive beside the two registries; first-registered-wins",
+      "contracts": ["T01", "T02"],
+      "capabilityRows": ["CR01", "CR06"],
+      "existingEvidence": [
+        "verter_compiler tests/cases/compiler_capability_catalog.rs duplicate_identities_fail_construction, duplicate_frontend_is_detected_across_languages_with_intervening_projection, catalog_iteration_is_deterministic_regardless_of_insert_order"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2"
+    }
+  ],
+  "workCounters": [
+    {"id": "WC01", "counter": "frontend parses per demand", "source": "verter_audit attribution compiler.carrier_parse (CarrierParse) plus the test-only registered_frontend_parse_count", "baselineRelation": "equal per parse key (growth ratio 1.0)", "cases": ["PC01", "PC02"]},
+    {"id": "WC02", "counter": "registry dispatches per demand", "source": "catalog lookups per demand (frontend, semantic, projection, backend), counted by CPF1 at the registry entry", "baselineRelation": "reported with the growth ratio against the baseline's catalog and enum dispatches; no hidden second lookup per product", "cases": ["PC01", "PC02", "PC06"]},
+    {"id": "WC03", "counter": "projection producer executions", "source": "take_projection_producer_invocations (test-support)", "baselineRelation": "equal; zero for runtime-only demands", "cases": ["PC01", "PC02", "PC04", "PC06"]},
+    {"id": "WC04", "counter": "template-fact producer executions", "source": "take_template_facts_producer_invocations (test-support)", "baselineRelation": "equal; zero runtime compile entries on a facts-only demand", "cases": ["PC07"]},
+    {"id": "WC05", "counter": "compiler-backend executions", "source": "runtime compile and host-admission executions per demand", "baselineRelation": "equal for Vue/Svelte compile demands; zero for every tooling-only demand", "cases": ["PC03", "PC04", "PC06", "PC07"]},
+    {"id": "WC06", "counter": "allocation-class work", "source": "verter_audit attribution SourceTextCopy, CodeTransformRender and SourceMapBuild counts", "baselineRelation": "reported with growth ratios; no new copy of source text or parse artifact per product", "cases": ["PC01", "PC02"]}
+  ]
+}
