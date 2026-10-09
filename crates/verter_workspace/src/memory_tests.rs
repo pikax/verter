@@ -2652,3 +2652,82 @@ fn a_package_checkout_between_input_rounds_never_admits_a_torn_answer() {
         CheckoutPoint::BetweenInputRounds,
     );
 }
+
+// ── Published authority identity ──
+
+/// A root republished over the live snapshot with the same readiness and
+/// env-hash tables answers under the live authority; a readiness change, a
+/// membership change, a rebuild of the same project graph and another
+/// workspace at the same scalar generation each answer under a new one.
+#[test]
+fn published_authority_survives_only_an_equivalent_republication() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&ws, &["/a"]);
+    let live = ws.load_published().expect("published");
+
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_env_hash_tables(
+            Arc::clone(&live.snapshot),
+            live.env_hashes_by_project.clone(),
+            live.project_identity_hashes.clone(),
+        ));
+    let republished = ws.load_published().expect("republished");
+    assert!(!Arc::ptr_eq(&live, &republished));
+    assert_eq!(republished.authority(), live.authority());
+
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_ext(
+            Arc::clone(&live.snapshot),
+            Box::new(()),
+        ));
+    let ready = ws.load_published().expect("ready");
+    assert_ne!(ready.authority(), live.authority(), "readiness changed");
+
+    // The env-hash tables the publication recomposes for the extension-only
+    // root equal the live ones, so this is the equivalent republication a
+    // consumer-view rebuild performs.
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_ext(
+            Arc::clone(&live.snapshot),
+            Box::new(()),
+        ));
+    let views_rebuilt = ws.load_published().expect("views rebuilt");
+    assert_eq!(views_rebuilt.authority(), ready.authority());
+
+    set_fallback_projects(&ws, &["/a", "/b"]);
+    let membership = ws.load_published().expect("membership");
+    assert_ne!(
+        membership.authority(),
+        ready.authority(),
+        "membership changed"
+    );
+
+    set_fallback_projects(&ws, &["/a", "/b"]);
+    let rebuilt = ws.load_published().expect("rebuilt");
+    assert_ne!(
+        rebuilt.authority(),
+        membership.authority(),
+        "a rebuilt snapshot is a new authority even with identical content"
+    );
+
+    // Republishing an older snapshot over a newer root never resurrects the
+    // older root's authority.
+    ws.engine
+        .publish_snapshot(crate::published_state::PublishedRoot::with_ext(
+            Arc::clone(&live.snapshot),
+            Box::new(()),
+        ));
+    let older = ws.load_published().expect("older snapshot");
+    assert_ne!(older.authority(), ready.authority());
+    assert_ne!(older.authority(), rebuilt.authority());
+
+    let replacement = MemoryWorkspace::new(MemoryOptions::default());
+    set_fallback_projects(&replacement, &["/a"]);
+    let replaced = replacement.load_published().expect("replacement");
+    assert_eq!(replaced.snapshot.generation, live.snapshot.generation);
+    assert_ne!(
+        replaced.authority(),
+        live.authority(),
+        "a replacement workspace repeating the scalar generation"
+    );
+}

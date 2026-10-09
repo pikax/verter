@@ -4688,6 +4688,91 @@ impl VerterHost {
     }
 }
 
+/// The identity of the authority a host answers under: the workspace
+/// authority of its published root and the project generation of its store.
+///
+/// Equal across everything that cannot change an answer — an equivalent
+/// republication of the workspace root, a cache eviction, a cache-row
+/// removal — and distinct across every authority replacement: a workspace
+/// swap, a configuration or membership change, a project reconfiguration.
+/// Neither half is a row-local counter: the workspace authority is
+/// process-unique and the project generation is monotonic for the store's
+/// lifetime, so a reset never repeats an identity it retired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HostAuthority {
+    workspace: Option<verter_workspace::WorkspaceAuthority>,
+    project_generation: u64,
+}
+
+impl HostAuthority {
+    /// The workspace authority half; `None` before any root was published.
+    #[must_use]
+    pub fn workspace(&self) -> Option<verter_workspace::WorkspaceAuthority> {
+        self.workspace
+    }
+}
+
+/// One capture of the authority a foreground read answers under, shared by
+/// `Arc` with everything that reads on the request's behalf.
+///
+/// The view holds only the captured identity, so it retains no workspace
+/// state. It never populates a cache: whether an answer computed under it is still
+/// the host's answer is [`Self::is_current`], and any read that went to live
+/// state instead is covered by the same check, because a live read that
+/// observed another authority can only have done so after the captured one
+/// stopped being current, and an authority never returns once replaced.
+#[derive(Debug)]
+pub struct HostAuthorityView {
+    authority: HostAuthority,
+}
+
+impl HostAuthorityView {
+    /// The captured identity.
+    #[must_use]
+    pub fn authority(&self) -> HostAuthority {
+        self.authority
+    }
+
+    /// Whether `host` still answers under the captured authority.
+    #[must_use]
+    pub fn is_current(&self, host: &VerterHost) -> bool {
+        host.current_authority() == self.authority
+    }
+}
+
+impl VerterHost {
+    /// The authority this host answers under now.
+    #[must_use]
+    pub fn current_authority(&self) -> HostAuthority {
+        // Generation first: a workspace swap installs the workspace before it
+        // advances the generation, so a read racing the swap pairs the new
+        // workspace with the old generation — an identity no settled host
+        // ever reports, which reads as replaced, never as current.
+        let project_generation = self.project_type_store.current_project_generation();
+        HostAuthority {
+            workspace: self
+                .workspace_read()
+                .published_root()
+                .map(|root| root.authority()),
+            project_generation,
+        }
+    }
+
+    /// Capture the authority a foreground read answers under. Costs one
+    /// root read and one counter read; retains no workspace state.
+    #[must_use]
+    pub fn capture_authority_view(&self) -> Arc<HostAuthorityView> {
+        let project_generation = self.project_type_store.current_project_generation();
+        let published_root = self.workspace_read().published_root();
+        Arc::new(HostAuthorityView {
+            authority: HostAuthority {
+                workspace: published_root.as_ref().map(|root| root.authority()),
+                project_generation,
+            },
+        })
+    }
+}
+
 #[cfg(test)]
 impl HostStoreView {
     /// Test-only constructor: a detached view that tracks exactly the

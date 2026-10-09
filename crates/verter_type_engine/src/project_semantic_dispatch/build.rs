@@ -9770,8 +9770,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if type_parameters.is_empty() {
             return Some(signature);
         }
+        // One clause, one base substitution: the clause's base constraints
+        // are computed once and applied to every parameter and the return,
+        // never re-derived per position.
+        let substitution = self.clause_base_substitution(
+            type_parameters
+                .iter()
+                .map(|decl| (decl.name.as_ref(), decl.constraint)),
+            crate::semantic_query::ClauseSpelling::Bound,
+        );
         let base = |node: SemanticNodeId| {
-            self.instantiate_signature_params_at_base_constraints(signature, node)
+            self.apply_clause_base_substitution(
+                &substitution,
+                node,
+                crate::semantic_query::ClauseSpelling::Bound,
+            )
         };
         let params: Arc<[crate::semantic_query::FunctionParam]> = params
             .iter()
@@ -9831,9 +9844,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         constraint_spelling: crate::semantic_query::ClauseSpelling,
         spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
+        let substitution = self.clause_base_substitution(clause, constraint_spelling);
+        self.apply_clause_base_substitution(&substitution, extracted, spelling)
+    }
+
+    /// Substitute a clause's base constraints
+    /// ([`Self::clause_base_substitution`]) out of `extracted`, claiming
+    /// the clause parameters by `spelling`.
+    fn apply_clause_base_substitution(
+        &self,
+        substitution: &ClauseBaseSubstitution<'_>,
+        extracted: SemanticNodeId,
+        spelling: crate::semantic_query::ClauseSpelling,
+    ) -> SemanticNodeId {
+        if substitution.names.is_empty() {
+            return extracted;
+        }
+        self.instantiate_clause_params(
+            substitution
+                .names
+                .iter()
+                .copied()
+                .zip(substitution.bases.iter().copied().map(Some)),
+            extracted,
+            spelling,
+        )
+    }
+
+    /// The base constraint of each clause parameter, the substitution
+    /// [`Self::instantiate_clause_at_base_constraints`] applies. A round
+    /// is a pure function of the previous round's bases, so the rounds
+    /// stop at the first one that changes nothing: a clause whose
+    /// constraints name no sibling settles after one round instead of
+    /// `N - 1`.
+    fn clause_base_substitution<'n>(
+        &self,
+        clause: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        constraint_spelling: crate::semantic_query::ClauseSpelling,
+    ) -> ClauseBaseSubstitution<'n> {
         let clause: Vec<(&str, Option<SemanticNodeId>)> = clause.into_iter().collect();
         if clause.is_empty() {
-            return extracted;
+            return ClauseBaseSubstitution {
+                names: Vec::new(),
+                bases: Vec::new(),
+            };
         }
         let names: Vec<&str> = clause.iter().map(|(name, _)| *name).collect();
         let circular = self.circular_clause_constraints(&clause, constraint_spelling);
@@ -9866,7 +9920,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
             .collect();
         for _ in 1..clause.len() {
-            bases = constraints
+            let next: Vec<SemanticNodeId> = constraints
                 .iter()
                 .map(|&constraint| {
                     self.instantiate_clause_params(
@@ -9876,12 +9930,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )
                 })
                 .collect();
+            if next == bases {
+                break;
+            }
+            bases = next;
         }
-        self.instantiate_clause_params(
-            names.iter().copied().zip(bases.iter().copied().map(Some)),
-            extracted,
-            spelling,
-        )
+        ClauseBaseSubstitution { names, bases }
     }
 
     /// Per clause parameter: whether its constraint reaches the parameter
@@ -10363,6 +10417,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if !visited.insert(node) {
                 continue;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            BINDER_COLLECTION_VISITS.with(|visits| visits.set(visits.get() + 1));
             let Some(data) = self.graph().node_data(node) else {
                 continue;
             };
@@ -17678,6 +17734,15 @@ fn index_key_present(
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static INDEX_KEY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BINDER_COLLECTION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The nodes the per-name binder collection visited on this thread, so far
+/// (test-only): the work a clause instantiation spends finding the binders
+/// it substitutes.
+#[cfg(any(test, feature = "test-support"))]
+pub fn binder_collection_visits_for_tests() -> usize {
+    BINDER_COLLECTION_VISITS.with(std::cell::Cell::get)
 }
 
 /// The key comparisons the finite index-key sets made on this thread, so
@@ -17685,4 +17750,11 @@ std::thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn index_key_probes_for_tests() -> usize {
     INDEX_KEY_PROBES.with(std::cell::Cell::get)
+}
+
+/// A clause's base substitution: each named parameter's base constraint,
+/// in clause order.
+struct ClauseBaseSubstitution<'n> {
+    names: Vec<&'n str>,
+    bases: Vec<SemanticNodeId>,
 }

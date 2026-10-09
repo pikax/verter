@@ -883,14 +883,16 @@ fn carrier_companions_record_every_role_and_advance_version_on_content_change() 
         "export default {}; /* ide v1 */\n",
         "declare const C: {}; /* api v1 */\n",
     );
-    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v1, None);
+    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v1, None)
+        .expect("an unpinned record is never superseded");
     let (ide_v1, api_v1) = (v1[0].version, v1[1].version);
 
     let mut v2 = make(
         "export default {}; /* ide v2 CHANGED */\n",
         "declare const C: {}; /* api v2 CHANGED */\n",
     );
-    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v2, None);
+    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v2, None)
+        .expect("an unpinned record is never superseded");
     let (ide_v2, api_v2) = (v2[0].version, v2[1].version);
 
     assert!(

@@ -80,12 +80,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::conditional_decision::{exact_reading, ConditionalReading};
 use super::dispatch_txn::{
     provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
-    FlowReturnPendingOutcome, InferenceInfoSetup, InferenceOccurrence, InferenceSession,
-    InferenceSessionSetup, InferenceSessionState, ObligationFrameDomain, ObligationIdentity,
+    FlowReturnPendingOutcome, InferenceOccurrence, ObligationFrameDomain, ObligationIdentity,
     PendingObligation, PendingObligationDomain, PendingVerdict, ProvisionalSubstitution,
     ProvisionalVerdict, RelationEnvironment, RelationFrameState, RelationPendingState,
-    RelationStep, ResolveCallPendingState, ReverseProjectionState, ReverseRecoveredEntry,
-    SessionCheckpoint, StrictFamilyConfig,
+    RelationStep, ResolveCallPendingState, StrictFamilyConfig,
+};
+use super::inference::session::{
+    InferenceInfoSetup, InferenceSession, InferenceSessionSetup, InferenceSessionState,
+    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint,
 };
 #[cfg(feature = "semantic-observe")]
 use super::relation_explanation::RelationExplanation;
@@ -488,6 +490,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// helper, owning ZERO memoization / cycle / assumption / admission
     /// logic): constructs the full default assignability key for
     /// `(source, target)` and delegates to [`Self::execute_relate`].
+    ///
+    /// A pair question is pure assignability (`isTypeAssignableTo`): it
+    /// never deposits into an inference session open around it. A type
+    /// parameter an enclosing session infers is rigid here; a relation
+    /// whose own key carries an inference context still opens its own
+    /// session. Candidate collection enters through the inference owner.
     pub fn execute_relate_pair(
         &self,
         source: SemanticNodeId,
@@ -497,7 +505,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().record_relation_check();
             return step;
         }
-        self.execute_relate(self.relate_key_for(source, target))
+        self.execute_relate_without_binding(self.relate_key_for(source, target))
     }
 
     /// [`Self::execute_relate_pair`] for a NON-default relation kind — the
@@ -512,7 +520,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().record_relation_check();
             return step;
         }
-        self.execute_relate(self.relate_key_for_kind(source, target, relation))
+        self.execute_relate_without_binding(self.relate_key_for_kind(source, target, relation))
+    }
+
+    /// [`Self::execute_relate`] behind a binding barrier: no session open
+    /// before it accepts a deposit.
+    fn execute_relate_without_binding(&self, key: RelateMemoKey) -> RelationStep {
+        self.dispatch_txn.borrow_mut().begin_binding_disabled();
+        let step = self.execute_relate(key);
+        self.dispatch_txn.borrow_mut().end_binding_disabled();
+        step
     }
 
     /// Ask the shared authority whether `a` and `b` can have a common
@@ -4465,162 +4482,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inference_occurrence_for_position(self.relation_current_occurrence(), position)
     }
 
-    /// Deposit an inference candidate into the active session (a
-    /// session-local delta — the deposit itself is ReturnOnly, never
-    /// published). The current top frame records the delta flag ONLY when
-    /// the session belongs to an OUTER frame (admission row 7); the
-    /// binding root's own deposits into its OWN session do not suppress
-    /// its publish (its payload carries the session's fixed bindings).
-    fn relation_deposit(
+    pub(in crate::project_semantic_dispatch) fn relation_subtree_contains_semantically_unresolved(
         &self,
-        param_node: SemanticNodeId,
-        mut bound: SemanticNodeId,
-        occurrence: InferenceOccurrence,
+        root: SemanticNodeId,
     ) -> bool {
-        let (call_policy, deposit_is_top_level) = {
-            let txn = self.dispatch_txn.borrow();
-            (
-                txn.active_session()
-                    .and_then(|session| session.call_const_policy(param_node))
-                    .zip(txn.call_argument_literal_mode()),
-                txn.call_argument_target_is_top_level(param_node),
-            )
-        };
-        if let Some((policy, literal_mode)) = call_policy {
-            // A bare literal argument's candidate widens under the
-            // inferring parameter's own const policy; an argument whose
-            // authored form already pins its type deposits as authored.
-            // A NAKED top-level inference position preserves a primitive
-            // literal (the constraint is an upper-bound check, not a
-            // widening target: `cstr<T extends string>("a")` is `"a"`);
-            // nested positions — an array element, an object member —
-            // widen as before.
-            if literal_mode == crate::semantic_query::ArgumentLiteralMode::Widened {
-                // A fresh union (a call's result whose literal members are
-                // fresh, `h(1)` over `h<T>(x: T): T | undefined`) is kept
-                // whole at a naked position as a fresh literal is.
-                let fresh_literals: Vec<SemanticNodeId> =
-                    match self.graph().node_data(bound).as_deref() {
-                        Some(SemanticNodeData::Literal(_)) => vec![bound],
-                        Some(SemanticNodeData::Union(members)) => members
-                            .iter()
-                            .copied()
-                            .filter(|member| {
-                                matches!(
-                                    self.graph().node_data(*member).as_deref(),
-                                    Some(SemanticNodeData::Literal(_))
-                                )
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                let preserve_top_literal = deposit_is_top_level
-                    && policy == crate::semantic_query::ConstParamPolicy::NonConst
-                    && !fresh_literals.is_empty();
-                if !preserve_top_literal {
-                    bound = self.call_inference_candidate(bound, policy);
-                } else {
-                    // A preserved literal at a naked position is FRESH
-                    // provenance for an unconstrained parameter (the note
-                    // is a no-op for a constrained one, whose preserved
-                    // literal is regular).
-                    if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
-                        for literal in fresh_literals {
-                            session.note_fresh_literal_deposit(param_node, literal);
-                        }
-                    }
-                }
-            }
-        }
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let active_id = txn.active_session().map(|session| session.id);
-        let accepted = txn.active_session_mut().is_some_and(|session| {
-            session.deposit(param_node, bound, occurrence.priority, occurrence.variance)
-        });
-        if !accepted {
-            return false;
-        }
-        txn.relation.accepted_inference_deposits += 1;
-        txn.note_candidate_write(active_id);
-        true
-    }
-
-    fn relation_projection_target(&self, node: SemanticNodeId) -> bool {
-        self.dispatch_txn
-            .borrow()
-            .active_session()
-            .is_some_and(|session| session.is_projection_target(node))
-    }
-
-    /// Deposit the assembled reverse candidate through the same frame/session
-    /// ownership gate as ordinary and projection candidates. A nested frame
-    /// mutating an outer session is a session-local delta and therefore cannot
-    /// publish an otherwise context-free relation payload.
-    fn relation_reverse_aggregate_deposit(
-        &self,
-        param_node: SemanticNodeId,
-        candidate: SemanticNodeId,
-        priority: InferenceCandidatePriority,
-    ) -> bool {
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let active_id = txn.active_session().map(|session| session.id);
-        let accepted = txn.active_session_mut().is_some_and(|session| {
-            session.deposit_reverse_aggregate(param_node, candidate, priority)
-        });
-        if !accepted {
-            return false;
-        }
-        txn.relation.accepted_inference_deposits += 1;
-        txn.note_candidate_write(active_id);
-        true
-    }
-
-    /// Deposit into a registered reverse projection. The indexed access is
-    /// only a projection target; it never becomes an `Infer` declaration.
-    fn relation_projection_deposit(
-        &self,
-        projection: SemanticNodeId,
-        bound: SemanticNodeId,
-        occurrence: InferenceOccurrence,
-    ) -> bool {
-        let bound = match self.unwrap_identity_carrier_for_relation(bound) {
-            IdentityCarrierUnwrap::Concrete(bound) => bound,
-            IdentityCarrierUnwrap::Unresolvable => return false,
-        };
-        if self.relation_subtree_contains_semantically_unresolved(bound)
-            || super::raise::node_is_unknown_materializing_failure(self, bound)
-            || super::raise::node_contains_semantic_miss_with_dispatch(self, bound) != Some(false)
-        {
-            return false;
-        }
-        let Some(bound_data) = self.graph().node_data(bound) else {
-            return false;
-        };
-        if is_deferred(&bound_data)
-            || matches!(
-                bound_data.as_ref(),
-                SemanticNodeData::TypeParam { .. }
-                    | SemanticNodeData::Infer { .. }
-                    | SemanticNodeData::InferRef { .. }
-            )
-        {
-            return false;
-        }
-        drop(bound_data);
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let active_id = txn.active_session().map(|session| session.id);
-        let deposited = txn.active_session_mut().is_some_and(|session| {
-            session.deposit_projection(projection, bound, occurrence.priority, occurrence.variance)
-        });
-        if !deposited {
-            return false;
-        }
-        txn.relation.accepted_inference_deposits += 1;
-        txn.note_candidate_write(active_id);
-        true
-    }
-
-    fn relation_subtree_contains_semantically_unresolved(&self, root: SemanticNodeId) -> bool {
         self.relation_subtree_matches(root, |_, data| data.means_type_is_not_yet_known())
     }
 
@@ -4829,36 +4694,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 RelationResult::Unknown
             },
         )
-    }
-
-    /// Whether an inference session is currently active.
-    pub(super) fn relation_session_active(&self) -> bool {
-        self.dispatch_txn.borrow().active_session().is_some()
-    }
-
-    /// Checkpoint the ACTIVE inference session's deposits (`None` when no
-    /// session is active). The alternative-scoping half of the
-    /// losing-alternative rule: a first-match loop over overload /
-    /// signature-group alternatives brackets each alternative with a
-    /// checkpoint and rolls back on failure, so a LOSING alternative's
-    /// deposits never reach fixation (`{ (a: number, b: number): void;
-    /// (a: string, b: string): void } extends (a: infer U, b: string) =>
-    /// void` fixes `U := string`, never `number ∧ string`).
-    pub(super) fn relation_session_checkpoint(&self) -> Option<SessionCheckpoint> {
-        self.dispatch_txn
-            .borrow()
-            .active_session()
-            .map(InferenceSession::checkpoint)
-    }
-
-    /// Roll the ACTIVE session's deposits back to `checkpoint` (no-op when
-    /// no session is active or no checkpoint was taken).
-    pub(super) fn relation_session_rollback(&self, checkpoint: &Option<SessionCheckpoint>) {
-        if let Some(checkpoint) = checkpoint {
-            if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
-                session.rollback_to(checkpoint);
-            }
-        }
     }
 
     fn relate_pair_alternatives(

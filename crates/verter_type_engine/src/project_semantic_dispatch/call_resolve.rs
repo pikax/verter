@@ -6,11 +6,13 @@ use verter_session_query::source::demand::ExpressionSourceDemand as _;
 use rustc_hash::FxHashMap;
 
 use super::dispatch_txn::{
-    CompletedResolveCallMember, InferenceInfoSetup, InferenceSessionSetup, InferenceSessionState,
-    ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
-    ProvisionalSubstitution, ProvisionalVerdict, RelationStep, ResolveCallPendingState,
-    ResolveCallSelection, ReturnDomainMetadata, ReturnEquationFailure, ReturnEquationMember,
-    ReturnObligationIdentity, SessionId,
+    CompletedResolveCallMember, ObligationFrameDomain, ObligationIdentity, PendingObligation,
+    PendingObligationDomain, ProvisionalSubstitution, ProvisionalVerdict, RelationStep,
+    ResolveCallPendingState, ResolveCallSelection, ReturnDomainMetadata, ReturnEquationFailure,
+    ReturnEquationMember, ReturnObligationIdentity, SessionId,
+};
+use super::inference::session::{
+    InferenceInfoSetup, InferenceSessionSetup, InferenceSessionState, SessionCheckpoint,
 };
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
@@ -3041,9 +3043,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         literal_mode: ArgumentLiteralMode,
     ) -> RelationStep {
         let top_level = self.top_level_type_param_targets(target);
-        self.dispatch_txn
-            .borrow_mut()
-            .begin_call_argument(Some(literal_mode), top_level);
+        self.dispatch_txn.borrow_mut().begin_call_argument(
+            Some(literal_mode),
+            top_level,
+            Some(source),
+        );
         let step = self.call_relation(source, target, freshness_origin, budget, true, true);
         self.dispatch_txn.borrow_mut().end_call_argument();
         step
@@ -3134,9 +3138,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !binding_enabled {
             return self.call_relation(source, target, source, budget, false, false);
         }
-        self.dispatch_txn
-            .borrow_mut()
-            .begin_call_argument(Some(ArgumentLiteralMode::Literal), Vec::new());
+        self.dispatch_txn.borrow_mut().begin_call_argument(
+            Some(ArgumentLiteralMode::Literal),
+            Vec::new(),
+            None,
+        );
         let step = self.call_relation(source, target, source, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
         step
@@ -3188,7 +3194,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> RelationStep {
         self.dispatch_txn
             .borrow_mut()
-            .begin_call_argument(None, Vec::new());
+            .begin_call_argument(None, Vec::new(), None);
         let step = self.call_relation(source, target, freshness_origin, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
         step
@@ -3197,7 +3203,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn reject_call_candidate(
         &self,
         session_id: SessionId,
-        checkpoint: &super::dispatch_txn::SessionCheckpoint,
+        checkpoint: &SessionCheckpoint,
     ) -> CandidateVerdict {
         let mut txn = self.dispatch_txn.borrow_mut();
         if let Some(session) = txn.relation.session_mut(session_id) {
