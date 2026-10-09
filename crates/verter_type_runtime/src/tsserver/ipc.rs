@@ -23,8 +23,8 @@ use crate::contents_snapshot::{convert_per_target, with_target_index};
 use crate::pending::{watch_engine_silence, EngineLiveness, PendingRequestTable, PendingWorkClock};
 use crate::protocol::*;
 use crate::provider_query::{
-    BoundQuery, DeliveryLedger, DispatchRefusal, PreparedQuery, ProviderQuery, SurfaceEffect,
-    SurfacePublications,
+    BoundQuery, DeliveryLedger, DispatchRefusal, PreparedQuery, ProviderQuery, PublicationPosition,
+    SurfaceEffect, SurfacePublications,
 };
 use crate::traits::{ProviderFuture, TypeProvider};
 
@@ -359,20 +359,35 @@ enum WireBinding<'a> {
     /// The frame delivers or withdraws file bytes; the ledger records them at
     /// the frame's position.
     Deliver(serde_json::Value, Vec<SurfaceEffect>),
+    /// The first frame the engine evaluates after re-reading its publisher:
+    /// the ledger records the publisher position observed before the re-read
+    /// was requested as adopted at the frame's position.
+    Adopt(serde_json::Value, Option<PublicationPosition>),
     /// The frame is a positional query: its arguments are built from the
-    /// bytes the engine holds for the prepared file at the frame's position
-    /// (else the file's disk content), and the binding it returns retains that
-    /// surface for decoding.
+    /// bytes the engine holds for the prepared file at the frame's position,
+    /// and the binding it returns retains that surface for decoding.
     Query {
         prepared: PreparedQuery,
         arguments: QueryArguments<'a>,
     },
 }
 
-/// Builds a query's arguments from the requested file's bytes at dispatch
-/// (`None` when the engine holds none and the file is not on disk), or
+/// How the frames of one background transaction meet the delivery ledger.
+enum BatchBinding<'a> {
+    /// No frame delivers bytes or decodes positions.
+    #[cfg(test)]
+    Plain,
+    /// Every frame decodes positions in this file, bound at its own position.
+    Query(&'a str),
+    /// The frames make the engine re-read its publisher; the last one is the
+    /// first the engine evaluates after the re-read, and adopts the publisher
+    /// position observed before the transaction.
+    Refresh(Option<PublicationPosition>),
+}
+
+/// Builds a query's arguments from the requested file's bytes at dispatch, or
 /// declines (`None`) when no request is representable in them.
-type QueryArguments<'a> = Box<dyn FnOnce(Option<&str>) -> Option<serde_json::Value> + Send + 'a>;
+type QueryArguments<'a> = Box<dyn FnOnce(&str) -> Option<serde_json::Value> + Send + 'a>;
 
 /// Whether a request frame reached stdin.
 enum Placement {
@@ -392,7 +407,7 @@ enum QueryUnplaced {
 impl WireBinding<'_> {
     fn summary(&self) -> String {
         match self {
-            Self::Plain(arguments) | Self::Deliver(arguments, _) => {
+            Self::Plain(arguments) | Self::Deliver(arguments, _) | Self::Adopt(arguments, _) => {
                 summarize_tsserver_args(arguments)
             }
             Self::Query { .. } => "query=bound".to_string(),
@@ -641,6 +656,7 @@ impl TsserverTransport {
             .await
     }
 
+    #[cfg(test)]
     async fn request_background_batch_results_once(
         &self,
         requests: &[(&str, serde_json::Value)],
@@ -649,17 +665,61 @@ impl TsserverTransport {
             .await
     }
 
+    #[cfg(test)]
     async fn request_background_batch_results_with_preemption(
         &self,
         requests: &[(&str, serde_json::Value)],
         retry_after_preemption: bool,
     ) -> Result<Vec<Result<serde_json::Value, TypeProviderError>>, TypeProviderError> {
         Ok(self
-            .request_background_frames(requests, None, retry_after_preemption)
+            .request_background_frames(requests, BatchBinding::Plain, retry_after_preemption)
             .await?
             .into_iter()
             .map(|frame| frame.map(|(_, body)| body))
             .collect())
+    }
+
+    /// A one-shot background publisher re-read: `requests` make the engine
+    /// re-read its publisher, and their last frame — the first the engine
+    /// evaluates after the re-read — records `observed` as adopted.
+    async fn request_background_refresh_once(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+        observed: Option<PublicationPosition>,
+    ) -> Result<(), TypeProviderError> {
+        self.request_background_frames(requests, BatchBinding::Refresh(observed), false)
+            .await?
+            .into_iter()
+            .try_for_each(|frame| frame.map(drop))
+    }
+
+    /// [`Self::request_background_refresh_once`] on the interactive lane.
+    async fn request_interactive_refresh(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+        observed: Option<PublicationPosition>,
+    ) -> Result<(), TypeProviderError> {
+        let _interactive = self.begin_interactive_request();
+        let Some(((fence, fence_arguments), reread)) = requests.split_last() else {
+            return Ok(());
+        };
+        for (command, arguments) in reread {
+            self.request_inner(command, arguments.clone(), None, None)
+                .await?;
+        }
+        match self
+            .request_bound(
+                fence,
+                WireBinding::Adopt(fence_arguments.clone(), observed),
+                None,
+            )
+            .await?
+        {
+            Placement::Sent(..) => Ok(()),
+            Placement::Unplaced => Err(TypeProviderError::new(format!(
+                "request '{fence}' was not placed"
+            ))),
+        }
     }
 
     /// The pull-diagnostics transaction for `path`: every category's frame is
@@ -673,7 +733,7 @@ impl TsserverTransport {
     ) -> Result<Vec<Result<(BoundQuery, serde_json::Value), TypeProviderError>>, TypeProviderError>
     {
         Ok(self
-            .request_background_frames(requests, Some(path), true)
+            .request_background_frames(requests, BatchBinding::Query(path), true)
             .await?
             .into_iter()
             .map(|frame| {
@@ -687,12 +747,12 @@ impl TsserverTransport {
     }
 
     /// The background transaction core: `requests` admitted under one
-    /// editor-idle window, each frame bound to the delivered surface at its own
-    /// position when `bound` names the file the answers decode against.
+    /// editor-idle window, each frame meeting the delivery ledger as `binding`
+    /// says.
     async fn request_background_frames(
         &self,
         requests: &[(&str, serde_json::Value)],
-        bound: Option<&str>,
+        binding: BatchBinding<'_>,
         retry_after_preemption: bool,
     ) -> Result<
         Vec<Result<(Option<BoundQuery>, serde_json::Value), TypeProviderError>>,
@@ -736,18 +796,23 @@ impl TsserverTransport {
             }
             let mut responses = Vec::with_capacity(requests.len());
             let mut preempted = false;
-            for (command, arguments) in requests {
-                let binding = match bound {
-                    None => WireBinding::Plain(arguments.clone()),
-                    Some(path) => WireBinding::Query {
+            for (index, (command, arguments)) in requests.iter().enumerate() {
+                let frame = match &binding {
+                    #[cfg(test)]
+                    BatchBinding::Plain => WireBinding::Plain(arguments.clone()),
+                    BatchBinding::Query(path) => WireBinding::Query {
                         prepared: self
                             .ledger
                             .prepare(&ProviderQuery::at_engine_surface(path), path)?,
                         // The diagnostic request names no position.
                         arguments: Box::new(|_| Some(arguments.clone())),
                     },
+                    BatchBinding::Refresh(observed) if index + 1 == requests.len() => {
+                        WireBinding::Adopt(arguments.clone(), observed.clone())
+                    }
+                    BatchBinding::Refresh(_) => WireBinding::Plain(arguments.clone()),
                 };
-                let placed = match self.request_bound(command, binding, Some(epoch)).await {
+                let placed = match self.request_bound(command, frame, Some(epoch)).await {
                     Ok(Placement::Sent(query, body)) => Ok((query.map(|query| *query), body)),
                     Ok(Placement::Unplaced) => Err(TypeProviderError::new(format!(
                         "request '{command}' was not placed"
@@ -781,21 +846,6 @@ impl TsserverTransport {
             }
             return Ok(responses);
         }
-    }
-
-    async fn request_interactive_batch(
-        &self,
-        requests: &[(&str, serde_json::Value)],
-    ) -> Result<Vec<serde_json::Value>, TypeProviderError> {
-        let _interactive = self.begin_interactive_request();
-        let mut responses = Vec::with_capacity(requests.len());
-        for (command, arguments) in requests {
-            responses.push(
-                self.request_inner(command, arguments.clone(), None, None)
-                    .await?,
-            );
-        }
-        Ok(responses)
     }
 
     /// Send a tsserver request with a custom configured response timeout. Split
@@ -1088,9 +1138,8 @@ impl TsserverTransport {
     /// there; the returned binding retains them, and the delivered surface of
     /// every other file, for decoding the answer.
     ///
-    /// `Ok(None)` when `arguments` declined to send a frame — a positional
-    /// query with no delivered or disk bytes to convert against (never a
-    /// fabricated position).
+    /// `Ok(None)` when `arguments` declined to send a frame — a position not
+    /// representable in the delivered bytes (never a fabricated position).
     ///
     /// # Errors
     /// The typed conflict when the engine holds other bytes than `query`
@@ -1100,7 +1149,7 @@ impl TsserverTransport {
         command: &str,
         query: &ProviderQuery,
         path: &str,
-        arguments: impl FnOnce(Option<&str>) -> Option<serde_json::Value> + Send + 'a,
+        arguments: impl FnOnce(&str) -> Option<serde_json::Value> + Send + 'a,
     ) -> Result<Option<(BoundQuery, serde_json::Value)>, TypeProviderError> {
         let prepared = self.ledger.prepare(query, path)?;
         let _interactive = self.begin_interactive_request();
@@ -1123,7 +1172,7 @@ impl TsserverTransport {
         command: &str,
         query: &ProviderQuery,
         path: &str,
-        arguments: impl Fn(Option<&str>) -> Option<serde_json::Value> + Send + Sync + 'a,
+        arguments: impl Fn(&str) -> Option<serde_json::Value> + Send + Sync + 'a,
     ) -> Result<Option<(BoundQuery, serde_json::Value)>, TypeProviderError> {
         if self.cancellation.is_none() {
             return Err(TypeProviderError::new(
@@ -1241,6 +1290,12 @@ impl TsserverTransport {
                         .map(|()| Some(None)),
                     WireBinding::Deliver(arguments, effects) => frame(arguments).map(|frame| {
                         self.ledger.deliver_with(effects, || {
+                            permit.send(TsserverStdinMessage::Frame(frame));
+                        });
+                        Some(None)
+                    }),
+                    WireBinding::Adopt(arguments, observed) => frame(arguments).map(|frame| {
+                        self.ledger.adopt_with(observed, || {
                             permit.send(TsserverStdinMessage::Frame(frame));
                         });
                         Some(None)
@@ -2229,21 +2284,18 @@ impl DiagnosticsQuery<'_> {
                 // passes almost always met the same delivery, so that document
                 // is indexed once for the whole pull, not once per pass.
                 let shared = semantic.0.requested();
-                let shared_index = shared.map(|bytes| SourceIndex::new_utf16(bytes));
-                let decode = |(query, body): &(BoundQuery, serde_json::Value)| match (
-                    query.requested(),
-                    shared,
-                ) {
-                    (Some(bytes), Some(held)) if Arc::ptr_eq(bytes, held) => {
+                let shared_index = SourceIndex::new_utf16(shared);
+                let decode = |(query, body): &(BoundQuery, serde_json::Value)| {
+                    let bytes = query.requested();
+                    if Arc::ptr_eq(bytes, shared) {
                         parse_tsserver_diagnostics_body(
                             body,
-                            shared_index.as_ref(),
+                            Some(&shared_index),
                             Some(file.as_str()),
                         )
-                    }
-                    (bytes, _) => {
-                        let index = bytes.map(|bytes| SourceIndex::new_utf16(bytes));
-                        parse_tsserver_diagnostics_body(body, index.as_ref(), Some(file.as_str()))
+                    } else {
+                        let index = SourceIndex::new_utf16(bytes);
+                        parse_tsserver_diagnostics_body(body, Some(&index), Some(file.as_str()))
                     }
                 };
                 let semantic = decode(&semantic);
@@ -2576,6 +2628,9 @@ impl TsserverTypeProvider {
             carrier_store_dir,
             plugin_response_remap,
         )?;
+        // Before the process exists: every publication the ledger observes as
+        // adopted is in place before the engine can first read its store.
+        let ledger = DeliveryLedger::new(publications);
 
         let child = cmd
             .stdin(Stdio::piped())
@@ -2615,7 +2670,7 @@ impl TsserverTypeProvider {
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
             cancellation: Some(Arc::clone(&cancellation)),
-            ledger: DeliveryLedger::new(publications),
+            ledger,
         });
         if let Some(notify) = crash_notify.as_ref() {
             tokio::spawn(watch_engine_silence(
@@ -2807,6 +2862,12 @@ async fn notify_carriers_changed_inner(
     // fence: the plugin's `setImmediate` graph reconciliation runs between the
     // two input turns, so a following diagnostic/hover cannot observe the new
     // store manifest with the old configured-project roots.
+    //
+    // The plugin adopts store bytes only here — its carrier ScriptInfos are
+    // virtual and reload on this refresh alone — so every publication the
+    // store holds before `configurePlugin` is placed is what the engine
+    // evaluates from the fence frame on, and is recorded as adopted there.
+    let observed = transport.ledger.publication_position();
     let requests = [
         (
             "configurePlugin",
@@ -2823,16 +2884,15 @@ async fn notify_carriers_changed_inner(
     match priority {
         CarrierRefreshPriority::Background => {
             transport
-                .request_background_batch_results_once(&requests)
-                .await?
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()?;
+                .request_background_refresh_once(&requests, observed)
+                .await
         }
         CarrierRefreshPriority::Interactive => {
-            transport.request_interactive_batch(&requests).await?;
+            transport
+                .request_interactive_refresh(&requests, observed)
+                .await
         }
     }
-    Ok(())
 }
 
 fn schedule_carrier_refresh(
@@ -3119,7 +3179,8 @@ async fn activate_published_carrier_inner(
 struct CarrierMetadataCaches<'a> {
     contents: &'a Mutex<HashMap<String, Arc<str>>>,
     /// The plugin serves registered carrier bytes out of band; the ledger
-    /// records them so a query converts and decodes against them.
+    /// records them so a query converts and decodes against them once the
+    /// engine has adopted their publication.
     ledger: &'a DeliveryLedger,
     generations: &'a ContentGenerations,
     projects: &'a parking_lot::RwLock<HashMap<String, String>>,
@@ -3174,7 +3235,10 @@ async fn cache_carrier_metadata(
         content_changed |= source_changed;
     }
     // The plugin serves one publication under both identities: both are
-    // recorded under one ledger lock, so no query binds half of it.
+    // recorded under one ledger lock, so no query binds half of it. The
+    // record names the bytes a query converts and decodes against; the engine
+    // evaluates them only once a refresh fence adopts their publication, which
+    // the ledger requires before it binds or settles through them.
     let mut effects = vec![SurfaceEffect::deliver(file, Arc::clone(&content))];
     if is_ide_companion {
         effects.push(SurfaceEffect::deliver(source, content));
@@ -3983,7 +4047,7 @@ impl TypeProvider for TsserverTypeProvider {
         Box::pin(async move {
             let Some((bound, result)) = transport
                 .request_query("completionInfo", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     let mut args = inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4070,7 +4134,7 @@ impl TypeProvider for TsserverTypeProvider {
                     let result = loop {
                         let r = transport
                             .request_query("quickinfo", &query, &file, |requested| {
-                                let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                                let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                                 Some(inject_project_file_name(
                                     serde_json::json!({
                                         "file": query_file,
@@ -4103,7 +4167,7 @@ impl TypeProvider for TsserverTypeProvider {
 
                     match result {
                         Ok(None) => {
-                            // No delivered or disk bytes to place the request in:
+                            // No request representable in the delivered bytes:
                             // nothing was sent, never a fabricated position.
                             crate::type_runtime_trace_event!(
                                 "tsserver_get_hover_result",
@@ -4153,19 +4217,11 @@ impl TypeProvider for TsserverTypeProvider {
                             // The quickinfo body's `start`/`end` positions are
                             // lines and columns in the bytes the request was
                             // converted against; the query retains exactly those.
-                            let (range_start, range_end) = match bound.requested() {
-                                Some(content) => {
-                                    let index = SourceIndex::new_utf16(content);
-                                    (
-                                        quickinfo_wire_pos_to_byte_offset(
-                                            &index,
-                                            body.get("start"),
-                                        ),
-                                        quickinfo_wire_pos_to_byte_offset(&index, body.get("end")),
-                                    )
-                                }
-                                None => (None, None),
-                            };
+                            let index = SourceIndex::new_utf16(bound.requested());
+                            let range_start =
+                                quickinfo_wire_pos_to_byte_offset(&index, body.get("start"));
+                            let range_end =
+                                quickinfo_wire_pos_to_byte_offset(&index, body.get("end"));
 
                             Ok(Some(HoverInfo {
                                 contents,
@@ -4238,7 +4294,7 @@ impl TypeProvider for TsserverTypeProvider {
                         .collect();
                     let result = transport
                         .request_query("completionEntryDetails", query, &file, |requested| {
-                            let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                            let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                             Some(inject_project_file_name(
                                 serde_json::json!({
                                     "file": query_file,
@@ -4340,7 +4396,7 @@ impl TypeProvider for TsserverTypeProvider {
 
             let Some((bound, result)) = transport
                 .request_query("completionEntryDetails", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4357,6 +4413,7 @@ impl TypeProvider for TsserverTypeProvider {
             };
 
             let Some(detail) = result.as_array().and_then(|arr| arr.first()) else {
+                transport.ledger.settle(&bound, [])?;
                 return Ok(None);
             };
             // The entry's auto-import `codeActions` parse into `additionalTextEdits`:
@@ -4431,7 +4488,7 @@ impl TypeProvider for TsserverTypeProvider {
         Box::pin(async move {
             let Some((bound, result)) = transport
                 .request_query("definition", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4490,7 +4547,7 @@ impl TypeProvider for TsserverTypeProvider {
         Box::pin(async move {
             let Some((bound, result)) = transport
                 .request_query("typeDefinition", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4549,7 +4606,7 @@ impl TypeProvider for TsserverTypeProvider {
         Box::pin(async move {
             let Some((bound, result)) = transport
                 .request_query("references", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4608,7 +4665,7 @@ impl TypeProvider for TsserverTypeProvider {
         Box::pin(async move {
             let Some((bound, result)) = transport
                 .request_query("rename", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4627,8 +4684,7 @@ impl TypeProvider for TsserverTypeProvider {
 
             // Each span decodes against its target file's bytes as this query's
             // request frame met them — only the files the response touches; a
-            // target the engine read from disk decodes through its disk bytes
-            // only when they predate the dispatch.
+            // target the engine was never handed is a typed conflict.
             let target_paths = crate::contents_snapshot::tsserver_rename_target_paths(&result);
             let cache_snapshot = bound.targets(&target_paths, |path| {
                 remap_carrier_response_path(path, &carrier_companions, true)
@@ -4687,7 +4743,7 @@ impl TypeProvider for TsserverTypeProvider {
         Box::pin(async move {
             let result = transport
                 .request_query("signatureHelp", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4853,8 +4909,8 @@ impl TypeProvider for TsserverTypeProvider {
             }
             let result = transport
                 .request_query("getCodeFixes", &query, &file, |requested| {
-                    let (sl, sc) = byte_offset_to_tsserver_pos(requested?, start_offset);
-                    let (el, ec) = byte_offset_to_tsserver_pos(requested?, end_offset);
+                    let (sl, sc) = byte_offset_to_tsserver_pos(requested, start_offset);
+                    let (el, ec) = byte_offset_to_tsserver_pos(requested, end_offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -4982,7 +5038,7 @@ impl TypeProvider for TsserverTypeProvider {
                             serde_json::json!({
                                 "file": query_file,
                                 "start": 0,
-                                "length": requested?.encode_utf16().count() as u64,
+                                "length": requested.encode_utf16().count() as u64,
                                 "format": "2020",
                             }),
                             &project_file_name,
@@ -4995,9 +5051,7 @@ impl TypeProvider for TsserverTypeProvider {
                 // No bytes to classify: nothing was sent.
                 Ok(None) => Ok(vec![]),
                 Ok(Some((bound, body))) => {
-                    let Some(content) = bound.requested() else {
-                        return Ok(vec![]);
-                    };
+                    let content = bound.requested();
                     let spans = body
                         .get("spans")
                         .and_then(|v| v.as_array())
@@ -5035,7 +5089,7 @@ impl TypeProvider for TsserverTypeProvider {
         Box::pin(async move {
             let result = transport
                 .request_query("documentHighlights", &query, &file, |requested| {
-                    let (line, col) = byte_offset_to_tsserver_pos(requested?, offset);
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
                     Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
@@ -5055,9 +5109,7 @@ impl TypeProvider for TsserverTypeProvider {
                     // request was converted against; `filesToSearch` names only
                     // the requested file, so a span in any other file is not
                     // part of the answer.
-                    let Some(content) = bound.requested() else {
-                        return Ok(vec![]);
-                    };
+                    let content = bound.requested();
                     let index = SourceIndex::new_utf16(content);
                     let highlights = body
                         .as_array()
@@ -5105,8 +5157,8 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request_background_query("provideInlayHints", &query, &file, |requested| {
                     // A range not representable in these bytes asks nothing.
-                    let start = byte_offset_to_tsserver_absolute_offset(requested?, start_offset)?;
-                    let end = byte_offset_to_tsserver_absolute_offset(requested?, end_offset)?;
+                    let start = byte_offset_to_tsserver_absolute_offset(requested, start_offset)?;
+                    let end = byte_offset_to_tsserver_absolute_offset(requested, end_offset)?;
                     let length = end.checked_sub(start)?;
                     Some(inject_project_file_name(
                         serde_json::json!({
@@ -5123,9 +5175,7 @@ impl TypeProvider for TsserverTypeProvider {
                 Ok(Some((bound, body))) => {
                     // One index for the whole hint batch, over the bytes the
                     // request range was converted against.
-                    let index = bound
-                        .requested()
-                        .map(|content| SourceIndex::new_utf16(content));
+                    let index = Some(SourceIndex::new_utf16(bound.requested()));
                     let hints = body
                         .as_array()
                         .map(|arr| {

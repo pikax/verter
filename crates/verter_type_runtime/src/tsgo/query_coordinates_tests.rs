@@ -89,6 +89,14 @@ fn beta_range() -> serde_json::Value {
     })
 }
 
+/// A relay injection of `content` that the relay confirms applied.
+async fn inject(provider: &TsgoTypeProvider, file: &str, content: &str) {
+    provider.begin_injection(file);
+    provider
+        .finish_injection(file, InjectionOutcome::Applied(Arc::from(content)))
+        .await;
+}
+
 #[tokio::test]
 async fn hover_range_decodes_from_the_dispatched_bytes_across_a_content_replacement() {
     let (provider, mut engine) = provider();
@@ -177,19 +185,16 @@ async fn references_into_another_file_decode_from_that_files_dispatched_bytes() 
 
 #[tokio::test]
 async fn out_of_band_bytes_republished_under_an_answer_are_a_typed_conflict() {
-    // A non-owning attach learns carrier bytes through `load_file` while its
-    // relay injects them out of band: no frame on this transport orders them.
+    // A non-owning attach's relay injects carrier bytes out of band: no frame
+    // on this transport orders them.
     let (provider, mut engine) = provider();
     let file = path("Comp.vue.tsx");
-    provider.load_file(&file, DISPATCHED).await.expect("load");
+    inject(&provider, &file, DISPATCHED).await;
 
     let offset = beta_offset(DISPATCHED);
     let engine_side = async {
         let hover = engine.expect("textDocument/hover").await;
-        provider
-            .load_file(&file, REPLACED)
-            .await
-            .expect("republish");
+        inject(&provider, &file, REPLACED).await;
         engine
             .answer(
                 &hover,
@@ -211,29 +216,32 @@ async fn out_of_band_bytes_republished_under_an_answer_are_a_typed_conflict() {
 /// A stdin writer driven directly, so a test controls exactly which lane
 /// messages precede a query frame.
 struct Writer {
-    lane: mpsc::Sender<StdinMessage>,
+    control: mpsc::UnboundedSender<StdinMessage>,
+    interactive: mpsc::Sender<StdinMessage>,
+    normal: mpsc::Sender<StdinMessage>,
+    background: mpsc::Sender<StdinMessage>,
     ledger: Arc<DeliveryLedger>,
     engine_stdin: tokio::io::DuplexStream,
-    /// The lanes this test never uses, held open so the writer keeps running.
-    _idle: (
-        mpsc::UnboundedSender<StdinMessage>,
-        mpsc::Sender<StdinMessage>,
-        mpsc::Sender<StdinMessage>,
-    ),
 }
 
 impl Writer {
     fn spawn() -> Self {
-        let (stdin, engine_stdin) = tokio::io::duplex(64 * 1024);
-        let (lane, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+        Self::spawn_with_pipe(64 * 1024)
+    }
+
+    /// A writer whose pipe to the engine holds at most `pipe` unread bytes, so
+    /// a larger flush blocks until the engine side reads.
+    fn spawn_with_pipe(pipe: usize) -> Self {
+        let (stdin, engine_stdin) = tokio::io::duplex(pipe);
         let ledger = Arc::new(DeliveryLedger::default());
-        let (control_tx, control_rx) = mpsc::unbounded_channel();
-        let (normal_tx, normal_rx) = mpsc::channel(1);
-        let (background_tx, background_rx) = mpsc::channel(1);
+        let (control, control_rx) = mpsc::unbounded_channel();
+        let (interactive, interactive_rx) = mpsc::channel(16);
+        let (normal, normal_rx) = mpsc::channel(16);
+        let (background, background_rx) = mpsc::channel(16);
         tokio::spawn(stdin_writer_loop(
             stdin,
             control_rx,
-            stdin_rx,
+            interactive_rx,
             normal_rx,
             background_rx,
             None,
@@ -242,18 +250,21 @@ impl Writer {
             Arc::clone(&ledger),
         ));
         Self {
-            lane,
+            control,
+            interactive,
+            normal,
+            background,
             ledger,
             engine_stdin,
-            _idle: (control_tx, normal_tx, background_tx),
         }
     }
 
-    /// Place a delivery of `content` for `key` and wait for it to flush.
-    async fn deliver(&self, key: &str, content: &str) {
+    /// Enqueue a delivery of `content` for `key` on the interactive lane;
+    /// the receiver resolves once it is flushed.
+    async fn send_delivery(&self, key: &str, content: &str) -> oneshot::Receiver<()> {
         let versions = Arc::new(Mutex::new(HashMap::new()));
         let (done, delivered) = oneshot::channel();
-        self.lane
+        self.interactive
             .send(StdinMessage::Document(
                 b"DELIVERY;".to_vec(),
                 Box::new(DocumentDelivery {
@@ -268,31 +279,58 @@ impl Writer {
             ))
             .await
             .unwrap();
-        delivered.await.expect("the delivery is flushed");
+        delivered
+    }
+
+    /// Place a delivery of `content` for `key` and wait for it to flush.
+    async fn deliver(&self, key: &str, content: &str) {
+        self.send_delivery(key, content)
+            .await
+            .await
+            .expect("the delivery is flushed");
+    }
+
+    /// Prepare `query` on `key` now and enqueue it on `lane`; the frame is the
+    /// bytes it converted against, and the receiver resolves when the writer
+    /// reaches it.
+    async fn send_query(
+        &self,
+        lane: &mpsc::Sender<StdinMessage>,
+        query: &ProviderQuery,
+        key: &str,
+    ) -> oneshot::Receiver<QueryPlaced> {
+        let prepared = self.ledger.prepare(query, key).expect("prepare");
+        let (placed, bound) = oneshot::channel();
+        lane.send(StdinMessage::Query(Box::new(QueryAnchor {
+            prepared,
+            frame: Box::new(|requested| Ok(format!("QUERY[{requested}];").into_bytes())),
+            placed,
+        })))
+        .await
+        .unwrap();
+        bound
     }
 
     /// Enqueue `query` on `key`; the frame is the bytes it converted against.
     async fn query(&self, query: &ProviderQuery, key: &str) -> QueryPlaced {
-        let prepared = self.ledger.prepare(query, key).expect("prepare");
-        let (placed, bound) = oneshot::channel();
-        self.lane
-            .send(StdinMessage::Query(Box::new(QueryAnchor {
-                prepared,
-                frame: Box::new(|requested| {
-                    Ok(requested.map(|bytes| format!("QUERY[{bytes}];").into_bytes()))
-                }),
-                placed,
-            })))
+        self.send_query(&self.interactive, query, key)
             .await
-            .unwrap();
-        bound.await.expect("the writer answers the anchor")
+            .await
+            .expect("the writer answers the anchor")
     }
 
-    async fn written(mut self) -> String {
-        drop(self.lane);
-        drop(self._idle);
+    async fn written(self) -> String {
+        let Self {
+            control,
+            interactive,
+            normal,
+            background,
+            mut engine_stdin,
+            ..
+        } = self;
+        drop((control, interactive, normal, background));
         let mut written = Vec::new();
-        self.engine_stdin.read_to_end(&mut written).await.unwrap();
+        engine_stdin.read_to_end(&mut written).await.unwrap();
         String::from_utf8(written).unwrap()
     }
 }
@@ -309,20 +347,98 @@ async fn a_query_converts_against_whatever_delivery_the_writer_placed_before_its
         .query(&ProviderQuery::at_engine_surface(&key), &key)
         .await
         .expect("placed")
-        .expect("never a conflict on a wire-ordered route")
-        .expect("not declined");
-    assert_eq!(bound.requested().map(|b| &**b), Some(DISPATCHED));
+        .expect("never a conflict on a wire-ordered route");
+    assert_eq!(&**bound.requested(), DISPATCHED);
     writer.deliver(&key, REPLACED).await;
     let bound = writer
         .query(&ProviderQuery::at_engine_surface(&key), &key)
         .await
         .expect("placed")
-        .expect("bound")
-        .expect("not declined");
-    assert_eq!(bound.requested().map(|b| &**b), Some(REPLACED));
+        .expect("bound");
+    assert_eq!(&**bound.requested(), REPLACED);
     assert_eq!(
         writer.written().await,
         format!("DELIVERY;DELIVERY;QUERY[{DISPATCHED}];DELIVERY;QUERY[{REPLACED}];")
+    );
+}
+
+#[tokio::test]
+async fn a_higher_priority_delivery_overtaking_a_prepared_query_is_what_its_frame_converts_against()
+{
+    const BLOCKER_LEN: usize = 256;
+    // The pipe holds less than the blocker, so the writer stays inside that
+    // flush until the engine side reads.
+    let writer = Writer::spawn_with_pipe(BLOCKER_LEN / 2);
+    let key = contents_key(&path("a.ts"));
+    writer.deliver(&key, DISPATCHED).await;
+    writer
+        .control
+        .send(StdinMessage::Frame(vec![b'#'; BLOCKER_LEN]))
+        .unwrap();
+
+    // Both queries are prepared while the engine holds A and enqueued on the
+    // lowest lane; B is enqueued on the interactive lane after them, so the
+    // writer places B first.
+    let intending_a = ProviderQuery::intending(
+        &key,
+        DeliveredSurfaceId {
+            generation: 1,
+            content_epoch: 1,
+            incarnation: 1,
+        },
+        Arc::from(DISPATCHED),
+    );
+    let at_engine = writer
+        .send_query(
+            &writer.background,
+            &ProviderQuery::at_engine_surface(&key),
+            &key,
+        )
+        .await;
+    let intended = writer
+        .send_query(&writer.background, &intending_a, &key)
+        .await;
+    let replaced = writer.send_delivery(&key, REPLACED).await;
+
+    let Writer {
+        control,
+        interactive,
+        normal,
+        background,
+        mut engine_stdin,
+        ..
+    } = writer;
+    let engine = tokio::spawn(async move {
+        let mut written = Vec::new();
+        engine_stdin.read_to_end(&mut written).await.unwrap();
+        String::from_utf8(written).unwrap()
+    });
+    replaced.await.expect("B is flushed");
+    let at_engine = at_engine
+        .await
+        .expect("reached")
+        .expect("placed")
+        .expect("an at-engine query binds what its frame meets");
+    assert_eq!(
+        &**at_engine.requested(),
+        REPLACED,
+        "the frame converts against B, which the writer placed before it"
+    );
+    assert_eq!(
+        intended
+            .await
+            .expect("reached")
+            .expect("placed")
+            .unwrap_err()
+            .kind(),
+        ConflictKind::IntendedSurface,
+        "a position computed against A never reaches an engine holding B"
+    );
+    drop((control, interactive, normal, background));
+    let written = engine.await.expect("engine side");
+    assert!(
+        written.ends_with(&format!("DELIVERY;QUERY[{REPLACED}];")),
+        "B precedes the only query frame placed: {written}"
     );
 }
 
@@ -355,8 +471,7 @@ async fn a_query_intending_bytes_the_engine_no_longer_holds_never_reaches_it() {
         .query(&intending, &key)
         .await
         .expect("answered")
-        .expect("A binds")
-        .expect("not declined");
+        .expect("A binds");
     assert_eq!(
         writer.written().await,
         format!("DELIVERY;DELIVERY;DELIVERY;QUERY[{DISPATCHED}];")
@@ -367,14 +482,11 @@ async fn a_query_intending_bytes_the_engine_no_longer_holds_never_reaches_it() {
 async fn signature_help_over_republished_out_of_band_bytes_is_a_typed_conflict() {
     let (provider, mut engine) = provider();
     let file = path("Comp.vue.tsx");
-    provider.load_file(&file, DISPATCHED).await.expect("load");
+    inject(&provider, &file, DISPATCHED).await;
 
     let engine_side = async {
         let request = engine.expect("textDocument/signatureHelp").await;
-        provider
-            .load_file(&file, REPLACED)
-            .await
-            .expect("republish");
+        inject(&provider, &file, REPLACED).await;
         engine
             .answer(
                 &request,
@@ -393,12 +505,32 @@ async fn signature_help_over_republished_out_of_band_bytes_is_a_typed_conflict()
     assert!(error.query_conflict, "typed conflict, got {error}");
 }
 
-#[tokio::test]
-async fn a_disk_target_rewritten_after_dispatch_is_a_typed_conflict() {
+/// Pin `path`'s modification time a minute in the past.
+fn age(path: &std::path::Path) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| {
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        })
+        .expect("age the fixture");
+}
+
+/// References from an opened origin into a disk file the engine was never
+/// handed, answered in the coordinates of [`DISPATCHED`] while the file's
+/// disk bytes move: replaced after evaluation with its timestamp restored, or
+/// edited before dispatch without the engine having re-read it.
+async fn references_into_an_undelivered_disk_target(
+    edited_before_dispatch: bool,
+) -> Result<Vec<TypeLocation>, TypeProviderError> {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("b.ts");
     std::fs::write(&target, DISPATCHED).expect("write target");
-    let target = target.to_string_lossy().to_string();
+    age(&target);
+    if edited_before_dispatch {
+        std::fs::write(&target, REPLACED).expect("edit target");
+        age(&target);
+    }
     let (provider, mut engine) = provider();
     let origin = path("a.ts");
     provider
@@ -409,21 +541,22 @@ async fn a_disk_target_rewritten_after_dispatch_is_a_typed_conflict() {
 
     let engine_side = async {
         let references = engine.expect("textDocument/references").await;
-        // The engine evaluated the disk bytes; a writer replaces them before
-        // the answer is decoded.
-        std::fs::write(&target, REPLACED).expect("rewrite target");
-        std::fs::File::options()
-            .write(true)
-            .open(&target)
-            .and_then(|file| {
-                file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
-            })
-            .expect("pin modification time after dispatch");
+        if !edited_before_dispatch {
+            let modified = std::fs::metadata(&target)
+                .and_then(|metadata| metadata.modified())
+                .expect("modification time");
+            std::fs::write(&target, REPLACED).expect("replace target");
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .and_then(|file| file.set_modified(modified))
+                .expect("restore modification time");
+        }
         engine
             .answer(
                 &references,
                 serde_json::json!([{
-                    "uri": TsgoTypeProvider::path_to_uri(&target),
+                    "uri": TsgoTypeProvider::path_to_uri(&target.to_string_lossy()),
                     "range": beta_range(),
                 }]),
             )
@@ -433,6 +566,150 @@ async fn a_disk_target_rewritten_after_dispatch_is_a_typed_conflict() {
         provider.get_references(&ProviderQuery::at_engine_surface(&origin), 29),
         engine_side
     );
-    let error = locations.expect_err("the target's bytes are not the evaluated ones");
+    locations
+}
+
+#[tokio::test]
+async fn an_undelivered_disk_target_is_a_typed_conflict_whatever_its_timestamps_say() {
+    for edited_before_dispatch in [false, true] {
+        let error = references_into_an_undelivered_disk_target(edited_before_dispatch)
+            .await
+            .expect_err("no disk read identifies the bytes the engine evaluated");
+        assert!(
+            error.query_conflict,
+            "edited before dispatch: {edited_before_dispatch}; typed conflict, got {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_null_answer_over_republished_out_of_band_bytes_is_a_typed_conflict() {
+    let (provider, mut engine) = provider();
+    let file = path("Comp.vue.tsx");
+    inject(&provider, &file, DISPATCHED).await;
+
+    let engine_side = async {
+        let hover = engine.expect("textDocument/hover").await;
+        inject(&provider, &file, REPLACED).await;
+        engine.answer(&hover, serde_json::Value::Null).await;
+    };
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(&ProviderQuery::at_engine_surface(&file), 3),
+        engine_side
+    );
+    let error = hover.expect_err("\"nothing here\" over moved bytes is not an answer");
     assert!(error.query_conflict, "typed conflict, got {error}");
+
+    // Unchanged bytes: an empty answer is a successful absence.
+    let engine_side = async {
+        let hover = engine.expect("textDocument/hover").await;
+        engine.answer(&hover, serde_json::Value::Null).await;
+    };
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(&ProviderQuery::at_engine_surface(&file), 3),
+        engine_side
+    );
+    assert!(hover.expect("an unchanged surface answers").is_none());
+}
+
+#[tokio::test]
+async fn a_relay_injection_in_flight_binds_nothing_and_unsettles_answers_bound_before_it() {
+    let (provider, mut engine) = provider();
+    let file = path("Comp.vue.tsx");
+    inject(&provider, &file, DISPATCHED).await;
+
+    let engine_side = async {
+        let hover = engine.expect("textDocument/hover").await;
+        // The relay starts injecting B through its own channel; the engine may
+        // apply it before evaluating the hover.
+        provider.begin_injection(&file);
+        engine
+            .answer(
+                &hover,
+                serde_json::json!({
+                    "contents": { "kind": "plaintext", "value": "const beta: 2" },
+                    "range": beta_range(),
+                }),
+            )
+            .await;
+    };
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(
+            &ProviderQuery::at_engine_surface(&file),
+            beta_offset(DISPATCHED)
+        ),
+        engine_side
+    );
+    assert!(
+        hover
+            .expect_err("bound before the injection")
+            .query_conflict
+    );
+
+    let error = provider
+        .get_hover(
+            &ProviderQuery::at_engine_surface(&file),
+            beta_offset(DISPATCHED),
+        )
+        .await
+        .expect_err("which bytes the engine holds is unknown");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+
+    // The relay confirms B: the file binds again, against B.
+    provider
+        .finish_injection(&file, InjectionOutcome::Applied(Arc::from(REPLACED)))
+        .await;
+    let engine_side = async {
+        let hover = engine.expect("textDocument/hover").await;
+        assert_eq!(hover["params"]["position"]["line"], 2);
+        engine.answer(&hover, serde_json::Value::Null).await;
+    };
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(
+            &ProviderQuery::at_engine_surface(&file),
+            beta_offset(REPLACED)
+        ),
+        engine_side
+    );
+    assert!(hover.expect("bound to the confirmed bytes").is_none());
+}
+
+#[tokio::test]
+async fn a_cache_only_load_binds_nothing_until_the_file_is_delivered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("loaded.ts");
+    std::fs::write(&file, DISPATCHED).expect("write");
+    age(&file);
+    let file = file.to_string_lossy().to_string();
+    let (provider, mut engine) = provider();
+    // The local cache holds A and the disk agrees, but the engine reads the
+    // file itself: neither identifies the bytes it would evaluate.
+    provider.load_file(&file, DISPATCHED).await.expect("load");
+    let error = provider
+        .get_hover(
+            &ProviderQuery::at_engine_surface(&file),
+            beta_offset(DISPATCHED),
+        )
+        .await
+        .expect_err("a cache-only load is not a delivery");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+
+    // Delivered, it binds: the delivery is the first frame the engine sees.
+    provider
+        .update_file(&file, DISPATCHED)
+        .await
+        .expect("deliver");
+    engine.expect("textDocument/didOpen").await;
+    let engine_side = async {
+        let hover = engine.expect("textDocument/hover").await;
+        engine.answer(&hover, serde_json::Value::Null).await;
+    };
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(
+            &ProviderQuery::at_engine_surface(&file),
+            beta_offset(DISPATCHED)
+        ),
+        engine_side
+    );
+    assert!(hover.expect("a delivered file binds").is_none());
 }

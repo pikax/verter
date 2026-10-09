@@ -97,10 +97,7 @@ async fn initialized_non_owning_transport_serves_hover_without_initialize_or_chi
         "/w/Comp.vue.tsx"
     };
     let source = "export const label: string = 'ok';\n";
-    provider
-        .load_file(path, source)
-        .await
-        .expect("cache attached carrier content");
+    relay_injects(&provider, path, source).await;
 
     let server = tokio::spawn(async move {
         let mut framer = MessageFramer::new();
@@ -3389,6 +3386,7 @@ async fn test_provider_operations_fail_after_process_death() {
         diagnostics_cache,
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
 
     // All operations should NOT hang, which is the critical invariant.
@@ -3480,6 +3478,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         diagnostics_cache,
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
 
     // Insert under a mixed-case, backslash-separated Windows-style path.
@@ -3581,6 +3580,7 @@ async fn test_drop_kills_child_process() {
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
 
     // Drop the provider — Drop impl should call start_kill().
@@ -3622,6 +3622,7 @@ async fn test_child_pid_returns_id() {
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
 
     // After the process has exited, id() returns None.
@@ -4310,10 +4311,10 @@ async fn spawn_resolve_responder(
     mut stdin_rx: mpsc::Receiver<StdinMessage>,
     pending: Arc<PendingRequestTable>,
     seen: Arc<std::sync::atomic::AtomicUsize>,
+    ledger: Arc<DeliveryLedger>,
 ) {
     // This responder stands in for the stdin writer, so it places query frames
-    // itself — against an empty surface, as nothing was delivered.
-    let ledger = DeliveryLedger::default();
+    // itself against the transport's delivered surface.
     while let Some(msg) = stdin_rx.recv().await {
         let bytes = match msg {
             StdinMessage::Frame(bytes) => bytes,
@@ -4369,13 +4370,14 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
     let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(256);
     let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     tokio::spawn(spawn_resolve_responder(
         stdin_rx,
         Arc::clone(&pending),
         Arc::clone(&seen),
+        Arc::clone(&transport.ledger),
     ));
 
-    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
         tree: Some(verter_tsgo_api::process::TreeKill::arm(
@@ -4388,6 +4390,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
 
     let total = MAX_COMPLETION_DETAIL_ENRICH + 70;
@@ -4395,6 +4398,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
         .map(|i| resolvable_completion(&format!("m{i:03}")))
         .collect();
 
+    relay_injects(&provider, "/proj/file.tsx", "").await;
     let detailed = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         provider.get_completion_details(
@@ -4454,12 +4458,13 @@ async fn get_completion_details_enriches_full_small_list() {
     let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
     let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     tokio::spawn(spawn_resolve_responder(
         stdin_rx,
         Arc::clone(&pending),
         Arc::clone(&seen),
+        Arc::clone(&transport.ledger),
     ));
-    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
         tree: Some(verter_tsgo_api::process::TreeKill::arm(
@@ -4472,11 +4477,13 @@ async fn get_completion_details_enriches_full_small_list() {
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
 
     let items: Vec<Completion> = (0..5)
         .map(|i| resolvable_completion(&format!("s{i}")))
         .collect();
+    relay_injects(&provider, "/proj/file.tsx", "").await;
     let detailed = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         provider.get_completion_details(
@@ -4506,10 +4513,10 @@ async fn get_completion_details_enriches_full_small_list() {
 async fn spawn_label_details_only_responder(
     mut stdin_rx: mpsc::Receiver<StdinMessage>,
     pending: Arc<PendingRequestTable>,
+    ledger: Arc<DeliveryLedger>,
 ) {
     // This responder stands in for the stdin writer, so it binds query frames
-    // itself — against an empty surface, as nothing was delivered.
-    let ledger = DeliveryLedger::default();
+    // itself against the transport's delivered surface.
     while let Some(msg) = stdin_rx.recv().await {
         let bytes = match msg {
             StdinMessage::Frame(bytes) => bytes,
@@ -4555,11 +4562,12 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
     let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
     let pending: Arc<PendingRequestTable> = Arc::new(PendingRequestTable::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     tokio::spawn(spawn_label_details_only_responder(
         stdin_rx,
         Arc::clone(&pending),
+        Arc::clone(&transport.ledger),
     ));
-    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
         tree: Some(verter_tsgo_api::process::TreeKill::arm(
@@ -4572,6 +4580,7 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
 
     let handle = CompletionResolveData::Lsp {
@@ -4579,6 +4588,7 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
         data: serde_json::json!({ "label": "createApp" }),
     };
 
+    relay_injects(&provider, "/proj/file.tsx", "").await;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         provider.resolve_completion(
@@ -4608,110 +4618,60 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
 
 // ─── Fabricated-position deletion + teardown-intent crash-signal disarm ───
 
-/// A contents-cache miss must FAIL CLOSED: no `(0, byte-offset)` fabricated
-/// position may ever be sent to the engine (a malformed position is a
-/// documented tsgo-crasher). Every positional feature returns its empty
-/// result AND the wire stays silent.
+/// A file the engine was never handed must FAIL CLOSED: no position converted
+/// against anything but delivered bytes — and no fabricated `(0, byte-offset)`
+/// position, a documented tsgo-crasher — may ever be sent to the engine. Every
+/// positional feature is a typed conflict AND the wire stays silent.
 #[tokio::test]
 async fn contents_cache_miss_fails_closed_without_fabricating_positions() {
     let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
     let (read, write) = tokio::io::split(provider_side);
     let provider = TsgoTypeProvider::from_initialized_transport(read, write);
 
-    // Deliberately NOT loaded/opened: the contents cache has no entry.
+    // Deliberately NOT delivered: the engine holds nothing for it.
     let path = if cfg!(windows) {
         "D:/w/Missing.vue.tsx"
     } else {
         "/w/Missing.vue.tsx"
     };
-
-    let hover = provider
-        .get_hover(
-            &crate::provider_query::ProviderQuery::at_engine_surface(path),
-            10,
-        )
-        .await;
-    assert!(
-        matches!(hover, Ok(None)),
-        "hover on a contents-cache miss fails closed, got {hover:?}"
-    );
-    let completions = provider
-        .get_completions(
-            &crate::provider_query::ProviderQuery::at_engine_surface(path),
-            10,
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        completions.items.is_empty() && !completions.is_incomplete,
-        "completions on a miss fail closed, got {completions:?}"
-    );
-    assert!(
-        provider
-            .get_definition(
-                &crate::provider_query::ProviderQuery::at_engine_surface(path),
-                10
-            )
-            .await
-            .unwrap()
-            .is_empty(),
-        "definition on a miss fails closed"
-    );
-    assert!(
-        provider
-            .get_type_definition(
-                &crate::provider_query::ProviderQuery::at_engine_surface(path),
-                10
-            )
-            .await
-            .unwrap()
-            .is_empty(),
-        "type definition on a miss fails closed"
-    );
-    assert!(
-        provider
-            .get_references(
-                &crate::provider_query::ProviderQuery::at_engine_surface(path),
-                10
-            )
-            .await
-            .unwrap()
-            .is_empty(),
-        "references on a miss fails closed"
-    );
-    assert!(
-        provider
-            .get_rename_locations(
-                &crate::provider_query::ProviderQuery::at_engine_surface(path),
-                10
-            )
-            .await
-            .unwrap()
-            .is_empty(),
-        "rename locations on a miss fail closed"
-    );
-    let signature_help = provider
-        .get_signature_help(
-            &crate::provider_query::ProviderQuery::at_engine_surface(path),
-            10,
-        )
-        .await;
-    assert!(
-        matches!(signature_help, Ok(None)),
-        "signature help on a miss fails closed, got {signature_help:?}"
-    );
-    assert!(
-        provider
-            .get_document_highlights(
-                &crate::provider_query::ProviderQuery::at_engine_surface(path),
-                10
-            )
-            .await
-            .unwrap()
-            .is_empty(),
-        "document highlights on a miss fail closed"
-    );
+    let query = crate::provider_query::ProviderQuery::at_engine_surface(path);
+    let conflicts = [
+        ("hover", provider.get_hover(&query, 10).await.err()),
+        (
+            "completions",
+            provider.get_completions(&query, 10, None).await.err(),
+        ),
+        (
+            "definition",
+            provider.get_definition(&query, 10).await.err(),
+        ),
+        (
+            "type definition",
+            provider.get_type_definition(&query, 10).await.err(),
+        ),
+        (
+            "references",
+            provider.get_references(&query, 10).await.err(),
+        ),
+        (
+            "rename locations",
+            provider.get_rename_locations(&query, 10).await.err(),
+        ),
+        (
+            "signature help",
+            provider.get_signature_help(&query, 10).await.err(),
+        ),
+        (
+            "document highlights",
+            provider.get_document_highlights(&query, 10).await.err(),
+        ),
+    ];
+    for (feature, error) in conflicts {
+        assert!(
+            error.is_some_and(|error| error.query_conflict),
+            "{feature} on an undelivered file is a typed conflict"
+        );
+    }
 
     // NEGATIVE CONTROL: none of the calls above may have put a request on the
     // wire — the engine never sees a fabricated position.
@@ -4728,7 +4688,7 @@ async fn contents_cache_miss_fails_closed_without_fabricating_positions() {
     );
 }
 
-/// The positive control for the fail-closed suite: WITH cached contents the
+/// The positive control for the fail-closed suite: WITH delivered contents the
 /// hover request IS sent (the fail-closed path discriminates on the cache
 /// miss, not on some always-empty stub).
 #[tokio::test]
@@ -4742,10 +4702,7 @@ async fn contents_cache_hit_still_sends_the_hover_request() {
     } else {
         "/w/Present.vue.tsx"
     };
-    provider
-        .load_file(path, "const present = 1;\n")
-        .await
-        .expect("load cached contents");
+    relay_injects(&provider, path, "const present = 1;\n").await;
 
     let hover_task = tokio::spawn(async move {
         provider
@@ -5202,6 +5159,7 @@ fn manual_ledger_provider(capacity: usize) -> (TsgoTypeProvider, mpsc::Receiver<
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
         teardown_intent: Arc::new(AtomicBool::new(false)),
         semantic_token_legend: Arc::new(StdRwLock::new(None)),
+        injections: StdMutex::new(HashMap::new()),
     };
     (provider, stdin_rx)
 }
@@ -5746,10 +5704,7 @@ async fn non_owning_transport_semantic_tokens_fail_closed_until_witness_legend_a
         "/w/Comp.vue.tsx"
     };
     let source = "interface Shape { area: number }\n";
-    provider
-        .load_file(path, source)
-        .await
-        .expect("cache content");
+    relay_injects(&provider, path, source).await;
 
     // No legend yet: fail closed — empty result, nothing on the wire.
     let tokens = provider
@@ -6247,4 +6202,12 @@ async fn cancelled_document_delivery_keeps_order_until_writer_completion() {
         provider.applied_content(path),
         AppliedContent::Applied(Arc::from("third"))
     );
+}
+
+/// The relay confirms it applied `content` for `path` to the engine.
+async fn relay_injects(provider: &TsgoTypeProvider, path: &str, content: &str) {
+    provider.begin_injection(path);
+    provider
+        .finish_injection(path, InjectionOutcome::Applied(Arc::from(content)))
+        .await;
 }

@@ -201,9 +201,9 @@ async fn a_carrier_republished_under_an_answer_is_a_typed_conflict() {
             TsserverTypeProvider::normalize_path(source),
             "a managed carrier is queried under its authored source identity"
         );
-        // The plugin reads the store while it evaluates, so a republication
-        // between dispatch and decode leaves no way to tell which bytes the
-        // engine evaluated.
+        // A republication between dispatch and decode reaches the engine
+        // through no frame the ledger can order against this query, so which
+        // bytes the engine evaluated cannot be told.
         provider
             .register_carrier_metadata(source, companion, REPLACED, project)
             .await
@@ -253,15 +253,17 @@ async fn a_carrier_republished_under_an_answer_is_a_typed_conflict() {
 }
 
 #[tokio::test]
-async fn a_query_on_a_file_neither_delivered_nor_on_disk_sends_nothing() {
+async fn a_query_on_a_file_the_engine_was_never_handed_sends_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let closed = dir.path().join("closed.ts");
+    std::fs::write(&closed, DISPATCHED).expect("write fixture");
+    let closed = TsserverTypeProvider::normalize_path(&closed.to_string_lossy());
     let (provider, mut engine) = provider();
-    let missing = verter_test_support::unique_temp_dir("tsserver-query-missing").join("gone.ts");
-    let missing = missing.to_string_lossy().to_string();
-    let hover = provider
-        .get_hover(&ProviderQuery::at_engine_surface(&missing), 3)
+    let error = provider
+        .get_hover(&ProviderQuery::at_engine_surface(&closed), 3)
         .await
-        .expect("hover");
-    assert!(hover.is_none());
+        .expect_err("the engine reads the file itself, so no position is bound");
+    assert!(error.query_conflict, "typed conflict, got {error}");
     // A frame is enqueued synchronously before `get_hover` returns, so an
     // empty channel now is the observed state.
     assert!(
@@ -269,7 +271,7 @@ async fn a_query_on_a_file_neither_delivered_nor_on_disk_sends_nothing() {
             engine.stdin_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ),
-        "no fabricated position reaches the engine"
+        "no position converted against disk bytes reaches the engine"
     );
 }
 
@@ -449,12 +451,32 @@ async fn highlights_decode_byte_ranges_from_the_dispatched_bytes() {
     ));
 }
 
-#[tokio::test]
-async fn a_disk_target_rewritten_after_dispatch_is_a_typed_conflict() {
+/// Pin `path`'s modification time a minute in the past.
+fn age(path: &std::path::Path) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| {
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+        })
+        .expect("age the fixture");
+}
+
+/// A definition from an opened origin into a disk file the engine was never
+/// handed, answered in the coordinates of [`DISPATCHED`] while the file's
+/// disk bytes move: replaced after evaluation with its timestamp restored, or
+/// edited before dispatch without the engine having re-read it.
+async fn definition_into_an_undelivered_disk_target(
+    edited_before_dispatch: bool,
+) -> Result<Vec<TypeLocation>, TypeProviderError> {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("b.ts");
     std::fs::write(&target, DISPATCHED).expect("write target");
-    let target = TsserverTypeProvider::normalize_path(&target.to_string_lossy());
+    age(&target);
+    if edited_before_dispatch {
+        std::fs::write(&target, REPLACED).expect("edit target");
+        age(&target);
+    }
     let (provider, mut engine) = provider();
     let origin = "/ws/src/a.ts";
     let (opened, ()) = tokio::join!(
@@ -466,18 +488,21 @@ async fn a_disk_target_rewritten_after_dispatch_is_a_typed_conflict() {
     let engine_side = async {
         let definition = engine.next().await;
         assert_eq!(definition["command"], "definition");
-        std::fs::write(&target, REPLACED).expect("rewrite target");
-        std::fs::File::options()
-            .write(true)
-            .open(&target)
-            .and_then(|file| {
-                file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
-            })
-            .expect("pin modification time after dispatch");
+        if !edited_before_dispatch {
+            let modified = std::fs::metadata(&target)
+                .and_then(|metadata| metadata.modified())
+                .expect("modification time");
+            std::fs::write(&target, REPLACED).expect("replace target");
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .and_then(|file| file.set_modified(modified))
+                .expect("restore modification time");
+        }
         engine.answer(
             &definition,
             serde_json::json!([{
-                "file": target,
+                "file": TsserverTypeProvider::normalize_path(&target.to_string_lossy()),
                 "start": { "line": 2, "offset": 7 },
                 "end": { "line": 2, "offset": 11 },
             }]),
@@ -487,8 +512,20 @@ async fn a_disk_target_rewritten_after_dispatch_is_a_typed_conflict() {
         provider.get_definition(&ProviderQuery::at_engine_surface(origin), 29),
         engine_side
     );
-    let error = locations.expect_err("the target's bytes are not the evaluated ones");
-    assert!(error.query_conflict, "typed conflict, got {error}");
+    locations
+}
+
+#[tokio::test]
+async fn an_undelivered_disk_target_is_a_typed_conflict_whatever_its_timestamps_say() {
+    for edited_before_dispatch in [false, true] {
+        let error = definition_into_an_undelivered_disk_target(edited_before_dispatch)
+            .await
+            .expect_err("no disk read identifies the bytes the engine evaluated");
+        assert!(
+            error.query_conflict,
+            "edited before dispatch: {edited_before_dispatch}; typed conflict, got {error}"
+        );
+    }
 }
 
 /// Published rows: path → (publication epoch, bytes).
@@ -511,6 +548,15 @@ impl Store {
                 TsserverTypeProvider::normalize_path(path),
                 (epoch, Arc::from(content)),
             );
+        }
+    }
+
+    /// Withdraw every row naming `paths` in one record.
+    fn withdraw(&self, paths: &[&str]) {
+        let mut rows = self.rows.lock();
+        rows.0 += 1;
+        for path in paths {
+            rows.1.remove(&TsserverTypeProvider::normalize_path(path));
         }
     }
 }
@@ -539,15 +585,27 @@ const SOURCE: &str = "/ws/src/App.vue";
 const COMPANION: &str = "/ws/src/App.vue.tsx";
 const PROJECT: &str = "/ws/tsconfig.json";
 
+/// The carrier refresh: the plugin re-reads its store on `configurePlugin`
+/// and the `configure` fence is the first frame evaluated after the re-read.
+async fn refresh(provider: &TsserverTypeProvider, engine: &mut Engine) {
+    let changed = [COMPANION.to_string()];
+    let (refreshed, ()) = tokio::join!(provider.notify_carriers_changed(&changed), async {
+        engine.acknowledge("configurePlugin").await;
+        engine.acknowledge("configure").await;
+    });
+    refreshed.expect("refresh");
+}
+
 async fn published_carrier() -> (TsserverTypeProvider, Engine, Arc<Store>) {
     let store = Arc::new(Store::default());
-    let (provider, engine) =
+    let (provider, mut engine) =
         provider_publishing(Some(Arc::clone(&store) as Arc<dyn SurfacePublications>));
     store.publish(SOURCE, COMPANION, DISPATCHED);
     provider
         .register_carrier_metadata(SOURCE, COMPANION, DISPATCHED, PROJECT)
         .await
         .expect("register");
+    refresh(&provider, &mut engine).await;
     (provider, engine, store)
 }
 
@@ -610,11 +668,13 @@ async fn a_publication_ahead_of_registration_refuses_the_query_before_dispatch()
         Err(mpsc::error::TryRecvError::Empty)
     ));
 
-    // Registration catches up: the query binds again.
+    // Registration catches up and the plugin re-reads the store: the query
+    // binds again.
     provider
         .register_carrier_metadata(SOURCE, COMPANION, REPLACED, PROJECT)
         .await
         .expect("register");
+    refresh(&provider, &mut engine).await;
     let engine_side = async {
         let quickinfo = engine.next().await;
         engine.answer(&quickinfo, quickinfo_body(3));
@@ -659,5 +719,160 @@ async fn a_carrier_target_republished_under_a_definition_is_a_typed_conflict() {
         engine_side
     );
     let error = locations.expect_err("the carrier target's publication moved");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+}
+
+#[tokio::test]
+async fn a_registered_carrier_the_engine_has_not_reloaded_is_a_typed_conflict() {
+    let (provider, mut engine, store) = published_carrier().await;
+    let origin = "/ws/src/main.ts";
+    let (opened, ()) = tokio::join!(
+        provider.open_file(origin, "import App from './App.vue';\nApp;\n"),
+        engine.acknowledge("updateOpen")
+    );
+    opened.expect("open");
+
+    // B is published and registered here, but no refresh has reached the
+    // engine: its virtual carrier ScriptInfo still holds the dispatched bytes.
+    store.publish(SOURCE, COMPANION, REPLACED);
+    provider
+        .register_carrier_metadata(SOURCE, COMPANION, REPLACED, PROJECT)
+        .await
+        .expect("register");
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        provider.get_hover(
+            &ProviderQuery::at_engine_surface(COMPANION),
+            beta_offset(REPLACED),
+        ),
+    )
+    .await
+    .expect("refused without reaching the engine")
+    .expect_err("a request converted against B would be answered from A");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+    assert!(matches!(
+        engine.stdin_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    // A definition into the carrier is answered in A's coordinates.
+    let engine_side = async {
+        let definition = engine.next().await;
+        assert_eq!(definition["command"], "definition");
+        engine.answer(
+            &definition,
+            serde_json::json!([{
+                "file": TsserverTypeProvider::normalize_path(SOURCE),
+                "start": { "line": 2, "offset": 7 },
+                "end": { "line": 2, "offset": 11 },
+            }]),
+        );
+    };
+    let (locations, ()) = tokio::join!(
+        provider.get_definition(&ProviderQuery::at_engine_surface(origin), 4),
+        engine_side
+    );
+    let error = locations.expect_err("A's coordinates must not decode through B");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+
+    // The refresh reloads B: the query binds it.
+    refresh(&provider, &mut engine).await;
+    let engine_side = async {
+        let quickinfo = engine.next().await;
+        engine.answer(&quickinfo, quickinfo_body(3));
+    };
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(
+            &ProviderQuery::at_engine_surface(COMPANION),
+            beta_offset(REPLACED)
+        ),
+        engine_side
+    );
+    assert_eq!(
+        hover.expect("hover").expect("answered").range_start,
+        Some(beta_offset(REPLACED))
+    );
+}
+
+#[tokio::test]
+async fn an_unregistered_foreign_target_its_publisher_names_with_other_bytes_is_a_typed_conflict() {
+    // Another LSP published the carrier this process never registered: the
+    // plugin serves the published bytes, and nothing ties them, or the
+    // authored source on disk, to this query.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("Other.vue");
+    std::fs::write(&target, DISPATCHED).expect("write target");
+    let target = TsserverTypeProvider::normalize_path(&target.to_string_lossy());
+    let (provider, mut engine, store) = published_carrier().await;
+    store.publish(&target, &format!("{target}.tsx"), REPLACED);
+    let origin = "/ws/src/main.ts";
+    let (opened, ()) = tokio::join!(
+        provider.open_file(
+            origin,
+            "import Other from './Other.vue';
+Other;
+"
+        ),
+        engine.acknowledge("updateOpen")
+    );
+    opened.expect("open");
+
+    let engine_side = async {
+        let definition = engine.next().await;
+        assert_eq!(definition["command"], "definition");
+        engine.answer(
+            &definition,
+            serde_json::json!([{
+                "file": target,
+                "start": { "line": 2, "offset": 7 },
+                "end": { "line": 2, "offset": 11 },
+            }]),
+        );
+    };
+    let (locations, ()) = tokio::join!(
+        provider.get_definition(&ProviderQuery::at_engine_surface(origin), 4),
+        engine_side
+    );
+    let error = locations.expect_err("the engine evaluated the published bytes, not the disk ones");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+}
+
+#[tokio::test]
+async fn a_carrier_row_withdrawn_under_an_answer_is_a_typed_conflict() {
+    // The companion's disk bytes equal the registered publication, so only
+    // the withdrawal's evidence can tell the engine may have evaluated B.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("App.vue");
+    let companion = dir.path().join("App.vue.tsx");
+    std::fs::write(&companion, DISPATCHED).expect("write companion");
+    let source = TsserverTypeProvider::normalize_path(&source.to_string_lossy());
+    let companion = TsserverTypeProvider::normalize_path(&companion.to_string_lossy());
+    let store = Arc::new(Store::default());
+    let (provider, mut engine) =
+        provider_publishing(Some(Arc::clone(&store) as Arc<dyn SurfacePublications>));
+    store.publish(&source, &companion, DISPATCHED);
+    provider
+        .register_carrier_metadata(&source, &companion, DISPATCHED, PROJECT)
+        .await
+        .expect("register");
+    refresh(&provider, &mut engine).await;
+
+    let engine_side = async {
+        let quickinfo = engine.next().await;
+        // Another writer publishes B while the engine evaluates, then
+        // withdraws the row; this process re-registers nothing.
+        store.publish(&source, &companion, REPLACED);
+        store.withdraw(&[&source, &companion]);
+        engine.answer(&quickinfo, quickinfo_body(2));
+    };
+    let (hover, ()) = tokio::join!(
+        provider.get_hover(
+            &ProviderQuery::at_engine_surface(&companion),
+            beta_offset(DISPATCHED)
+        ),
+        engine_side
+    );
+    let error = hover.expect_err("the engine may have evaluated the withdrawn publication");
     assert!(error.query_conflict, "typed conflict, got {error}");
 }

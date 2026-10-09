@@ -30,27 +30,32 @@
 //!   await.
 //!
 //! Bytes an engine reads out of band (a store its plugin reads while it
-//! evaluates) have no wire position. They are recorded as
-//! [`DeliveryOrder::OutOfBand`]. When the engine's publisher is known
-//! ([`SurfacePublications`]), a query observes the publisher's position before
-//! it is dispatched and, once the answer is in, requires every out-of-band file
-//! it decoded through to be attested by the publisher with exactly the retained
-//! bytes at a publication no later than that position
-//! ([`DeliveryLedger::settle`]); a file no publisher names is read by the
-//! engine from disk and must be unmodified since before dispatch. Any other
-//! outcome is a [`ProviderQueryConflict`], never a decode against bytes the
-//! engine may not have evaluated.
+//! evaluates, or an overlay another channel injects) have no wire position.
+//! They are recorded as [`DeliveryOrder::OutOfBand`] once the engine is known
+//! to hold them; while a delivery is still in flight the file is recorded as
+//! unknown ([`SurfaceEffect::unsettle`]) and nothing binds or decodes through
+//! it. When the engine's publisher is known ([`SurfacePublications`]), the
+//! engine holds a publication only once it has adopted it: the ledger records,
+//! at the wire position of the frame that makes the engine re-read its
+//! publisher, the publisher position observed before that frame
+//! ([`DeliveryLedger::adopt_with`]). A query binds an out-of-band file only
+//! while the publisher attests exactly the retained bytes at a publication the
+//! engine has adopted, and once the answer is in every out-of-band file it
+//! decoded through must still carry its local stamp and that attestation
+//! ([`DeliveryLedger::settle`]). A row withdrawn or never published leaves the
+//! engine reading the file itself, which is never delivery evidence.
 //!
-//! A file the engine was never handed is read by the engine from disk. A
-//! request on it converts against its disk bytes, which the binding retains
-//! with the file's observed length and modification time; a foreign target the
-//! engine read from disk decodes through its disk bytes only when the file was
-//! last modified before the query was dispatched.
+//! A file the engine was never handed — a closed workspace file, a library
+//! declaration — is read by the engine itself, from disk or its own bundle,
+//! with no wire position and no snapshot. Neither a read of the file nor its
+//! timestamps identify the bytes the engine evaluated, so a request on such a
+//! file, and an answer locating anything in one, is a
+//! [`ProviderQueryConflict`] ([`ConflictKind::Undelivered`]) — never a decode
+//! against bytes the engine may not have evaluated.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 /// How an engine receives one file's bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +76,9 @@ struct DeliveredBytes {
     /// identical bytes is still a different delivery.
     stamp: u64,
     order: DeliveryOrder,
+    /// A delivery of the file is in flight, so which bytes the engine holds is
+    /// unknown; `bytes` is meaningless until its outcome is recorded.
+    in_flight: bool,
 }
 
 /// One change to what an engine holds, recorded when it takes effect.
@@ -80,6 +88,10 @@ pub enum SurfaceEffect {
     Deliver { path: String, bytes: Arc<str> },
     /// The engine no longer holds an overlay for `path`.
     Withdraw { path: String },
+    /// A delivery for `path` may reach the engine from now on, through a
+    /// channel the ledger cannot order: until its outcome is recorded the
+    /// engine may hold either the old or the new bytes.
+    Unsettle { path: String },
 }
 
 impl SurfaceEffect {
@@ -95,6 +107,11 @@ impl SurfaceEffect {
     pub fn withdraw(path: impl Into<String>) -> Self {
         Self::Withdraw { path: path.into() }
     }
+
+    #[must_use]
+    pub fn unsettle(path: impl Into<String>) -> Self {
+        Self::Unsettle { path: path.into() }
+    }
 }
 
 /// Why a query's coordinates could not be bound to the bytes the engine
@@ -107,12 +124,15 @@ pub enum ConflictKind {
     /// The file's delivered bytes were replaced between the query's binding
     /// and its decode.
     Moved,
-    /// The engine's publisher does not attest the retained bytes as published
-    /// since before the query was dispatched.
+    /// The engine's publisher does not attest the retained bytes as a
+    /// publication the engine had adopted when the query was dispatched.
     Publication,
-    /// The file the engine reads from disk is not provably the bytes it held
-    /// when the query was dispatched.
-    Disk,
+    /// The engine was never handed the file: it reads the file itself, so the
+    /// bytes it evaluated cannot be bound.
+    Undelivered,
+    /// A delivery of the file was in flight, so which bytes the engine holds
+    /// is unknown.
+    InFlight,
 }
 
 /// The typed outcome of a query whose coordinates cannot be bound to the bytes
@@ -125,7 +145,8 @@ pub struct ProviderQueryConflict {
 }
 
 impl ProviderQueryConflict {
-    fn new(path: &str, kind: ConflictKind) -> Self {
+    #[must_use]
+    pub fn new(path: &str, kind: ConflictKind) -> Self {
         Self {
             path: path.to_string(),
             kind,
@@ -153,7 +174,8 @@ impl std::fmt::Display for ProviderQueryConflict {
             ConflictKind::Publication => {
                 "its publisher does not attest the bytes the query decoded through"
             }
-            ConflictKind::Disk => "its disk bytes changed after the query was dispatched",
+            ConflictKind::Undelivered => "the engine was never handed it",
+            ConflictKind::InFlight => "a delivery of it is in flight",
         };
         write!(
             f,
@@ -409,50 +431,14 @@ pub trait SurfacePublications: Send + Sync {
     fn attest(&self, path: &str, bytes: &str) -> Attestation;
 }
 
-// ── disk evidence ───────────────────────────────────────────────────────────
-
-/// The length and modification time a file had when it was read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileObservation {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-impl FileObservation {
-    fn of(path: &str) -> std::io::Result<Self> {
-        let metadata = std::fs::metadata(path)?;
-        Ok(Self {
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        })
-    }
-
-    /// Whether the file was last modified strictly before `at`.
-    fn predates(&self, at: SystemTime) -> bool {
-        self.modified.is_some_and(|modified| modified < at)
-    }
-}
-
-/// One read of a file the engine reads from disk itself.
-enum DiskRead {
-    Missing,
-    /// The file changed while it was read.
-    Unstable,
-    Read(Arc<str>, FileObservation),
-}
-
-fn read_disk(path: &str) -> DiskRead {
-    let Ok(before) = FileObservation::of(path) else {
-        return DiskRead::Missing;
-    };
-    let Ok(bytes) = std::fs::read_to_string(path) else {
-        return DiskRead::Missing;
-    };
-    match FileObservation::of(path) {
-        Ok(after) if after == before && after.len == bytes.len() as u64 => {
-            DiskRead::Read(Arc::from(bytes), after)
+impl Attestation {
+    /// Whether the publisher attests exactly the retained bytes at a
+    /// publication the engine had adopted at `adopted`.
+    fn adopted_at(&self, adopted: Option<&PublicationPosition>) -> bool {
+        match self {
+            Self::Attested(published) => adopted.is_some_and(|at| published.at_or_before(at)),
+            Self::Unpublished | Self::Contradicted | Self::Unreadable => false,
         }
-        _ => DiskRead::Unstable,
     }
 }
 
@@ -466,42 +452,65 @@ fn same_bytes(left: &Arc<str>, right: &Arc<str>) -> bool {
 struct LedgerState {
     files: imbl::HashMap<String, DeliveredBytes>,
     next_stamp: u64,
+    /// The latest publisher position the engine has adopted: every
+    /// publication and withdrawal at or before it is what the engine reads.
+    adopted: Option<PublicationPosition>,
 }
 
 impl LedgerState {
+    fn stamp(&mut self) -> u64 {
+        self.next_stamp += 1;
+        self.next_stamp
+    }
+
     fn apply(&mut self, effect: SurfaceEffect, order: DeliveryOrder) {
+        let path = match &effect {
+            SurfaceEffect::Deliver { path, .. }
+            | SurfaceEffect::Withdraw { path }
+            | SurfaceEffect::Unsettle { path } => path,
+        };
+        let held = self.files.get(path);
+        if order == DeliveryOrder::OutOfBand {
+            match (held, &effect) {
+                // A buffer the engine holds through its own protocol outranks
+                // bytes it would otherwise read out of band.
+                (Some(held), _) if held.order == DeliveryOrder::Wire => return,
+                // Identical out-of-band bytes place every position the same,
+                // so they are the same delivery.
+                (Some(held), SurfaceEffect::Deliver { bytes, .. })
+                    if !held.in_flight && held.bytes == *bytes =>
+                {
+                    return
+                }
+                _ => {}
+            }
+        }
         match effect {
             SurfaceEffect::Deliver { path, bytes } => {
-                if order == DeliveryOrder::OutOfBand {
-                    match self.files.get(&path) {
-                        // A buffer the engine holds through its own protocol
-                        // outranks bytes it would otherwise read out of band.
-                        Some(held) if held.order == DeliveryOrder::Wire => return,
-                        // Identical out-of-band bytes place every position the
-                        // same, so they are the same delivery.
-                        Some(held) if held.bytes == bytes => return,
-                        _ => {}
-                    }
-                }
-                self.next_stamp += 1;
+                let stamp = self.stamp();
                 self.files.insert(
                     path,
                     DeliveredBytes {
                         bytes,
-                        stamp: self.next_stamp,
+                        stamp,
                         order,
+                        in_flight: false,
+                    },
+                );
+            }
+            SurfaceEffect::Unsettle { path } => {
+                let stamp = self.stamp();
+                self.files.insert(
+                    path,
+                    DeliveredBytes {
+                        bytes: Arc::from(""),
+                        stamp,
+                        order,
+                        in_flight: true,
                     },
                 );
             }
             SurfaceEffect::Withdraw { path } => {
-                if order == DeliveryOrder::OutOfBand
-                    && self
-                        .files
-                        .get(&path)
-                        .is_some_and(|held| held.order == DeliveryOrder::Wire)
-                {
-                    return;
-                }
                 self.files.remove(&path);
             }
         }
@@ -511,12 +520,10 @@ impl LedgerState {
 /// The bytes one query's request position was converted against.
 #[derive(Clone, Debug)]
 struct RequestedBytes {
-    bytes: Option<Arc<str>>,
-    /// The ledger entry those bytes came from; `None` when the engine was never
-    /// handed the file and the bytes are its disk content.
-    entry: Option<(u64, DeliveryOrder)>,
-    /// The disk observation the fallback bytes were read with.
-    disk: Option<FileObservation>,
+    bytes: Arc<str>,
+    /// The local stamp of the ledger entry those bytes came from.
+    stamp: u64,
+    order: DeliveryOrder,
 }
 
 /// A query prepared for dispatch: the evidence gathered before its frame is
@@ -524,9 +531,6 @@ struct RequestedBytes {
 pub struct PreparedQuery {
     query: ProviderQuery,
     path: String,
-    fallback: Option<(Arc<str>, FileObservation)>,
-    /// The publisher's position observed before dispatch.
-    position: Option<PublicationPosition>,
     /// The local stamp of the out-of-band request entry the publisher attested.
     attested: Option<u64>,
 }
@@ -563,10 +567,21 @@ impl Default for DeliveryLedger {
 impl DeliveryLedger {
     /// A ledger whose out-of-band bytes are attested by `publications`, or by
     /// their local record alone when `None`.
+    ///
+    /// Construct it before the engine can read anything from `publications`
+    /// (before its process starts): the publisher position observed here is
+    /// what the engine adopts by reading lazily, since every row published no
+    /// later than it is already in place when the engine first reads it.
     #[must_use]
     pub fn new(publications: Option<Arc<dyn SurfacePublications>>) -> Self {
+        let adopted = publications
+            .as_ref()
+            .and_then(|publications| publications.position());
         Self {
-            state: parking_lot::Mutex::new(LedgerState::default()),
+            state: parking_lot::Mutex::new(LedgerState {
+                adopted,
+                ..LedgerState::default()
+            }),
             incarnation: NEXT_LEDGER.fetch_add(1, Ordering::Relaxed),
             publications,
         }
@@ -595,16 +610,49 @@ impl DeliveryLedger {
         self.state.lock().apply(effect, DeliveryOrder::Wire);
     }
 
-    /// Record bytes the engine reads out of band, all under one lock so no
-    /// query observes part of one publication. They carry no wire position; a
-    /// query decoding through them settles against their evidence. An
-    /// out-of-band record never replaces or withdraws a buffer the engine holds
-    /// through its protocol, and re-recording identical bytes keeps the stamp.
+    /// Record what the engine holds out of band, all under one lock so no
+    /// query observes part of one change: bytes it is known to hold, a file it
+    /// no longer holds, or a delivery whose outcome is not yet known
+    /// ([`SurfaceEffect::unsettle`]). They carry no wire position; a query
+    /// decoding through them settles against their evidence. An out-of-band
+    /// record never replaces or withdraws a buffer the engine holds through its
+    /// protocol, and re-recording identical bytes keeps the stamp.
     pub fn record_out_of_band(&self, effects: impl IntoIterator<Item = SurfaceEffect>) {
         let mut state = self.state.lock();
         for effect in effects {
             state.apply(effect, DeliveryOrder::OutOfBand);
         }
+    }
+
+    /// The publisher's current position, observed before a frame that makes
+    /// the engine re-read its publisher is placed; `None` without a publisher.
+    #[must_use]
+    pub fn publication_position(&self) -> Option<PublicationPosition> {
+        self.publications.as_ref()?.position()
+    }
+
+    /// Record that the engine has adopted every publication up to `observed`
+    /// (a [`Self::publication_position`] taken before the frame that makes the
+    /// engine re-read its publisher was placed) at the wire position of the
+    /// frame `put_on_wire` synchronously enqueues — the first frame the engine
+    /// evaluates after that re-read completes — under the ledger lock.
+    pub fn adopt_with<R>(
+        &self,
+        observed: Option<PublicationPosition>,
+        put_on_wire: impl FnOnce() -> R,
+    ) -> R {
+        let mut state = self.state.lock();
+        let placed = put_on_wire();
+        if let Some(observed) = observed {
+            let newer = state
+                .adopted
+                .as_ref()
+                .is_none_or(|adopted| !observed.at_or_before(adopted));
+            if newer {
+                state.adopted = Some(observed);
+            }
+        }
+        placed
     }
 
     /// Whether the engine holds delivered bytes for `path`.
@@ -614,115 +662,97 @@ impl DeliveryLedger {
     }
 
     /// Gather `query`'s pre-dispatch evidence for a request on `path` (the
-    /// adapter's key for the file): the file's disk bytes when the engine holds
-    /// none, and — when the engine reads bytes out of band from a publisher —
-    /// the publisher's position and its attestation of the request file.
+    /// adapter's key for the file): when the engine reads the file's bytes out
+    /// of band from a publisher, the publisher's attestation of them against
+    /// the publications the engine has adopted.
     ///
     /// # Errors
-    /// [`ProviderQueryConflict`] when the request file's disk bytes change
-    /// while they are read, or the publisher contradicts the out-of-band bytes
-    /// the request would convert against.
+    /// [`ProviderQueryConflict`] when the engine was never handed the request
+    /// file, a delivery of it is in flight, or the publisher's record of its
+    /// out-of-band bytes is not one the engine has adopted.
     pub fn prepare(
         &self,
         query: &ProviderQuery,
         path: &str,
     ) -> Result<PreparedQuery, ProviderQueryConflict> {
-        let held = self.state.lock().files.get(path).cloned();
-        let fallback = match &held {
-            Some(_) => None,
-            None => match read_disk(path) {
-                DiskRead::Missing => None,
-                DiskRead::Unstable => {
-                    return Err(ProviderQueryConflict::new(path, ConflictKind::Disk))
-                }
-                DiskRead::Read(bytes, observed) => Some((bytes, observed)),
-            },
+        let (held, adopted) = {
+            let state = self.state.lock();
+            (state.files.get(path).cloned(), state.adopted.clone())
         };
-        let mut position = None;
+        let Some(held) = held else {
+            return Err(ProviderQueryConflict::new(path, ConflictKind::Undelivered));
+        };
+        if held.in_flight {
+            return Err(ProviderQueryConflict::new(path, ConflictKind::InFlight));
+        }
         let mut attested = None;
         if let Some(publications) = &self.publications {
-            if let Some(held) = held.filter(|held| held.order == DeliveryOrder::OutOfBand) {
-                match publications.attest(path, &held.bytes) {
-                    Attestation::Attested(_) | Attestation::Unpublished => {
-                        attested = Some(held.stamp);
-                    }
-                    Attestation::Contradicted | Attestation::Unreadable => {
-                        return Err(ProviderQueryConflict::new(path, ConflictKind::Publication));
-                    }
+            if held.order == DeliveryOrder::OutOfBand {
+                if !publications
+                    .attest(path, &held.bytes)
+                    .adopted_at(adopted.as_ref())
+                {
+                    return Err(ProviderQueryConflict::new(path, ConflictKind::Publication));
                 }
+                attested = Some(held.stamp);
             }
-            position = publications.position();
         }
         Ok(PreparedQuery {
             query: query.clone(),
             path: path.to_string(),
-            fallback,
-            position,
             attested,
         })
     }
 
     /// Bind a prepared query at its wire position: `put_on_wire` converts the
-    /// request against the bytes the engine holds for the file (else its disk
-    /// bytes) and synchronously enqueues the frame, all under the ledger lock,
-    /// so the binding names exactly the surface that frame meets.
+    /// request against the bytes the engine holds for the file and
+    /// synchronously enqueues the frame, all under the ledger lock, so the
+    /// binding names exactly the surface that frame meets.
     ///
     /// # Errors
-    /// [`DispatchRefusal::Conflict`] when the engine holds other bytes than the
-    /// query intends, or an out-of-band request file moved after the publisher
+    /// [`DispatchRefusal::Conflict`] when the engine no longer holds the file,
+    /// holds other bytes than the query intends, a delivery of the file is in
+    /// flight, or an out-of-band request file moved after the publisher
     /// attested it; [`DispatchRefusal::Unplaced`] with whatever `put_on_wire`
     /// returns. No frame is placed and nothing is bound in either case.
     pub fn dispatch_with<R, E>(
         &self,
         prepared: PreparedQuery,
-        put_on_wire: impl FnOnce(Option<&str>) -> Result<R, E>,
+        put_on_wire: impl FnOnce(&str) -> Result<R, E>,
     ) -> Result<(BoundQuery, R), DispatchRefusal<E>> {
         let PreparedQuery {
             query,
             path,
-            fallback,
-            position,
             attested,
         } = prepared;
         let state = self.state.lock();
-        let requested = match state.files.get(&path) {
-            Some(entry) => {
-                if entry.order == DeliveryOrder::OutOfBand
-                    && self.publications.is_some()
-                    && attested != Some(entry.stamp)
-                {
-                    return Err(DispatchRefusal::Conflict(ProviderQueryConflict::new(
-                        &path,
-                        ConflictKind::Moved,
-                    )));
-                }
-                RequestedBytes {
-                    bytes: Some(Arc::clone(&entry.bytes)),
-                    entry: Some((entry.stamp, entry.order)),
-                    disk: None,
-                }
-            }
-            None => RequestedBytes {
-                disk: fallback.as_ref().map(|(_, observed)| *observed),
-                bytes: fallback.map(|(bytes, _)| bytes),
-                entry: None,
-            },
+        let refuse = |kind| DispatchRefusal::Conflict(ProviderQueryConflict::new(&path, kind));
+        let Some(entry) = state.files.get(&path) else {
+            return Err(refuse(ConflictKind::Undelivered));
         };
-        if let Some(intended) = query.intended() {
-            if !requested
-                .bytes
-                .as_ref()
-                .is_some_and(|held| same_bytes(held, &intended.bytes))
-            {
-                return Err(DispatchRefusal::Conflict(ProviderQueryConflict::new(
-                    &path,
-                    ConflictKind::IntendedSurface,
-                )));
-            }
+        if entry.in_flight {
+            return Err(refuse(ConflictKind::InFlight));
         }
-        let dispatched_at = SystemTime::now();
-        let placed = put_on_wire(requested.bytes.as_deref()).map_err(DispatchRefusal::Unplaced)?;
+        if entry.order == DeliveryOrder::OutOfBand
+            && self.publications.is_some()
+            && attested != Some(entry.stamp)
+        {
+            return Err(refuse(ConflictKind::Moved));
+        }
+        if query
+            .intended()
+            .is_some_and(|intended| !same_bytes(&entry.bytes, &intended.bytes))
+        {
+            return Err(refuse(ConflictKind::IntendedSurface));
+        }
+        let requested = RequestedBytes {
+            bytes: Arc::clone(&entry.bytes),
+            stamp: entry.stamp,
+            order: entry.order,
+        };
+        let placed = put_on_wire(&requested.bytes).map_err(DispatchRefusal::Unplaced)?;
         let surface = state.files.clone();
+        let adopted = state.adopted.clone();
         drop(state);
         Ok((
             BoundQuery {
@@ -731,8 +761,7 @@ impl DeliveryLedger {
                 path,
                 requested,
                 surface,
-                dispatched_at,
-                position,
+                adopted,
             },
             placed,
         ))
@@ -742,11 +771,10 @@ impl DeliveryLedger {
     /// decoded through (the requested file and each of `decoded`) must still
     /// carry the local stamp it had at dispatch and, when the engine reads it
     /// from a publisher, be attested by the publisher with exactly the retained
-    /// bytes at a publication no later than the position observed before
-    /// dispatch — or, when no publisher names it, be unmodified on disk since
-    /// before dispatch. An undelivered request file must still carry the disk
-    /// bytes it was converted against. Wire-ordered bytes need no check: the
-    /// engine evaluated exactly the bytes the binding retained.
+    /// bytes as a publication the engine had adopted at dispatch. Wire-ordered
+    /// bytes need no check: the engine evaluated exactly the bytes the binding
+    /// retained. Nothing decodes through a file the engine was never handed
+    /// ([`BoundQuery::target`] refuses it).
     ///
     /// # Errors
     /// [`ProviderQueryConflict`] naming the first file whose evidence failed.
@@ -755,22 +783,9 @@ impl DeliveryLedger {
         bound: &BoundQuery,
         decoded: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), ProviderQueryConflict> {
-        if let Some(observed) = bound.requested.disk {
-            if FileObservation::of(&bound.path).ok() != Some(observed) {
-                return Err(ProviderQueryConflict::new(&bound.path, ConflictKind::Disk));
-            }
-        }
-        let mut out_of_band: Vec<(&str, &DeliveredBytes)> = Vec::new();
-        let requested_entry;
-        if let (Some((stamp, DeliveryOrder::OutOfBand)), Some(bytes)) =
-            (bound.requested.entry, &bound.requested.bytes)
-        {
-            requested_entry = DeliveredBytes {
-                bytes: Arc::clone(bytes),
-                stamp,
-                order: DeliveryOrder::OutOfBand,
-            };
-            out_of_band.push((&bound.path, &requested_entry));
+        let mut out_of_band: Vec<(&str, u64, &Arc<str>)> = Vec::new();
+        if bound.requested.order == DeliveryOrder::OutOfBand {
+            out_of_band.push((&bound.path, bound.requested.stamp, &bound.requested.bytes));
         }
         let mut seen = HashSet::new();
         for path in decoded {
@@ -779,7 +794,7 @@ impl DeliveryLedger {
             }
             if let Some(entry) = bound.surface.get(path) {
                 if entry.order == DeliveryOrder::OutOfBand {
-                    out_of_band.push((path, entry));
+                    out_of_band.push((path, entry.stamp, &entry.bytes));
                 }
             }
         }
@@ -788,8 +803,8 @@ impl DeliveryLedger {
         }
         {
             let state = self.state.lock();
-            for (path, entry) in &out_of_band {
-                if state.files.get(*path).map(|held| held.stamp) != Some(entry.stamp) {
+            for (path, stamp, _) in &out_of_band {
+                if state.files.get(*path).map(|held| held.stamp) != Some(*stamp) {
                     return Err(ProviderQueryConflict::new(path, ConflictKind::Moved));
                 }
             }
@@ -797,20 +812,12 @@ impl DeliveryLedger {
         let Some(publications) = &self.publications else {
             return Ok(());
         };
-        for (path, entry) in out_of_band {
-            match publications.attest(path, &entry.bytes) {
-                Attestation::Attested(published)
-                    if bound
-                        .position
-                        .as_ref()
-                        .is_some_and(|observed| published.at_or_before(observed)) => {}
-                Attestation::Unpublished => match read_disk(path) {
-                    DiskRead::Read(bytes, observed)
-                        if observed.predates(bound.dispatched_at)
-                            && same_bytes(&bytes, &entry.bytes) => {}
-                    _ => return Err(ProviderQueryConflict::new(path, ConflictKind::Disk)),
-                },
-                _ => return Err(ProviderQueryConflict::new(path, ConflictKind::Publication)),
+        for (path, _, bytes) in out_of_band {
+            if !publications
+                .attest(path, bytes)
+                .adopted_at(bound.adopted.as_ref())
+            {
+                return Err(ProviderQueryConflict::new(path, ConflictKind::Publication));
             }
         }
         Ok(())
@@ -828,9 +835,9 @@ pub struct BoundQuery {
     path: String,
     requested: RequestedBytes,
     surface: imbl::HashMap<String, DeliveredBytes>,
-    /// Taken under the ledger lock before the frame was placed.
-    dispatched_at: SystemTime,
-    position: Option<PublicationPosition>,
+    /// The publisher position the engine had adopted when the frame was
+    /// placed.
+    adopted: Option<PublicationPosition>,
 }
 
 impl BoundQuery {
@@ -850,50 +857,39 @@ impl BoundQuery {
     /// The bytes the request position was converted against, retained for the
     /// decode of every range in the same file.
     #[must_use]
-    pub fn requested(&self) -> Option<&Arc<str>> {
-        self.requested.bytes.as_ref()
+    pub fn requested(&self) -> &Arc<str> {
+        &self.requested.bytes
     }
 
     /// The bytes a location in `path` decodes through: the request file's
-    /// retained bytes, another file's bytes as the request frame met them, or
-    /// — for a file the engine reads from disk — its disk bytes when the file
-    /// was last modified before the query was dispatched. `intended_as` is the
-    /// identity the requester maps that location under; when the requester
-    /// captured a surface for it, the decode bytes must be exactly that
-    /// surface's. `Ok(None)` for a target with no bytes at all: its locations
-    /// cannot be decoded and are dropped, never given fabricated offsets.
+    /// retained bytes, or another file's bytes as the request frame met them.
+    /// `intended_as` is the identity the requester maps that location under;
+    /// when the requester captured a surface for it, the decode bytes must be
+    /// exactly that surface's.
     ///
     /// # Errors
-    /// [`ProviderQueryConflict`] when the target's disk bytes changed after
-    /// dispatch, or the decode bytes are not the requester's intended surface.
-    pub fn target(
-        &self,
-        path: &str,
-        intended_as: &str,
-    ) -> Result<Option<Arc<str>>, ProviderQueryConflict> {
+    /// [`ProviderQueryConflict`] when the engine was never handed the target
+    /// (it read the file itself), a delivery of it was in flight at dispatch,
+    /// or the decode bytes are not the requester's intended surface.
+    pub fn target(&self, path: &str, intended_as: &str) -> Result<Arc<str>, ProviderQueryConflict> {
         let bytes = if path == self.path {
-            self.requested.bytes.clone()
-        } else if let Some(entry) = self.surface.get(path) {
-            Some(Arc::clone(&entry.bytes))
+            Arc::clone(&self.requested.bytes)
         } else {
-            match read_disk(path) {
-                DiskRead::Missing => None,
-                DiskRead::Read(bytes, observed) if observed.predates(self.dispatched_at) => {
-                    Some(bytes)
+            match self.surface.get(path) {
+                Some(entry) if entry.in_flight => {
+                    return Err(ProviderQueryConflict::new(path, ConflictKind::InFlight))
                 }
-                DiskRead::Read(..) | DiskRead::Unstable => {
-                    return Err(ProviderQueryConflict::new(path, ConflictKind::Disk))
-                }
+                Some(entry) => Arc::clone(&entry.bytes),
+                None => return Err(ProviderQueryConflict::new(path, ConflictKind::Undelivered)),
             }
         };
         self.query
-            .check_intended_target(intended_as, bytes.as_ref())?;
+            .check_intended_target(intended_as, Some(&bytes))?;
         Ok(bytes)
     }
 
     /// [`Self::target`] for exactly `paths`, keyed for decoders that take a
-    /// path-keyed map; a target with no bytes is omitted and its locations are
-    /// dropped by the decoder.
+    /// path-keyed map.
     ///
     /// # Errors
     /// The first target's [`ProviderQueryConflict`].
@@ -902,13 +898,10 @@ impl BoundQuery {
         paths: &HashSet<String>,
         intended_as: impl Fn(&str) -> String,
     ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
-        let mut resolved = HashMap::with_capacity(paths.len());
-        for path in paths {
-            if let Some(bytes) = self.target(path, &intended_as(path))? {
-                resolved.insert(path.clone(), bytes);
-            }
-        }
-        Ok(resolved)
+        paths
+            .iter()
+            .map(|path| Ok((path.clone(), self.target(path, &intended_as(path))?)))
+            .collect()
     }
 }
 

@@ -1,5 +1,4 @@
 use super::*;
-use std::time::Duration;
 
 fn bytes(text: &str) -> Arc<str> {
     Arc::from(text)
@@ -27,25 +26,6 @@ fn at_engine(path: &str) -> ProviderQuery {
     ProviderQuery::at_engine_surface(path)
 }
 
-/// A file whose modification time is pinned `offset` away from now, so a
-/// dispatch taken now is provably before or after its last write.
-fn disk_file(dir: &tempfile::TempDir, name: &str, content: &str, offset: i64) -> String {
-    let path = dir.path().join(name);
-    std::fs::write(&path, content).expect("write fixture");
-    let now = SystemTime::now();
-    let modified = if offset < 0 {
-        now - Duration::from_secs(offset.unsigned_abs())
-    } else {
-        now + Duration::from_secs(offset.unsigned_abs())
-    };
-    std::fs::File::options()
-        .write(true)
-        .open(&path)
-        .and_then(|file| file.set_modified(modified))
-        .expect("pin modification time");
-    path.to_string_lossy().to_string()
-}
-
 #[test]
 fn a_binding_keeps_the_surface_its_frame_met_after_later_deliveries() {
     let ledger = DeliveryLedger::default();
@@ -59,12 +39,10 @@ fn a_binding_keeps_the_surface_its_frame_met_after_later_deliveries() {
     let query = at_engine("/ws/a.ts");
     let prepared = ledger.prepare(&query, "/ws/a.ts").expect("prepare");
     let (bound, converted) = ledger
-        .dispatch_with(prepared, |requested| {
-            Ok::<_, ()>(requested.map(str::to_string))
-        })
+        .dispatch_with(prepared, |requested| Ok::<_, ()>(requested.to_string()))
         .ok()
         .expect("bind");
-    assert_eq!(converted.as_deref(), Some("a1"));
+    assert_eq!(converted, "a1");
 
     ledger.deliver_with(
         [
@@ -74,13 +52,10 @@ fn a_binding_keeps_the_surface_its_frame_met_after_later_deliveries() {
         || (),
     );
 
-    assert_eq!(bound.requested().map(|b| &**b), Some("a1"));
+    assert_eq!(&**bound.requested(), "a1");
     assert_eq!(
-        bound
-            .target("/ws/b.ts", "/ws/b.ts")
-            .expect("wire target")
-            .as_deref(),
-        Some("b1")
+        &*bound.target("/ws/b.ts", "/ws/b.ts").expect("wire target"),
+        "b1"
     );
 }
 
@@ -106,7 +81,7 @@ fn a_query_bound_to_other_bytes_than_it_intends_is_refused_before_dispatch() {
     // A delivered back before dispatch is exactly what the requester intends.
     ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("A")));
     let bound = bind(&ledger, &query).expect("A again binds");
-    assert_eq!(bound.requested().map(|b| &**b), Some("A"));
+    assert_eq!(&**bound.requested(), "A");
     assert_eq!(
         bound.query().intended().map(IntendedSurface::id),
         Some(ID_A)
@@ -130,22 +105,45 @@ fn an_identical_re_delivery_before_dispatch_still_binds() {
 }
 
 #[test]
-fn an_undelivered_request_retains_its_disk_bytes_and_settles_against_them() {
+fn a_file_the_engine_was_never_handed_is_a_conflict_whatever_its_disk_holds() {
+    // The engine reads such a file itself, with no wire position: a disk edit
+    // it has not re-read, or a replacement that keeps the file's timestamp,
+    // leaves nothing that identifies the bytes it evaluated, however stable
+    // the file looks.
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = disk_file(&dir, "disk.ts", "disk", -60);
+    let closed = dir.path().join("closed.ts");
+    std::fs::write(&closed, "closed").expect("write fixture");
+    let closed = closed.to_string_lossy().to_string();
     let ledger = DeliveryLedger::default();
-    let bound = bind(&ledger, &at_engine(&path)).expect("bind");
-    assert_eq!(bound.requested().map(|b| &**b), Some("disk"));
-    ledger
-        .settle(&bound, [])
-        .expect("unchanged disk bytes settle");
-
-    std::fs::write(&path, "rewritten").expect("rewrite");
     assert_eq!(
-        ledger.settle(&bound, []).unwrap_err().kind(),
-        ConflictKind::Disk,
-        "the engine may have read the rewritten bytes"
+        bind(&ledger, &at_engine(&closed)).unwrap_err(),
+        ConflictKind::Undelivered,
+        "a request on a file the engine reads itself never converts against its disk bytes"
     );
+
+    ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
+    let bound = bind(&ledger, &at_engine("/ws/a.ts")).expect("bind");
+    assert_eq!(
+        bound.target(&closed, &closed).unwrap_err().kind(),
+        ConflictKind::Undelivered,
+        "a location in a file the engine read from disk never decodes"
+    );
+    let bundled = dir.path().join("lib.d.ts").to_string_lossy().to_string();
+    assert_eq!(
+        bound.target(&bundled, &bundled).unwrap_err().kind(),
+        ConflictKind::Undelivered,
+        "nor one in a library the engine reads from its own bundle"
+    );
+
+    // Delivered only after the query's frame: the engine evaluated whatever it
+    // read before, so the binding still has no bytes for it.
+    ledger.record_wire(SurfaceEffect::deliver(closed.clone(), bytes("closed")));
+    assert_eq!(
+        bound.target(&closed, &closed).unwrap_err().kind(),
+        ConflictKind::Undelivered
+    );
+    let delivered = bind(&ledger, &at_engine(&closed)).expect("a delivered file binds");
+    assert_eq!(&**delivered.requested(), "closed");
 }
 
 #[test]
@@ -184,7 +182,7 @@ fn out_of_band_records_never_displace_a_protocol_buffer_and_dedupe_identical_byt
     ledger.record_out_of_band([SurfaceEffect::deliver("/ws/open.ts", bytes("disk"))]);
     ledger.record_out_of_band([SurfaceEffect::withdraw("/ws/open.ts")]);
     let bound = bind(&ledger, &at_engine("/ws/open.ts")).expect("bind");
-    assert_eq!(bound.requested().map(|b| &**b), Some("buffer"));
+    assert_eq!(&**bound.requested(), "buffer");
 
     ledger.record_out_of_band([SurfaceEffect::deliver("/ws/loaded.ts", bytes("v1"))]);
     let bound = bind(&ledger, &at_engine("/ws/loaded.ts")).expect("bind");
@@ -194,32 +192,6 @@ fn out_of_band_records_never_displace_a_protocol_buffer_and_dedupe_identical_byt
         .expect("an identical re-record settles");
     ledger.record_out_of_band([SurfaceEffect::deliver("/ws/loaded.ts", bytes("v2"))]);
     assert!(ledger.settle(&bound, []).is_err());
-}
-
-#[test]
-fn a_foreign_disk_target_decodes_only_when_unmodified_since_dispatch() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let stable = disk_file(&dir, "stable.ts", "stable", -60);
-    let rewritten = disk_file(&dir, "rewritten.ts", "after", 60);
-    let ledger = DeliveryLedger::default();
-    ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
-    let bound = bind(&ledger, &at_engine("/ws/a.ts")).expect("bind");
-
-    assert_eq!(
-        bound.target(&stable, &stable).expect("stable").as_deref(),
-        Some("stable")
-    );
-    assert_eq!(
-        bound.target(&rewritten, &rewritten).unwrap_err().kind(),
-        ConflictKind::Disk,
-        "bytes written after dispatch are not the ones the engine evaluated"
-    );
-    let gone = dir.path().join("gone.ts").to_string_lossy().to_string();
-    assert_eq!(
-        bound.target(&gone, &gone).expect("missing"),
-        None,
-        "a target with no bytes has no decodable location"
-    );
 }
 
 struct Captured(HashMap<String, Arc<str>>);
@@ -253,65 +225,85 @@ fn a_foreign_target_decodes_only_through_the_surface_the_requester_maps_it_throu
         ConflictKind::IntendedSurface,
         "the requester would map the engine's B2 offsets through its captured B1"
     );
-    assert_eq!(
-        bound
-            .target("/ws/a.ts", "/ws/a.ts")
-            .expect("own")
-            .as_deref(),
-        Some("a")
-    );
+    assert_eq!(&*bound.target("/ws/a.ts", "/ws/a.ts").expect("own"), "a");
 }
 
 /// Published rows: path → (publication epoch, bytes).
 type PublishedRows = HashMap<String, (u64, Arc<str>)>;
 
+#[derive(Default)]
+struct PublisherState {
+    epoch: u64,
+    rows: PublishedRows,
+}
+
 /// A publisher whose record a test moves explicitly — another writer's
 /// publication included.
 #[derive(Default)]
 struct Publisher {
-    rows: parking_lot::Mutex<(u64, PublishedRows)>,
+    state: parking_lot::Mutex<PublisherState>,
+}
+
+fn store_position(epoch: u64) -> PublicationPosition {
+    PublicationPosition {
+        instance: Arc::from("store"),
+        epoch,
+    }
 }
 
 impl Publisher {
     fn publish(&self, path: &str, content: &str) {
-        let mut rows = self.rows.lock();
-        rows.0 += 1;
-        let epoch = rows.0;
-        rows.1.insert(path.to_string(), (epoch, bytes(content)));
+        let mut state = self.state.lock();
+        state.epoch += 1;
+        let epoch = state.epoch;
+        state.rows.insert(path.to_string(), (epoch, bytes(content)));
+    }
+
+    fn withdraw(&self, path: &str) {
+        let mut state = self.state.lock();
+        state.epoch += 1;
+        state.rows.remove(path);
     }
 }
 
 impl SurfacePublications for Publisher {
     fn position(&self) -> Option<PublicationPosition> {
-        Some(PublicationPosition {
-            instance: Arc::from("store"),
-            epoch: self.rows.lock().0,
-        })
+        Some(store_position(self.state.lock().epoch))
     }
 
     fn attest(&self, path: &str, content: &str) -> Attestation {
-        match self.rows.lock().1.get(path) {
+        let state = self.state.lock();
+        match state.rows.get(path) {
             None => Attestation::Unpublished,
             Some((_, published)) if **published != *content => Attestation::Contradicted,
-            Some((epoch, _)) => Attestation::Attested(PublicationPosition {
-                instance: Arc::from("store"),
-                epoch: *epoch,
-            }),
+            Some((epoch, _)) => Attestation::Attested(store_position(*epoch)),
         }
     }
+}
+
+/// A ledger over `publisher`, constructed before the engine reads anything.
+fn published_ledger(publisher: &Arc<Publisher>) -> DeliveryLedger {
+    DeliveryLedger::new(Some(Arc::clone(publisher) as Arc<dyn SurfacePublications>))
+}
+
+/// The engine re-reads its publisher: everything published so far is what it
+/// holds from the next frame on.
+fn adopt(ledger: &DeliveryLedger) {
+    ledger.adopt_with(ledger.publication_position(), || ());
 }
 
 #[test]
 fn a_publication_by_another_writer_after_dispatch_is_a_conflict() {
     let publisher = Arc::new(Publisher::default());
-    let ledger = DeliveryLedger::new(Some(publisher.clone() as Arc<dyn SurfacePublications>));
+    let ledger = published_ledger(&publisher);
     publisher.publish("/ws/App.vue.tsx", "A");
     ledger.record_out_of_band([SurfaceEffect::deliver("/ws/App.vue.tsx", bytes("A"))]);
+    adopt(&ledger);
 
     let bound = bind(&ledger, &at_engine("/ws/App.vue.tsx")).expect("bind");
     ledger
         .settle(&bound, [])
-        .expect("published before dispatch");
+        .expect("published and adopted before dispatch");
 
     // Another process publishes B; this process never re-registers.
     publisher.publish("/ws/App.vue.tsx", "B");
@@ -331,9 +323,10 @@ fn a_publication_by_another_writer_after_dispatch_is_a_conflict() {
 #[test]
 fn a_publication_racing_ahead_of_registration_refuses_the_query() {
     let publisher = Arc::new(Publisher::default());
-    let ledger = DeliveryLedger::new(Some(publisher.clone() as Arc<dyn SurfacePublications>));
+    let ledger = published_ledger(&publisher);
     publisher.publish("/ws/App.vue.tsx", "A");
     ledger.record_out_of_band([SurfaceEffect::deliver("/ws/App.vue.tsx", bytes("A"))]);
+    adopt(&ledger);
     // The store already serves B; this process has not registered it yet.
     publisher.publish("/ws/App.vue.tsx", "B");
     assert_eq!(
@@ -344,11 +337,58 @@ fn a_publication_racing_ahead_of_registration_refuses_the_query() {
 }
 
 #[test]
-fn an_out_of_band_foreign_target_settles_against_its_own_publication() {
+fn a_registered_publication_binds_only_once_the_engine_has_adopted_it() {
     let publisher = Arc::new(Publisher::default());
-    let ledger = DeliveryLedger::new(Some(publisher.clone() as Arc<dyn SurfacePublications>));
+    let ledger = published_ledger(&publisher);
+    publisher.publish("/ws/App.vue.tsx", "A");
+    ledger.record_out_of_band([SurfaceEffect::deliver("/ws/App.vue.tsx", bytes("A"))]);
+    adopt(&ledger);
+    let on_a = bind(&ledger, &at_engine("/ws/App.vue.tsx")).expect("A is adopted");
+
+    // B is published and registered here, but the engine has not re-read its
+    // publisher: it still evaluates A.
+    publisher.publish("/ws/App.vue.tsx", "B");
+    ledger.record_out_of_band([SurfaceEffect::deliver("/ws/App.vue.tsx", bytes("B"))]);
+    assert_eq!(
+        bind(&ledger, &at_engine("/ws/App.vue.tsx")).unwrap_err(),
+        ConflictKind::Publication,
+        "a query converted against B would be answered from A"
+    );
+    assert!(
+        ledger.settle(&on_a, []).is_err(),
+        "A no longer holds either"
+    );
+
+    adopt(&ledger);
+    let on_b = bind(&ledger, &at_engine("/ws/App.vue.tsx")).expect("B is adopted");
+    assert_eq!(&**on_b.requested(), "B");
+    ledger.settle(&on_b, []).expect("adopted before dispatch");
+}
+
+#[test]
+fn a_publication_adopted_only_after_dispatch_is_a_conflict() {
+    let publisher = Arc::new(Publisher::default());
+    let ledger = published_ledger(&publisher);
     publisher.publish("/ws/B.vue.tsx", "B1");
     ledger.record_out_of_band([SurfaceEffect::deliver("/ws/B.vue.tsx", bytes("B1"))]);
+    ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
+    // The engine read its publisher before B1 existed and has not re-read it.
+    let bound = bind(&ledger, &at_engine("/ws/a.ts")).expect("bind");
+    adopt(&ledger);
+    assert_eq!(
+        ledger.settle(&bound, ["/ws/B.vue.tsx"]).unwrap_err().kind(),
+        ConflictKind::Publication,
+        "the engine adopted B1 only after this query's frame"
+    );
+}
+
+#[test]
+fn an_out_of_band_foreign_target_settles_against_its_own_publication() {
+    let publisher = Arc::new(Publisher::default());
+    let ledger = published_ledger(&publisher);
+    publisher.publish("/ws/B.vue.tsx", "B1");
+    ledger.record_out_of_band([SurfaceEffect::deliver("/ws/B.vue.tsx", bytes("B1"))]);
+    adopt(&ledger);
     ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
     let bound = bind(&ledger, &at_engine("/ws/a.ts")).expect("bind");
     ledger
@@ -365,29 +405,95 @@ fn an_out_of_band_foreign_target_settles_against_its_own_publication() {
 }
 
 #[test]
-fn an_unpublished_out_of_band_file_is_evidenced_by_its_disk_bytes() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = disk_file(&dir, "loaded.ts", "loaded", -60);
+fn a_row_withdrawn_under_an_answer_is_a_conflict() {
     let publisher = Arc::new(Publisher::default());
-    let ledger = DeliveryLedger::new(Some(publisher as Arc<dyn SurfacePublications>));
-    ledger.record_out_of_band([SurfaceEffect::deliver(path.clone(), bytes("loaded"))]);
-    let bound = bind(&ledger, &at_engine(&path)).expect("bind");
-    ledger
-        .settle(&bound, [])
-        .expect("disk holds the loaded bytes");
+    let ledger = published_ledger(&publisher);
+    publisher.publish("/ws/App.vue.tsx", "A");
+    ledger.record_out_of_band([SurfaceEffect::deliver("/ws/App.vue.tsx", bytes("A"))]);
+    adopt(&ledger);
 
-    let virtual_path = dir
-        .path()
-        .join("Virtual.vue.tsx")
-        .to_string_lossy()
-        .to_string();
-    ledger.record_out_of_band([SurfaceEffect::deliver(virtual_path.clone(), bytes("v"))]);
-    let bound = bind(&ledger, &at_engine(&virtual_path)).expect("bind");
+    let unchanged = bind(&ledger, &at_engine("/ws/App.vue.tsx")).expect("bind");
+    ledger
+        .settle(&unchanged, [])
+        .expect("an unchanged publication settles");
+
+    let bound = bind(&ledger, &at_engine("/ws/App.vue.tsx")).expect("bind");
+    // Another writer publishes B while the engine evaluates, then retracts the
+    // row; this process never re-registers.
+    publisher.publish("/ws/App.vue.tsx", "B");
+    publisher.withdraw("/ws/App.vue.tsx");
     assert_eq!(
         ledger.settle(&bound, []).unwrap_err().kind(),
-        ConflictKind::Disk,
-        "bytes no publisher names and no disk holds were never evidenced"
+        ConflictKind::Publication,
+        "the engine may have evaluated B, or reads the withdrawn file itself"
     );
+}
+
+#[test]
+fn a_foreign_target_this_process_never_registered_is_a_conflict() {
+    let publisher = Arc::new(Publisher::default());
+    let ledger = published_ledger(&publisher);
+    // Another LSP published the target; this process never registered it, so
+    // nothing ties the engine's bytes for it to this query.
+    publisher.publish("/ws/B.vue.tsx", "published B");
+    adopt(&ledger);
+    ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
+    let bound = bind(&ledger, &at_engine("/ws/a.ts")).expect("bind");
+    assert_eq!(
+        bound
+            .target("/ws/B.vue.tsx", "/ws/B.vue.tsx")
+            .unwrap_err()
+            .kind(),
+        ConflictKind::Undelivered
+    );
+}
+
+#[test]
+fn an_out_of_band_file_no_publisher_names_is_never_bound() {
+    let publisher = Arc::new(Publisher::default());
+    let ledger = published_ledger(&publisher);
+    // Recorded out of band, but the publisher names no row for it: the engine
+    // reads the file itself.
+    ledger.record_out_of_band([SurfaceEffect::deliver("/ws/loaded.ts", bytes("loaded"))]);
+    assert_eq!(
+        bind(&ledger, &at_engine("/ws/loaded.ts")).unwrap_err(),
+        ConflictKind::Publication
+    );
+}
+
+#[test]
+fn a_delivery_in_flight_binds_and_decodes_nothing_until_its_outcome_is_recorded() {
+    let ledger = DeliveryLedger::default();
+    ledger.record_out_of_band([SurfaceEffect::deliver("/ws/App.vue.tsx", bytes("A"))]);
+    ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
+    let before = bind(&ledger, &at_engine("/ws/App.vue.tsx")).expect("bind");
+
+    // B is being injected through a channel the ledger cannot order: the
+    // engine may hold A or B until the injection is confirmed.
+    ledger.record_out_of_band([SurfaceEffect::unsettle("/ws/App.vue.tsx")]);
+    assert_eq!(
+        bind(&ledger, &at_engine("/ws/App.vue.tsx")).unwrap_err(),
+        ConflictKind::InFlight
+    );
+    assert_eq!(
+        ledger.settle(&before, []).unwrap_err().kind(),
+        ConflictKind::Moved,
+        "an answer bound to A may have been evaluated over B"
+    );
+    let origin = bind(&ledger, &at_engine("/ws/a.ts")).expect("bind");
+    assert_eq!(
+        origin
+            .target("/ws/App.vue.tsx", "/ws/App.vue.tsx")
+            .unwrap_err()
+            .kind(),
+        ConflictKind::InFlight
+    );
+
+    // The injection is confirmed: B binds, even when it repeats the old bytes.
+    ledger.record_out_of_band([SurfaceEffect::deliver("/ws/App.vue.tsx", bytes("A"))]);
+    let after = bind(&ledger, &at_engine("/ws/App.vue.tsx")).expect("bind");
+    assert_eq!(&**after.requested(), "A");
+    ledger.settle(&after, []).expect("settles");
 }
 
 #[test]
@@ -406,11 +512,11 @@ fn the_binding_carries_the_admission_the_query_was_dispatched_under() {
             project: Some(Arc::from("/ws/tsconfig.json")),
         }
     );
+    let other = DeliveryLedger::default();
+    other.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
     assert_ne!(
         bound.engine(),
-        bind(&DeliveryLedger::default(), &at_engine("/ws/a.ts"))
-            .map(|bound| bound.engine())
-            .unwrap_or_default(),
+        bind(&other, &at_engine("/ws/a.ts")).expect("bind").engine(),
         "each engine incarnation's ledger is a distinct binding target"
     );
     assert!(requester.admission().incarnation.is_none());

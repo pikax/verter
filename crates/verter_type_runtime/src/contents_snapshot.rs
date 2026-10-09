@@ -21,13 +21,12 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use crate::codec::SourceIndex;
 use crate::uri::file_uri_to_path;
 
-/// Resolve one response target's content through the provider's `resolve` (its
-/// contents snapshot, then its disk fallback) and hand `convert` ONE UTF-16 index
+/// Resolve one response target's content through the provider's `resolve` (the
+/// bytes its query binding retained) and hand `convert` ONE UTF-16 index
 /// over it, shared by every endpoint the response places in that target.
 /// `convert` sees `None` when the target has no content. The content and its
 /// index live only for this call.
@@ -77,40 +76,6 @@ pub fn convert_per_target<'c, T, R>(
         });
     }
     converted.into_iter().flatten().collect()
-}
-
-/// Clone only the `paths` entries out of the locked contents cache into a small
-/// snapshot. The values are `Arc<str>`, so each clone is a pointer bump; the map
-/// is bounded by the response's target files, not the whole cache.
-///
-/// A path absent from the cache is simply omitted — the parser's own disk
-/// fallback (run unlocked, after the lock is released) handles that miss.
-pub fn targeted_contents_snapshot(
-    cache: &HashMap<String, Arc<str>>,
-    paths: &HashSet<String>,
-) -> HashMap<String, Arc<str>> {
-    paths
-        .iter()
-        .filter_map(|p| cache.get(p).map(|c| (p.clone(), Arc::clone(c))))
-        .collect()
-}
-
-/// Add the disk bytes of every `paths` entry the snapshot lacks — for a
-/// provider whose engine reads unopened targets from disk and that keeps no
-/// delivery ledger to resolve them through. A missing file stays absent, so
-/// its locations drop.
-pub fn fill_missing_from_disk(
-    snapshot: &mut HashMap<String, Arc<str>>,
-    paths: impl IntoIterator<Item = String>,
-) {
-    for path in paths {
-        if snapshot.contains_key(&path) {
-            continue;
-        }
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            snapshot.insert(path, Arc::from(content));
-        }
-    }
 }
 
 /// Canonical target files of a tsserver location batch (definition /
@@ -243,13 +208,6 @@ fn uri_to_canonical_path(uri: &str) -> String {
 mod tests {
     use super::*;
 
-    fn cache_with(entries: &[(&str, &str)]) -> HashMap<String, Arc<str>> {
-        entries
-            .iter()
-            .map(|(k, v)| (k.to_string(), Arc::from(*v)))
-            .collect()
-    }
-
     /// A batch converts through one content resolution per DISTINCT target: interleaved
     /// elements of the same target share it, a target-less element is skipped, a target with
     /// no content converts with no index, and results keep the batch's element order.
@@ -299,42 +257,6 @@ mod tests {
             vec!["a".to_string(), "b".to_string(), "missing".to_string()],
             "each distinct target resolves once, in first-seen order"
         );
-    }
-
-    #[test]
-    fn targeted_snapshot_contains_only_requested_paths_not_whole_cache() {
-        let cache = cache_with(&[
-            ("d:/proj/a.ts", "const a = 1;\n"),
-            ("d:/proj/b.ts", "const b = 2;\n"),
-            ("d:/proj/c.ts", "const c = 3;\n"),
-        ]);
-        let mut want = HashSet::new();
-        want.insert("d:/proj/b.ts".to_string());
-
-        let snapshot = targeted_contents_snapshot(&cache, &want);
-        assert_eq!(
-            snapshot.len(),
-            1,
-            "the snapshot must hold only the requested path, never the whole cache"
-        );
-        assert!(snapshot.contains_key("d:/proj/b.ts"));
-        assert!(
-            !snapshot.contains_key("d:/proj/a.ts") && !snapshot.contains_key("d:/proj/c.ts"),
-            "unreferenced cache entries must not be cloned into the snapshot"
-        );
-    }
-
-    #[test]
-    fn targeted_snapshot_omits_paths_absent_from_cache() {
-        let cache = cache_with(&[("d:/proj/a.ts", "const a = 1;\n")]);
-        let mut want = HashSet::new();
-        want.insert("d:/proj/a.ts".to_string());
-        want.insert("d:/proj/missing.ts".to_string());
-
-        let snapshot = targeted_contents_snapshot(&cache, &want);
-        assert_eq!(snapshot.len(), 1, "a path absent from the cache is omitted");
-        assert!(snapshot.contains_key("d:/proj/a.ts"));
-        assert!(!snapshot.contains_key("d:/proj/missing.ts"));
     }
 
     #[test]
