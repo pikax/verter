@@ -3066,18 +3066,15 @@ fn inference_deposits_have_no_call_quota() {
 }
 
 /// The same call written in source and read the way a consumer reads it
-/// (`resolve_named_symbol` over `typeof r`). Each call argument lowers
-/// through value inference, whose work fuse a 5,000-element array literal
-/// exhausts: the exhausted argument is unfinished inference, so the call
-/// is refused rather than inferring `T` from a fabricated `any` argument
-/// and completing with no candidate (`unknown`). Below the fuse the
-/// source-written call selects `T := number` like the synthesized one.
+/// (`resolve_named_symbol` over `typeof r`), cold and then again on the warm
+/// host. Each call argument lowers through value inference, which infers a
+/// finite literal whole however wide it is, so the source-written call
+/// selects `T := number` like the synthesized one at both sizes.
 ///
-/// Measured on TypeScript 7.0.2: `typeof r` is `number` at both sizes; the
-/// refusal at 5,000 is this engine's fuse, never a different answer.
+/// Measured on TypeScript 7.0.2: `typeof r` is `number` at both sizes.
 #[test]
-fn a_source_call_past_the_argument_fuse_is_refused_not_inferred_from_any() {
-    for (element_count, expect_number) in [(1025, true), (5000, false)] {
+fn a_source_call_infers_from_every_argument_position() {
+    for element_count in [1025, 5000] {
         let canonical = "/w/inference_deposits.ts";
         let source = format!(
             "export declare function f<T>(xs: [{}]): T;\n\
@@ -3096,23 +3093,19 @@ fn a_source_call_past_the_argument_fuse_is_refused_not_inferred_from_any() {
                 aliases: Vec::new(),
             })
             .expect("upsert the fixture");
-        let (outcome, _record) = host
-            .resolve_named_symbol_with_audit(canonical, "R", None)
-            .into_parts();
-        let node = outcome.ok().flatten().expect("R resolves to a node");
-        let data = host.project_type_store().semantic_graph().node_data(node);
-        if expect_number {
+        for request in ["cold", "repeated"] {
+            let (outcome, _record) = host
+                .resolve_named_symbol_with_audit(canonical, "R", None)
+                .into_parts();
+            let node = outcome.ok().flatten().expect("R resolves to a node");
+            let data = host.project_type_store().semantic_graph().node_data(node);
             assert!(
                 matches!(
                     data.as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
                 ),
-                "{element_count} positions select T := number, got {data:?}"
-            );
-        } else {
-            assert!(
-                matches!(data.as_deref(), Some(SemanticNodeData::Opaque(_))),
-                "{element_count} positions past the argument fuse refuse the call, got {data:?}"
+                "{element_count} positions select T := number on the {request} request, \
+                 got {data:?}"
             );
         }
     }
