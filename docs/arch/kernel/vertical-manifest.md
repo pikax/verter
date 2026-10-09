@@ -26,13 +26,16 @@ The reviewed contract data lives in `tests/kernel/VIM0/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `manifest-inventory.v1.json` | Manifest files `MF01`–`MF05`, the subblock-6 sections `MS01`–`MS12`, schema rules `VM01`–`VM28`, cell tiers `CT0`–`CT4`, current manifest-like authorities `G01`–`G09`, outcomes `VIM-O..`, consumers `VIM-C..`, plan consumers `VIM-P..`, the displaced route `VIM-D01`, referenced routes, category coverage, empty populations, findings `VIM-F..` and transferred obligations `VIM-T..` |
-| `manifest-case-table.v1.json` | Positive manifests `MP01`–`MP07`, structural-failure cases `MN01`–`MN16` and work counters `WC01`–`WC02`, each with input, required and forbidden outcome, the rules it exercises and the node whose test makes it executable |
+| `manifest-inventory.v1.json` | Manifest files `MF01`–`MF05`, the subblock-6 sections `MS01`–`MS12`, schema rules `VM01`–`VM28`, cell tiers `CT0`–`CT4`, current manifest-like authorities `G01`–`G09`, outcomes `VIM-O..`, consumers `VIM-C..`, plan consumers `VIM-P..`, displaced routes `VIM-D01`–`VIM-D04`, referenced routes, category coverage, empty populations, findings `VIM-F..` and transferred obligations `VIM-T..` |
+| `manifest-case-table.v1.json` | Positive manifests `MP01`–`MP07`, structural-failure cases `MN01`–`MN17` and work counters `WC01`–`WC02`, each with input, required and forbidden outcome, the rules it exercises and the node whose test makes it executable |
 
-Every `successorPath` starts at VIM0 and follows successor edges in the
-controller-owned plan. UAK0's `D..`/`O..`, UAK1's `U..`, VID0's `I..`/`R..`/
-`V-..`, CAT0's `T..`/`CR..`/`CAT-..`, DEM0's `DR..`/`DEM-..` and PAR0's
-`PD..`/`PAR-..` rows keep their owners. VIM0 references them by id.
+A `successorPath` follows successor edges in the controller-owned plan.
+Routes this node displaces start at VIM0. Routes an earlier decision already
+assigned keep that decision's path: TIF1, IDX0 and CPF1 are not successors of
+VIM0, so a path that started here would not be an edge. UAK0's `D..`/`O..`,
+UAK1's `U..`, VID0's `I..`/`R..`/`V-..`, CAT0's `T..`/`CR..`/`CAT-..`, DEM0's
+`DR..`/`DEM-..` and PAR0's `PD..`/`PAR-..` rows keep their owners. VIM0
+references them by id and does not re-home them.
 
 ## Method
 
@@ -47,8 +50,10 @@ controller-owned plan. UAK0's `D..`/`O..`, UAK1's `U..`, VID0's `I..`/`R..`/
 4. Fixed the representative manifests the charter names (current Vue and
    Svelte; synthetic HTML, React, Lit, Angular and a project profile) and the
    structural failures, as cases whose executable owner is VIM1.
-5. Bound every outcome, consumer and displaced route to one descendant of VIM0
-   with a receiving acceptance ID.
+5. Bound every outcome and consumer this node introduces to one descendant of
+   VIM0 with a receiving acceptance ID. Displaced routes whose production
+   owner is not a descendant keep the owner, path and acceptance the authority
+   inventory already records.
 
 ## What exists at the described head
 
@@ -92,15 +97,19 @@ There is no vertical manifest. The facts it will hold live in nine places:
 
 `G03`–`G05` and `G08`–`G09` stay. `G03`–`G05` become inputs that a manifest
 cites by path and digest; `G08` and `G09` are vocabularies a manifest
-references by id. `G06` and `G07` keep their recorded owners. `G01` and `G02`
-are the one displaced route this decision records (`VIM-D01`).
+references by id. `G06` and `G07` keep their recorded owners. `G01` stops
+being an authority and is rendered under `verticals/` (`VIM-D04`). `G02` is
+deleted by CPF1 (`VIM-D01`). `G01`'s harness path stays a cited seed.
 
 ## Manifest layout
 
-One manifest is one directory per exact vertical release:
+A carrier manifest is one directory keyed by `CarrierProfileId` alone. A
+semantic-profile or project-profile manifest is one directory per exact
+release:
 
 ```
-verticals/<vertical>/<release>/
+verticals/<vertical>/                         # kind = carrier
+verticals/<vertical>/<release>/               # kind = semantic-profile | project-profile
   vertical.toml            # MF01: identity, geometry, ownership, version + sections MS01–MS12
   capabilities.toml        # MF02: capability cells
   rules/<rule-pack>.toml   # MF03: rule and action rows
@@ -109,10 +118,16 @@ verticals/<vertical>/<release>/
 ```
 
 `<vertical>` is the catalog slug of the carrier, semantic profile or project
-profile the manifest describes; `<release>` is its exact `ReleaseId` (VID0).
-Paths are portable (`tracked_paths_are_portable`): the release directory
-spells the version with `.`, `-` and `+` only. The `verticals/` tree is
-VIM1's to create (`VIM1-AC-R1`).
+profile. `<release>` is present only for a profile kind, and it is that
+profile's exact `ReleaseId` (VID0 `I05` for a semantic profile, `I07` for a
+project profile). A carrier identity never contains a `ReleaseId` (VID0
+`I03`), so a carrier directory has no release component and one
+`CarrierProfileId` has one manifest. The directory release and the
+`ReleaseId` inside the profile id are the same value; a second release for
+the same profile id fails as CAT0 `CR07`. Paths are portable
+(`tracked_paths_are_portable`): a release directory spells the version with
+`.`, `-` and `+` only. The `verticals/` tree is VIM1's to create
+(`VIM1-AC-R1`).
 
 ### `MF01` — `vertical.toml`
 
@@ -121,18 +136,18 @@ VIM1's to create (`VIM1-AC-R1`).
 | `schema` | `ManifestSchemaEpoch` integer | `VM01` |
 | `kind` | one of `carrier`, `semantic-profile`, `project-profile` | `VM04` |
 | `id` | the tagged `CarrierProfileId`, `FrameworkProfileId` or `ProjectProfileId` of `kind` | `VM03` |
-| `release` | one exact `ReleaseId` scalar | `VM02` |
+| `release` | one exact `ReleaseId` scalar; semantic-profile and project-profile only. Forbidden on `kind = carrier` | `VM02` |
 | `display_family` | presentation string, never a key | `VM03` |
-| `geometry` | closed `GeometryClass` (below) | `VM05` |
+| `geometry` | carrier axis, claim shape, or `not-applicable` (below) | `VM05` |
 | `owner` | the plan node owning the vertical and its terminal | `VM06` |
 | `claims` | for a semantic profile, the `CarrierProfileId`s it claims; for a project profile, the `FrameworkProfileId`s it overlays | `VM07` |
 
 `GeometryClass` is closed: `dedicated-carrier`, `script-carrier`,
 `neutral-carrier`, `embedded-syntax`, `document-language`, `dsl`, `overlay`
 (PAR0 `DK5` on JS/TS/JSX/TSX), `attachment` (PAR0 `DK5` on HTML attributes or
-tagged templates) and `project-overlay`. A representative geometry that needs
-a value outside this list rescopes the schema (`VM28`); it never adds an
-untyped escape.
+tagged templates) and `project-overlay`. Which kind may use which value is
+`VM05`. A representative geometry that needs a value outside this list
+rescopes the schema (`VM28`); it never adds an untyped escape.
 
 ### Subblock-6 sections of `vertical.toml`
 
@@ -152,19 +167,21 @@ omitted (`VM08`).
 | `MS07` | `[[coexistence]]` | CAT0 `T06`: peer profile and `exclusive`, `coexisting` or `nested` | `VM14` |
 | `MS08` | `[[public_surface]]` | the surfaces (Rust, NAPI, WASM, LSP, MCP, CLI, VS Code, TS plugin) the vertical publishes on, with their PUB0 outcome vocabulary | `VM15` |
 | `MS09` | `[[budget]]` | references to `performance-gates.toml` rows, the MEM0 budget or the owning product catalog, by id | `VM16` |
-| `MS10` | `[compiler]` | CAT0 `T02`: `none`, or a backend with its declared compile capability for this exact release | `VM17` |
+| `MS10` | `[compiler]` | CAT0 `T02`: `none`, or a backend for one referenced `FrameworkProfileId` (the release is that id's `ReleaseId`, not a key on the carrier) | `VM17` |
 | `MS11` | `[[deletion]]` | displaced routes the vertical's nodes delete: route id, owner node, receiving acceptance | `VM18` |
 | `MS12` | `[[forbidden_dependency]]` | UAK1 firewall edges the vertical's crates must not take | `VM19` |
 
 ### `MF02` — `capabilities.toml`
 
-One `[[cell]]` per capability cell. A cell's key is the tuple
-`(CapabilityId, FrameworkProfileId release, CarrierProfileId, host,
-extension?)`: a profile-qualified `CapabilityId` (VID0 `I10`), the exact
-release this manifest is for, the carrier it runs on, the host it is served
-through, and an optional external extension written as a `T09` namespace plus
-exact version. A cell carries its tier, its producer node and receiving
-acceptance, its evidence and, for a required cell, `required = true`.
+One `[[cell]]` per capability. The cell key is the profile-qualified
+`CapabilityId` (CAT0 `T07`, VID0 `I10`) and nothing else. That id already
+carries its `FrameworkProfileId` or `CarrierProfileId`, and a
+`FrameworkProfileId` already carries its one `ReleaseId` (VID0 `I05`), so the
+cell does not restate profile, carrier or release. `host` is not a VID0
+identity and is not a catalog key (VID0 `R14`); an extension is a CAT0 `T09`
+row, not part of the `T07` key. Per-surface maturity is a value: one entry
+per `MS08` surface, each with a tier, a producer, a receiving acceptance and
+evidence ids. A required capability sets `required = true` on the cell.
 
 Cell tiers (`CT..`) separate proof, partial implementation and delivered
 product:
@@ -174,13 +191,14 @@ product:
 | `CT0` `excluded` | a truthful exclusion with a typed reason and, for a migration exclusion, its target | none | excluded, with reason |
 | `CT1` `required-unimplemented` | a required cell no producer has delivered | none | not supported |
 | `CT2` `geometry-proof` | the carrier geometry, identity or parser decision is proven | `static-proof` | proof only; never support |
-| `CT3` `implemented-operation` | the operation runs through its public boundary in the repository's executed tests | `static-proof` plus executed test evidence | implemented, unqualified |
+| `CT3` `implemented-operation` | the operation runs through its public boundary in the repository's executed tests | none. WDX0 `static-proof` may not claim executed behaviour, and `runtime-observation` is the `CT4` receipt. The evidence is the test id | implemented, unqualified |
 | `CT4` `qualified-product` | the vertical's own producing terminal observed the operation on the named host and profile under a receipt basis | `runtime-observation` | supported |
 
-The schema version declares, per `kind` and `GeometryClass`, the normative
-required capability list. Every required capability has one cell for every
-host and carrier the manifest's `MS08` publishes on (`VM21`). "Full support"
-of a release is derived: every required cell is `CT4`. It is never authored.
+The schema version declares, per `kind` and geometry, the normative required
+capability list. Every required capability has one cell, and that cell's
+maturity value names every host the manifest's `MS08` publishes (`VM21`).
+"Full support" of a release is derived: every required cell is `CT4` on every
+published host. It is never authored.
 
 ### `MF03` — `rules/*.toml`
 
@@ -209,19 +227,38 @@ for the Vue and Svelte official cases.
 
 - **VM01.** Every file carries `schema = <ManifestSchemaEpoch>`. A schema
   change mints a new epoch; there is no unversioned manifest.
-- **VM02.** One manifest is one exact release. `release` is a scalar exact
-  version. A `versions` array, a range, a `latest`/`next` tag, a wildcard or a
+- **VM02.** A semantic-profile or project-profile manifest is one exact
+  release. `release` is a scalar exact version and equals the `ReleaseId`
+  inside that profile id (`I05`, `I07`) and the directory name. A carrier
+  manifest has no `release` key: `CarrierProfileId` never contains a
+  `ReleaseId` (VID0 `I03`, identities.md). A `release` key on a carrier, a
+  `versions` array, a range, a `latest`/`next` tag, a wildcard or a
   complement ("anything other than") is a structural failure (`MN01`). An
   unsupported version is DEM0's typed `UnsupportedVersion` outcome, never a
-  capability cell.
+  capability cell. One carrier id has one manifest; two releases for one
+  profile id fail as CAT0 `CR07`.
 - **VM03.** Every key is a typed identity in its canonical tagged encoding
   (VID0 `R12`, `R13`). `display_family`, adapter spellings, `FrameworkTag`s
   and file extensions are presentation data and never keys (VID0 `R03`, CAT0
-  `CR10`).
+  `CR10`). A cell does not restate the profile, carrier or release its
+  `CapabilityId` already carries.
 - **VM04.** `kind` decides which identity `id` is. A project-profile manifest
   declares no carrier, parser or compiler; a carrier manifest declares no
-  semantic facet.
-- **VM05.** `geometry` is one value of the closed `GeometryClass`.
+  semantic facet and no `ReleaseId`.
+- **VM05.** Geometry of a carrier is an axis of `CarrierProfileId` (VID0
+  `I03`, identities.md). On `kind = carrier`, `geometry` is one of
+  `dedicated-carrier`, `script-carrier`, `neutral-carrier`,
+  `embedded-syntax`, `document-language`, `dsl`, and it is the only geometry
+  authority for that carrier. A semantic profile does not restate that axis.
+  Its `geometry` is the claim shape `overlay` or `attachment`, or
+  `not-applicable` with reason `carrier-owned` when the geometry lives only
+  on the claimed carrier (Vue, Svelte, the Angular carrier). A project
+  profile's `geometry` is `project-overlay` only: `ProjectProfileId`
+  references semantic profiles and carries no carrier geometry (VID0 `I07`).
+  A profile `geometry` equal to a claimed carrier's geometry, a carrier
+  geometry class on a profile, or `overlay` / `attachment` /
+  `project-overlay` on a carrier, fails (`MN17`). The claimed carriers'
+  geometries are read from those carrier manifests.
 - **VM06.** `owner` and every producer, deletion and acceptance reference name
   an existing plan node and acceptance ID. Prose, retired block names and
   people are not owners.
@@ -263,7 +300,9 @@ for the Vue and Svelte official cases.
   declares its own threshold, picks its own gate or omits a gate a required
   cell needs is a self-selected performance gate (`MN14`).
 - **VM17.** `[compiler] = "none"` is a normal state (UAK1 `U02`). A backend
-  declares its compile capability for this exact release only.
+  on a carrier manifest names the `FrameworkProfileId` it serves. The release
+  is that id's `ReleaseId`. The carrier manifest does not gain a `release`
+  key from this section.
 - **VM18.** Every `[[deletion]]` names a route id an earlier decision
   recorded, one owner node and its receiving acceptance.
 - **VM19.** `[[forbidden_dependency]]` restates UAK1 firewall edges for the
@@ -276,31 +315,44 @@ for the Vue and Svelte official cases.
   id. A row whose only content is a note is a prose-only capability row
   (`MN05`). Notes never carry meaning.
 - **VM21.** The required capability list is normative per schema epoch, `kind`
-  and `GeometryClass`. A manifest cannot drop a required cell, mark it
-  `excluded` without an exclusion reason the schema admits for that
-  capability, or raise "full support" while a required cell is below `CT4`
-  (`MN09`, `MN10`).
+  and geometry. There is one cell per required profile-qualified
+  `CapabilityId` (CAT0 `T07`). That cell's per-surface maturity value names
+  every host `MS08` publishes, each with one tier. A manifest cannot drop a
+  required cell, omit a published host from the maturity value, mark a
+  surface `excluded` without an exclusion reason the schema admits, or raise
+  "full support" while any required maturity is below `CT4` (`MN09`, `MN10`).
+  Two maturity entries for one host fail. A `T09` extension is cited by row
+  id from the value; it is not part of the cell key.
 - **VM22.** `rules/*.toml` rows are CAT0 `T08` rows; their vocabulary is
   LRA0's.
-- **VM23.** `oracles.lock` pins are exact and carry integrity digests. The
-  manifest `release`, every `compatibility` value a cell cites and the oracle
-  pin agree; any divergence fails (`MN15`). An oracle is never a dependency
-  and never an authority (PAR0 `PD04`).
+- **VM23.** `oracles.lock` pins are exact and carry integrity digests. On a
+  semantic-profile or project-profile manifest, `release` and the oracle pin
+  that defines it agree; any divergence fails (`MN15`). A carrier manifest
+  has no `release` to compare. A cell cites no separate compatibility
+  release: the release is the one inside the profile id. An oracle is never a
+  dependency and never an authority (PAR0 `PD04`).
 - **VM24.** Every fixture has a content digest and an executing acceptance.
-- **VM25.** Tier promotion follows evidence. `CT2` needs static proof, `CT3`
-  executed tests through the public boundary, `CT4` a runtime observation from
-  the vertical's own producing terminal (WDX0 claim laws). A geometry proof, an
-  installed parser, syntax highlighting or an upstream install never promotes
-  a cell above `CT2` (`MN08`).
+- **VM25.** Tier promotion follows evidence. `CT2` needs static proof
+  (WDX0 `static-proof`). `CT3` needs executed tests through the public
+  boundary, named by test id. `CT3` has no WDX0 evidence class: `static-proof`
+  may not claim executed behaviour, and `runtime-observation` is reserved for
+  `CT4`, a receipt from the vertical's own producing terminal (WDX0 claim
+  laws). A geometry proof, an installed parser, syntax highlighting or an
+  upstream install never promotes a maturity above `CT2` (`MN08`).
 
 ### Generation, determinism and project profiles
 
-- **VM26.** Manifests are the only authority. Catalog rows, the capability
-  matrix, the generated TS mirrors, docs support tables, the compile
-  capability table and any per-family capability matrix are rendered from
-  them and are consumers. A rendered artifact edited by hand fails its
-  freshness check; a second hand-maintained truth beside a manifest fails
-  (`MN07`).
+- **VM26.** Manifests are the authority for the facts a vertical declares.
+  Rendering them does not transfer implementation ownership of the catalog
+  rows. `T01`–`T03` stay CPF1 (`CPF1-AC2`), `T04` stays PPR0T (`PPR0T-AC1`),
+  `T05` stays EMB0I (`EMB0I-AC1`), `T06` and `T07` stay COX0 (`COX0-AC2`),
+  `T08` stays LNT3 (`LNT3-AC2`), `T09` stays XSDK1 (`XSDK1-AC1`), and `PD01`
+  stays PAR0 (catalog.md, parser-ownership.md). VIM1 renders manifest bytes
+  into those rows; the row owner remains the sole producer of the row. The
+  capability matrix, the generated TS mirrors, docs support tables, the
+  compile capability table and any per-family capability matrix are rendered
+  consumers. A rendered artifact edited by hand fails its freshness check; a
+  second hand-maintained truth beside a manifest fails (`MN07`).
 - **VM27.** Manifests are data. They hold no script, expression, regex,
   template, code path, hook or plugin reference, and loading them executes
   nothing (`MN06`, `MN12`). Every table is ordered by the canonical encoding
@@ -324,19 +376,19 @@ Each is written in full there; these are their distinguishing values:
 
 | Case | `kind` | `geometry` | `[parser]` | `[compiler]` | `[custom_elements]` |
 | ---- | ------ | ---------- | ---------- | ------------ | ------------------- |
-| `MP01` Vue 3.6 (current) | carrier + semantic-profile | dedicated-carrier | `DK4` existing, PAR0 `G03` route | backend: VDOM, Vapor, SSR | producer and consumer |
-| `MP02` Svelte 5 (current) | carrier + semantic-profile | dedicated-carrier | `DK4` existing, PAR0 `G04` route | backend: client, server | producer and consumer |
-| `MP03` synthetic HTML | carrier | neutral-carrier | `DK3` fork into PAR0 `H08` | `none` | consumer only |
-| `MP04` synthetic React | semantic-profile | overlay | `no-parser` over TSX | `none` | consumer only |
-| `MP05` synthetic Lit | semantic-profile | attachment | `no-parser` on tagged templates | `none` | producer and consumer |
-| `MP06` synthetic Angular | carrier + semantic-profile | dedicated-carrier | `DK3` over `H08` or `DK4` | `none` | producer and consumer |
-| `MP07` synthetic project profile (Tailwind 4) | project-profile | project-overlay | absent by `VM04` | absent by `VM04` | `not-applicable` with reason |
+| `MP01` Vue 3.6 (current) | carrier + semantic-profile | carrier `dedicated-carrier`; profile `not-applicable` / `carrier-owned` | `DK4` existing, PAR0 `G03` route | backend: VDOM, Vapor, SSR, named `FrameworkProfileId` | producer and consumer |
+| `MP02` Svelte 5 (current) | carrier + semantic-profile | carrier `dedicated-carrier`; profile `not-applicable` / `carrier-owned` | `DK4` existing, PAR0 `G04` route | backend: client, server, named `FrameworkProfileId` | producer and consumer |
+| `MP03` synthetic HTML | carrier | neutral-carrier; no `release` key | `DK3` fork into PAR0 `H08` | `none` | consumer only |
+| `MP04` synthetic React | semantic-profile | claim shape `overlay` (the TSX carrier's geometry stays `script-carrier` on that carrier) | `no-parser` over TSX | `none` | consumer only |
+| `MP05` synthetic Lit | semantic-profile | claim shape `attachment` | `no-parser` on tagged templates | `none` | producer and consumer |
+| `MP06` synthetic Angular | carrier + semantic-profile | carrier `dedicated-carrier`; profile `not-applicable` / `carrier-owned` | `DK3` over `H08` or `DK4` | `none` | producer and consumer |
+| `MP07` synthetic project profile (Tailwind 4) | project-profile | `project-overlay` only | absent by `VM04` | absent by `VM04` | `not-applicable` with reason |
 
 A carrier and the semantic profile on it are two manifests (`VM04`); the
 `MP01`, `MP02` and `MP06` rows are each such a pair. The synthetic cases are
 schema fixtures, not support claims: their cells stay at `CT0`–`CT2`.
 
-The structural failures `MN01`–`MN16` each name the one rule they break.
+The structural failures `MN01`–`MN17` each name the one rule they break.
 The charter's four named failures are `MN01` (versions array), `MN02`
 (untyped extension bag), `MN03` (missing CE row) and `MN04`
 (compiler/parser conflation). The web-product amendment adds `MN08`
@@ -347,29 +399,33 @@ or full support declared over one) and `MN11` (merged Tailwind identity).
 
 | Route | Category | Unit | Disposition | Owner |
 | ----- | -------- | ---- | ----------- | ----- |
-| `VIM-D01` | duplicate capability authority; central framework switch; untagged identity | `capability-matrix.tsv` as the hand-maintained compile capability and maturity authority (`G01`), and its hand mirror `CapabilityCell`/`CapabilityDisposition` (`G02`), a closed per-framework enum keyed by display framework and untagged `compatibility_domain` strings | replace: cells move to each release's `capabilities.toml` and `[compiler]` section; the table the compile request consults is rendered from them and freshness-checked, and the TSV is deleted or becomes a rendered consumer | VIM1 (`VIM1-AC1`) |
+| `VIM-D01` | duplicate capability authority; central framework switch; untagged identity | `CapabilityCell` / `CapabilityDisposition` (`G02`) in `crates/verter_compiler/src/compile_request/capability.rs`, a closed per-framework enum | replace: the enum is deleted after the rendered table's freshness guard holds. CPF1's charter paths include `crates/verter_compiler`, which contains this file. VIM1's domains (`area:verticals`, `area:xtask`, `shared:ci-workflow`, `area:.github`) do not | CPF1 (`CPF1-AC1`), path `UAK1` → `CPF0` → `CPF1` |
+| `VIM-D02` | duplicate component information | UAK0 `D12`–`D15`: component-meta resolver/cache/schema, public-API projection, off-store surface caches, legacy serde TypeInfo DTOs (authority-inventory.md) | keep that assignment. A manifest declares facets and roles; it computes no component information. TIF1 is not a successor of VIM0 | TIF1 (`TIF1-AC1`), path `UAK0` → `UAK1` → `CAT0` → `TIF1` |
+| `VIM-D03` | duplicate component information | UAK0 `D18`: per-request component scan | keep that assignment. IDX0 is not a successor of VIM0 | IDX0 (`IDX0-AC1`), path `UAK0` → `UAK1` → `CAT0` → `DEM0` → `IDX0` |
+| `VIM-D04` | duplicate capability authority | hand-maintained `capability-matrix.tsv` (`G01`) | stops being an authority (`VM26`). VIM1 renders the consumer under `verticals/`, which it creates. The harness path is a cited seed, not a file VIM1 writes | VIM1 (`VIM1-AC-R2`), path `VIM0` → `VIM1` |
 
-VIM1's charter carries the condition: hand-maintained mirrors are removed only
-after the freshness guard proves the replacement. `G06` (`V-D03`, REG0) and
-`G07` (`CAT-D04`, CPF1) stay with their owners.
+`G06` (`V-D03`, REG0) and `G07` (`CAT-D04`, CPF1) stay with their owners.
+`VueOtherVersion` and `SvelteOtherVersion` are complement arms of `G02`.
+CPF1 deletes the arms (`VIM-F02`, `CPF1-AC1`). VIM1 proves a complement is a
+structural manifest failure (`MN01`, `VIM1-AC-R1`), not a cell.
 
 | Category | Recorded here | Referenced |
 | -------- | ------------- | ---------- |
 | central framework switch | `VIM-D01` (closed per-framework `CapabilityCell`) | `D01`, `D04`, `D07`, `CAT-D06`, `V-D03`, `DEM-D04` |
 | untagged coordinate/public identity | `VIM-D01` (untagged `compatibility_domain`, display `framework` key) | `D08`, `V-D01`, `V-D02`, `PAR-D03` |
-| duplicate component information authority | none: a manifest declares facets and roles, it computes no component information | `D12`–`D15`, `D18` |
-| duplicate capability authority | `VIM-D01` | `CAT-D04` |
+| duplicate component information authority | `VIM-D02` (`D12`–`D15`), `VIM-D03` (`D18`) | none left bare |
+| duplicate capability authority | `VIM-D01`, `VIM-D04` | `CAT-D04` |
 
 ## Outcomes and consumers
 
 | Id | Outcome or consumer | Owner |
 | -- | ------------------- | ----- |
-| `VIM-O01` | Manifest schema types and structural validator for `MF01`–`MF05` and `MS01`–`MS12`; `MP01`–`MP07` accepted, `MN01`–`MN16` rejected for their own reason | VIM1 (`VIM1-AC-R1`) |
-| `VIM-O02` | Deterministic rendering of manifests into catalog rows `T01`–`T09` and PAR0 `PD01` decisions | VIM1 (`VIM1-AC2`) |
+| `VIM-O01` | Manifest schema types and structural validator for `MF01`–`MF05` and `MS01`–`MS12`; `MP01`–`MP07` accepted, `MN01`–`MN17` rejected for their own reason | VIM1 (`VIM1-AC-R1`) |
+| `VIM-O02` | Deterministic rendering of manifest sections into catalog rows `T01`–`T09` and PAR0 `PD01` decisions. Row owners stay CPF1, PPR0T, EMB0I, COX0, LNT3, XSDK1 and PAR0 (`VM26`) | VIM1 (`VIM1-AC2`) |
 | `VIM-O03` | Generated per-surface capability/maturity matrix from `MF02`, freshness-checked | VIM1 (`VIM1-AC-R2`) |
 | `VIM-O04` | Executable validator for this inventory: missing member, unknown or pathless owner, missing acceptance, conflicting assignment | VIM1 (`VIM1-AC-R1`) |
 | `VIM-O05` | Independent re-validation of schema, generator determinism and malformed-manifest negatives | UAM0 (`UAM0-AC2`) |
-| `VIM-C01` | Compile-request construction consulting the capability table (`G02`) | VIM1 (`VIM1-AC1`) |
+| `VIM-C01` | Compile-request construction consulting the capability table (`G02`) | CPF1 (`CPF1-AC1`) |
 | `VIM-C02` | Session compile-request mapping onto cells (`compile_request_build.rs`) | VIM1 (`VIM1-AC2`) |
 | `VIM-C03` | Harness seeds `G03`–`G05` read into `oracles.lock` and `fixtures/manifest.toml` | VIM1 (`VIM1-AC-R1`) |
 | `VIM-C04` | Docs framework/version/carrier/host support tables rendered from manifests; a `CT2` cell never shown as support | DOC6 (`DOC6-AC1`, `DOC6-AC2`) |
@@ -390,17 +446,19 @@ rows, each with its own successor path and receiving acceptance.
   oracle `package.json` files pin `vue` `3.6.0-rc.5` and `svelte` `5.56.10`.
   Two hand-maintained truths have drifted. `VM23` makes the oracle pin the
   release and fails the divergence (`MN15`).
-- **Versions are encoded as capability cells** (`VIM-F02`, VIM1).
+- **Versions are encoded as capability cells** (`VIM-F02`, CPF1).
   `VueOtherVersion` and `SvelteOtherVersion` (domain "anything other than …")
   write a version complement as a cell. Under `VM02` that is DEM0's
-  `UnsupportedVersion` activation outcome.
+  `UnsupportedVersion` activation outcome. CPF1 deletes the arms; VIM1
+  rejects the complement as `MN01`.
 - **Matrix owners are not plan nodes** (`VIM-F03`, VIM1). The `owner` and
   `acceptance_id` columns name retired blocks (`B2`, `BV1`, `FC-…`). Migrating
   a row into `MF02` rebinds it to a plan node and acceptance ID (`VM06`).
-- **VIM1's conflict domains miss the displaced route** (`VIM-F04`,
-  controller). VIM1 declares `area:verticals`, `area:xtask`,
-  `shared:ci-workflow` and `area:.github`. `VIM-D01` lives in
-  `area:crates/verter_compiler` and `area:packages/framework-conformance-harness`.
+- **VIM1 cannot delete `CapabilityCell`** (`VIM-F04`, CPF1). VIM1's domains
+  are `area:verticals`, `area:xtask`, `shared:ci-workflow` and
+  `area:.github`. `VIM-D01` is CPF1's because CPF1's charter paths include
+  `crates/verter_compiler`. The hand matrix is rendered under `verticals/`
+  (`VIM-D04`); the harness file is a seed, not a VIM1 write.
 - **The tag table calls React and Solid out of scope** (`VIM-F05`, REG0). The
   plan now carries React and Solid verticals. `V-D03` retags the table; a
   manifest's existence, not a hand row, decides a tag's disposition.
@@ -416,11 +474,15 @@ This change adds contract text and data only, so existing coverage and bounded
 inspection are the right evidence. The diff adds no test, validator or check.
 
 - **AC1 — ownership contract.** The inventory binds every manifest file,
-  section, outcome, consumer and the displaced route `VIM-D01` to one existing
-  plan node, a successor path from VIM0 and a receiving acceptance ID. UAK0,
-  UAK1, VID0, CAT0, DEM0 and PAR0 rows are referenced, not re-owned. The
-  executable validator for this inventory and the manifest negatives belongs
-  to VIM1 (`VIM1-AC-R1`); UAM0 re-validates it (`UAM0-AC2`).
+  section, outcome, consumer and displaced route to one existing plan node,
+  a successor path that exists in the controller plan, and a receiving
+  acceptance ID. `VIM-D01` is CPF1 because that node's charter paths include
+  the file. `VIM-D02` and `VIM-D03` keep TIF1 and IDX0, the owners the
+  authority inventory assigns, on the UAK0 paths. `VIM-D04` is the render
+  under `verticals/`, which VIM1 creates. UAK0, UAK1, VID0, CAT0, DEM0 and
+  PAR0 rows are referenced, not re-owned. The executable validator for this
+  inventory and the manifest negatives belongs to VIM1 (`VIM1-AC-R1`); UAM0
+  re-validates it (`UAM0-AC2`).
 - **AC2 — positive contract.** Existing coverage pins the identity, provenance
   and ordering of the boundaries a manifest renders:
   - `capability_matrix_compile_request_coverage`
