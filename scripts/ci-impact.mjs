@@ -834,9 +834,13 @@ export const CI_INERT_PATHS = Object.freeze([
   // Product, architecture and evidence inventories that only local verifiers
   // or the docs build read.
   "tests/documentation/**",
-  // Read as data only until the family's lock spec lands; that spec's runner
-  // then owns it through a lane filter.
-  "tests/framework-angular/**",
+  // Reviewed contract data with no ci.yml consumer. Future executable specs
+  // and consumed products require an explicit lane owner.
+  "tests/framework-angular/ANG0/manifest.json",
+  "tests/framework-angular/ANG0/cases.md",
+  "tests/framework-angular/ANG0/products/angular-version-lock.json",
+  "tests/framework-angular/ANG0/products/angular-capability-matrix.json",
+  "tests/framework-angular/ANG0/products/angular-activation-policy.json",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",

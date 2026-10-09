@@ -36,7 +36,8 @@
     "noWorkOf": ["parse", "attachment", "fact", "projection", "navigation", "lint-host", "format"],
     "proofs": [
       {"work": "parse and attachment", "acceptance": "ANG1M-AC5"},
-      {"work": "carrier LSP structure features", "acceptance": "ANG1S-AC5"},
+      {"work": "external carrier LSP structure features", "acceptance": "ANG1S-AC5"},
+      {"work": "inline carrier LSP structure features", "acceptance": "ANG5-AC6"},
       {"work": "lint host", "acceptance": "ANG8-AC1"}
     ]
   },
@@ -73,6 +74,7 @@
     "projection": "ANG6 companion, project-bound through ProjectBinding/BoundProject and mapped back through ProviderPositionMapper; generated-only spans suppressed",
     "verterLsp": "carrier-only enhancements; never computes a TS-region answer itself",
     "externalTemplates": "a Verter LSP document-selector row gated by the FWA1 capability bit (ANG6, ANG6-AC4)",
+    "inlineTemplates": "LSPX11 Angular contributor seam (LSPX11-AC8), implemented by ANG5 using ANG1S CarrierStructureFeatures and ANG1M exact escape-aware authored maps; ordinary TS regions remain with tsgo (ANG5-AC5, ANG5-AC6)",
     "typescriptPlugin": "@verter/typescript-plugin serves the companion only through its existing carrier-generic carrier-store path; no Angular-specific row (ANG6-AC6)",
     "angularLanguageService": "oracle only",
     "stepDown": "a Verter carrier-only answer is given only where LSPX11 owns(capability, position) resolves to Verter (ANG5R-AC5)"

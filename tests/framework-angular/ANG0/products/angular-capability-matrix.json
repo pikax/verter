@@ -5,7 +5,7 @@
   "node": "ANG0",
   "kind": "lock",
   "family": "angular",
-  "ownershipRule": "Every admitted cell names exactly one producer node and one receiving acceptance ID of that producer, or of ANG9 (ANG9-AC1, the coverage join every admitted cell must pass). Every other row is a truthful exclusion with a reason.",
+  "ownershipRule": "Every admitted cell names exactly one producer node and one receiving acceptance ID of that producer covering its operation and locations. ANG9-AC1 independently qualifies all cells; it never substitutes for delivery acceptance. Every other row is a truthful exclusion with a reason.",
   "evidenceRule": "A cell is supported only by its receiving acceptance passing on the pinned release. An architecture proof (ANGP), an installed compiler and syntax highlighting (ANG1G) are never product evidence.",
   "qualification": {
     "coverage": "ANG9-AC1 joins every admitted cell to a passing fixture on the pinned release",
@@ -188,10 +188,10 @@
     {"id": "ANG-C35", "operation": "tsserver compatibility through the generic carrier store", "locations": ["inline", "external"], "host": "typescript-plugin-generic", "angularSpecific": false, "producer": "ANG6", "receivingAcceptance": "ANG6-AC6"},
     {"id": "ANG-C36", "operation": "TS-region hover, definition and references answered exactly once", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/hover", "textDocument/definition", "textDocument/references"], "producer": "ANG5", "receivingAcceptance": "ANG5-AC1"},
     {"id": "ANG-C37", "operation": "binding definition to input() and output() declarations", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/definition"], "producer": "ANG5", "receivingAcceptance": "ANG5-AC3"},
-    {"id": "ANG-C38", "operation": "TS-region completion", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/completion"], "producer": "ANG5", "receivingAcceptance": "ANG9-AC1", "receivingNote": "ANG5 and ANG6 claim completion in their outcomes but carry no completion acceptance; the cell is received by the coverage join (operator question ang0-unacked-cells)."},
+    {"id": "ANG-C38", "operation": "TS-region completion", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/completion"], "producer": "ANG5", "receivingAcceptance": "ANG5-AC5"},
     {"id": "ANG-C39", "operation": "selector references within importing standalone scopes", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "tsgo has no Angular selector-scope model", "producer": "ANG5", "receivingAcceptance": "ANG5-AC2"},
     {"id": "ANG-C40", "operation": "navigation on broken source: complete before the break, incomplete after", "locations": ["inline", "external"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC4"},
-    {"id": "ANG-C41", "operation": "carrier-only completion (elements, attributes, ng-content slots)", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "tsgo has no template element, attribute or content-projection model", "producer": "ANG5", "receivingAcceptance": "ANG9-AC1", "receivingNote": "No ANG5 completion acceptance exists; received by the coverage join (operator question ang0-unacked-cells)."},
+    {"id": "ANG-C41", "operation": "carrier-only completion (elements, attributes, ng-content slots)", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "tsgo has no template element, attribute or content-projection model", "producer": "ANG5", "receivingAcceptance": "ANG5-AC5"},
     {"id": "ANG-C42", "operation": "TS-symbol rename leaves unrelated text untouched", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/rename", "textDocument/prepareRename"], "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC2"},
     {"id": "ANG-C43", "operation": "rename touching generated scaffolding is refused whole", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/rename"], "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC3"},
     {"id": "ANG-C44", "operation": "selector rename plan", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "tsgo has no Angular selector model", "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC1"},
@@ -208,7 +208,12 @@
     {"id": "ANG-C55", "operation": "format: idempotent and meaning-preserving", "locations": ["inline", "external"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC1"},
     {"id": "ANG-C56", "operation": "format: recovery islands byte-identical", "locations": ["inline", "external"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC2"},
     {"id": "ANG-C57", "operation": "format: delegation to FMT2TX and FMTC0, no second printer", "locations": ["inline", "external"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC3"},
-    {"id": "ANG-C58", "operation": "format: inline template formatted inside its literal through the ANG1M escape-aware maps", "locations": ["inline"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC4"}
+    {"id": "ANG-C58", "operation": "format: inline template formatted inside its literal through the ANG1M escape-aware maps", "locations": ["inline"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC4"},
+    {"id": "ANG-C59", "operation": "inline native syntax diagnostics through the native syntax rail at exact literal ranges", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C60", "operation": "inline document symbols through exact literal maps, preserving the surrounding TS outline", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C61", "operation": "inline folding and selection ranges through exact literal maps", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C62", "operation": "inline carrier-only semantic tokens; no tokens inside TS expression regions", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C63", "operation": "inline structure: inactive zero work, edit/revert equals fresh, cancellation publishes nothing and shared parse reuse", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"}
   ],
   "exclusions": [
     {"id": "ANG-X01", "row": "consuming ng build / ngc emit output or its source maps", "reason": "ruling 4: no BND consumption; ANG6 is the TS-host projection"},
@@ -223,7 +228,6 @@
     {"id": "ANG-X10", "row": "activation from a generic .html file, LK6, angular.json or a name match", "reason": "FWA1 is the only activation source (angular-activation-policy.json)"},
     {"id": "ANG-X11", "row": "OPTIONS and MODEL surface kinds", "reason": "class-B facet table: not used; model() maps to props plus a derived event", "refusalProof": ["ANG3-AC5"]},
     {"id": "ANG-X12", "row": "Prettier's Angular printer as a formatting oracle", "reason": "not an official Angular source"},
-    {"id": "ANG-X13", "row": "ANG1G TextMate colouring as support evidence for any cell", "reason": "client-side lexical colouring; never product evidence (ANG1G-AC6)"},
-    {"id": "ANG-X14", "row": "carrier-structure features (syntax diagnostics, symbols, folding, carrier tokens) inside inline templates in .ts files", "reason": "outside the chartered scope: ANG1S serves external templates only and LSPX11 registers no Angular contributor; the .ts document's own outline and folding stay with tsgo (operator question ang0-unacked-cells)"}
+    {"id": "ANG-X13", "row": "ANG1G TextMate colouring as support evidence for any cell", "reason": "client-side lexical colouring; never product evidence (ANG1G-AC6)"}
   ]
 }

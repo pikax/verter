@@ -6,11 +6,28 @@ products and this table only. The validator
 ANG1G's (`ANG1G-ACV`), and `scripts/run-framework-locks.mjs` (`REG0-AC6`) runs
 it.
 
-Each case starts from the clean products in `products/`, applies the one
+Each case starts from the clean products in `products/`, applies the
 planted change named in its row, and expects the result shown. A `reject` row
-must fail for the recorded reason and no other. A plant that does not apply
+must include the recorded reason in its set of rejection reasons. Other
+independently applicable reasons are permitted: tag collisions can also cause
+allocation mismatches, and invalid pins can also diverge from their peers.
+The validator collects applicable reasons without a first-error precedence.
+A plant that does not apply
 (the target field or row is missing, or the planted value is already present)
 fails the case; it never counts as a pass.
+
+Reasons describe structural contract violations, never differences in the
+prose of an operation label. AC2-P12 and AC3-P12 intentionally exercise the
+same forbidden profile from the matrix and policy acceptances and require the
+same reason. Added-cell plants clone the complete named cell, give it a fresh
+unique ID, and apply only the stated changes; unspecified fields stay intact.
+
+`unknown-version` means an exact package version lacks a matching reviewed
+package/version/source/integrity tuple in ANG1G's offline pin expectations.
+It does not assert that a version was never published. Those expectations are
+derived from the reviewed lock when the validator lands and change only with
+an explicit release re-pin; tests mutate the input, not those expectations.
+No registry lookup or comparison of commit identities is part of a lock test.
 
 ## Clean products
 
@@ -28,7 +45,7 @@ Target: `products/angular-version-lock.json`.
 | `AC1-P02` | `@angular/core` version `latest` | reject | `floating-tag` |
 | `AC1-P03` | `@angular/compiler-cli` version `next` | reject | `floating-tag` |
 | `AC1-P04` | `@angular/core` version `22.x` | reject | `floating-range` |
-| `AC1-P05` | `@angular/core` version `22.9.9`, a version the registry never published | reject | `unknown-version` |
+| `AC1-P05` | `@angular/core` version `22.9.9`, leaving its reviewed 22.2.1 source and integrity intact | reject | `unknown-version` |
 | `AC1-P06` | `@angular/core` and `@angular/compiler-cli` versions differ (`22.2.1` and `22.2.0`) | reject | `diverged-pin` |
 | `AC1-P07` | admitted release `angular@20.0.0`, the WDX1 `mixed-framework` pin | reject | `diverged-pin` |
 | `AC1-P08` | an admitted package row cites `tests/web-product/WDX1/fixtures/mixed-framework/case.json` as its source | reject | `diverged-pin` |
@@ -50,21 +67,27 @@ Target: `products/angular-capability-matrix.json`.
 | `AC2-P01` | `producer` removed from `ANG-C12` | reject | `unowned-cell` |
 | `AC2-P02` | `receivingAcceptance` removed from `ANG-C21` | reject | `unowned-cell` |
 | `AC2-P03` | `ANG-C21` producer becomes `["ANG3", "ANG6"]` | reject | `duplicate-owner` |
-| `AC2-P04` | a second cell with the operation and locations of `ANG-C30` and producer `ANG5` | reject | `duplicate-owner` |
-| `AC2-P05` | `ANG-C55` receiving acceptance becomes `ANG6-AC1`, an acceptance of neither its producer nor ANG9 | reject | `acceptance-not-owned-by-producer` |
-| `AC2-P06` | receiving acceptance `ANG3-AC9`, which no charter defines | reject | `unknown-acceptance` |
-| `AC2-P07` | a cell "consume ng build output and its maps" with producer `ANG6` | reject | `build-cell` |
-| `AC2-P08` | a cell promising a DBG source map for Angular output | reject | `build-cell` |
-| `AC2-P09` | a cell "render component in a dev server" | reject | `runtime-cell` |
-| `AC2-P10` | a cell "`*ngIf` structural directive supported" with producer `ANG1` | reject | `excluded-sugar-supported` |
+| `AC2-P04` | clone `ANG-C30` with the same operation and locations, producer `ANG5` and receiving acceptance `ANG5-AC1` | reject | `duplicate-owner` |
+| `AC2-P05` | `ANG-C55` receiving acceptance becomes `ANG6-AC1`, which its producer does not own | reject | `acceptance-not-owned-by-producer` |
+| `AC2-P06` | `ANG-C21` receiving acceptance becomes `ANG3-AC9`, which no charter defines | reject | `unknown-acceptance` |
+| `AC2-P07` | clone `ANG-C30` with `buildConsumption: "ng-build-output"` | reject | `build-cell` |
+| `AC2-P08` | clone `ANG-C30` with `buildMapPromise: "DBG"` | reject | `build-cell` |
+| `AC2-P09` | clone `ANG-C30` with `runtimeExecution: "dev-server"` | reject | `runtime-cell` |
+| `AC2-P10` | clone `ANG-C03` with `supportedStructuralSugar: ["*ngIf"]` | reject | `excluded-sugar-supported` |
 | `AC2-P11` | `ANG-X05` exclusion deleted | reject | `missing-exclusion` |
-| `AC2-P12` | a cell "NgModule declarations scope binding" with producer `ANG2` | reject | `ngmodule-scope-supported` |
+| `AC2-P12` | clone `ANG-C20` with `compilationScope: "ngmodule-declarations"` and `scopeDisposition: "supported"` | reject | `ngmodule-scope-supported` |
 | `AC2-P13` | `ANG-X04` exclusion deleted | reject | `missing-exclusion` |
 | `AC2-P14` | an exclusion row with no `reason` | reject | `missing-exclusion-reason` |
 | `AC2-P15` | the expression-grammar parser decision deleted | reject | `missing-parser-decision` |
 | `AC2-P16` | the template-markup parser decision becomes `ForkAndSpecialize` with `home` `H08 crates/verter_html_syntax` | reject | `angular-branch-in-neutral-parser` |
 | `AC2-P17` | a facet row `slots` with provenance `native` | reject | `facet-provenance-mismatch` |
 | `AC2-P18` | facet `expose` deleted | reject | `unmapped-facet` |
+| `AC2-P19` | `ANG-C38` receiving acceptance becomes `ANG9-AC1` | reject | `acceptance-not-owned-by-producer` |
+| `AC2-P20` | `ANG-C41` receiving acceptance becomes `ANG5-AC1`, which does not cover completion | reject | `acceptance-does-not-cover-operation` |
+| `AC2-P21` | inline syntax-diagnostics cell `ANG-C59` removed | reject | `missing-required-cell` |
+| `AC2-P22` | `ANG-C60` producer becomes `ANG1S` and receiving acceptance becomes `ANG1S-AC2`, whose delivery scope is external only | reject | `acceptance-does-not-cover-location` |
+| `AC2-P23` | `ANG-C63` removed, leaving inline structure without gating/incremental/cancellation coverage | reject | `missing-required-cell` |
+| `AC2-P24` | inline structure moved from admitted cells into an exclusion | reject | `required-cell-excluded` |
 
 ## ANG0-AC3 — activation and host policy
 
@@ -79,16 +102,18 @@ Targets: `products/angular-activation-policy.json` and
 | `AC3-P04` | `detection.reads` becomes "the presence of angular.json" | reject | `second-activation-source` |
 | `AC3-P05` | `detection.reads` becomes "the declared dependency range" | reject | `declared-range-activation` |
 | `AC3-P06` | `hostPolicy.angularLanguageService` becomes `authority` | reject | `angular-ls-authority` |
-| `AC3-P07` | a cell with host `angular-language-service` | reject | `angular-ls-authority` |
+| `AC3-P07` | clone `ANG-C36` with host `angular-language-service` | reject | `angular-ls-authority` |
 | `AC3-P08` | `ANG-C36` host becomes `lsp-enhancement` (Verter computes the TS-region hover) | reject | `verter-computed-ts-answer` |
 | `AC3-P09` | `ANG-C38` host becomes `lsp-enhancement` | reject | `verter-computed-ts-answer` |
-| `AC3-P10` | a cell with host `typescript-plugin-angular` | reject | `angular-specific-ts-plugin-row` |
+| `AC3-P10` | clone `ANG-C35` with host `typescript-plugin-angular` | reject | `angular-specific-ts-plugin-row` |
 | `AC3-P11` | `ANG-C35` `angularSpecific` becomes `true` | reject | `angular-specific-ts-plugin-row` |
-| `AC3-P12` | a cell "scope from `@NgModule` `declarations` array" with producer `ANG2` | reject | `declarations-scope-row` |
+| `AC3-P12` | clone `ANG-C20` with `compilationScope: "ngmodule-declarations"` and `scopeDisposition: "supported"` (same structural plant as AC2-P12) | reject | `ngmodule-scope-supported` |
 | `AC3-P13` | `hostPolicy.order` lists `tsgo-managed` before `tsgo-shared` | reject | `host-order` |
 | `AC3-P14` | `hostPolicy.externalTemplates` loses its FWA1 gate | reject | `ungated-external-template-row` |
 | `AC3-P15` | `inactiveMeansZeroWork.noWorkOf` drops `format` | reject | `inactive-work` |
 | `AC3-P16` | `switch.on` becomes "admits any installed version" | reject | `on-admits-unadmitted-release` |
+| `AC3-P17` | `hostPolicy.inlineTemplates` loses its LSPX11 seam or ANG1M authored-map requirement | reject | `unmapped-inline-structure-route` |
+| `AC3-P18` | `ANG-C62` gains `tokensInTsRegions: true` | reject | `verter-computed-ts-answer` |
 
 ## ANG0-AC4 — proof is not support
 

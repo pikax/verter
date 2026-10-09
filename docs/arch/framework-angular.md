@@ -8,8 +8,12 @@ Angular semantic-facts successors build against it.
 
 It describes the repository at `docs(arch): define the TypeInfo selector,
 descriptor and (#815)`, 2026-10-09. It is contract text only: it changes no
-production code and adds no check (see the docs-only rule in
-[kernel/README.md](kernel/README.md)).
+production code and adds no framework check (see the docs-only rule in
+[kernel/README.md](kernel/README.md)). Its ratified scope also permits exact
+entries for the five current contract-data files in the existing CI ownership
+classifier. This exception changes no selector algorithm or lane. Future
+executable specs and other products do not inherit that inert classification;
+ANG1G assigns the products to their consuming lane when its validator lands.
 
 ## Machine-readable products
 
@@ -123,11 +127,15 @@ come from tsgo over the ANG6 companion, so the grammar holds no TS semantics.
   `ProviderPositionMapper`; generated-only spans are suppressed. Verter never
   computes a TS-region answer itself.
 - **Carrier-only operations** (selector navigation and rename, alias rename,
-  carrier completion, external-template structure) are Verter LSP
+  carrier completion, inline and external template structure) are Verter LSP
   enhancements. They step down where LSPX11's `owns(capability, position)` is
   false.
 - **External templates** reach the Verter LSP through a document-selector row
   gated by the FWA1 capability bit (ANG6).
+- **Inline templates** reach the Angular contributor through LSPX11's TS
+  document seam. ANG5 uses ANG1S's structure provider with ANG1M's exact
+  escape-aware literal maps. Ordinary TS symbols, ranges and tokens remain
+  with tsgo; generated-only or non-reversible ranges are suppressed.
 - **`@verter/typescript-plugin`** serves the companion through its existing
   carrier-generic carrier-store path, with no Angular-specific row (`ANG6-AC6`).
 - **`@angular/language-service`** is an oracle only.
@@ -148,7 +156,7 @@ so the rescope trigger does not fire.
 
 ## Operation matrix
 
-The matrix has 58 cells, `ANG-C01` to `ANG-C58`, over the single profile and
+The matrix covers the single profile and
 the two template locations. Each cell names its host, the tsgo operations it
 needs or the tsgo limitation that makes it carrier-only, one producer node and
 one receiving acceptance. In summary:
@@ -158,6 +166,7 @@ one receiving acceptance. In summary:
 | Grammar, recovery, microsyntax, wire tag | ANG1 | kernel |
 | Activation gate, attachment and maps, displaced routes | ANG1M | kernel |
 | External-template syntax diagnostics, symbols, folding, carrier tokens | ANG1S | Verter LSP |
+| Inline-template syntax diagnostics, symbols, folding, carrier tokens | ANG5 using ANG1S and ANG1M | LSPX11 Angular contributor |
 | Scope binding, template references, index contributions | ANG2 | kernel |
 | Component info and facets | ANG3 | kernel |
 | Control-flow, signal, hydration-annotation and realm facts | ANG4 | kernel |
@@ -171,15 +180,30 @@ one receiving acceptance. In summary:
 Inline templates are formatted inside their string literal through the ANG1M
 escape-aware maps (`ANG8F-AC4`).
 
-Two cell groups have no acceptance in their producer's charter, and an operator
-question (`ang0-unacked-cells`) is open on them:
+Each receiving acceptance belongs to the cell's delivery producer and covers
+the operation and template location. The ratified delivery boundaries are:
 
-- TS-region completion (`ANG-C38`) and carrier-only completion (`ANG-C41`) are
-  claimed by the ANG5 and ANG6 outcomes. Their receiving acceptance is
-  `ANG9-AC1`, the coverage join every admitted cell must pass.
-- Carrier-structure features inside inline templates (`ANG-X14`) are recorded
-  as an exclusion. ANG1S serves external templates only and LSPX11 registers no
-  Angular contributor.
+- **Completion (`ANG5-AC5`):** TS-region completion (`ANG-C38`) uses the ANG6
+  companion through the existing tsgo composite. Carrier completion
+  (`ANG-C41`) contributes only elements, attributes and `ng-content` slots.
+  Inline and external fixtures prove exact authored completion-edit ranges,
+  generated-only suppression and no duplicate answers. Ordinary TS positions
+  and positions owned by another provider get no Angular contribution.
+- **Inline structure (`ANG5-AC6`):** `ANG-C59`–`ANG-C63` consume the ANG1S
+  provider through ANG1M's maps. Tests cover diagnostics, symbols,
+  folding/selection and carrier tokens, escaped literals, broken source,
+  inactive zero work, edit/revert equality with fresh state, cancellation and
+  shared parse reuse. No carrier token overlaps a TS expression region, and
+  the surrounding TS outline and tokens stay with their existing owner.
+- **Dispatch (`LSPX11-AC8`):** LSPX11 reserves the Angular contributor and
+  dispatches typed inline structure and completion operations only for active,
+  exactly mapped Angular regions. Its tests plant an outside-region dispatch
+  and duplicate TS answer and require failure; inactive and unowned positions
+  perform zero contributor work. ANG5 depends on this seam. ANG1S remains the
+  early external-only provider, with no attachment dependency added to it.
+
+These are successor delivery obligations. This contract records them; it does
+not claim their implementations or tests have landed.
 
 ANG9 joins every admitted cell to a passing fixture (`ANG9-AC1`). ANG10
 promotes Angular only when every cell has an ANG9 pass or is a ratified
@@ -202,7 +226,6 @@ exclusion (`ANG10-AC1`).
 | `ANG-X11` | OPTIONS and MODEL surface kinds | not used by the class-B facet table |
 | `ANG-X12` | Prettier as formatting oracle | not an official source |
 | `ANG-X13` | TextMate colouring as support evidence | never product evidence |
-| `ANG-X14` | carrier structure inside inline templates | outside the chartered scope |
 
 An architecture proof (ANGP), an installed compiler and syntax highlighting
 never satisfy a product claim.
