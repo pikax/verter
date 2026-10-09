@@ -30,7 +30,7 @@
       "tests/web-product/WDX0/products/evidence-class-policy.v1.json",
       "performance-gates.toml"
     ],
-    "rule": "UAK0 routes D01-D19 and outcomes O01-O11, UAK1 rules U01-U08, VID0 identities I01-I12, rules R01-R16 and routes V-D01-V-D06, CAT0 tables T01-T09, rules CR01-CR14 and routes CAT-D01-CAT-D06, DEM0 rules DR01-DR30 and routes DEM-D01-DEM-D06, and PAR0 contracts PD01-PD09 and routes PAR-D01-PAR-D04 keep their owners. WDX0's evidence classes and performance-gates.toml rows are referenced by id. VIM0 adds manifest files MF01-MF05, sections MS01-MS12, rules VM01-VM28, cell tiers CT0-CT4, current authorities G01-G09, outcomes VIM-O01-VIM-O05, consumers VIM-C01-VIM-C10, plan consumers VIM-P01-VIM-P03, displaced routes VIM-D01-VIM-D04, findings VIM-F01-VIM-F06 and transferred obligations VIM-T01-VIM-T04. A successor path for a route this node displaces starts at VIM0. TIF1 and IDX0 are not successors of VIM0, so VIM-D02 and VIM-D03 keep the controller path already recorded for that owner. VIM-D01 is NCK5 on VIM0 to VIM1 to NCK5. VIM-D04 is FCH1 on VIM0 to VIM1 to FCH1; VIM1 is a predecessor of FCH1."
+    "rule": "UAK0 routes D01-D19 and outcomes O01-O11, UAK1 rules U01-U08, VID0 identities I01-I12, rules R01-R16 and routes V-D01-V-D06, CAT0 tables T01-T09, rules CR01-CR14 and routes CAT-D01-CAT-D06, DEM0 rules DR01-DR30 and routes DEM-D01-DEM-D06, and PAR0 contracts PD01-PD09 and routes PAR-D01-PAR-D04 keep their owners. WDX0's evidence classes and performance-gates.toml rows are referenced by id. VIM0 adds manifest files MF01-MF05, sections MS01-MS12, rules VM01-VM28, cell tiers CT0-CT4, current authorities G01-G09, outcomes VIM-O01-VIM-O05, consumers VIM-C01-VIM-C10, plan consumers VIM-P01-VIM-P03, displaced routes VIM-D01-VIM-D04, findings VIM-F01-VIM-F06 and transferred obligations VIM-T01-VIM-T05. A successor path for a route this node displaces starts at VIM0. TIF1 and IDX0 are not successors of VIM0, so VIM-D02 and VIM-D03 keep the controller path already recorded for that owner. VIM-D01 is NCK5 on VIM0 to VIM1 to NCK5. VIM-D04 is FCH1 on VIM0 to VIM1 to FCH1, receiving obligation VIM-T05; VIM1 is a predecessor of FCH1. FCH1-AC3 is rejected for that cutover."
   },
   "layout": {
     "root": "verticals/<vertical>/ for kind carrier; verticals/<vertical>/<release>/ for kind semantic-profile and project-profile",
@@ -453,7 +453,7 @@
         "packages/framework-conformance-harness/evidence/capability-matrix.tsv"
       ],
       "shape": "34 rows keyed by cell_id; display framework column; untagged compatibility_domain (core@3.6.0-rc.3, svelte@5.56.8, 'anything other than ...'); target_disposition; target_maturity; owner and acceptance_id naming retired program blocks",
-      "disposition": "displaced as an authority (VIM-D04). Not a seed: FCH1 makes the TSV a rendered consumer or deletes it after VIM1 renders the matrix"
+      "disposition": "displaced as an authority (VIM-D04). Not a seed: FCH1 carries VIM-T05, which makes the TSV a rendered consumer or deletes it after VIM1 renders the matrix. FCH1-AC3 does not state that cutover"
     },
     {
       "id": "G02",
@@ -884,7 +884,7 @@
         "packages/framework-conformance-harness/evidence/capability-matrix.tsv",
         "verticals/"
       ],
-      "disposition": "stops being an authority (VM26, MN07). VIM1 renders the matrix under verticals/ (VIM1-AC-R2). FCH1 then makes the harness TSV a rendered consumer of that matrix or deletes it. The TSV is not a G03-G05 seed. FCH1 charter path packages/framework-conformance-harness and domain area:packages/framework-conformance-harness contain the file; VIM1's domains and charter paths do not. FCH1 is kind implementation (ts-heavy), not a docs-only owner, and VIM1 is its predecessor.",
+      "disposition": "stops being an authority (VM26, MN07). VIM1 renders the matrix under verticals/ (VIM1-AC-R2). FCH1 then makes the harness TSV a rendered consumer of that matrix or deletes it (VIM-T05). The TSV is not a G03-G05 seed. FCH1 charter path packages/framework-conformance-harness and domain area:packages/framework-conformance-harness contain the file; VIM1's domains and charter paths do not. FCH1 is kind implementation (ts-heavy), not a docs-only owner, and VIM1 is its predecessor. FCH1-AC1 through FCH1-AC4 do not state this cutover.",
       "owner": "FCH1",
       "productionCapable": true,
       "successorPath": [
@@ -892,7 +892,7 @@
         "VIM1",
         "FCH1"
       ],
-      "receivingAcceptance": "FCH1-AC3"
+      "receivingAcceptance": "VIM-T05"
     }
   ],
   "referencedRoutes": [
@@ -972,7 +972,7 @@
       "referenced": [
         "CAT-D04"
       ],
-      "why": "G02 is the CapabilityCell enum NCK5 deletes after VIM1 (VIM-D01). G01 stops being an authority; FCH1 makes the harness TSV a rendered consumer or deletes it (VIM-D04). CAT-D04 stays with CPF1."
+      "why": "G02 is the CapabilityCell enum NCK5 deletes after VIM1 (VIM-D01). G01 stops being an authority; FCH1 carries VIM-T05, rendered consumer or deletion, on VIM-D04. FCH1-AC3 does not state that cutover. CAT-D04 stays with CPF1."
     }
   ],
   "emptyPopulations": [
@@ -1000,9 +1000,9 @@
   "findings": [
     {
       "id": "VIM-F01",
-      "finding": "capability-matrix.tsv names core@3.6.0-rc.3 and svelte@5.56.8 while the oracle package.json files pin vue 3.6.0-rc.5 and svelte 5.56.10. VM23 makes the oracle pin the release and fails the divergence (MN15). FCH1 owns the TSV; VIM1 cannot write that path.",
+      "finding": "capability-matrix.tsv names core@3.6.0-rc.3 and svelte@5.56.8 while the oracle package.json files pin vue 3.6.0-rc.5 and svelte 5.56.10. VM23 makes the oracle pin the release and fails the divergence (MN15). FCH1 owns the TSV under VIM-T05; FCH1-AC3 does not state that cutover. VIM1 cannot write that path.",
       "owner": "FCH1",
-      "receivingAcceptance": "FCH1-AC3"
+      "receivingAcceptance": "VIM-T05"
     },
     {
       "id": "VIM-F02",
@@ -1018,7 +1018,7 @@
     },
     {
       "id": "VIM-F04",
-      "finding": "VIM1 domains are area:verticals, area:xtask, shared:ci-workflow and area:.github, and CPF1 precedes VIM1, so neither can delete CapabilityCell after the freshness guard. VIM-D01 binds that deletion to NCK5 (NCK5-AC1), whose charter path crates/verter_compiler contains the file and who follows VIM1. VIM-D04 binds the harness TSV to FCH1 (FCH1-AC3).",
+      "finding": "VIM1 domains are area:verticals, area:xtask, shared:ci-workflow and area:.github, and CPF1 precedes VIM1, so neither can delete CapabilityCell after the freshness guard. VIM-D01 binds that deletion to NCK5 (NCK5-AC1), whose charter path crates/verter_compiler contains the file and who follows VIM1. VIM-D04 binds the harness TSV to FCH1 (VIM-T05).",
       "owner": "NCK5",
       "receivingAcceptance": "NCK5-AC1"
     },
@@ -1059,6 +1059,23 @@
       "obligation": "Independent re-validation of schema and negatives",
       "receiver": "UAM0",
       "receivingAcceptance": "UAM0-AC2"
+    },
+    {
+      "id": "VIM-T05",
+      "kind": "cutover",
+      "rows": [
+        "VIM-D04",
+        "VIM-F01"
+      ],
+      "receiver": "FCH1",
+      "successorPath": [
+        "VIM0",
+        "VIM1",
+        "FCH1"
+      ],
+      "obligation": "After VIM1 renders the capability matrix under verticals/, make packages/framework-conformance-harness/evidence/capability-matrix.tsv a rendered consumer of that matrix or delete it. The hand-maintained target_disposition, target_maturity, owner and acceptance_id columns then stop being an authority (VM26, MN07).",
+      "rejectedBinding": "FCH1-AC3",
+      "why": "FCH1-AC3 joins coverage onto tests/framework-<f>/<P>0/products/*-capability-matrix.json. It can pass while evidence/capability-matrix.tsv stays hand-maintained. FCH1-AC1, FCH1-AC2 and FCH1-AC4 do not state this cutover. FCH1's charter path packages/framework-conformance-harness contains the file, and VIM1 is FCH1's predecessor."
     }
   ]
 }

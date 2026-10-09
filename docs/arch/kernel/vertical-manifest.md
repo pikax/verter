@@ -98,10 +98,14 @@ There is no vertical manifest. The facts it will hold live in nine places:
 `G03`–`G05` and `G08`–`G09` stay. `G03`–`G05` become inputs that a manifest
 cites by path and digest; `G08` and `G09` are vocabularies a manifest
 references by id. `G06` and `G07` keep their recorded owners. `G01` stops
-being an authority (`VIM-D04`): VIM1 renders the matrix under `verticals/`,
-and FCH1, after VIM1, makes the harness TSV a rendered consumer of that
-matrix or deletes it. `G02` is deleted by NCK5 after that render's freshness
-guard holds (`VIM-D01`).
+being an authority (`VIM-D04`): VIM1 renders the matrix under `verticals/`.
+FCH1 follows VIM1 and its charter path contains the harness TSV. No FCH1
+acceptance states the cutover. `FCH1-AC3` joins coverage onto
+`tests/framework-<f>/<P>0/products/*-capability-matrix.json` and can pass
+while the TSV stays hand-maintained, so it is not the receiving acceptance.
+The cutover is the transferred obligation `VIM-T05`: FCH1 makes that TSV a
+rendered consumer of the rendered matrix or deletes it. `G02` is deleted by
+NCK5 after that render's freshness guard holds (`VIM-D01`).
 
 ## Manifest layout
 
@@ -406,7 +410,7 @@ or full support declared over one) and `MN11` (merged Tailwind identity).
 | `VIM-D01` | duplicate capability authority; central framework switch; untagged identity | `CapabilityCell` / `CapabilityDisposition` (`G02`) in `crates/verter_compiler/src/compile_request/capability.rs`, a closed per-framework enum | replace: the enum is deleted after VIM1's rendered-matrix freshness guard holds (`VIM1-AC-R2`). NCK5 is a successor of VIM1, rust-mixed, and its charter path `crates/verter_compiler` and domain `area:crates/verter_compiler` contain this file. CPF1 precedes VIM1, so CPF1 cannot be the deleter | NCK5 (`NCK5-AC1`), path `VIM0` → `VIM1` → `NCK5` |
 | `VIM-D02` | duplicate component information | UAK0 `D12`–`D15`: component-meta resolver/cache/schema, public-API projection, off-store surface caches, legacy serde TypeInfo DTOs (authority-inventory.md) | keep that assignment. A manifest declares facets and roles; it computes no component information. TIF1 is not a successor of VIM0 | TIF1 (`TIF1-AC1`), path `UAK0` → `UAK1` → `CAT0` → `TIF1` |
 | `VIM-D03` | duplicate component information | UAK0 `D18`: per-request component scan | keep that assignment. IDX0 is not a successor of VIM0 | IDX0 (`IDX0-AC1`), path `UAK0` → `UAK1` → `CAT0` → `DEM0` → `IDX0` |
-| `VIM-D04` | duplicate capability authority | hand-maintained `capability-matrix.tsv` (`G01`) | stops being an authority (`VM26`, `MN07`). VIM1 renders the matrix under `verticals/` (`VIM1-AC-R2`). FCH1 then makes the harness TSV a rendered consumer of that matrix or deletes it. The TSV is not a G03–G05 seed: its disposition, maturity, owner and acceptance columns are the capability authority. FCH1's charter path `packages/framework-conformance-harness` and domain `area:packages/framework-conformance-harness` contain the file; VIM1's do not. FCH1 is an implementation node, and VIM1 is its predecessor | FCH1 (`FCH1-AC3`), path `VIM0` → `VIM1` → `FCH1` |
+| `VIM-D04` | duplicate capability authority | hand-maintained `capability-matrix.tsv` (`G01`) | stops being an authority (`VM26`, `MN07`). VIM1 renders the matrix under `verticals/` (`VIM1-AC-R2`). FCH1 then makes the harness TSV a rendered consumer of that matrix or deletes it (`VIM-T05`). The TSV is not a G03–G05 seed: its disposition, maturity, owner and acceptance columns are the capability authority. FCH1's charter path `packages/framework-conformance-harness` and domain `area:packages/framework-conformance-harness` contain the file; VIM1's do not. FCH1 is an implementation node, and VIM1 is its predecessor. `FCH1-AC1` through `FCH1-AC4` do not state this cutover; `FCH1-AC3` is a coverage join and is rejected as the binding | FCH1 (`VIM-T05`), path `VIM0` → `VIM1` → `FCH1` |
 
 `G06` (`V-D03`, REG0) and `G07` (`CAT-D04`, CPF1) stay with their owners.
 `VueOtherVersion` and `SvelteOtherVersion` are complement arms of `G02`.
@@ -450,7 +454,8 @@ rows, each with its own successor path and receiving acceptance.
   oracle `package.json` files pin `vue` `3.6.0-rc.5` and `svelte` `5.56.10`.
   Two hand-maintained truths have drifted. `VM23` makes the oracle pin the
   release and fails the divergence (`MN15`). FCH1 owns the TSV
-  (`FCH1-AC3`); VIM1 cannot write that path.
+  (`VIM-T05`); `FCH1-AC3` does not state that cutover. VIM1 cannot write
+  that path.
 - **Versions are encoded as capability cells** (`VIM-F02`, NCK5).
   `VueOtherVersion` and `SvelteOtherVersion` (domain "anything other than …")
   write a version complement as a cell. Under `VM02` that is DEM0's
@@ -464,7 +469,7 @@ rows, each with its own successor path and receiving acceptance.
   `area:.github`, and CPF1 precedes VIM1. `VIM-D01` is NCK5's: NCK5 follows
   VIM1 and its charter path `crates/verter_compiler` contains the file. The
   hand matrix is rendered under `verticals/` and the harness TSV is FCH1's
-  (`VIM-D04`).
+  (`VIM-D04`, `VIM-T05`).
 - **The tag table calls React and Solid out of scope** (`VIM-F05`, REG0). The
   plan now carries React and Solid verticals. `V-D03` retags the table; a
   manifest's existence, not a hand row, decides a tag's disposition.
@@ -486,8 +491,10 @@ inspection are the right evidence. The diff adds no test, validator or check.
   after the freshness guard, because that node's charter path contains
   `crates/verter_compiler/src/compile_request/capability.rs`. `VIM-D02` and
   `VIM-D03` keep TIF1 and IDX0, the owners the authority inventory assigns,
-  on the UAK0 paths. `VIM-D04` is FCH1 (`FCH1-AC3`) on `VIM0` → `VIM1` →
+  on the UAK0 paths. `VIM-D04` is FCH1 (`VIM-T05`) on `VIM0` → `VIM1` →
   `FCH1`: VIM1 renders under `verticals/`, and FCH1 owns the harness TSV.
+  `VIM-T05` is the receiving obligation because `FCH1-AC3` does not carry
+  the cutover.
   UAK0, UAK1, VID0, CAT0, DEM0 and PAR0 rows are referenced, not re-owned.
   The executable validator for this inventory and the manifest negatives
   belongs to VIM1 (`VIM1-AC-R1`); UAM0 re-validates it (`UAM0-AC2`).
