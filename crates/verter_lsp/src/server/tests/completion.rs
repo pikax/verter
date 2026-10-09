@@ -822,6 +822,146 @@ async fn child_contract_completion_rejects_an_answer_whose_imported_props_type_m
     drop(service);
 }
 
+/// A native completion read through a published child contract answers under
+/// the authority it was admitted under. Background work during the request
+/// that replaces no authority — an equivalent root republication, the child's
+/// eviction with its identical reload and a reset of its diagnostics row —
+/// leaves the contract's answer deliverable; a workspace replacement that
+/// repeats the scalar snapshot generation, a project reconfiguration and a
+/// membership change answer `ContentModified`, never the replaced authority's
+/// contract.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_contract_completion_answers_under_its_admitted_authority() {
+    #[derive(Clone, Copy, Debug)]
+    enum Movement {
+        EquivalentRootPublication,
+        ChildEvictionAndReload,
+        WorkspaceReplacement,
+        Reconfiguration,
+        MembershipChange,
+    }
+
+    let child_source =
+        "<script setup lang=\"ts\">\ndefineProps<{ beforeProp: string }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport ViewChild from './ViewChild.vue'\n</script>\n<template>\n  <ViewChild  />\n</template>\n";
+    for movement in [
+        Movement::EquivalentRootPublication,
+        Movement::ChildEvictionAndReload,
+        Movement::WorkspaceReplacement,
+        Movement::Reconfiguration,
+        Movement::MembershipChange,
+    ] {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/ViewChild.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_id = format!("{workspace_id}/src/ViewChild.vue");
+        settle_child_contracts(server, &uri, &workspace_id, &["src/ViewChild.vue"]).await;
+        let cursor = parent_source.find("<ViewChild ").unwrap() + "<ViewChild ".len();
+        let position = LineIndex::new_utf16(parent_source)
+            .offset_to_position(cursor as u32)
+            .expect("completion position");
+
+        let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let server = server.clone();
+            let moved = Arc::clone(&moved);
+            let workspace_id = workspace_id.clone();
+            let child_id = child_id.clone();
+            server.request_barriers().clear();
+            server.request_barriers().arm(
+                super::super::test_support::RequestBarrier::Capture,
+                Arc::new(move |arrival| {
+                    if arrival == 0 {
+                        let host = server.documents.host();
+                        let tsconfig = format!("{workspace_id}/tsconfig.json");
+                        match movement {
+                            Movement::EquivalentRootPublication => {
+                                server.test_republish_equivalent_root();
+                            }
+                            Movement::ChildEvictionAndReload => {
+                                host.evict(&child_id);
+                                let _ = host.ensure_loaded(&child_id);
+                                host.bump_diagnostics_generation(&child_id);
+                            }
+                            Movement::WorkspaceReplacement => {
+                                let before = host
+                                    .workspace_read()
+                                    .published_root()
+                                    .expect("published")
+                                    .snapshot
+                                    .generation;
+                                install_test_resolver_for_root(
+                                    &server,
+                                    &workspace_id,
+                                    Some(&tsconfig),
+                                );
+                                let after = server.documents.host();
+                                let after = after
+                                    .workspace_read()
+                                    .published_root()
+                                    .expect("republished")
+                                    .snapshot
+                                    .generation;
+                                assert_eq!(before, after, "the replacement repeats the generation");
+                            }
+                            Movement::Reconfiguration => {
+                                host.configure_projects(vec![
+                                    verter_workspace::ide_project_config(
+                                        workspace_id.clone(),
+                                        workspace_id.clone(),
+                                        Some(tsconfig),
+                                    ),
+                                ]);
+                            }
+                            Movement::MembershipChange => {
+                                server
+                                    .vfs_workspace
+                                    .read()
+                                    .clone()
+                                    .expect("a workspace is installed")
+                                    .set_project_graph(Default::default());
+                            }
+                        }
+                        moved.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Box::pin(async {})
+                }),
+            );
+        }
+        let raced = server
+            .completion(completion_params(&uri, position, None))
+            .await;
+        server.request_barriers().clear();
+        assert!(
+            moved.load(std::sync::atomic::Ordering::SeqCst),
+            "{movement:?}"
+        );
+        match movement {
+            Movement::EquivalentRootPublication | Movement::ChildEvictionAndReload => {
+                let labels = completion_labels(raced.expect("the completion answers"));
+                assert!(
+                    labels.contains(&"before-prop".to_string()),
+                    "{movement:?}: the admitted child contract still answers: {labels:?}"
+                );
+            }
+            Movement::WorkspaceReplacement
+            | Movement::Reconfiguration
+            | Movement::MembershipChange => assert!(
+                matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                "{movement:?}: a replaced authority answers ContentModified: {raced:?}"
+            ),
+        }
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_stable_completions_do_not_cancel_each_other() {
     let child_source =

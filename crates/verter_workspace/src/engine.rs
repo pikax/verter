@@ -804,6 +804,15 @@ impl Engine {
         // bump, so the source-env domain advances here.
         self.bump_source_env_generation();
         self.mutate_resolution_world(|world| {
+            // Under the publication gate, so no other publication lands
+            // between reading the live root and replacing it: an equivalent
+            // republication keeps the live authority, anything else keeps the
+            // fresh one its construction minted.
+            if let Some(live) = self.published_state.load_full() {
+                if root.republishes_authority_of(&live) {
+                    root.inherit_authority(&live);
+                }
+            }
             let root = Arc::new(root);
             self.published_state.store(Some(Arc::clone(&root)));
             #[cfg(any(test, feature = "test-support"))]
