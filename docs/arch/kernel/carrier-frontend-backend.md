@@ -38,12 +38,14 @@ references them by id.
    (`M21`–`M23`), not associated methods. Each has its own row, callers, owner
    and route.
 2. Enumerated the free functions and product types in `vue_bridge.rs`,
-   `svelte/carrier.rs`, `carrier_compiler.rs`, `registered_carrier_projection.rs`
-   and `catalog.rs`, and the five capability traits with their Vue/Svelte
-   implementations. Followed each to its consumers in `verter_session`,
-   `verter_lsp`, the `parse_corpus_probe` binary, NAPI, WASM, FFI and MCP.
-   Paths follow producer→consumer edges, not name matches. The compile-request
-   envelope those transports name is `P17`, owned by CMP0.
+   `svelte/carrier.rs`, `carrier_compiler.rs`, `registered_carrier_projection.rs`,
+   `catalog.rs` and `standalone.rs`, and the five capability traits with their
+   Vue/Svelte implementations. Followed each to its consumers in `verter_session`,
+   `verter_lsp`, the `parse_corpus_probe` binary, `StandaloneCompiler`,
+   `verter_tsc`, NAPI, WASM, FFI and MCP. Paths follow producer→consumer edges,
+   not name matches. The compile-request envelope the transports and `verter-tsc`
+   name is `P17`, owned by CMP0 (`F-C12`, `F-C14`). `StandaloneCompiler::compile`
+   and `prepare` call `parse_sfc` / `parse_svelte` directly (`F-C13`, CPF1).
 3. Classified each product as frontend, semantic, projection, compiler backend
    or residue. Classified each module edge against UAK1's layers: the frontend
    half is `L3`, which may not import the optional compiler backends (`LC`).
@@ -149,7 +151,7 @@ exhaustive.
 | ----- | ------ | ----- |
 | `VueCarrierCompiler`/`SvelteCarrierCompiler` identity | profile row identity (VID0 `I03`/`I05`) | CPF1 (`F-D02`) |
 | struct `parse` (`M03`, `M13`) | body of the frontend's `parse`, in a frontend module | CPF1 (`F-D01`) |
-| `compile::parse_sfc`, `svelte::runtime::official_reject::deferred_parse_defects_excluding_css` | frontend-owned parse and parse-defect modules | CPF1 (`F-D01`) |
+| `compile::parse_sfc`, `svelte::parse_svelte`, `svelte::runtime::official_reject::deferred_parse_defects_excluding_css` | frontend-owned parse and parse-defect modules; `StandaloneCompiler::compile` and `prepare` consume that parse (`F-C13`) | CPF1 (`F-D01`) |
 | typed downcasts (`M04`–`M06`, `M14`–`M17`) | frontend-owned typed accessors | CPF1 (`F-D02`) |
 | `compile_ide`, `compile_bundle` shims and their absence guards | deleted; tests drive the typed backends | CPF1 (`F-D03`) |
 | Vue template facts via `compile_from_parsed_legacy` with `TEMPLATE_DATA` | codegen-free extractor on the semantic row | CPF1 (`F-D04`) |
@@ -167,7 +169,7 @@ are deleted in that same change, and no alias of the combined shape survives.
 
 | Route | Category | Unit | Owner |
 | ----- | -------- | ---- | ----- |
-| `F-D01` | central framework switch | Frontends import runtime-codegen modules (Vue parse in `compile/mod.rs`; Svelte parse defects in `svelte::runtime`) | CPF1 (`CPF1-AC1`) |
+| `F-D01` | central framework switch | Frontends import runtime-codegen modules (Vue parse in `compile/mod.rs`, also called from `standalone.rs`; Svelte parse defects in `svelte::runtime`) | CPF1 (`CPF1-AC1`) |
 | `F-D02` | central framework switch | The two compiler-shaped carrier structs | CPF1 (`CPF1-AC1`) |
 | `F-D03` | central framework switch | Test-support combined compile shims and their guards | CPF1 (`CPF1-AC1`) |
 | `F-D04` | central framework switch | Vue template facts computed by the runtime compile entry | CPF1 (`CPF1-AC1`) |
@@ -196,6 +198,10 @@ Empty populations at this head:
   uses only the generated-identifier spelling (`F-C10`). The
   `external-corpus` binary `parse_corpus_probe` is a compiler-bin consumer of
   `parse_registered_frontend` (`F-C11`), not a host or transport caller.
+  `StandaloneCompiler::compile` and `prepare` re-parse through `parse_sfc` and
+  `parse_svelte` and never enter `CarrierFrontend::parse` (`F-C13`, CPF1).
+  `verter-tsc` `generate_all_tsx`, reached from `pub fn run`, drives that
+  compile and names the compile-request envelope (`F-C14`, CMP0).
 - **`Unsupported` compiler implementations.** None exists, and `T03` forbids
   one.
 
@@ -231,8 +237,14 @@ the same exposure as `take_projection_producer_invocations`, so the proof
 entry `crates/verter_compiler/tests/cases/carrier_frontend_backend_split_proof.rs`
 can read it. `registered_frontend_parse_count` is `#[cfg(test)] pub(super)`
 and is not that source. `CarrierParse` attribution records parse bytes, not
-the parse-entry count. Wall-clock numbers, if any, come from a bench-m3
-evidence run and never gate.
+the parse-entry count. `WC01` excludes `StandaloneCompiler::compile` and
+`prepare`: those calls never enter `InstalledCarrierFrontend::parse`, and
+they are `F-C13`. The growth ratio is the registered frontend entry on
+`PC01` and `PC02` only. CPF1's cutover makes the direct route consume the
+admitted frontend parse (`lower_vue_from_parsed` and
+`lower_svelte_from_parsed` already do) instead of calling `parse_sfc` or
+`parse_svelte`. The counter is not widened, and no second counter is added.
+Wall-clock numbers, if any, come from a bench-m3 evidence run and never gate.
 
 ## Findings recorded for the receiving owners
 
@@ -242,9 +254,12 @@ evidence run and never gate.
 - **The host binding re-scans.** `registered_host_integration_for` has no
   production caller; `native_host_binding` re-scans the host catalog itself
   (`D02`, `D03`).
-- **Parse once holds.** Every backend and projection row already consumes the
-  one admitted `FrameworkParseArtifact` through `M05`/`M15`. Separation needs
-  no second parse, so the charter's abort condition does not trigger.
+- **Parse once holds for the registries.** Backend and projection rows already
+  consume the one admitted `FrameworkParseArtifact` through `M05`/`M15`.
+  `StandaloneCompiler::compile` and `prepare` do not: they call `parse_sfc`
+  and `parse_svelte` (`F-C13`). Their successor consumes that admitted parse,
+  so separation does not require a second artifact and the charter's abort
+  condition does not trigger.
 - **UAK1 classes all of `vue_bridge` as `LC`.** Its frontend half (`M03`–`M06`,
   `P01`, `P06`, `P07`) is `L3`; `F-D01` splits the file.
 
