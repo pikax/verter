@@ -358,9 +358,10 @@ mod inner {
         /// tests that drive the pending-sync re-drive wiring opt in.
         restart_pulse: Option<std::sync::Arc<tokio::sync::Notify>>,
         /// Test seam: the bytes the engine holds for a foreign target file. A
-        /// definition, references or code-action answer locating into one is
-        /// refused when its requester will map it through other bytes, as an
-        /// adapter's target decode refuses it.
+        /// definition, type-definition, references, rename or code-action
+        /// answer locating into one is refused when its requester will map it
+        /// through other bytes, or when those bytes move before the answer
+        /// settles, as an adapter's target decode and settlement refuse it.
         engine_targets: std::collections::HashMap<String, Arc<str>>,
     }
 
@@ -1890,13 +1891,19 @@ mod inner {
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, locs)| locs.clone())
                 .unwrap_or_default();
+            let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
+            let result = state
+                .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                .map(|()| result);
+            drop(state);
+            let state = Arc::clone(&self.state);
             self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient type-definition failure".to_string(),
                     ));
                 }
-                Ok(result)
+                settle_targets(&state, &held, result)
             }))
         }
 
@@ -1948,7 +1955,7 @@ mod inner {
             offset: u32,
         ) -> ProviderFuture<'_, Vec<RenameLocation>> {
             let path = query.path();
-            let (result, block) = {
+            let (result, held, block) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetRenameLocations {
                     path: path.to_string(),
@@ -1961,6 +1968,10 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
+                let result = state
+                    .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                    .map(|()| result);
                 let block = match &state.rename_block {
                     Some((armed_path, _, _)) if armed_path == path => state
                         .rename_block
@@ -1968,14 +1979,15 @@ mod inner {
                         .map(|(_, arrived, release)| (arrived, release)),
                     _ => None,
                 };
-                (result, block)
+                (result, held, block)
             };
+            let state = Arc::clone(&self.state);
             self.barriered(Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
-                Ok(result)
+                settle_targets(&state, &held, result)
             }))
         }
 

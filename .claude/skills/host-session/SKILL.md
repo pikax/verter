@@ -364,20 +364,28 @@ ones the capability intends (a delivery the requester has not seen, even one tha
 to the captured bytes). The binding (`BoundQuery`) retains the requested bytes and an O(1)
 persistent snapshot of every delivered file; every response range — highlights included —
 decodes through it, a foreign target only through bytes equal to the requester's intended surface
-for it. A target the engine read from disk decodes through its disk bytes only when the file was
-last modified before dispatch, otherwise the query conflicts; a target with no bytes drops its
-locations (never packed offsets). Bytes an engine reads out of band carry no wire position. On
+for it. A file the engine was never handed — it reads it itself: a closed workspace file, a library
+declaration, or a cache-only `load_file` on either adapter, which puts no frame on the wire — is
+`ConflictKind::Undelivered`: no disk read, timestamp or local cache identifies the bytes it
+evaluated, so nothing decodes through it. A request file in that state sends nothing. Read-only
+navigation (definition, type definition, references; `BoundQuery::navigation_targets`) omits only
+the locations in Undelivered targets, decodes every surviving location from its own retained
+delivered bytes and settles the request file plus every surviving target; any other conflict or a
+failed settlement refuses the whole answer, and a non-empty answer whose targets are ALL
+Undelivered returns the conflict (the LSP serves its native result). A genuinely empty answer stays
+an empty success. Rename and code actions keep whole-answer refusal — a partial edit is unsafe.
+Bytes an engine reads out of band carry no wire position. On
 tsserver the carrier store the plugin reads is their publisher (`CarrierStorePublications`, every
 writer's commits, installed at spawn): each ready row carries a non-reusable publication epoch
 (`ReadyFile::published_epoch`, kept across identical republication); a query observes the store's
 position before dispatch, refuses if the publisher contradicts the request file's bytes, and at
 settlement requires every out-of-band file it decoded through to be attested with exactly the
-retained bytes at a publication no later than that position — an unpublished file must be
-unchanged on disk since dispatch. Without a publisher (a tsgo `load_file`), the local record's
-stamp settles it. Every route settles, including completions, completion details/resolve and
-signature help. The LSP's bounded provider recovery re-binds a conflicted query to the surface it
-records now (no resync); the hub never counts a conflict as crash evidence. A query on a file with
-neither delivered nor disk bytes sends nothing (no fabricated position).
+retained bytes at a publication no later than that position; an unpublished out-of-band file is a
+`Publication` conflict. Without a publisher, the local record's stamp settles it. Every route
+settles, including completions, completion details/resolve and signature help. The LSP's bounded
+provider recovery re-binds a conflicted query to the surface it records now (no resync); the hub
+never counts a conflict as crash evidence (it completes neutrally, neither recording an error nor
+erasing crash strikes). No position is ever fabricated.
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
 before receiving them, and the install announces exactly what it dropped

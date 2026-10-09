@@ -3372,30 +3372,26 @@ impl TypeProvider for TsserverTypeProvider {
         // sync overwhelms tsserver and blocks user requests for 15-20 seconds.
         // Resolver-managed provider files are pushed on demand when the user
         // actually opens or edits a file, so background sync only needs the
-        // local cache here.
+        // local cache here. No frame carries these bytes, so the delivery
+        // ledger keeps the file undelivered: tsserver reads it itself, and no
+        // query binds coordinates to it until `open_file` or `update_file`
+        // puts its bytes on the wire.
         let file = Self::normalize_path(path);
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         let content_generations = Arc::clone(&self.content_generations);
-        let transport = Arc::clone(&self.transport);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsserver_load_file",
                 format!("file={} content_len={}", file, content.len()),
                 async {
-                    let content: Arc<str> = content.into();
                     store_content_bump_generation(
                         &contents_cache,
                         &content_generations,
                         &file,
-                        Arc::clone(&content),
+                        Arc::from(content),
                     )
                     .await;
-                    // tsserver reads a loaded-only file itself; these bytes are
-                    // what a query converts and decodes against meanwhile.
-                    transport
-                        .ledger
-                        .record_out_of_band([SurfaceEffect::deliver(file.clone(), content)]);
                     crate::type_runtime_trace_event!(
                         "tsserver_load_file_result",
                         "cached_only=true".to_string()

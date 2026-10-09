@@ -275,6 +275,49 @@ async fn a_query_on_a_file_the_engine_was_never_handed_sends_nothing() {
     );
 }
 
+#[tokio::test]
+async fn a_cache_only_load_is_undelivered_with_or_without_a_publisher() {
+    let publishers: [Option<Arc<dyn SurfacePublications>>; 2] =
+        [None, Some(Arc::new(Store::default()))];
+    for publications in publishers {
+        let publishing = publications.is_some();
+        let (provider, mut engine) = provider_publishing(publications);
+        let file = "/ws/src/loaded.ts";
+        provider
+            .load_file(file, DISPATCHED)
+            .await
+            .expect("cache-only load");
+        let query = ProviderQuery::at_engine_surface(file);
+        let Err(refused) = provider
+            .transport
+            .ledger
+            .prepare(&query, &TsserverTypeProvider::normalize_path(file))
+        else {
+            panic!("publisher: {publishing}; no frame handed the engine these bytes");
+        };
+        assert_eq!(
+            refused.kind(),
+            crate::provider_query::ConflictKind::Undelivered,
+            "publisher: {publishing}"
+        );
+        let error = provider
+            .get_hover(&query, beta_offset(DISPATCHED))
+            .await
+            .expect_err("a cache-only load binds no coordinates");
+        assert!(
+            error.query_conflict,
+            "publisher: {publishing}; typed conflict, got {error}"
+        );
+        assert!(
+            matches!(
+                engine.stdin_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "publisher: {publishing}; no position converted against cached bytes reaches the engine"
+        );
+    }
+}
+
 fn quickinfo_body(line: u32) -> serde_json::Value {
     serde_json::json!({
         "displayString": "const beta: 2",
