@@ -711,18 +711,6 @@ impl VerterHost {
         // supplied are reachable from the canonical.
         let old_whole_hash = old_host_data.map(|h| h.parse.whole_hash);
         if !changes.changed && old_whole_hash == Some(parse.whole_hash) {
-            // The scheduler still re-captured this source at a fresh
-            // generation: it published the file `Absent`, then `Present`
-            // again at the commit this call waited on. A base view captured
-            // between the two reads the file as source-less, and since this
-            // path deliberately advances no token dimension the manager
-            // would keep serving that view — every cache entry that read
-            // the file would then fail validation for as long as nothing
-            // else moved. Retire the cached base view (and refuse any build
-            // still in flight from publishing) so the next read captures
-            // the committed source. Cache entries are untouched; this drops
-            // a snapshot handle, not a cached result.
-            self.store_view_manager().clear();
             // Alias-map sync runs only when `req.aliases` differs from
             // the previously recorded set for this canonical. This is
             // the only mutation permitted on the quintuple-unchanged

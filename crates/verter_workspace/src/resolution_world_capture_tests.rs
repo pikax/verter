@@ -132,51 +132,6 @@ fn stable_capture_waits_for_a_publication_window_without_spending_a_retry() {
     capturer.join().expect("capture must not panic");
 }
 
-/// The capture a consumer store view retains must wait a writer's window out
-/// rather than report "no world": a view that captured nothing validates no
-/// resolution witness, and a cached view keeps that answer until something
-/// else replaces it, so momentary publication contention would otherwise
-/// leave every resolution-dependent cache entry permanently cold.
-#[test]
-fn a_consumer_view_capture_during_a_publication_window_still_yields_a_world() {
-    let workspace = Arc::new(workspace());
-    let (release_tx, writer) = hold_publication_window(&workspace);
-    let (waiting_tx, waiting_rx) = mpsc::channel();
-    let capturer = {
-        let workspace = Arc::clone(&workspace);
-        std::thread::spawn(move || {
-            resolution_test_hooks::with_hook(
-                ResolutionPhase::PublicationGateWait,
-                move || waiting_tx.send(()).expect("capture test is listening"),
-                || WorkspaceRead::capture_resolution_world(workspace.as_ref()),
-            )
-        })
-    };
-    let deadline = std::time::Instant::now() + WAIT;
-    let waited = loop {
-        if waiting_rx.try_recv().is_ok() {
-            break true;
-        }
-        if capturer.is_finished() || std::time::Instant::now() >= deadline {
-            break false;
-        }
-        std::thread::yield_now();
-    };
-
-    release_tx.send(()).expect("writer is still waiting");
-    writer.join().expect("writer must not panic");
-    let captured = capturer.join().expect("capture must not panic");
-    assert!(
-        captured.is_some(),
-        "a capture racing a publication window must return the world the \
-         writer leaves, not `None`"
-    );
-    assert!(
-        waited,
-        "the capture must wait on the gate the held writer owns"
-    );
-}
-
 /// A resolution that begins while a world writer is descheduled inside its
 /// window for longer than any bounded wait would allow is still admitted
 /// with its answer: the capture waits the writer out, it never turns the

@@ -375,10 +375,8 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
     fn capture_resolution_world(
         &self,
     ) -> Option<Arc<crate::resolution_currency::CapturedResolutionWorld>> {
-        Some(
-            self.engine
-                .capture_view_resolution_world(self.engine.default_resolution_population()),
-        )
+        self.engine
+            .capture_published_resolution_world(self.engine.default_resolution_population())
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
