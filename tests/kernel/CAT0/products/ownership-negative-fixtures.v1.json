@@ -65,6 +65,16 @@
           "row": "consumers[CAT-C01]",
           "remove": true,
           "reason": "surfaceReferences cites CAT-C01 and CarrierGrammarAuthority consumes T01 with no consumer row"
+        },
+        {
+          "row": "consumers[CAT-C05]",
+          "remove": true,
+          "reason": "emptyPopulations cites CAT-C05 and the T09 external-contribution slot has no consumer row"
+        },
+        {
+          "row": "emptyPopulations[External contributions]",
+          "unset": "consumers",
+          "reason": "CAT-C05 is cited by no surfaceReference and no emptyPopulations entry"
         }
       ]
     },

@@ -20,7 +20,7 @@ The reviewed contract data lives in `tests/kernel/CAT0/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `catalog-inventory.v1.json` | Tables `T01`–`T09`, catalog rules `CR01`–`CR14`, contribution kinds `XK01`–`XK08`, outcomes `CAT-O01`–`CAT-O12`, consumers `CAT-C01`–`CAT-C06`, displaced routes `CAT-D01`–`CAT-D06`, the per-surface reference map, category coverage, out-of-scope registries, empty populations, findings and transferred obligations |
+| `catalog-inventory.v1.json` | Tables `T01`–`T09`, catalog rules `CR01`–`CR14`, contribution kinds `XK01`–`XK09`, outcomes `CAT-O01`–`CAT-O12`, consumers `CAT-C01`–`CAT-C06`, displaced routes `CAT-D01`–`CAT-D06`, the per-surface reference map, category coverage, out-of-scope registries, empty populations, findings and transferred obligations |
 | `registration-fixture-matrix.v1.json` | Registration/capability cases `RM01`–`RM12`, determinism cases `DM01`–`DM05` and manifest byte-pinning cases `MB01`–`MB03`, each with input, required and forbidden outcome, existing evidence and the node whose test makes it executable |
 | `ownership-negative-fixtures.v1.json` | The positive control `CN00` and the six refusal fixtures `CN01`–`CN06` for the ownership validator |
 
@@ -73,6 +73,9 @@ Plain script carriers (`ts`, `tsx`, `js`, `d.ts` and their module variants)
 are `T01` rows too. A carrier row names no profile, so one byte stream can
 carry several semantic claims (VID0 `VC03`). `T04`, `T06` and `T09` have no
 rows at this head; each is an empty population recorded in the inventory.
+The external-contribution consumer `CAT-C05` is cited from that `T09` empty
+population, not from a surface, because no production surface consumes a
+manifest yet.
 
 ## Catalog rules
 
@@ -84,7 +87,13 @@ rows at this head; each is an empty population recorded in the inventory.
 - **CR02.** Tables are separately typed. There is no flat row enum spanning
   tables, no per-framework arm in a shared table type and no second registry.
 - **CR03.** Registration carries no `Any`. Rows are concrete types; a frontend,
-  backend or leg is a typed trait object of its capability trait.
+  backend or leg is a typed trait object of its capability trait. This is the
+  successor state. Today `FrameworkRegistration` still carries
+  `ErasedFrameworkSurfaceStore` and `FrameworkSurfaceDtoBundle` `Any` bridges
+  (`CAT-F04`, deleted with the surface stores by `D14`) and the
+  `FrameworkScriptFactPayload` `Any` bridge reachable from
+  `script_fact_providers` (`CAT-F05`, dropped from the snapshot row by CPF1).
+  The carrier-parse downcast in `parse_artifact` stays outside registration.
 - **CR04.** No runtime plugin loading and no dynamic native ABI. An external
   contribution enters only as a validated `T09` row; admitting it yields a new
   snapshot with a new identity and never mutates a built one.
@@ -132,7 +141,11 @@ contribution version, its provenance (`official-static`, `data-manifest` or
 `isolated-guest`), the content digest of its admitted manifest and its target
 ids. The reserved kinds are carrier (`XK01`), semantic profile (`XK02`),
 project profile (`XK03`), embedded language (`XK04`), capability (`XK05`),
-rule or action (`XK06`), tool operation (`XK07`) and metadata facts (`XK08`).
+rule or action (`XK06`), tool operation (`XK07`), metadata facts (`XK08`) and
+interoperability (`XK09`). An `XK09` contribution declares whether profiles
+sharing a carrier are exclusive, coexisting or nested. Two relations on one
+`T06` key fail construction (`CR07`); an overlap with no declared relation is
+a typed ambiguous outcome (`CR14`). Admission order never chooses it.
 
 Core still resolves every claim deterministically (`CR14`). A contribution
 never replaces carrier parsing of a registered carrier, any identity, type
@@ -174,9 +187,9 @@ Coverage of the charter's deletion categories:
 | Category | Recorded here | Referenced |
 | -------- | ------------- | ---------- |
 | central framework switch | `CAT-D06` | `D01`–`D07`, `D10`, `D11`, `V-D03` |
-| untagged coordinate/public identity | `CAT-D05` | `D08`, `D09`, `D16`, `D17`, `D19`, `V-D01`, `V-D02`, `V-D04`–`V-D06` |
+| untagged coordinate/public identity | none | `D08`, `D09`, `D16`, `D17`, `D19`, `V-D01`, `V-D02`, `V-D04`–`V-D06` |
 | duplicate component information authority | none | `D12`–`D15`, `D18` |
-| displaced registry constructor or generated mirror | `CAT-D01`–`CAT-D04` | `D02`, `D06`, `D07` |
+| displaced registry constructor or generated mirror | `CAT-D01`–`CAT-D05` | `D02`, `D06`, `D07` |
 
 The inventory also lists the registries that are not registration roots (the
 external-TS `CarrierRegistry`, `ProjectRegistry`, `DocumentRegistry`,
@@ -221,8 +234,15 @@ to them.
   enum with owner-local configs. REG0 must place its grammar keys in family
   row modules over the CPF1 shape.
 - **Result caches hang off registration rows** (`CAT-F04`, TIF1).
-  `FrameworkRegistration` holds the framework-surface store. A `T03` row
-  carries no cache; `D14` deletes the stores.
+  `FrameworkRegistration.surface_store` carries
+  `ErasedFrameworkSurfaceStore::{as_any, into_any_arc}` and the stored bundle
+  carries `FrameworkSurfaceDtoBundle::as_any`. A `T03` row carries no cache
+  and no `Any` bridge; `D14` deletes the stores.
+- **Script-fact payloads downcast from the registration row** (`CAT-F05`,
+  CPF1). `script_fact_providers` returns `FrameworkScriptFactPayload` values
+  whose `as_any` / `as_any_arc` bridges are reachable from the registration
+  row. CPF1 drops that bridge from the snapshot row. `D14` does not own it:
+  `D14` deletes surface stores only.
 
 ## Acceptance evidence
 

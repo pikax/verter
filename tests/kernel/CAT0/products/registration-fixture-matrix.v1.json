@@ -167,8 +167,8 @@
     {
       "id": "RM11",
       "name": "conflicting external contributions",
-      "input": "Two data-manifest contributions claiming the same (kind, namespace, key) with different versions, admitted in both orders; one contribution claiming the FrameworkProfileId of an official-static row",
-      "required": "A deterministic typed conflict, identical for both admission orders; the claim on an official row is rejected",
+      "input": "Two data-manifest contributions claiming the same (kind, namespace, key) with different versions, admitted in both orders, including two XK09 interoperability relations on one carrier with different exclusive, coexisting or nested claims; one contribution claiming the FrameworkProfileId of an official-static row",
+      "required": "A deterministic typed conflict, identical for both admission orders, for a duplicate key and for two XK09 relations on one T06 key; the claim on an official row is rejected",
       "forbidden": "First-loaded or fastest-returning wins; an official row replaced by a contribution",
       "rules": ["CR04", "CR14"],
       "existingEvidence": [],

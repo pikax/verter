@@ -22,7 +22,7 @@
       "tests/kernel/VID0/products/identity-inventory.v1.json",
       "tests/kernel/VID0/products/identity-case-table.v1.json"
     ],
-    "rule": "UAK0 boundaries B01-B06, outcomes O01-O13, consumers C01-C17, seams S01-S13 and routes D01-D19; UAK1 outcomes U01-U12 and routes K01-K04; and VID0 identities I01-I12, law R01-R16, outcomes V-O01-V-O12, consumers V-C01-V-C11 and routes V-D01-V-D06 keep their owners. CAT0 references them by id and adds no second owner. CAT0 adds tables T01-T09, catalog rules CR01-CR14, contribution kinds XK01-XK08, outcomes CAT-O01-CAT-O12, consumers CAT-C01-CAT-C06, displaced routes CAT-D01-CAT-D06, the per-surface reference map and the category coverage."
+    "rule": "UAK0 boundaries B01-B06, outcomes O01-O13, consumers C01-C17, seams S01-S13 and routes D01-D19; UAK1 outcomes U01-U12 and routes K01-K04; and VID0 identities I01-I12, law R01-R16, outcomes V-O01-V-O12, consumers V-C01-V-C11 and routes V-D01-V-D06 keep their owners. CAT0 references them by id and adds no second owner. CAT0 adds tables T01-T09, catalog rules CR01-CR14, contribution kinds XK01-XK09, outcomes CAT-O01-CAT-O12, consumers CAT-C01-CAT-C06, displaced routes CAT-D01-CAT-D06, the per-surface reference map and the category coverage. Every consumer id is named by a surfaceReferences consumers list or by an emptyPopulations consumers list. Every id in categoryCoverage.referenced has a referencedRoutes row."
   },
   "tables": [
     {
@@ -205,7 +205,7 @@
   "catalogRules": [
     { "id": "CR01", "rule": "One CatalogSnapshot per host, built once by the composition root (UAK1 layer LR) from static row providers. Nothing is registered, replaced or removed after construction." },
     { "id": "CR02", "rule": "The catalog is a set of separately typed tables T01-T09. There is no flat row enum spanning tables, no per-framework enum arm in a shared table type and no second registry beside the snapshot." },
-    { "id": "CR03", "rule": "Registration carries no Any. Rows are concrete types; a frontend, backend or leg is a typed trait object of its capability trait. The confined carrier-parse downcast helpers stay outside registration." },
+    { "id": "CR03", "rule": "Registration carries no Any. Rows are concrete types; a frontend, backend or leg is a typed trait object of its capability trait. This is the successor state. At this head FrameworkRegistration still carries the Any bridges in CAT-F04 and CAT-F05; they are the deletion population, and the rule holds once those owners remove them from the registration row. The carrier-parse downcast in verter_language parse_artifact (__verter_as_any) stays outside registration." },
     { "id": "CR04", "rule": "No runtime plugin loading and no dynamic native ABI. An external contribution enters only as a validated T09 row admitted by XSDK1, which yields a new snapshot with a new identity; it never mutates a built snapshot." },
     { "id": "CR05", "rule": "Each table is ordered by the canonical encoding of its row key. The order rows were provided in, the order the composition root calls providers and hash-map iteration never decide table order." },
     { "id": "CR06", "rule": "Snapshot identity (VID0 I09) is the canonical tagged encoding of the ProfileSchemaEpoch and the semantic fields of every table in canonical order. Presentation fields (CR09) are excluded. It never includes provider order, admission options, workspace or project state, revisions, or process/backend identity (VID0 R14)." },
@@ -233,7 +233,8 @@
       { "id": "XK05", "kind": "capability", "attachesTo": "T07" },
       { "id": "XK06", "kind": "rule or action", "attachesTo": "T08" },
       { "id": "XK07", "kind": "tool operation", "attachesTo": "T09", "note": "a named operation a tool host exposes over existing queries" },
-      { "id": "XK08", "kind": "metadata facts", "attachesTo": "T09", "note": "data-only facts about a profile, such as component or element metadata" }
+      { "id": "XK08", "kind": "metadata facts", "attachesTo": "T09", "note": "data-only facts about a profile, such as component or element metadata" },
+      { "id": "XK09", "kind": "interoperability", "attachesTo": "T06", "note": "exclusive, coexisting or nested relation for a carrier shared by semantic profiles. Two relations on one T06 key fail construction (CR07). An overlap with no declared relation is a typed ambiguous outcome (CR14). Admission order never chooses the relation." }
     ],
     "requiredFields": ["namespace", "exact contribution version", "provenance", "content digest", "targets"],
     "neverReplaceable": [
@@ -255,7 +256,7 @@
     { "id": "CAT-O07", "outcome": "Embedded-language table T05 and its codec rows", "owner": "EMB0I", "successorPath": ["CAT0", "DEM0", "EAK0", "EMB0", "EMB0I"], "receivingAcceptance": "EMB0I-AC1" },
     { "id": "CAT-O08", "outcome": "Interoperability and capability tables T06-T07 read by per-profile participation and coexistence; refines UAK0 O03", "owner": "COX0", "successorPath": ["CAT0", "DEM0", "COX0"], "receivingAcceptance": "COX0-AC2" },
     { "id": "CAT-O09", "outcome": "Rule and action table T08 replacing the mutable shared rule registry", "owner": "LNT3", "successorPath": ["CAT0", "TIF1D", "LRA0", "PUB0", "LNT3"], "receivingAcceptance": "LNT3-AC2" },
-    { "id": "CAT-O10", "outcome": "External contribution slot T09: contribution kinds XK01-XK08, namespace/version/provenance/digest fields, deterministic conflict resolution (CR04, CR14)", "owner": "XSDK1", "successorPath": ["CAT0", "XSDK0", "XSDK1"], "receivingAcceptance": "XSDK1-AC2" },
+    { "id": "CAT-O10", "outcome": "External contribution slot T09: contribution kinds XK01-XK09, including an interoperability relation (XK09) over a shared carrier, namespace/version/provenance/digest fields, deterministic conflict resolution (CR04, CR07, CR14)", "owner": "XSDK1", "successorPath": ["CAT0", "XSDK0", "XSDK1"], "receivingAcceptance": "XSDK1-AC2" },
     { "id": "CAT-O11", "outcome": "Release admission reads the T03 activation rule slot of the snapshot", "owner": "FWA1", "successorPath": ["CAT0", "REG0", "FWA1"], "receivingAcceptance": "FWA1-AC1" },
     { "id": "CAT-O12", "outcome": "Executable validator over this inventory and the negative fixtures in ownership-negative-fixtures.v1.json", "owner": "UAI0", "successorPath": ["CAT0", "UAI0"], "receivingAcceptance": "UAI0-AC-R1" }
   ],
@@ -312,7 +313,7 @@
       "owner": "XSDK1",
       "successorPath": ["CAT0", "XSDK0", "XSDK1"],
       "receivingAcceptance": "XSDK1-AC1",
-      "note": "Empty at this head; the slot is reserved so the first contribution needs no catalog change."
+      "note": "Empty at this head. No surfaceReference names CAT-C05 because no production surface consumes a contribution manifest yet. The External contributions emptyPopulations row cites CAT-C05, so the omission rule can see the row."
     },
     {
       "id": "CAT-C06",
@@ -411,7 +412,7 @@
     },
     {
       "id": "CAT-D05",
-      "category": "untagged-coordinate-or-public-identity",
+      "category": "displaced-registry-constructor-or-mirror",
       "unit": "Mutable shared lint rule registry keyed by adapter id",
       "symbols": [
         "RuleRegistry::new",
@@ -456,19 +457,25 @@
     { "id": "D11", "owner": "COX0", "relation": "MCP branches read the same capability rows" },
     { "id": "D12", "owner": "TIF1", "relation": "component information is a TypeInfo view selected by T03 profile" },
     { "id": "D13", "owner": "TIF1", "relation": "public-API projector legs become T03 row legs consumed by the TypeInfo view" },
-    { "id": "D14", "owner": "TIF1", "relation": "off-store surface stores held on registry rows are deleted" },
+    { "id": "D14", "owner": "TIF1", "relation": "off-store surface stores on FrameworkRegistration.surface_store are deleted, including ErasedFrameworkSurfaceStore::{as_any, into_any_arc} and FrameworkSurfaceDtoBundle::as_any" },
+    { "id": "D15", "owner": "TIF1", "relation": "legacy serde TypeInfo request vocabulary beside the graph envelope" },
+    { "id": "D16", "owner": "ENCF0", "relation": "untagged non-editor public positions become encoding-tagged coordinates" },
+    { "id": "D17", "owner": "ENCL0", "relation": "fixed-UTF-16 editor contracts become a negotiated encoding" },
     { "id": "D18", "owner": "IDX0", "relation": "component discovery reads T03 carrier claims through the index" },
+    { "id": "D19", "owner": "PM1", "relation": "LSP ProjectRegistry is replaced by derived project identity" },
     { "id": "V-D01", "owner": "FWA1", "relation": "T03 rows carry an exact ReleaseId" },
     { "id": "V-D02", "owner": "TIF1", "relation": "selector carries a FrameworkProfileId instead of an open string" },
     { "id": "V-D03", "owner": "REG0", "relation": "wire tag is the T03 display family, never the row key" },
+    { "id": "V-D04", "owner": "CPF1", "relation": "per-producer SourceId domains for one carrier file become one minter" },
     { "id": "V-D05", "owner": "FWA1", "relation": "release admission reads the T03 activation slot" },
+    { "id": "V-D06", "owner": "PM1", "relation": "untyped ProjectStableKey is retagged to ConfiguredProjectId" },
     { "id": "K01", "owner": "FWC1", "relation": "the composition root, not a kernel crate, names concrete verticals and backends" }
   ],
   "categoryCoverage": [
     { "category": "central framework switch", "recordedHere": ["CAT-D06"], "referenced": ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D10", "D11", "V-D03"] },
-    { "category": "untagged coordinate/public identity", "recordedHere": ["CAT-D05"], "referenced": ["D08", "D09", "D16", "D17", "D19", "V-D01", "V-D02", "V-D04", "V-D05", "V-D06"] },
+    { "category": "untagged coordinate/public identity", "recordedHere": [], "referenced": ["D08", "D09", "D16", "D17", "D19", "V-D01", "V-D02", "V-D04", "V-D05", "V-D06"] },
     { "category": "duplicate component information authority", "recordedHere": [], "referenced": ["D12", "D13", "D14", "D15", "D18"] },
-    { "category": "displaced registry constructor or generated mirror", "recordedHere": ["CAT-D01", "CAT-D02", "CAT-D03", "CAT-D04"], "referenced": ["D02", "D06", "D07"] },
+    { "category": "displaced registry constructor or generated mirror", "recordedHere": ["CAT-D01", "CAT-D02", "CAT-D03", "CAT-D04", "CAT-D05"], "referenced": ["D02", "D06", "D07"] },
     { "category": "per-framework client wiring", "recordedHere": [], "referenced": ["D10", "V-D05"], "consumersReferenced": ["C05 (REG0)", "C07 (COX0)"] }
   ],
   "outOfScopeRegistries": [
@@ -484,8 +491,7 @@
   "emptyPopulations": [
     { "unit": "Project-profile registrations", "evidence": "No project profile type or registration exists in verter_language, verter_session, verter_protocol or verter_identity.", "consequence": "T04 starts empty; PPR0T fills it." },
     { "unit": "Interoperability relations", "evidence": "Vue (.vue) and Svelte (.svelte, .svelte.ts, .svelte.js) claim disjoint extension rows in LanguageRegistry::built_in.", "consequence": "T06 starts empty; the first shared carrier claim fills it." },
-    { "unit": "External contributions", "evidence": "No production crate loads a plugin or reads an extension manifest (UAK1 empty population).", "consequence": "T09 is a reserved slot with no rows." },
-    { "unit": "Any in registration", "evidence": "FrameworkAdapterRegistry, FrameworkCapabilityCatalog, LanguageRegistry and ImmutableCapabilityCatalog hold concrete or typed trait-object rows. The only Any bridge is the doc-hidden carrier-parse downcast in verter_language parse_artifact, confined to each owning adapter and outside registration.", "consequence": "CR03 has no deletion population; it binds the successor." }
+    { "unit": "External contributions", "consumers": ["CAT-C05"], "evidence": "No production crate loads a plugin or reads an extension manifest (UAK1 empty population). CAT-C05 is the consumer of that empty slot.", "consequence": "T09 is a reserved slot with no rows. CAT-C05 is cited here, not by a surfaceReference." }
   ],
   "findings": [
     {
@@ -508,9 +514,15 @@
     },
     {
       "id": "CAT-F04",
-      "finding": "The framework-surface result stores live on the registration rows (FrameworkRegistration.surface_store). A registration row must not own a result cache; D14 (TIF1) deletes the stores, and the T03 row carries no cache.",
+      "finding": "FrameworkRegistration.surface_store is Arc<dyn ErasedFrameworkSurfaceStore>, whose as_any and into_any_arc bridges, and FrameworkSurfaceDtoBundle::as_any on the stored bundle, are registration-carried Any (crates/verter_session/src/framework/surface_store.rs). D14 (TIF1) already deletes those stores. After that cutover they are not a CR03 population. The T03 row carries no cache and no Any bridge.",
       "owner": "TIF1",
       "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "CAT-F05",
+      "finding": "FrameworkRegistration.script_fact_providers returns payloads that implement FrameworkScriptFactPayload::{as_any, as_any_arc} (crates/verter_semantic/src/analysis/framework_facts/mod.rs). That Any bridge is reachable from the registration row, so it is not the parse_artifact downcast and not an empty population. D14 deletes surface stores only. CPF1 drops this bridge from the snapshot registration row (CR03); a downcast that remains inside an owning adapter, outside the row, is not a catalog field.",
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
     }
   ],
   "transferredObligations": [
