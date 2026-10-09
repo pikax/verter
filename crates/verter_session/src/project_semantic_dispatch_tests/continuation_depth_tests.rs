@@ -96,7 +96,8 @@ fn alias_chains_up_to_500_long_answer_cold_on_a_small_stack() {
 }
 
 /// The call's return through 500 aliases, and a chain of 1,000 aliases,
-/// answer as the shorter chains do.
+/// answer as the shorter chains do, on a 1 MiB thread — the least a host
+/// asks from — in a fresh process.
 ///
 /// TypeScript 7.0.2 (all four settings at 500, `strictNullChecks` on and
 /// off at 1,000): no TS2589; under `strictNullChecks` `typeof c` and
@@ -104,14 +105,21 @@ fn alias_chains_up_to_500_long_answer_cold_on_a_small_stack() {
 #[test]
 #[ignore = "the flow return of a call whose declared return is a chain of 500 or more aliases produces no result"]
 fn alias_chains_500_and_1000_long_answer_every_row_cold_on_a_one_mebibyte_stack() {
-    for (length, rows) in [(500, &ALIAS_CHAIN_ROWS[1..]), (1000, ALIAS_CHAIN_ROWS)] {
-        let mismatches = on_a_small_stack(move || evaluated_mismatches(&alias_chain(length), rows));
-        assert_eq!(
-            mismatches,
-            Vec::<String>::new(),
-            "a chain of {length} aliases"
-        );
-    }
+    in_a_fresh_process(test_path!(), || {
+        for (length, rows) in [(500, &ALIAS_CHAIN_ROWS[1..]), (1000, ALIAS_CHAIN_ROWS)] {
+            let mismatches = std::thread::Builder::new()
+                .stack_size(1 << 20)
+                .spawn(move || evaluated_mismatches(&alias_chain(length), rows))
+                .expect("spawn the probing thread")
+                .join()
+                .expect("the probe answers");
+            assert_eq!(
+                mismatches,
+                Vec::<String>::new(),
+                "a chain of {length} aliases"
+            );
+        }
+    });
 }
 
 /// The four `strictNullChecks` × `noImplicitAny` settings.

@@ -32,11 +32,18 @@ pub(super) struct ProbeProject<'a> {
 const PROBE_ROOT: &str = "/wb";
 pub(super) const PROBE_FILE: &str = "/wb/checker_probe.ts";
 
-/// Set in the child process [`in_a_fresh_process`] runs one test in.
+/// Set, to the exact path of the one test it admits, in the child process
+/// [`in_a_fresh_process`] runs that test in. A process inheriting any other
+/// value — a stray one, or another test's — is no child of that test and
+/// re-executes it like any parent.
 const FRESH_PROCESS_CHILD: &str = "VERTER_FRESH_PROCESS_TEST_CHILD";
 
 /// The line the child prints once its test's body returned.
 const FRESH_PROCESS_TOKEN: &str = "fresh-process test answered";
+
+/// The line [`a_fresh_process_probe_reports_its_process`]'s body prints:
+/// the id of the process it ran in.
+const FRESH_PROCESS_PROBE: &str = "fresh-process probe body ran in process";
 
 /// The path of the test this expands in, as libtest names it
 /// (`module::test`, without the crate), for [`in_a_fresh_process`].
@@ -57,16 +64,24 @@ pub(super) use test_path;
 /// overflow aborts that process alone, failing this one test instead of
 /// the whole run. The child runs the one test, with its output shown, and
 /// prints a token after the body; the parent requires both the token and a
-/// clean exit.
+/// clean exit, and shows the child's output in turn. The body runs in
+/// place only in a process whose marker names this very test.
 pub(super) fn in_a_fresh_process(test: &str, body: impl FnOnce()) {
-    if std::env::var_os(FRESH_PROCESS_CHILD).is_some() {
+    if std::env::var_os(FRESH_PROCESS_CHILD).is_some_and(|marker| marker.to_str() == Some(test)) {
         body();
         println!("{FRESH_PROCESS_TOKEN}: {test}");
         return;
     }
+    // `--include-ignored`: an ignored test run by hand re-executes as itself.
     let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
-        .args(["--exact", test, "--nocapture", "--test-threads=1"])
-        .env(FRESH_PROCESS_CHILD, "1")
+        .args([
+            "--exact",
+            test,
+            "--include-ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FRESH_PROCESS_CHILD, test)
         .output()
         .expect("run the test in a child process");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -75,6 +90,71 @@ pub(super) fn in_a_fresh_process(test: &str, body: impl FnOnce()) {
         output.status.success() && stdout.contains(&format!("{FRESH_PROCESS_TOKEN}: {test}")),
         "the child process running `{test}` failed (status {:?}):\n{stdout}\n{stderr}",
         output.status
+    );
+    print!("{stdout}");
+}
+
+/// A fresh-process test whose body reports the process it ran in, for
+/// [`a_fresh_process_marker_admits_only_the_test_it_names`].
+#[test]
+fn a_fresh_process_probe_reports_its_process() {
+    in_a_fresh_process(test_path!(), || {
+        println!("{FRESH_PROCESS_PROBE} {}", std::process::id());
+    });
+}
+
+/// The child marker admits only the test it names. A process of this
+/// binary started with an arbitrary marker, or one naming another test,
+/// runs the probe's body in a child of its own (the body reports a process
+/// other than the one started), where a process started with the probe's
+/// exact path runs it in place (the body reports that very process). The
+/// markers are set on the processes started here, never on this one.
+#[test]
+fn a_fresh_process_marker_admits_only_the_test_it_names() {
+    const PROBE: &str = "project_semantic_dispatch_tests::checker_probe_lane_tests::a_fresh_process_probe_reports_its_process";
+    let body_process_under = |marker: &str| -> (u32, u32) {
+        let child = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", PROBE, "--nocapture", "--test-threads=1"])
+            .env(FRESH_PROCESS_CHILD, marker)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("start the probe's process");
+        let started = child.id();
+        let output = child.wait_with_output().expect("the probe's process ends");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the probe passes under the marker {marker:?} (status {:?}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The report may share its line with the runner's own `test … ...`
+        // prefix, so it is found anywhere in a line.
+        let body_process = stdout
+            .lines()
+            .find_map(|line| {
+                let (_, rest) = line.split_once(FRESH_PROCESS_PROBE)?;
+                rest.trim().parse::<u32>().ok()
+            })
+            .unwrap_or_else(|| panic!("the probe's body reports its process:\n{stdout}"));
+        (started, body_process)
+    };
+    for marker in [
+        "1",
+        "arbitrary",
+        "project_semantic_dispatch_tests::checker_probe_lane_tests::some_other_test",
+    ] {
+        let (started, body) = body_process_under(marker);
+        assert_ne!(
+            started, body,
+            "the marker {marker:?} must not admit the body in place"
+        );
+    }
+    let (started, body) = body_process_under(PROBE);
+    assert_eq!(
+        started, body,
+        "the probe's own path admits the body in the process it names"
     );
 }
 
