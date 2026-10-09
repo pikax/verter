@@ -57,14 +57,18 @@ consume the plan.
 
 ### Captured selection inputs (subblock 1)
 
-- **DR01.** `SelectionInputs` is a closed, captured tuple. Its members are:
+- **DR01.** `SelectionInputs` is a closed, captured tuple of three members:
   the `CatalogSnapshot` identity (VID0 `I09`); the effective configuration's
   `frameworks` section for the scope, with its value fingerprint (CFG0
-  `CR14`, `CR16`); the `FrameworkActivation` records of the owning package,
-  published per PM snapshot (FWA1); and the host's declared client
-  capabilities. Nothing else activates. Participation (the COX0D mode and
-  capability mask) is not an activation input: it enters at `P4` (`DR15`), so
-  standing down never changes what is activated or parsed.
+  `CR14`, `CR16`); and the `FrameworkActivation` records of the owning
+  package, published per PM snapshot (FWA1). Nothing else activates. The
+  host's declared client capabilities are not a member and have no
+  activation identity. COX0D owns that vocabulary — provider unavailable,
+  unsupported client feature, and disabled optional visual layer — inside
+  the participation mask. The mask, mode and those capabilities enter at
+  `P4` (`DR15`); their identity is the mask identity, so a change mints a
+  new demand epoch only (`DR21`). Standing down never changes what is
+  activated or parsed.
 - **DR02.** Every member is read through its owner's captured snapshot.
   Selection reads no file, package manifest, lockfile, environment variable,
   process flag or editor setting directly. A member that is not captured is
@@ -132,8 +136,10 @@ consume the plan.
 - **DR15.** A request names one operation descriptor and one normalized root
   context, taken from the READS envelope (SKR-READS) and, for TypeInfo, the
   TIF0 operation descriptors. Stage four intersects the operation's
-  capability cells (VID0 `I10`, profile-qualified) with the participation
-  mask (COX0D) and the confirmed claims of `P3`.
+  capability cells (VID0 `I10`, profile-qualified) with the confirmed claims
+  of `P3` and with the participation mask (COX0D). That mask is the identity
+  of the COX0D mode and of the host's declared client capabilities. Neither
+  is a `SelectionInputs` member and neither enters the activation epoch.
 - **DR16.** Every capability declares its exact fact demands: the fact kinds
   and query families it reads, keyed by profile. A capability that cannot
   state them is a construction failure of the catalog row, never a capability
@@ -150,10 +156,16 @@ consume the plan.
   completion order.
 - **DR19.** Profile identity for refusal reuse is `(demand purpose,
   BudgetProfile identity, ordered FrameworkProfileId set, normalized root
-  context)`. An eligible isolated-root refusal is reused only under that exact
-  identity; it stays a refusal and is never read as exact absence (TIF0
-  2026-09-30 amendment). A dependency admitted under a root needs no second
-  root permit. A request with capture off performs no observation-only work.
+  context, demand epoch, root source identity)`. The demand epoch is the
+  `DR21` epoch. The root source identity is VID0 `R12`: `(SourceUnitId,
+  SourceRevision, ContentId)`, or `(SourceUnitId, SourceRevision,
+  MapRevision)` when the root is a map. An eligible isolated-root refusal is
+  reused only under that exact identity. A refusal warmed under one demand
+  epoch or one root source identity is not reusable under another (`DR25`,
+  `DC05`). It stays a refusal and is never read as exact absence (TIF0
+  2026-09-30 amendment, including that amendment's edit isolation for a
+  reused refusal). A dependency admitted under a root needs no second root
+  permit. A request with capture off performs no observation-only work.
 - **DR20.** `DemandPlan` is submitted through the engine-owned
   `ExecutionSubmission` port: `attach_engine()` returns an
   `EngineBinding<MacroMirrors>` holding engine resources only. Host-owned
@@ -164,12 +176,14 @@ consume the plan.
 
 ### Conflict, ambiguity and epoch transitions (subblock 5)
 
-- **DR21.** An activation epoch is the selection-input identity. Any change
-  to a member (`frameworks` value fingerprint, activation record, catalog
-  identity) mints a new activation epoch. A demand epoch is the activation
-  epoch plus the participation mode and mask identity; a participation
-  change mints a new demand epoch only. A change that leaves every member
-  identity unchanged mints neither (CFG0 `CR16`).
+- **DR21.** An activation epoch is the selection-input identity. Its closed
+  member list is `DR01`'s three: the `frameworks` value fingerprint, the
+  activation record and the catalog identity. Any change to one of those
+  members mints a new activation epoch. A demand epoch is the activation
+  epoch plus the participation mode and mask identity. The host's declared
+  client capabilities are inside that mask, so a change to them mints a new
+  demand epoch only, as does any other participation change. A change that
+  leaves every member identity unchanged mints neither (CFG0 `CR16`).
 - **DR22.** Ambiguity is decided per region, keyed by `(SourceUnitId,
   RegionId)` (VID0 `R10`). Two active profiles claiming one region with no
   per-file narrowing and no declared `T06` relation is `Ambiguous { claims }`
@@ -198,11 +212,14 @@ consume the plan.
   The carrier parse runs only when another demand needs the carrier (UAK0
   `Z02`); selection alone never triggers it.
 - **DR28.** Activation and demand planning emit exactly one audit record per
-  plan: `ActivationPlanned { epoch, selected, dormant, ambiguous, unproven }`
-  for stage one and `DemandPlanned { purpose, capabilities, facts }` for stage
-  four. Dormant work is counted, never executed. Audit capture is optional
-  detail; required plan state survives capture off (UAO0 2026-09-30
-  amendment).
+  plan, not one per epoch. A stage-one plan is one source unit under one
+  activation epoch (`DR06`, `DR09`), so that epoch emits one
+  `ActivationPlanned { epoch, selected, dormant, ambiguous, unproven }` for
+  each source unit it plans, and the counts are that plan's regions only.
+  Stage four emits one `DemandPlanned { purpose, capabilities, facts }` per
+  demand plan (one request or one batch). Dormant work is counted, never
+  executed. Audit capture is optional detail; required plan state survives
+  capture off (UAO0 2026-09-30 amendment).
 - **DR29.** Cancellation is observed at plan boundaries and at the engine's
   `CancellationCheckpoint`. A cancelled plan publishes nothing, leaves no
   warm entry and no refusal, and a retry answers what a fresh host answers.
