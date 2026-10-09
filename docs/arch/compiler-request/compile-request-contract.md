@@ -28,9 +28,9 @@ The reviewed contract data lives in `docs/arch/compiler-request/products/`:
 
 | File | Holds |
 | ---- | ----- |
-| `compile-request-inventory.v1.json` | Rules `RQ01`–`RQ10`, `DC01`–`DC06`, `SK01`–`SK10`, `OB01`–`OB05`, `NB01`–`NB06`, `MG01`–`MG09`; outcomes `CMP-O01`–`CMP-O18`; consumers `CMP-C01`–`CMP-C14`; displaced routes `CMP-D01`–`CMP-D17`; referenced routes, category coverage, empty populations, findings `CMP-F01`–`CMP-F16`, the authorised receiving-charter amendments `RA02` and `RA03`, plan consumers and transferred obligations `CMP-T01`–`CMP-T05` |
+| `compile-request-inventory.v1.json` | Rules `RQ01`–`RQ10`, `DC01`–`DC06`, `SK01`–`SK11`, `OB01`–`OB05`, `NB01`–`NB06`, `MG01`–`MG09`; outcomes `CMP-O01`–`CMP-O18`; consumers `CMP-C01`–`CMP-C14`; displaced routes `CMP-D01`–`CMP-D17`; referenced routes, category coverage, empty populations, findings `CMP-F01`–`CMP-F16`, the authorised receiving-charter amendments `RA02` and `RA03`, plan consumers and transferred obligations `CMP-T01`–`CMP-T05` |
 | `option-impact-classification.v1.json` | The seven option-impact classes, rules `OI01`–`OI06`, and one row per caller-settable request field (`OC-T..`, `OC-P..`, `OC-V..`, `OC-S..`) plus the host-resolved execution inputs (`OC-H..`), each with its class and its routing status at the described head |
-| `compile-request-case-table.v1.json` | Negative cases `CN01`–`CN13`, positive cases `CP01`–`CP05` and work counters `WC01`–`WC04` |
+| `compile-request-case-table.v1.json` | Negative cases `CN01`–`CN14`, positive cases `CP01`–`CP05` and work counters `WC01`–`WC04` |
 
 Every `successorPath` starts at CMP0 and follows predecessor edges in the
 controller-owned plan. VID0, CFG0, CPF0, DEM0 and PAR0 rows keep their owners;
@@ -67,9 +67,11 @@ CMP0 references them by id.
   no `Default`/`Optimized`, no contract id. The capability-matrix
   `compatibility_domain` cells (`core@3.6.0-rc.3`, `svelte@5.56.8`) are a
   frozen evidence package. They are not `DefaultCompilationContractId`.
-  The contract id's release is the admitted exact release of the framework
-  lock (VID0 `I04`): `@vue/compiler-sfc` `3.6.0-rc.5` and `svelte` `5.56.10`
-  at the described head.
+  The contract id's release is the activation record of the workspace the
+  request is served for (VID0 `I04`, `R08`), the same source
+  `FrameworkProfileId` reads. At the described head that activation is
+  `@vue/compiler-sfc` `3.6.0-rc.5` and `svelte` `5.56.10`. Those versions
+  are that head's workspace activation, not a compiler build pin.
 - **Admission is route-local.** The host integrations refuse options their
   bundle cannot route (`refuse_unproducible_vue_options`,
   `refuse_unproducible_svelte_options`, `unroutable_host_request_axis`). The
@@ -136,12 +138,16 @@ CompileRequest
 - `CompilerPolicy` is one closed type, `Default(DefaultCompilationContractId)`
   or `Optimized`. The source plan's `CompilePolicy` is the same type (`DC01`).
 - Public `Default` normalizes at admission to an exact
-  `DefaultCompilationContractId` = (VID0 `ReleaseId` of the admitted exact
-  release of the framework lock, target kind, contract revision), recorded
-  in artifact provenance (`DC02`). The capability-matrix
-  `compatibility_domain` cell is not that id. A workspace re-resolution of
-  the lock re-issues the registry row; the previous id does not stay in
-  force. The matrix cell is re-issued only by its own re-certification
+  `DefaultCompilationContractId` = (VID0 `ReleaseId`, target kind, contract
+  revision), recorded in artifact provenance (`DC02`). That `ReleaseId` is
+  read from the activation record of the workspace the request is served
+  for, the same record `FrameworkProfileId` reads (VID0 `R08`, `R09`). It
+  is not the compiler binary's build-time dependency pin. The
+  capability-matrix `compatibility_domain` cell is not that id. The
+  versions `CP02` names are the described head's workspace activation
+  only. A re-resolution that changes the activated release re-issues the
+  registry row; the previous id does not stay in force. The matrix cell is
+  re-issued only by its own re-certification
   (`packages/framework-conformance-harness/evidence/version-domain.md`).
 - The registry has one row per (exact release, target). Each row lists
   per-stage contract epochs and its intentional divergence records. A
@@ -184,7 +190,7 @@ Vue IDE axes (`OC-P08`, `OC-P09`); no profile-scoped key is introduced
 
 ```text
 ParseKey             existing verter_identity ParseKey (re-exported, never re-minted)
-SemanticKey          = H(sorted ParseKeys of demanded regions, FrameworkProfileId, Semantic-class option bytes, semantic epoch, semantic admission basis)
+SemanticKey          = H(field 1 sorted ParseKeys of the source units that contain the demanded regions, field 2 FrameworkProfileId, field 3 Semantic-class option bytes, field 4 semantic epoch, field 5 SemanticAdmissionBasis digest)
 CompileStructureKey  = H(SemanticKey, product demand-closure digest, CompileStructure options, structure epoch)
 TargetPlanKey        = H(CompileStructureKey, target, TargetPlan options, target epoch)
 EmitKey              = H(TargetPlanKey, Emit options, MapMode, emit epoch)
@@ -201,7 +207,17 @@ bytes and enter `TerminalKey` only. A profile id is never copied into a later
 class for safety.
 
 - Six distinct nominal types (`SK01`). `ParseKey` is PAR0's `G07` identity;
-  the compiler re-exports it (`SK02`, `CMP-F09`).
+  the compiler re-exports it (`SK02`, `CMP-F09`). `ParseKey` is per source
+  unit. It does not name a region.
+- `SemanticAdmissionBasis` (`SK11`) is `SemanticKey` field 5. Admission
+  mints it after the product's demand closure is known and its semantic
+  `NeedInputs` are supplied. It holds three sorted sets, canonically
+  encoded under `verter.compiler.stage.semantic-admission-basis.v1`: field
+  1 the demanded `RegionId` set (VID0 `I06`), field 2 the admitted
+  host-resolved facts (`OC-H01`, `OC-H04`), field 3 the digests of supplied
+  external style stages (`OC-H02`). CMP0K defines the type; CMP1 derives
+  the value. Two products that demand different regions of one file share
+  field 1 of `SemanticKey` and differ in field 5 (`CN14`).
 - Each product owns its own chain from its own demand closure. Products
   share a prefix exactly when their inputs to it are equal (`SK04`).
 - Canonical bytes come from the `verter_identity` `CanonicalEncoder` with one
@@ -244,7 +260,7 @@ engine or cache until OPT0 (`OB05`).
 | `NB03` | `DemandSet` | the finite per-request specialization of DEM0 `P4`: per product, the closed set of required parse, semantic, style, map, planning and emission capabilities with reason edges, closed before execution; its closure digest enters `CompileStructureKey` |
 | `NB04` | `RegionId` | VID0 `I06`, the only region identity that crosses a stage, a demand entry, a segment anchor or a qualifier. Compile-structure regions are snapshot-local dense ids of a distinct type, never spelled `RegionId`, never in a key. Lifetime classes: `Request`, `Snapshot`, `Retained`, `Published` |
 | `NB05` | `EmissionSegment` | no framework field and no identity; anchors are (`SourceUnitId`, `RegionId`, exact UTF-8 span); `EmitPlan` keyed by `EmitKey`; no map work under `NoMap` |
-| `NB06` | `ArtifactQualifier` | (`ProductKind`, target, `DefaultCompilationContractId`, `TerminalKey`) on every published artifact beside `ArtifactId` lineage; `ArtifactId` alone never addresses an artifact in a cache or host map |
+| `NB06` | `ArtifactQualifier` | (`ProductKind`, target, `DefaultCompilationContractId`, `TerminalKey`) on every published artifact beside `ArtifactId` lineage. Target and contract revision are projections of the inputs `TerminalKey` composes, minted with that key and never supplied independently. The target equals the `TargetPlanKey` target. The contract revision equals the registry row whose epochs that key composed, and the `ReleaseId` is that row's activation. A disagreeing copy is not a valid qualifier. `ArtifactId` alone never addresses an artifact in a cache or host map |
 
 ## Migration and deletion ledger (CMP0-F)
 
@@ -267,9 +283,9 @@ ride CPF0's `RA01` transport migration (`MG09`).
 | -- | ------- | ----- |
 | `CMP-O01` | Typed envelope, policy, contract id, three admission outcomes, one admission | CMP1 (`CMP1-AC2`) |
 | `CMP-O02` | Classifier enforced at admission, with its negative tests | CMP1 (`CMP1-AC2`) |
-| `CMP-O03` | Stage identity types and canonical encoding | CMP0K (`CMP0K-AC1`) |
+| `CMP-O03` | Stage identity types and canonical encoding, including `SemanticAdmissionBasis` | CMP0K (`CMP0K-AC1`) |
 | `CMP-O04` | Reserved optimized-basis types | CMP0K (`CMP0K-AC-R1`) |
-| `CMP-O05` | Per-product key derivation | CMP1 (`CMP1-AC2`) |
+| `CMP-O05` | Per-product key derivation, including `SemanticAdmissionBasis` | CMP1 (`CMP1-AC2`) |
 | `CMP-O06` | Complete-only publication, incremental equals fresh | CMP1 (`CMP1-AC3`) |
 | `CMP-O07` | `Optimized` refuses with zero work | CMP1 (`CMP1-AC1`) |
 | `CMP-O08` | Whether `Optimized` ever executes | OPT0 (`OPT0-AC1`) |
