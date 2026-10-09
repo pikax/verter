@@ -30,15 +30,20 @@ references them by id.
 
 ## Method
 
-1. Enumerated every method of the two compiler-shaped carrier structs
-   (`VueCarrierCompiler`, `SvelteCarrierCompiler`) and of the closed
+1. Enumerated every associated method of the two compiler-shaped carrier
+   structs (`VueCarrierCompiler`, `SvelteCarrierCompiler`) and of the closed
    `KnownRegisteredCompiler` enum, with every production and test caller.
+   `render_admitted_svelte_ide`, `svelte_ide_only_request` and
+   `svelte_carrier_bundle` are free functions after `impl SvelteCarrierCompiler`
+   (`M21`–`M23`), not associated methods. Each has its own row, callers, owner
+   and route.
 2. Enumerated the free functions and product types in `vue_bridge.rs`,
    `svelte/carrier.rs`, `carrier_compiler.rs`, `registered_carrier_projection.rs`
    and `catalog.rs`, and the five capability traits with their Vue/Svelte
    implementations. Followed each to its consumers in `verter_session`,
-   `verter_lsp`, NAPI, WASM, FFI and MCP. Paths follow producer→consumer edges,
-   not name matches.
+   `verter_lsp`, the `parse_corpus_probe` binary, NAPI, WASM, FFI and MCP.
+   Paths follow producer→consumer edges, not name matches. The compile-request
+   envelope those transports name is `P17`, owned by CMP0.
 3. Classified each product as frontend, semantic, projection, compiler backend
    or residue. Classified each module edge against UAK1's layers: the frontend
    half is `L3`, which may not import the optional compiler backends (`LC`).
@@ -80,7 +85,7 @@ The compiler shape survives in three places:
 | frontend | `P01` parse artifact, `P02` registered geometry, `P03` parse diagnostics and reject, `P04` parse admission, `P05` grammar fact, `P06` carrier opener, `P07` script source type | every carrier |
 | semantic | `P08` eval source, `P09` template facts | each semantic profile that registers one |
 | projection | `P10` IDE companion, public API and declarations; `P16` generated-identifier spelling | each profile that registers one |
-| compiler backend | `P11` runtime output and maps, `P12` compile admission and grants, `P13` bundle orchestration, `P14` compile artifact set, `P15` Vue audit compile | compile-capable carriers only |
+| compiler backend | `P11` runtime output and maps, `P12` compile admission and grants, `P13` bundle orchestration, `P14` compile artifact set, `P15` Vue audit compile, `P17` compile-request envelope (CMP0) | compile-capable carriers only (`P17` is the request contract the transports name) |
 | residue | `M07`–`M10`, `M18`–`M20` | nobody; deleted |
 
 The optional backend alone owns compiler output bytes and maps: runtime
@@ -107,7 +112,9 @@ optional, a runtime demand never requires it, and it never requires a backend.
 - Groups `RuntimeCompilerBackend` and `FrameworkHostIntegrationBackend` into
   one optional registration in `CarrierCompilerBackendRegistry`, over
   `CatalogSnapshot` rows (the UAK0 `D02` successor).
-- Only compile-capable carriers register one. It owns `P11`–`P14`.
+- Only compile-capable carriers register one. It owns `P11`–`P15`, including
+  the Vue audit compile route. That route is a backend-contract product;
+  audited compile reaches the backend only through the registry (`F-D07`).
 - It consumes the frontend's admitted parse and never parses.
 - Absence is an omitted registration, never a stub that returns `Unsupported`.
 
@@ -180,11 +187,15 @@ Each deletion category maps to recorded and referenced routes:
 Empty populations at this head:
 
 - **A combined trait or dynamic compiler registry.** None exists (UAK0).
-- **Host or transport callers of a combined compile entry.** `verter_session`
-  and `verter_lsp` have no production caller of `compile_bundle`,
-  `compile_ide`, `compile_runtime`, `project_ide` or `CarrierFrontend::parse`.
-  NAPI, WASM, FFI, MCP and unplugin name no split symbol. `verter_lsp` uses
-  only the generated-identifier spelling (`F-C10`).
+- **Host or transport callers of a combined compile entry.** `verter_session`,
+  `verter_lsp`, NAPI, WASM, FFI, MCP and unplugin have no production caller of
+  `compile_bundle`, `compile_ide`, `compile_runtime`, `project_ide` or
+  `CarrierFrontend::parse`. NAPI, WASM and FFI do name the compile-request
+  envelope in production (`P17`, `F-C12`). MCP names none of those Rust
+  symbols. unplugin names the JS `HostCompileRequest` wire only. `verter_lsp`
+  uses only the generated-identifier spelling (`F-C10`). The
+  `external-corpus` binary `parse_corpus_probe` is a compiler-bin consumer of
+  `parse_registered_frontend` (`F-C11`), not a host or transport caller.
 - **`Unsupported` compiler implementations.** None exists, and `T03` forbids
   one.
 
@@ -212,8 +223,15 @@ The case table holds `PC01`–`PC08`:
 - the `SourceTextCopy`, `CodeTransformRender` and `SourceMapBuild`
   attribution counts.
 
-Each reuses an existing counter except registry dispatches, which CPF1 counts
-at the registry entry. Wall-clock numbers, if any, come from a bench-m3
+Projection executions, template-fact executions and the attribution counts
+reuse existing readers. Registry dispatches are counted by CPF1 at the
+registry entry. The frontend parse-entry count is counted by CPF1 at
+`InstalledCarrierFrontend::parse` and published `pub` under `test-support`,
+the same exposure as `take_projection_producer_invocations`, so the proof
+entry `crates/verter_compiler/tests/cases/carrier_frontend_backend_split_proof.rs`
+can read it. `registered_frontend_parse_count` is `#[cfg(test)] pub(super)`
+and is not that source. `CarrierParse` attribution records parse bytes, not
+the parse-entry count. Wall-clock numbers, if any, come from a bench-m3
 evidence run and never gate.
 
 ## Findings recorded for the receiving owners
