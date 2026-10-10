@@ -290,17 +290,13 @@ pub(crate) struct VueMacroCodegenOutput {
 /// read, including the transitively reached ones no direct import names.
 #[derive(Debug, Clone)]
 pub(crate) enum MacroFactFootprint {
-    /// A bounded observation set built only from publishable reads.
+    /// The complete observation set (paged when wide), built only from
+    /// publishable reads.
     Rooted(Arc<[FactVersionRef]>),
-    /// A bounded observation set whose compute also consumed a read these facts
-    /// cannot validate. The facts still bubble into enclosing scopes; they must
-    /// never authorize shared-cache admission.
+    /// The complete observation set of a compute that also consumed a read
+    /// these facts cannot validate. The facts still bubble into enclosing
+    /// scopes; they must never authorize shared-cache admission.
     RootedNonCacheable(Arc<[FactVersionRef]>),
-    /// Finalisation exceeded the per-signature cap, so NO facts survived.
-    /// Replaying that as an empty observation set would root the consumer on
-    /// nothing — silently, and on exactly the wide-footprint inputs most likely
-    /// to reach it — so this arm can only refuse.
-    Overflowed,
     /// The producer's aggregate basis moved while its tracer was open.
     /// No fact set can validate that mixed world, so the consumer must
     /// refuse even though the producer did run.
@@ -318,15 +314,13 @@ impl MacroFactFootprint {
         let footprint = match finalise {
             FactReadSetFinalise::Ok(facts) => Self::Rooted(facts),
             FactReadSetFinalise::NonCacheable(facts) => Self::RootedNonCacheable(facts),
-            FactReadSetFinalise::Overflow => Self::Overflowed,
             FactReadSetFinalise::MutationUnstable => Self::MutationUnstable,
         };
-        let canonicals: BTreeSet<String> = footprint
-            .facts()
-            .iter()
-            .filter_map(FactVersionRef::canonical_id)
-            .map(ToOwned::to_owned)
-            .collect();
+        let canonicals: BTreeSet<String> =
+            verter_session_query::facts::fact_cache::signature_entries(footprint.facts())
+                .filter_map(FactVersionRef::canonical_id)
+                .map(ToOwned::to_owned)
+                .collect();
         (canonicals.into_iter().collect(), footprint)
     }
 
@@ -335,14 +329,14 @@ impl MacroFactFootprint {
     fn facts(&self) -> &[FactVersionRef] {
         match self {
             Self::Rooted(facts) | Self::RootedNonCacheable(facts) => facts,
-            Self::Overflowed | Self::MutationUnstable | Self::Unobserved => &[],
+            Self::MutationUnstable | Self::Unobserved => &[],
         }
     }
 
     /// Restate the producer's footprint onto the CURRENT thread's tracer stack.
     ///
-    /// Idempotent: finalisation canonicalises before enforcing the cap, so a
-    /// re-observed fact dedups away rather than inflating the consumer's set.
+    /// Idempotent: finalisation canonicalises, so a re-observed fact dedups
+    /// away rather than inflating the consumer's set.
     /// Every arm is handled explicitly — a factless arm must taint, because a
     /// consumer that roots on nothing serves stale results forever.
     pub(crate) fn replay(&self) {
@@ -356,7 +350,7 @@ impl MacroFactFootprint {
                     NonCacheablePropagation::Transitive,
                 );
             }
-            Self::Overflowed | Self::MutationUnstable | Self::Unobserved => {
+            Self::MutationUnstable | Self::Unobserved => {
                 verter_type_engine::fact_tracing::note_non_cacheable_propagation(
                     NonCacheablePropagation::Transitive,
                 );
@@ -366,7 +360,7 @@ impl MacroFactFootprint {
 }
 
 impl VueMacroCodegenOutput {
-    /// Whether the producer's footprint was bounded and built only from
+    /// Whether the producer's footprint was built only from
     /// publishable reads — the deterministic-instrumentation contract surface
     /// the in-crate suites assert, derived from the carrier that drives replay.
     #[cfg(test)]

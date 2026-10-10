@@ -12,7 +12,8 @@ mod inner {
 
     use crate::server::test_support::{RequestBarrier, RequestBarriers};
     use crate::type_provider::protocol::*;
-    use crate::type_provider::traits::{ProviderFuture, TypeProvider};
+    use crate::type_provider::traits::{ProviderFuture, ProviderQuery, TypeProvider};
+    use verter_type_runtime::provider_query::{ConflictKind, ProviderQueryConflict};
 
     /// Test-side mint for the branded provider display signature.
     ///
@@ -357,9 +358,43 @@ mod inner {
         /// default) keeps the trait default — no engine-start pulse — so only
         /// tests that drive the pending-sync re-drive wiring opt in.
         restart_pulse: Option<std::sync::Arc<tokio::sync::Notify>>,
+        /// Test seam: the bytes the engine holds for a foreign target file. A
+        /// definition, type-definition, references, rename or code-action
+        /// answer locating into one is refused when its requester will map it
+        /// through other bytes, or when those bytes move before the answer
+        /// settles, as an adapter's target decode and settlement refuse it.
+        engine_targets: std::collections::HashMap<String, Arc<str>>,
     }
 
     impl MockState {
+        /// Refuse an answer locating into `targets` when the query's requester
+        /// will map a location there through bytes other than the ones the
+        /// engine holds for it.
+        fn check_targets<'a>(
+            &self,
+            query: &ProviderQuery,
+            targets: impl IntoIterator<Item = &'a str>,
+        ) -> Result<(), TypeProviderError> {
+            for path in targets {
+                if let Some(held) = self.engine_targets.get(path) {
+                    query.check_intended_target(path, Some(held))?;
+                }
+            }
+            Ok(())
+        }
+
+        /// The engine's bytes for each of `targets` as the query is
+        /// dispatched, for [`settle_targets`] to recheck once the answer is in.
+        fn held_targets<'a>(
+            &self,
+            targets: impl IntoIterator<Item = &'a str>,
+        ) -> Vec<(String, Option<Arc<str>>)> {
+            targets
+                .into_iter()
+                .map(|path| (path.to_string(), self.engine_targets.get(path).cloned()))
+                .collect()
+        }
+
         /// Record that a query at `path` is evaluated now, against the bytes
         /// the engine holds there at this instant.
         fn note_evaluation(&mut self, path: &str) {
@@ -368,6 +403,24 @@ mod inner {
             self.evaluations
                 .push((path.to_string(), bytes, incarnation));
         }
+    }
+
+    /// Refuse `result` when the engine's bytes for any target it locates into
+    /// moved after the query was dispatched, as an adapter's settlement refuses
+    /// an answer whose decoded targets changed under it.
+    fn settle_targets<T>(
+        state: &Mutex<MockState>,
+        held: &[(String, Option<Arc<str>>)],
+        result: Result<T, TypeProviderError>,
+    ) -> Result<T, TypeProviderError> {
+        let result = result?;
+        let state = state.lock().unwrap();
+        for (path, at_dispatch) in held {
+            if state.engine_targets.get(path) != at_dispatch.as_ref() {
+                return Err(ProviderQueryConflict::new(path, ConflictKind::Moved).into());
+            }
+        }
+        Ok(result)
     }
 
     /// A mock `TypeProvider` for testing.
@@ -464,6 +517,18 @@ mod inner {
                 }
                 result
             })
+        }
+
+        /// Settle foreign targets after every response wait, including the
+        /// decode barrier, before handing their locations back to the caller.
+        fn barriered_targets<'a, T: Send + 'a>(
+            &self,
+            held: Vec<(String, Option<Arc<str>>)>,
+            answer: ProviderFuture<'a, T>,
+        ) -> ProviderFuture<'a, T> {
+            let answer = self.barriered(answer);
+            let state = Arc::clone(&self.state);
+            Box::pin(async move { settle_targets(&state, &held, answer.await) })
         }
 
         fn note_recorded(&self) {
@@ -596,6 +661,15 @@ mod inner {
             state
                 .type_definition_responses
                 .push((path.to_string(), offset, locs));
+        }
+
+        /// Hold `content` as the engine's bytes for the foreign target file
+        /// `path`, whatever surface the LSP recorded for it.
+        pub fn hold_engine_target(&self, path: &str, content: &str) {
+            let mut state = self.state.lock().unwrap();
+            state
+                .engine_targets
+                .insert(path.to_string(), Arc::from(content));
         }
 
         /// Configure reference locations for a specific path and offset.
@@ -1112,7 +1186,7 @@ mod inner {
 
         fn get_completions(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
@@ -1120,7 +1194,11 @@ mod inner {
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
 
-        fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        fn get_hover(
+            &self,
+            _query: &ProviderQuery,
+            _offset: u32,
+        ) -> ProviderFuture<'_, Option<HoverInfo>> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
@@ -1132,7 +1210,7 @@ mod inner {
 
         fn get_definition(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let msg = self.error_message.clone();
@@ -1141,7 +1219,7 @@ mod inner {
 
         fn get_type_definition(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let msg = self.error_message.clone();
@@ -1150,7 +1228,7 @@ mod inner {
 
         fn get_references(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             let msg = self.error_message.clone();
@@ -1159,7 +1237,7 @@ mod inner {
 
         fn get_rename_locations(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<RenameLocation>> {
             let msg = self.error_message.clone();
@@ -1168,7 +1246,7 @@ mod inner {
 
         fn get_signature_help(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Option<SignatureHelp>> {
             let msg = self.error_message.clone();
@@ -1177,7 +1255,7 @@ mod inner {
 
         fn get_code_actions(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _start_offset: u32,
             _end_offset: u32,
             _diagnostics: &[ProviderDiagnosticContext],
@@ -1186,14 +1264,17 @@ mod inner {
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
 
-        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        fn get_semantic_tokens(
+            &self,
+            _query: &ProviderQuery,
+        ) -> ProviderFuture<'_, Vec<SemanticToken>> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
 
         fn get_document_highlights(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
             let msg = self.error_message.clone();
@@ -1202,7 +1283,7 @@ mod inner {
 
         fn get_inlay_hints(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _start_offset: u32,
             _end_offset: u32,
         ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -1212,7 +1293,7 @@ mod inner {
 
         fn resolve_completion(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _data: CompletionResolveData,
         ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
             let msg = self.error_message.clone();
@@ -1649,10 +1730,11 @@ mod inner {
 
         fn get_completions(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
+            let path = query.path();
             let (items, on_query, block, fail) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetCompletions {
@@ -1709,7 +1791,12 @@ mod inner {
             }))
         }
 
-        fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        fn get_hover(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Option<HoverInfo>> {
+            let path = query.path();
             let (result, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetHover {
@@ -1801,8 +1888,13 @@ mod inner {
             })
         }
 
-        fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-            let (result, on_query, fail, hang) = {
+        fn get_definition(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let path = query.path();
+            let (result, held, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDefinition {
                     path: path.to_string(),
@@ -1821,13 +1913,17 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
+                let result = state
+                    .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                    .map(|()| result);
                 let on_query = match &state.on_query {
                     Some((armed_path, _)) if armed_path == path => {
                         state.on_query.take().map(|(_, cb)| cb)
                     }
                     _ => None,
                 };
-                (result, on_query, fail, state.hang_definition)
+                (result, held, on_query, fail, state.hang_definition)
             };
             if hang {
                 // A wedged provider: never resolves. The handler must fail closed
@@ -1839,21 +1935,25 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered(Box::pin(async move {
-                if fail {
-                    return Err(TypeProviderError::new(
-                        "scripted transient definition failure".to_string(),
-                    ));
-                }
-                Ok(result)
-            }))
+            self.barriered_targets(
+                held,
+                Box::pin(async move {
+                    if fail {
+                        return Err(TypeProviderError::new(
+                            "scripted transient definition failure".to_string(),
+                        ));
+                    }
+                    result
+                }),
+            )
         }
 
         fn get_type_definition(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetTypeDefinition {
                 path: path.to_string(),
@@ -1872,18 +1972,31 @@ mod inner {
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, locs)| locs.clone())
                 .unwrap_or_default();
-            self.barriered(Box::pin(async move {
-                if fail {
-                    return Err(TypeProviderError::new(
-                        "scripted transient type-definition failure".to_string(),
-                    ));
-                }
-                Ok(result)
-            }))
+            let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
+            let result = state
+                .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                .map(|()| result);
+            drop(state);
+            self.barriered_targets(
+                held,
+                Box::pin(async move {
+                    if fail {
+                        return Err(TypeProviderError::new(
+                            "scripted transient type-definition failure".to_string(),
+                        ));
+                    }
+                    result
+                }),
+            )
         }
 
-        fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-            let (result, on_query) = {
+        fn get_references(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let path = query.path();
+            let (result, held, on_query) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetReferences {
                     path: path.to_string(),
@@ -1896,28 +2009,33 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
+                let result = state
+                    .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                    .map(|()| result);
                 let on_query = match &state.on_query {
                     Some((armed_path, _)) if armed_path == path => {
                         state.on_query.take().map(|(_, cb)| cb)
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, held, on_query)
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered(Box::pin(async move { Ok(result) }))
+            self.barriered_targets(held, Box::pin(async move { result }))
         }
 
         fn get_rename_locations(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-            let (result, block) = {
+            let path = query.path();
+            let (result, held, block) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetRenameLocations {
                     path: path.to_string(),
@@ -1930,6 +2048,10 @@ mod inner {
                     .find(|(p, o, _)| p == path && *o == offset)
                     .map(|(_, _, locs)| locs.clone())
                     .unwrap_or_default();
+                let held = state.held_targets(result.iter().map(|loc| loc.path.as_str()));
+                let result = state
+                    .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
+                    .map(|()| result);
                 let block = match &state.rename_block {
                     Some((armed_path, _, _)) if armed_path == path => state
                         .rename_block
@@ -1937,22 +2059,26 @@ mod inner {
                         .map(|(_, arrived, release)| (arrived, release)),
                     _ => None,
                 };
-                (result, block)
+                (result, held, block)
             };
-            self.barriered(Box::pin(async move {
-                if let Some((arrived, release)) = block {
-                    arrived.notify_one();
-                    release.notified().await;
-                }
-                Ok(result)
-            }))
+            self.barriered_targets(
+                held,
+                Box::pin(async move {
+                    if let Some((arrived, release)) = block {
+                        arrived.notify_one();
+                        release.notified().await;
+                    }
+                    result
+                }),
+            )
         }
 
         fn get_signature_help(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+            let path = query.path();
             let (result, on_query, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetSignatureHelp {
@@ -1988,11 +2114,12 @@ mod inner {
 
         fn get_code_actions(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             start_offset: u32,
             end_offset: u32,
             diagnostics: &[ProviderDiagnosticContext],
         ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetCodeActions {
                 path: path.to_string(),
@@ -2007,10 +2134,23 @@ mod inner {
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, actions)| actions.clone())
                 .unwrap_or_default();
-            self.barriered(Box::pin(async move { Ok(result) }))
+            let edit_targets = || {
+                result
+                    .iter()
+                    .flat_map(|action| action.edits.iter().map(|edit| edit.path.as_str()))
+            };
+            let held = state.held_targets(edit_targets());
+            let checked = state.check_targets(query, edit_targets());
+            let result = checked.map(|()| result);
+            drop(state);
+            self.barriered_targets(held, Box::pin(async move { result }))
         }
 
-        fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        fn get_semantic_tokens(
+            &self,
+            query: &ProviderQuery,
+        ) -> ProviderFuture<'_, Vec<SemanticToken>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetSemanticTokens {
                 path: path.to_string(),
@@ -2027,9 +2167,10 @@ mod inner {
 
         fn get_document_highlights(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetDocumentHighlights {
                 path: path.to_string(),
@@ -2047,10 +2188,11 @@ mod inner {
 
         fn get_inlay_hints(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             start_offset: u32,
             end_offset: u32,
         ) -> ProviderFuture<'_, Vec<InlayHint>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetInlayHints {
                 path: path.to_string(),
@@ -2069,9 +2211,10 @@ mod inner {
 
         fn resolve_completion(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             data: CompletionResolveData,
         ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+            let path = query.path();
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::ResolveCompletion {
                 path: path.to_string(),

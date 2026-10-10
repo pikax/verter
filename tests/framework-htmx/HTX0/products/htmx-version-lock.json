@@ -1,0 +1,73 @@
+{
+  "id": "htmx-version-lock.v1",
+  "schema": 1,
+  "family": "htmx",
+  "ratifiedOn": "2026-10-10",
+  "profiles": [
+    {
+      "id": "htmx-2",
+      "major": 2,
+      "release": "2.0.11",
+      "role": "current-stable",
+      "registryTagAtRatification": "latest",
+      "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+      "package": "htmx.org",
+      "registry": "https://registry.npmjs.org/htmx.org",
+      "tarball": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+      "license": "BSD-0-Clause",
+      "sourcePaths": ["dist/htmx.js", "dist/htmx.d.ts", "LICENSE"],
+      "vocabulary": "htmx-vocabulary.json#htmx-2"
+    },
+    {
+      "id": "htmx-4",
+      "major": 4,
+      "release": "4.0.0",
+      "role": "announced-next-line",
+      "registryTagAtRatification": "next",
+      "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+      "package": "htmx.org",
+      "registry": "https://registry.npmjs.org/htmx.org",
+      "tarball": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+      "license": "BSD-0-Clause",
+      "sourcePaths": ["dist/htmx.js", "dist/htmx.d.ts", "LICENSE"],
+      "vocabulary": "htmx-vocabulary.json#htmx-4"
+    }
+  ],
+  "admission": "Each admitted major has one exact reference release and its own vocabulary. This lock admits only the two exact releases listed here; another resolved release is unsupported-version until the lock is reviewed. Registry tags describe selection on the ratification date and are never admission inputs.",
+  "excluded": [
+    {
+      "major": 1,
+      "reason": "Legacy; operator admits current stable and announced next major only."
+    },
+    {
+      "major": 3,
+      "reason": "No admitted release."
+    }
+  ],
+  "otherVersions": "Canary, nightly, prerelease, floating and unlisted releases are not admitted.",
+  "sources": [
+    "https://registry.npmjs.org/htmx.org",
+    "https://four.htmx.org/announcements/2026-08-28-htmx-4.0.0-is-released"
+  ],
+  "featureSources": [
+    {
+      "profile": "htmx-2",
+      "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+      "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+      "license": "BSD-0-Clause",
+      "paths": ["dist/htmx.js", "dist/htmx.d.ts", "LICENSE"],
+      "examples": "https://github.com/bigskysoftware/htmx/tree/v2.0.11/test",
+      "examplePolicy": "Read upstream HTML fixtures as static input only; HTX9 vendors selected fixtures with their licence before hermetic checks. Never execute htmx or request servers."
+    },
+    {
+      "profile": "htmx-4",
+      "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+      "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+      "license": "BSD-0-Clause",
+      "paths": ["dist/htmx.js", "dist/htmx.d.ts", "LICENSE"],
+      "examples": "https://github.com/bigskysoftware/htmx/tree/v4.0.0/test",
+      "examplePolicy": "Read upstream HTML fixtures as static input only; HTX9 vendors selected fixtures with their licence before hermetic checks. Never execute htmx or request servers."
+    }
+  ],
+  "supportClaim": false
+}

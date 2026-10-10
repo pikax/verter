@@ -1,6 +1,7 @@
 //! Discriminating unit tests for the composite's project-bound admission and
 //! shared-session lifecycle.
 
+use crate::type_provider::traits::ProviderQuery;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -181,7 +182,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -195,7 +196,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_completion_details<'a>(
         &'a self,
-        _path: &'a str,
+        _query: &'a ProviderQuery,
         _offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
@@ -205,13 +206,18 @@ impl TypeProvider for RecordingAttach {
 
     fn resolve_completion(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         Box::pin(async { Ok(None) })
     }
 
-    fn get_hover(&self, path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let path = query.path();
         let gated = self.hover_gated.load(std::sync::atomic::Ordering::SeqCst);
         self.ops.lock().push(format!("hover:{path}"));
         Box::pin(async move {
@@ -223,25 +229,33 @@ impl TypeProvider for RecordingAttach {
         })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -249,7 +263,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -257,7 +271,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -265,13 +279,16 @@ impl TypeProvider for RecordingAttach {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -279,7 +296,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -1199,7 +1216,14 @@ async fn feature_invocation_revalidates_epoch_after_selection() {
     let hover = selection
         .invoke(|provider| {
             let path = path.to_string();
-            async move { provider.get_hover(&path, 0).await }
+            async move {
+                provider
+                    .get_hover(
+                        &crate::type_provider::traits::ProviderQuery::at_engine_surface(&path),
+                        0,
+                    )
+                    .await
+            }
         })
         .await
         .expect("epoch mismatch activates managed fallback");
@@ -1278,7 +1302,14 @@ async fn feature_invocation_discards_stale_error_after_inflight_reconnect() {
         selection
             .invoke(|provider| {
                 let path = path.to_string();
-                async move { provider.get_hover(&path, 0).await }
+                async move {
+                    provider
+                        .get_hover(
+                            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&path),
+                            0,
+                        )
+                        .await
+                }
             })
             .await
     });

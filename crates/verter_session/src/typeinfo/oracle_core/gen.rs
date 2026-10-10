@@ -796,7 +796,12 @@ async fn drive_hover_over_files(
     // (d) Hover the probe name.
     let hover = tokio::time::timeout(
         Duration::from_secs(15),
-        provider.get_hover(&hover_abs.to_string_lossy(), hover_offset),
+        provider.get_hover(
+            &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(
+                &hover_abs.to_string_lossy(),
+            ),
+            hover_offset,
+        ),
     )
     .await
     .map_err(|_| GenError::TsgoDriver("hover timed out".to_string()))?

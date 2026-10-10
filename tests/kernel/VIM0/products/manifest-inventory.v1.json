@@ -10,14 +10,7 @@
   },
   "companionCaseTable": "manifest-case-table.v1.json",
   "inherits": {
-    "nodes": [
-      "UAK0",
-      "UAK1",
-      "VID0",
-      "CAT0",
-      "DEM0",
-      "PAR0"
-    ],
+    "nodes": ["UAK0", "UAK1", "VID0", "CAT0", "DEM0", "PAR0"],
     "files": [
       "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
       "tests/kernel/UAK1/products/constitution-inventory.v1.json",
@@ -30,16 +23,13 @@
       "tests/web-product/WDX0/products/evidence-class-policy.v1.json",
       "performance-gates.toml"
     ],
-    "rule": "UAK0 routes D01-D19 and outcomes O01-O11, UAK1 rules U01-U08, VID0 identities I01-I12, rules R01-R16 and routes V-D01-V-D06, CAT0 tables T01-T09, rules CR01-CR14 and routes CAT-D01-CAT-D06, DEM0 rules DR01-DR30 and routes DEM-D01-DEM-D06, and PAR0 contracts PD01-PD09 and routes PAR-D01-PAR-D04 keep their owners. WDX0's evidence classes and performance-gates.toml rows are referenced by id. VIM0 adds manifest files MF01-MF05, sections MS01-MS12, rules VM01-VM28, cell tiers CT0-CT4, current authorities G01-G09, outcomes VIM-O01-VIM-O05, consumers VIM-C01-VIM-C10, plan consumers VIM-P01-VIM-P03, displaced routes VIM-D01-VIM-D04, findings VIM-F01-VIM-F06 and transferred obligations VIM-T01-VIM-T05. A successor path for a route this node displaces starts at VIM0. TIF1 and IDX0 are not successors of VIM0, so VIM-D02 and VIM-D03 keep the controller path already recorded for that owner. VIM-D01 is NCK5 on VIM0 to VIM1 to NCK5. VIM-D04 is FCH1 on VIM0 to VIM1 to FCH1, receiving obligation VIM-T05; VIM1 is a predecessor of FCH1. FCH1-AC3 is rejected for that cutover."
+    "rule": "UAK0 routes D01-D19 and outcomes O01-O11, UAK1 rules U01-U08, VID0 identities I01-I12, rules R01-R16 and routes V-D01-V-D06, CAT0 tables T01-T09, rules CR01-CR14 and routes CAT-D01-CAT-D06, DEM0 rules DR01-DR30 and routes DEM-D01-DEM-D06, and PAR0 contracts PD01-PD09 and routes PAR-D01-PAR-D04 keep their owners. WDX0's evidence classes and performance-gates.toml rows are referenced by id. VIM0 adds manifest files MF01-MF05, sections MS01-MS12, rules VM01-VM28, cell tiers CT0-CT4, current authorities G01-G09, outcomes VIM-O01-VIM-O05, consumers VIM-C01-VIM-C10, plan consumers VIM-P01-VIM-P03, displaced routes VIM-D01-VIM-D04, findings VIM-F01-VIM-F06 and transferred obligations VIM-T01-VIM-T05. A successor path for a route this node displaces starts at VIM0. TIF1 and IDX0 are not successors of VIM0, so VIM-D02 and VIM-D03 keep the controller path already recorded for that owner. VIM-D01 is NCK5 on VIM0 to VIM1 to NCK5. VIM-D04 binds FCH1 on VIM0 to VIM1 to FCH1 under FCH1-AC5, authorised by ruling fch1-matrix-cutover-acceptance (2026-10-10) and recorded in VIM-T05; VIM1 already precedes FCH1. FCH1-AC3 remains only a coverage join. Implementation stays with FCH1 after VIM1."
   },
   "layout": {
     "root": "verticals/<vertical>/ for kind carrier; verticals/<vertical>/<release>/ for kind semantic-profile and project-profile",
     "rule": "A carrier manifest is keyed by CarrierProfileId alone and has no ReleaseId (VID0 I03 neverContains ReleaseId). A semantic-profile manifest is keyed by FrameworkProfileId, derived from exactly one ReleaseId (VID0 I05); the directory release equals that ReleaseId. A project-profile manifest is keyed by ProjectProfileId, derived from exactly one ReleaseId (VID0 I07); the directory release equals that ReleaseId. A release directory is spelled with '.', '-' and '+' only (tracked_paths_are_portable). Two manifests for one carrier id, or two directory releases for one profile id, fail as CAT0 CR07. VIM1 creates the tree.",
     "owner": "VIM1",
-    "successorPath": [
-      "VIM0",
-      "VIM1"
-    ],
+    "successorPath": ["VIM0", "VIM1"],
     "receivingAcceptance": "VIM1-AC-R1"
   },
   "manifestFiles": [
@@ -48,21 +38,9 @@
       "subblock": 1,
       "file": "vertical.toml",
       "holds": "schema epoch, kind, typed id, display family, geometry, owner node, claims; exact release only for semantic-profile and project-profile; the sections MS01-MS12",
-      "rules": [
-        "VM01",
-        "VM02",
-        "VM03",
-        "VM04",
-        "VM05",
-        "VM06",
-        "VM07",
-        "VM08"
-      ],
+      "rules": ["VM01", "VM02", "VM03", "VM04", "VM05", "VM06", "VM07", "VM08"],
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     },
     {
@@ -70,16 +48,9 @@
       "subblock": 2,
       "file": "capabilities.toml",
       "holds": "one [[cell]] keyed only by the profile-qualified CapabilityId (CAT0 T07, VID0 I10). Per-surface maturity is a value: one tier, producer, receiving acceptance and evidence ids per MS08 surface. The cell does not restate profile, carrier, release or host. Host identity is not a key. A T09 extension is cited by row id, not keyed.",
-      "rules": [
-        "VM20",
-        "VM21",
-        "VM25"
-      ],
+      "rules": ["VM20", "VM21", "VM25"],
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     },
     {
@@ -87,14 +58,9 @@
       "subblock": 3,
       "file": "rules/<rule-pack>.toml",
       "holds": "CAT0 T08 rows: rule id, profile, rule epoch, applicability, fix and action kinds (LRA0 vocabulary)",
-      "rules": [
-        "VM22"
-      ],
+      "rules": ["VM22"],
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     },
     {
@@ -102,14 +68,9 @@
       "subblock": 4,
       "file": "oracles.lock",
       "holds": "one [[oracle]] per upstream package or corpus: name, exact version, registry or source, integrity digest, role oracle, corpus path and content digest (PAR0 PD04)",
-      "rules": [
-        "VM23"
-      ],
+      "rules": ["VM23"],
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     },
     {
@@ -117,14 +78,9 @@
       "subblock": 5,
       "file": "fixtures/manifest.toml",
       "holds": "one [[fixture]] per fixture: id, repository-relative path, content digest, class positive/negative/recovery/migration, exercised cells or rules, executing acceptance",
-      "rules": [
-        "VM24"
-      ],
+      "rules": ["VM24"],
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     }
   ],
@@ -144,120 +100,84 @@
       "id": "MS01",
       "table": "[parser]",
       "renders": "PAR0 PD01 ParserDecision",
-      "kinds": [
-        "carrier"
-      ],
+      "kinds": ["carrier"],
       "rule": "VM09"
     },
     {
       "id": "MS02",
       "table": "[activation]",
       "renders": "DEM0 DR07 stage-one parse-domain fact kinds, DR11 stage-two fact kinds, FWA1 activation source",
-      "kinds": [
-        "semantic-profile",
-        "project-profile"
-      ],
+      "kinds": ["semantic-profile", "project-profile"],
       "rule": "VM10"
     },
     {
       "id": "MS03",
       "table": "[[embedding]]",
       "renders": "CAT0 T05 rows",
-      "kinds": [
-        "carrier"
-      ],
+      "kinds": ["carrier"],
       "rule": "VM11"
     },
     {
       "id": "MS04",
       "table": "[[map]]",
       "renders": "map-chain kinds with ENC0 coordinate kinds at each end",
-      "kinds": [
-        "carrier"
-      ],
+      "kinds": ["carrier"],
       "rule": "VM11"
     },
     {
       "id": "MS05",
       "table": "[[typeinfo_role]]",
       "renders": "public facet, producing construct, native or derived{kind}",
-      "kinds": [
-        "semantic-profile"
-      ],
+      "kinds": ["semantic-profile"],
       "rule": "VM12"
     },
     {
       "id": "MS06",
       "table": "[custom_elements]",
       "renders": "CEF0 producer and consumer dispositions, exactly one row each",
-      "kinds": [
-        "carrier",
-        "semantic-profile",
-        "project-profile"
-      ],
+      "kinds": ["carrier", "semantic-profile", "project-profile"],
       "rule": "VM13"
     },
     {
       "id": "MS07",
       "table": "[[coexistence]]",
       "renders": "CAT0 T06 relation per peer",
-      "kinds": [
-        "semantic-profile",
-        "project-profile"
-      ],
+      "kinds": ["semantic-profile", "project-profile"],
       "rule": "VM14"
     },
     {
       "id": "MS08",
       "table": "[[public_surface]]",
       "renders": "published surfaces with the PUB0 outcome vocabulary",
-      "kinds": [
-        "carrier",
-        "semantic-profile",
-        "project-profile"
-      ],
+      "kinds": ["carrier", "semantic-profile", "project-profile"],
       "rule": "VM15"
     },
     {
       "id": "MS09",
       "table": "[[budget]]",
       "renders": "references to performance-gates.toml rows, the MEM0 budget or the owning product catalog",
-      "kinds": [
-        "carrier",
-        "semantic-profile",
-        "project-profile"
-      ],
+      "kinds": ["carrier", "semantic-profile", "project-profile"],
       "rule": "VM16"
     },
     {
       "id": "MS10",
       "table": "[compiler]",
       "renders": "CAT0 T02: none, or a backend for one referenced FrameworkProfileId. The release is that id's ReleaseId; the carrier manifest has no release key",
-      "kinds": [
-        "carrier"
-      ],
+      "kinds": ["carrier"],
       "rule": "VM17"
     },
     {
       "id": "MS11",
       "table": "[[deletion]]",
       "renders": "displaced route id, owner node, receiving acceptance",
-      "kinds": [
-        "carrier",
-        "semantic-profile",
-        "project-profile"
-      ],
+      "kinds": ["carrier", "semantic-profile", "project-profile"],
       "rule": "VM18"
     },
     {
       "id": "MS12",
       "table": "[[forbidden_dependency]]",
       "renders": "UAK1 firewall edges for the vertical's crates",
-      "kinds": [
-        "carrier",
-        "semantic-profile",
-        "project-profile"
-      ],
+      "kinds": ["carrier", "semantic-profile", "project-profile"],
       "rule": "VM19"
     }
   ],
@@ -449,11 +369,9 @@
     {
       "id": "G01",
       "unit": "Hand-maintained capability matrix",
-      "paths": [
-        "packages/framework-conformance-harness/evidence/capability-matrix.tsv"
-      ],
+      "paths": ["packages/framework-conformance-harness/evidence/capability-matrix.tsv"],
       "shape": "34 rows keyed by cell_id; display framework column; untagged compatibility_domain (core@3.6.0-rc.3, svelte@5.56.8, 'anything other than ...'); target_disposition; target_maturity; owner and acceptance_id naming retired program blocks",
-      "disposition": "displaced as an authority (VIM-D04). Not a seed: FCH1 carries VIM-T05, which makes the TSV a rendered consumer or deletes it after VIM1 renders the matrix. FCH1-AC3 does not state that cutover"
+      "disposition": "displaced as an authority (VIM-D04). Not a seed: FCH1-AC5, authorised by ruling fch1-matrix-cutover-acceptance (2026-10-10) and recorded in VIM-T05, makes the TSV a rendered consumer or deletes it after VIM1-AC-R2. FCH1-AC3 does not state that cutover"
     },
     {
       "id": "G02",
@@ -490,9 +408,7 @@
         "packages/framework-conformance-harness/evidence/svelte-official-cases.tsv",
         "packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs"
       ],
-      "guards": [
-        "official_parse_manifest_guard"
-      ],
+      "guards": ["official_parse_manifest_guard"],
       "disposition": "stays as the seed MF05 cites (VIM-C03)"
     },
     {
@@ -507,16 +423,9 @@
     {
       "id": "G06",
       "unit": "Closed tag disposition table",
-      "symbols": [
-        "FrameworkAdapterRegistry::tag_disposition",
-        "TagDisposition"
-      ],
-      "paths": [
-        "crates/verter_session/src/framework/registry.rs"
-      ],
-      "guards": [
-        "framework_registry_complete"
-      ],
+      "symbols": ["FrameworkAdapterRegistry::tag_disposition", "TagDisposition"],
+      "paths": ["crates/verter_session/src/framework/registry.rs"],
+      "guards": ["framework_registry_complete"],
       "disposition": "referenced: VID0 V-D03 (REG0)"
     },
     {
@@ -535,17 +444,13 @@
     {
       "id": "G08",
       "unit": "Evidence-class policy",
-      "paths": [
-        "tests/web-product/WDX0/products/evidence-class-policy.v1.json"
-      ],
+      "paths": ["tests/web-product/WDX0/products/evidence-class-policy.v1.json"],
       "disposition": "vocabulary referenced by CT2 and CT4. CT3 has no WDX0 class (VM25)"
     },
     {
       "id": "G09",
       "unit": "Ratified performance gates",
-      "paths": [
-        "performance-gates.toml"
-      ],
+      "paths": ["performance-gates.toml"],
       "disposition": "vocabulary referenced by MS09 and VM16"
     }
   ],
@@ -554,51 +459,35 @@
       "id": "VIM-O01",
       "outcome": "Manifest schema types and structural validator for MF01-MF05 and MS01-MS12; MP01-MP07 accepted and MN01-MN17 rejected each for its own reason",
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     },
     {
       "id": "VIM-O02",
       "outcome": "Deterministic rendering of manifest sections into catalog rows T01-T09 and PAR0 PD01 decisions. Implementation owners stay the CAT0 and PAR0 owners named in VM26; VIM1 does not become a second producer of those rows",
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC2"
     },
     {
       "id": "VIM-O03",
       "outcome": "Generated per-surface capability/maturity matrix from MF02, freshness-checked",
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R2"
     },
     {
       "id": "VIM-O04",
       "outcome": "Executable validator for this inventory: missing member, unknown or pathless owner, missing receiving acceptance, conflicting assignment",
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     },
     {
       "id": "VIM-O05",
       "outcome": "Independent re-validation of the schema, generator determinism and malformed-manifest negatives",
       "owner": "UAM0",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "UAM0"
-      ],
+      "successorPath": ["VIM0", "VIM1", "UAM0"],
       "receivingAcceptance": "UAM0-AC2"
     }
   ],
@@ -606,168 +495,89 @@
     {
       "id": "VIM-C01",
       "consumer": "Compile-request construction consulting the rendered capability table",
-      "symbols": [
-        "CapabilityCell",
-        "CapabilityDisposition"
-      ],
-      "paths": [
-        "crates/verter_compiler/src/compile_request/capability.rs"
-      ],
-      "consumes": [
-        "MF02",
-        "MS10"
-      ],
+      "symbols": ["CapabilityCell", "CapabilityDisposition"],
+      "paths": ["crates/verter_compiler/src/compile_request/capability.rs"],
+      "consumes": ["MF02", "MS10"],
       "owner": "NCK5",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "NCK5"
-      ],
+      "successorPath": ["VIM0", "VIM1", "NCK5"],
       "receivingAcceptance": "NCK5-AC1",
       "disposition": "reads the rendered table after VIM1-AC-R2. NCK5 follows VIM1 and its charter path crates/verter_compiler contains this file. CPF1 precedes VIM1, so CPF1 cannot be this consumer"
     },
     {
       "id": "VIM-C02",
       "consumer": "Session compile-request mapping onto capability cells",
-      "paths": [
-        "crates/verter_session/src/host_resolve/compile_request_build.rs"
-      ],
-      "consumes": [
-        "MF02"
-      ],
+      "paths": ["crates/verter_session/src/host_resolve/compile_request_build.rs"],
+      "consumes": ["MF02"],
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC2",
       "disposition": "maps onto rendered cells by typed key"
     },
     {
       "id": "VIM-C03",
       "consumer": "Harness seeds read into oracles.lock, fixtures/manifest.toml and capability cells",
-      "paths": [
-        "packages/framework-conformance-harness/evidence/"
-      ],
-      "consumes": [
-        "MF02",
-        "MF04",
-        "MF05"
-      ],
+      "paths": ["packages/framework-conformance-harness/evidence/"],
+      "consumes": ["MF02", "MF04", "MF05"],
       "owner": "VIM1",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1",
       "disposition": "seeds cited by path and digest"
     },
     {
       "id": "VIM-C04",
       "consumer": "Docs framework/version/carrier/surface support tables rendered from manifests; a CT2 cell never displays as support",
-      "consumes": [
-        "MF02",
-        "CT0-CT4"
-      ],
+      "consumes": ["MF02", "CT0-CT4"],
       "owner": "DOC6",
-      "successorPath": [
-        "VIM0",
-        "DOC6"
-      ],
+      "successorPath": ["VIM0", "DOC6"],
       "receivingAcceptance": "DOC6-AC1",
       "secondaryAcceptance": "DOC6-AC2"
     },
     {
       "id": "VIM-C05",
       "consumer": "Language-service operation rows in the manifest generator",
-      "consumes": [
-        "MF02",
-        "MS08"
-      ],
+      "consumes": ["MF02", "MS08"],
       "owner": "LSO9",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "LSO9"
-      ],
+      "successorPath": ["VIM0", "VIM1", "LSO9"],
       "receivingAcceptance": "LSO9-AC2"
     },
     {
       "id": "VIM-C06",
       "consumer": "Diagnostic-family manifest on the same schema",
-      "consumes": [
-        "MF01",
-        "MF03"
-      ],
+      "consumes": ["MF01", "MF03"],
       "owner": "NCK4",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "NCK4"
-      ],
+      "successorPath": ["VIM0", "VIM1", "NCK4"],
       "receivingAcceptance": "NCK4-AC2"
     },
     {
       "id": "VIM-C07",
       "consumer": "Enterprise conformance manifest and applicability closure",
-      "consumes": [
-        "MF01",
-        "MF02"
-      ],
+      "consumes": ["MF01", "MF02"],
       "owner": "EPR6",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "EPR6"
-      ],
+      "successorPath": ["VIM0", "VIM1", "EPR6"],
       "receivingAcceptance": "EPR6-AC2"
     },
     {
       "id": "VIM-C08",
       "consumer": "Utility-CSS project-profile cells, one ProjectProfileId per Tailwind major",
-      "consumes": [
-        "MF01",
-        "MF02",
-        "VM28"
-      ],
+      "consumes": ["MF01", "MF02", "VM28"],
       "owner": "TW9",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "TW9"
-      ],
+      "successorPath": ["VIM0", "VIM1", "TW9"],
       "receivingAcceptance": "TW9-AC4"
     },
     {
       "id": "VIM-C09",
       "consumer": "Skill planning and implementation routes reading the vertical manifest",
-      "consumes": [
-        "MF01",
-        "MF02"
-      ],
+      "consumes": ["MF01", "MF02"],
       "owner": "SKL0",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "UAM0",
-        "SKL0"
-      ],
+      "successorPath": ["VIM0", "VIM1", "UAM0", "SKL0"],
       "receivingAcceptance": "SKL0-AC2"
     },
     {
       "id": "VIM-C10",
       "consumer": "Cross-family convergence over every manifest",
-      "consumes": [
-        "MF01",
-        "MF02"
-      ],
+      "consumes": ["MF01", "MF02"],
       "owner": "UAK2",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "UAM0",
-        "UAK2"
-      ],
+      "successorPath": ["VIM0", "VIM1", "UAM0", "UAK2"],
       "receivingAcceptance": "UAK2-AC1"
     }
   ],
@@ -776,31 +586,21 @@
       "id": "VIM-P01",
       "node": "VIM1",
       "reads": "the whole inventory and case table",
-      "successorPath": [
-        "VIM0",
-        "VIM1"
-      ],
+      "successorPath": ["VIM0", "VIM1"],
       "receivingAcceptance": "VIM1-AC-R1"
     },
     {
       "id": "VIM-P02",
       "node": "UAM0",
       "reads": "rules VM01-VM28 and cases MN01-MN17 for re-validation",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "UAM0"
-      ],
+      "successorPath": ["VIM0", "VIM1", "UAM0"],
       "receivingAcceptance": "UAM0-AC2"
     },
     {
       "id": "VIM-P03",
       "node": "DOC6",
       "reads": "cell tiers CT0-CT4 and the cell key",
-      "successorPath": [
-        "VIM0",
-        "DOC6"
-      ],
+      "successorPath": ["VIM0", "DOC6"],
       "receivingAcceptance": "DOC6-AC2"
     }
   ],
@@ -813,86 +613,50 @@
         "untagged-coordinate-public-identity"
       ],
       "unit": "Hand mirror CapabilityCell/CapabilityDisposition (G02): a closed per-framework enum keyed by a display framework and untagged compatibility_domain strings",
-      "symbols": [
-        "CapabilityCell",
-        "CapabilityDisposition"
-      ],
-      "paths": [
-        "crates/verter_compiler/src/compile_request/capability.rs"
-      ],
+      "symbols": ["CapabilityCell", "CapabilityDisposition"],
+      "paths": ["crates/verter_compiler/src/compile_request/capability.rs"],
       "disposition": "replace: the enum is deleted after VIM1-AC-R2 freshness holds. NCK5 is a successor of VIM1, rust-mixed (maxLoc 800), and charter path crates/verter_compiler plus domain area:crates/verter_compiler contain this file. CPF1 precedes VIM1, so CPF1-AC1 is not the receiving acceptance.",
       "owner": "NCK5",
       "productionCapable": true,
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "NCK5"
-      ],
+      "successorPath": ["VIM0", "VIM1", "NCK5"],
       "receivingAcceptance": "NCK5-AC1"
     },
     {
       "id": "VIM-D02",
-      "categories": [
-        "duplicate-component-information-authority"
-      ],
-      "members": [
-        "D12",
-        "D13",
-        "D14",
-        "D15"
-      ],
+      "categories": ["duplicate-component-information-authority"],
+      "members": ["D12", "D13", "D14", "D15"],
       "unit": "Component-information authorities the authority inventory assigns to TIF1: D12 component-meta resolver/cache/schema, D13 public-API projection, D14 off-store surface caches, D15 legacy serde TypeInfo DTOs",
       "disposition": "keep the UAK0 assignment. A manifest declares facets and roles and computes no component information. VIM0 does not re-home the routes.",
       "owner": "TIF1",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "CAT0",
-        "TIF1"
-      ],
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
       "receivingAcceptance": "TIF1-AC1"
     },
     {
       "id": "VIM-D03",
-      "categories": [
-        "duplicate-component-information-authority"
-      ],
-      "members": [
-        "D18"
-      ],
+      "categories": ["duplicate-component-information-authority"],
+      "members": ["D18"],
       "unit": "Per-request component scan (UAK0 D18, build_workspace_components), assigned to IDX0 by the authority inventory",
       "disposition": "keep the UAK0 assignment. VIM0 does not re-home the route.",
       "owner": "IDX0",
       "productionCapable": true,
-      "successorPath": [
-        "UAK0",
-        "UAK1",
-        "CAT0",
-        "DEM0",
-        "IDX0"
-      ],
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "IDX0"],
       "receivingAcceptance": "IDX0-AC1"
     },
     {
       "id": "VIM-D04",
-      "categories": [
-        "duplicate-capability-authority"
-      ],
+      "categories": ["duplicate-capability-authority"],
       "unit": "capability-matrix.tsv (G01) as a hand-maintained capability and maturity authority",
       "paths": [
         "packages/framework-conformance-harness/evidence/capability-matrix.tsv",
         "verticals/"
       ],
-      "disposition": "stops being an authority (VM26, MN07). VIM1 renders the matrix under verticals/ (VIM1-AC-R2). FCH1 then makes the harness TSV a rendered consumer of that matrix or deletes it (VIM-T05). The TSV is not a G03-G05 seed. FCH1 charter path packages/framework-conformance-harness and domain area:packages/framework-conformance-harness contain the file; VIM1's domains and charter paths do not. FCH1 is kind implementation (ts-heavy), not a docs-only owner, and VIM1 is its predecessor. FCH1-AC1 through FCH1-AC4 do not state this cutover.",
+      "disposition": "stops being an authority (VM26, MN07). VIM1 renders the canonical matrix under verticals/ (VIM1-AC-R2). FCH1-AC5, authorised by ruling fch1-matrix-cutover-acceptance (2026-10-10), requires the harness TSV to be rendered from that matrix or deleted after VIM1-AC-R2. The TSV is not a G03-G05 seed. FCH1-AC3 remains the coverage join and does not authorise this cutover. Implementation stays with FCH1 after VIM1.",
       "owner": "FCH1",
       "productionCapable": true,
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "FCH1"
-      ],
-      "receivingAcceptance": "VIM-T05"
+      "successorPath": ["VIM0", "VIM1", "FCH1"],
+      "receivingAcceptance": "FCH1-AC5",
+      "authorization": "ruling fch1-matrix-cutover-acceptance (2026-10-10)"
     }
   ],
   "referencedRoutes": [
@@ -928,51 +692,27 @@
   "categoryCoverage": [
     {
       "category": "central-framework-switch",
-      "recorded": [
-        "VIM-D01"
-      ],
-      "referenced": [
-        "D01",
-        "D04",
-        "D07",
-        "CAT-D06",
-        "V-D03",
-        "DEM-D04"
-      ],
+      "recorded": ["VIM-D01"],
+      "referenced": ["D01", "D04", "D07", "CAT-D06", "V-D03", "DEM-D04"],
       "why": "CapabilityCell is a closed per-framework enum; every other central switch is already owned."
     },
     {
       "category": "untagged-coordinate-public-identity",
-      "recorded": [
-        "VIM-D01"
-      ],
-      "referenced": [
-        "D08",
-        "V-D01",
-        "V-D02",
-        "PAR-D03"
-      ],
+      "recorded": ["VIM-D01"],
+      "referenced": ["D08", "V-D01", "V-D02", "PAR-D03"],
       "why": "compatibility_domain and framework are untagged strings used as keys."
     },
     {
       "category": "duplicate-component-information-authority",
-      "recorded": [
-        "VIM-D02",
-        "VIM-D03"
-      ],
+      "recorded": ["VIM-D02", "VIM-D03"],
       "referenced": [],
       "why": "D12-D15 stay with TIF1 (TIF1-AC1) and D18 stays with IDX0 (IDX0-AC1), on the UAK0 successor paths. A manifest declares facets and roles; it computes no component information."
     },
     {
       "category": "duplicate-capability-authority",
-      "recorded": [
-        "VIM-D01",
-        "VIM-D04"
-      ],
-      "referenced": [
-        "CAT-D04"
-      ],
-      "why": "G02 is the CapabilityCell enum NCK5 deletes after VIM1 (VIM-D01). G01 stops being an authority; FCH1 carries VIM-T05, rendered consumer or deletion, on VIM-D04. FCH1-AC3 does not state that cutover. CAT-D04 stays with CPF1."
+      "recorded": ["VIM-D01", "VIM-D04"],
+      "referenced": ["CAT-D04"],
+      "why": "G02 is the CapabilityCell enum NCK5 deletes after VIM1 (VIM-D01). G01 stops being an authority; VIM-D04 binds FCH1-AC5, render or delete, authorised by ruling fch1-matrix-cutover-acceptance (2026-10-10) and recorded in VIM-T05. FCH1-AC3 does not state that cutover. CAT-D04 stays with CPF1."
     }
   ],
   "emptyPopulations": [
@@ -1000,9 +740,10 @@
   "findings": [
     {
       "id": "VIM-F01",
-      "finding": "capability-matrix.tsv names core@3.6.0-rc.3 and svelte@5.56.8 while the oracle package.json files pin vue 3.6.0-rc.5 and svelte 5.56.10. VM23 makes the oracle pin the release and fails the divergence (MN15). FCH1 owns the TSV under VIM-T05; FCH1-AC3 does not state that cutover. VIM1 cannot write that path.",
+      "finding": "capability-matrix.tsv names core@3.6.0-rc.3 and svelte@5.56.8 while oracle package.json files pin vue 3.6.0-rc.5 and svelte 5.56.10. VM23 makes the oracle pin the release and fails divergence (MN15). FCH1 owns the TSV cutover under FCH1-AC5, authorised by ruling fch1-matrix-cutover-acceptance (2026-10-10); FCH1-AC3 remains only the coverage join. VIM1 renders the canonical matrix and does not write the harness path.",
       "owner": "FCH1",
-      "receivingAcceptance": "VIM-T05"
+      "receivingAcceptance": "FCH1-AC5",
+      "authorization": "ruling fch1-matrix-cutover-acceptance (2026-10-10)"
     },
     {
       "id": "VIM-F02",
@@ -1063,19 +804,17 @@
     {
       "id": "VIM-T05",
       "kind": "cutover",
-      "rows": [
-        "VIM-D04",
-        "VIM-F01"
-      ],
+      "rows": ["VIM-D04", "VIM-F01"],
       "receiver": "FCH1",
-      "successorPath": [
-        "VIM0",
-        "VIM1",
-        "FCH1"
-      ],
+      "successorPath": ["VIM0", "VIM1", "FCH1"],
       "obligation": "After VIM1 renders the capability matrix under verticals/, make packages/framework-conformance-harness/evidence/capability-matrix.tsv a rendered consumer of that matrix or delete it. The hand-maintained target_disposition, target_maturity, owner and acceptance_id columns then stop being an authority (VM26, MN07).",
       "rejectedBinding": "FCH1-AC3",
-      "why": "FCH1-AC3 joins coverage onto tests/framework-<f>/<P>0/products/*-capability-matrix.json. It can pass while evidence/capability-matrix.tsv stays hand-maintained. FCH1-AC1, FCH1-AC2 and FCH1-AC4 do not state this cutover. FCH1's charter path packages/framework-conformance-harness contains the file, and VIM1 is FCH1's predecessor."
+      "why": "FCH1-AC3 joins coverage and can pass while the TSV stays hand-maintained. FCH1-AC5, authorised by ruling fch1-matrix-cutover-acceptance (2026-10-10), requires render-or-delete and freshness against the canonical matrix. FCH1's charter path and domain contain the TSV, and VIM1 already precedes FCH1. Implementation remains FCH1's after VIM1.",
+      "receivingAcceptance": "FCH1-AC5",
+      "authorization": "ruling fch1-matrix-cutover-acceptance (2026-10-10)",
+      "requiredPredecessor": "VIM1",
+      "prerequisiteAcceptance": "VIM1-AC-R2",
+      "proposedProof": "FCH1 tests verify canonical matrix rendering and reject hand edits to disposition, maturity, owner or acceptance columns; alternatively prove TSV deletion with every reader migrated to the canonical matrix. Preserve existing Vue/Svelte goldens and dependency pins."
     }
   ]
 }

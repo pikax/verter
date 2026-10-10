@@ -66,10 +66,10 @@ use verter_type_runtime::protocol::{
     InlayHint, ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp,
     TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation, TypeProviderError,
 };
-use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
+use verter_type_runtime::traits::{ProviderFuture, ProviderQuery, TypeProvider};
 use verter_type_runtime::tsgo::{
     javascript_carrier_semantic_diagnostics_enabled, position_carrier_diagnostics,
-    select_configured_project_carrier, TsgoTypeProvider,
+    select_configured_project_carrier, InjectionOutcome, TsgoTypeProvider,
 };
 
 use super::shared_support::{
@@ -938,6 +938,58 @@ impl TsgoSharedProvider {
     async fn close_carrier_overlay(&self, path: &str) -> Result<(), TypeProviderError> {
         self.drive_carrier(path, PendingKind::Close).await
     }
+
+    /// Inject `content` for `path` while the feature facade records the file
+    /// as in flight, then record the bytes the relay's ordered barrier
+    /// confirms the engine holds — never the bytes merely requested, which a
+    /// coalesced or failed injection may not have applied.
+    async fn inject_tracked(&self, path: &str, content: &str) -> Result<(), TypeProviderError> {
+        let injection = FacadeInjection::begin(&self.features, path);
+        let injected = self.inject_carrier(path, content).await;
+        let slashed = slash(path);
+        let outcome = match self
+            .applied_carrier_bytes(&slashed, &slashed)
+            .or_else(|| self.applied_carrier_bytes(path, path))
+        {
+            Some(bytes) if injected.is_ok() => InjectionOutcome::Applied(bytes),
+            _ => InjectionOutcome::Unknown,
+        };
+        injection.finish(outcome).await;
+        injected
+    }
+}
+
+/// One relay delivery as the feature facade's delivery ledger sees it: in
+/// flight from [`Self::begin`] until [`Self::finish`], and abandoned with an
+/// unknown outcome when its caller is dropped in between.
+struct FacadeInjection<'a> {
+    features: &'a TsgoTypeProvider,
+    path: String,
+    finished: bool,
+}
+
+impl<'a> FacadeInjection<'a> {
+    fn begin(features: &'a TsgoTypeProvider, path: &str) -> Self {
+        features.begin_injection(path);
+        Self {
+            features,
+            path: path.to_string(),
+            finished: false,
+        }
+    }
+
+    async fn finish(mut self, outcome: InjectionOutcome) {
+        self.finished = true;
+        self.features.finish_injection(&self.path, outcome).await;
+    }
+}
+
+impl Drop for FacadeInjection<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.features.abandon_injection(&self.path);
+        }
+    }
 }
 
 /// The redirect-ON [`ReferenceInput`]s a resolved [`ProjectBinding`] carries — its
@@ -1087,12 +1139,9 @@ impl TypeProvider for TsgoSharedProvider {
         let content = content.to_string();
         Box::pin(async move {
             let started = std::time::Instant::now();
-            self.inject_carrier(&path, &content).await?;
-            let injected = started.elapsed();
-            self.features.load_file(&path, &content).await?;
+            self.inject_tracked(&path, &content).await?;
             tracing::debug!(
                 path,
-                inject_ms = injected.as_millis() as u64,
                 total_ms = started.elapsed().as_millis() as u64,
                 "shared overlay injected"
             );
@@ -1107,19 +1156,20 @@ impl TypeProvider for TsgoSharedProvider {
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         let content = content.to_string();
-        Box::pin(async move {
-            self.inject_carrier(&path, &content).await?;
-            self.features.load_file(&path, &content).await?;
-            Ok(())
-        })
+        Box::pin(async move { self.inject_tracked(&path, &content).await })
     }
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         Box::pin(async move {
-            self.close_carrier_overlay(&path).await?;
-            self.features.forget_cached_content(&path).await;
-            Ok(())
+            let injection = FacadeInjection::begin(&self.features, &path);
+            let closed = self.close_carrier_overlay(&path).await;
+            let outcome = match closed {
+                Ok(()) => InjectionOutcome::Withdrawn,
+                Err(_) => InjectionOutcome::Unknown,
+            };
+            injection.finish(outcome).await;
+            closed
         })
     }
 
@@ -1143,98 +1193,110 @@ impl TypeProvider for TsgoSharedProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
         self.features
-            .get_completions(path, offset, trigger_character)
+            .get_completions(query, offset, trigger_character)
     }
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        self.features.get_completion_details(path, offset, items)
+        self.features.get_completion_details(query, offset, items)
     }
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        self.features.resolve_completion(path, data)
+        self.features.resolve_completion(query, data)
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        self.features.get_hover(path, offset)
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        self.features.get_hover(query, offset)
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.features.get_definition(path, offset)
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.features.get_definition(query, offset)
     }
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.features.get_type_definition(path, offset)
+        self.features.get_type_definition(query, offset)
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.features.get_references(path, offset)
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.features.get_references(query, offset)
     }
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        self.features.get_rename_locations(path, offset)
+        self.features.get_rename_locations(query, offset)
     }
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        self.features.get_signature_help(path, offset)
+        self.features.get_signature_help(query, offset)
     }
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         self.features
-            .get_code_actions(path, start_offset, end_offset, diagnostics)
+            .get_code_actions(query, start_offset, end_offset, diagnostics)
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        self.features.get_semantic_tokens(path)
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        self.features.get_semantic_tokens(query)
     }
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        self.features.get_document_highlights(path, offset)
+        self.features.get_document_highlights(query, offset)
     }
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         self.features
-            .get_inlay_hints(path, start_offset, end_offset)
+            .get_inlay_hints(query, start_offset, end_offset)
     }
 
     fn shutdown(&self) -> ProviderFuture<'_, ()> {

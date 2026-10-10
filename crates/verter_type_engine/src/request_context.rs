@@ -381,7 +381,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
 /// [`crate::semantic_query::CacheRead::result_is_partial`], NOT on
 /// `cache_suppress`. `cache_suppress` is ALSO set when a perfectly VALID
 /// complete result is merely not memo-publishable (a torn / unrootable
-/// self-root, a tracer signature overflow, a `ReturnOnly`
+/// self-root, a fenced serve, a `ReturnOnly`
 /// cross-owner-reuse admission; see `project_semantic_dispatch::mod`'s
 /// admission arms). Those are benign non-cacheability, NOT partial results
 /// — keying the warm gate on `cache_suppress` would wrongly refuse to warm

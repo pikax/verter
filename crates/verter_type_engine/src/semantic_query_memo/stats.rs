@@ -94,8 +94,7 @@ pub(crate) struct AtomicSemanticGraphStats {
     /// NOT validate against the joiner's own `ctx` (the winner ran
     /// under a different overlay / view); or the winner was
     /// `cache_suppress` and its carrier carries no view-discriminating
-    /// self-root (a tracer-overflow synthetic empty-fact carrier or an
-    /// unrootable build with an empty self-root set), so its carrier
+    /// self-root (an unrootable build with an empty self-root set), so its carrier
     /// could only ever validate vacuously and is unsafe to reuse
     /// cross-view. A view-validated coalesce does not bump this
     /// counter; only a fork does.

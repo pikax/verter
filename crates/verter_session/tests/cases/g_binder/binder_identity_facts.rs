@@ -363,6 +363,8 @@ pub(crate) fn binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic
     let fact_hash = |entry: &BinderIdentityFactsEntry, pick: &dyn Fn(&FactKey) -> bool| {
         entry
             .read_set_signature
+            .as_ref()
+            .expect("a served entry carries its read-set signature")
             .facts
             .iter()
             .find_map(|fact| match fact {
@@ -730,6 +732,8 @@ pub(crate) fn negative_name_lookup_requires_recorded_completeness_or_returnonly(
 fn has_parse_fact(entry: &BinderIdentityFactsEntry, pick: &dyn Fn(&FactKey) -> bool) -> bool {
     entry
         .read_set_signature
+        .as_ref()
+        .expect("a served entry carries its read-set signature")
         .facts
         .iter()
         .any(|fact| matches!(fact, FactVersionRef::Parse(parse_fact) if pick(&parse_fact.key)))

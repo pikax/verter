@@ -245,6 +245,7 @@ async fn quoted_prop_consumer_mistype_surfaces_ts2322_tsserver() {
         None,
         false,
         None,
+        None,
     )
     .await
     .expect("tsserver should spawn");

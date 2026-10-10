@@ -1,0 +1,2479 @@
+{
+  "id": "htmx-vocabulary.v1",
+  "schema": 1,
+  "profiles": [
+    {
+      "profile": "htmx-2",
+      "release": "2.0.11",
+      "source": {
+        "package": "htmx.org",
+        "release": "2.0.11",
+        "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+        "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+        "path": "dist/htmx.js"
+      },
+      "reference": "https://htmx.org/reference/",
+      "attributes": [
+        {
+          "name": "hx-boost",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-confirm",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-delete",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-disable",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-disabled-elt",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit closest-value lookup via getClosestAttributeValue, subject to hx-disinherit/hx-inherit; findAttributeTargets resolves the nearer selector targets first, then a whole inherit token at the start/end or surrounded by commas (allowing whitespace) recursively appends targets from the next ancestor carrying this attribute; each recursive call uses that ancestor as its evaluation element for relative selectors; without inherit, the nearer value replaces ancestor targets; the exact value 'this' resolves the closest element carrying the attribute via findThisElement; only static authored targets and provenance are recorded, never runtime effects",
+          "value": "selector list with optional whole-token inherit for recursive ancestor-target append; authored selectors decoded by the pinned reference; never executed",
+          "inheritanceSource": "findAttributeTargets, getClosestAttributeValue, querySelectorAllExt and findThisElement"
+        },
+        {
+          "name": "hx-disinherit",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-encoding",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-ext",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "accumulated ancestor extension names; ignore:name suppresses that inherited extension",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-get",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-headers",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
+          "value": "JSON or explicit js:/javascript: expression where supported"
+        },
+        {
+          "name": "hx-history",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-history-elt",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-include",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit closest-value lookup via getClosestAttributeValue, subject to hx-disinherit/hx-inherit; findAttributeTargets resolves the nearer selector targets first, then a whole inherit token at the start/end or surrounded by commas (allowing whitespace) recursively appends targets from the next ancestor carrying this attribute; each recursive call uses that ancestor as its evaluation element for relative selectors; without inherit, the nearer value replaces ancestor targets; the exact value 'this' resolves the closest element carrying the attribute via findThisElement; only static authored targets and provenance are recorded, never runtime effects",
+          "value": "selector list with optional whole-token inherit for recursive ancestor-target append; authored selectors decoded by the pinned reference; never executed",
+          "inheritanceSource": "findAttributeTargets, getClosestAttributeValue, querySelectorAllExt and findThisElement"
+        },
+        {
+          "name": "hx-indicator",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit closest-value lookup via getClosestAttributeValue, subject to hx-disinherit/hx-inherit; findAttributeTargets resolves the nearer selector targets first, then a whole inherit token at the start/end or surrounded by commas (allowing whitespace) recursively appends targets from the next ancestor carrying this attribute; each recursive call uses that ancestor as its evaluation element for relative selectors; without inherit, the nearer value replaces ancestor targets; the exact value 'this' resolves the closest element carrying the attribute via findThisElement; only static authored targets and provenance are recorded, never runtime effects",
+          "value": "selector list with optional whole-token inherit for recursive ancestor-target append; authored selectors decoded by the pinned reference; never executed",
+          "inheritanceSource": "findAttributeTargets, getClosestAttributeValue, querySelectorAllExt and findThisElement"
+        },
+        {
+          "name": "hx-inherit",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-on",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "event-suffixed hx-on:event / hx-on::event and dash alternatives hx-on-event / hx-on--event / hx-on-htmx-event; unsuffixed hx-on is not recognized; JavaScript stays unevaluated",
+          "grammarSource": "processHxOnWildcard"
+        },
+        {
+          "name": "hx-params",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-patch",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-post",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-preserve",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-prompt",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-push-url",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-put",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-replace-url",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-request",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
+          "value": "JSON or explicit js:/javascript: expression where supported"
+        },
+        {
+          "name": "hx-select",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-select-oob",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-swap",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-swap-oob",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-sync",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-target",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-trigger",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-validate",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "local-or-structural; not implicitly inherited",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-vals",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
+          "value": "JSON or explicit js:/javascript: expression where supported"
+        },
+        {
+          "name": "hx-vars",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
+          "value": "deprecated JavaScript expression"
+        }
+      ],
+      "aliases": {
+        "source": {
+          "package": "htmx.org",
+          "release": "2.0.11",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+          "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+          "path": "dist/htmx.js"
+        },
+        "standardPrefix": "hx-",
+        "dataPrefix": "data-hx-",
+        "policy": "Each core hx- attribute also admits data-hx- spelling."
+      },
+      "inheritance": {
+        "source": {
+          "package": "htmx.org",
+          "release": "2.0.11",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+          "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+          "path": "dist/htmx.js"
+        },
+        "default": "implicit for attributes explicitly marked implicit above",
+        "optOut": "hx-disinherit=\"*\" or named attributes; unset stops a value",
+        "optIn": "hx-inherit names attributes when config.disableInheritance is enabled; computed config is unknown",
+        "nonInherited": [
+          "hx-get",
+          "hx-post",
+          "hx-put",
+          "hx-patch",
+          "hx-delete",
+          "hx-trigger",
+          "hx-on"
+        ]
+      },
+      "trigger": {
+        "source": {
+          "package": "htmx.org",
+          "release": "2.0.11",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+          "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+          "path": "dist/htmx.js"
+        },
+        "grammarSource": "parseAndCacheTrigger, maybeGenerateConditional, consumeCSSSelector",
+        "form": "comma-separated event[JavaScript-filter] modifier* or every interval[filter]; from/target/root selectors preserve their selector parts",
+        "modifiers": [
+          "once",
+          "changed",
+          "delay",
+          "throttle",
+          "from",
+          "target",
+          "consume",
+          "queue",
+          "root",
+          "threshold"
+        ],
+        "queue": ["last", "first", "all", "none"],
+        "specialEvents": ["load", "revealed", "intersect", "every"],
+        "intervals": ["ms", "s", "m"],
+        "filterOwner": "EMB0 attaches authored JavaScript; values are never executed; template holes retain unknown parts."
+      },
+      "swap": {
+        "source": {
+          "package": "htmx.org",
+          "release": "2.0.11",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+          "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+          "path": "dist/htmx.js"
+        },
+        "grammarSource": "getSwapSpecification, swapWithStyle",
+        "form": "optional style followed by whitespace-separated name:value modifiers",
+        "default": "innerHTML",
+        "strategies": [
+          "innerHTML",
+          "outerHTML",
+          "textContent",
+          "beforebegin",
+          "afterbegin",
+          "beforeend",
+          "afterend",
+          "delete",
+          "none"
+        ],
+        "aliases": {},
+        "modifiers": [
+          "swap",
+          "settle",
+          "transition",
+          "ignoreTitle",
+          "scroll",
+          "show",
+          "focus-scroll"
+        ],
+        "policy": "Decode authored strategy, timing and target only. No live swap, settle phase, history state or runtime class fact."
+      },
+      "events": [
+        {
+          "name": "htmx:abort",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:afterOnLoad",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:afterProcessNode",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:afterRequest",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:afterSettle",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:afterSwap",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:badResponseUrl",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeCleanupElement",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeHistorySave",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeHistoryUpdate",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeOnLoad",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeProcessNode",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeRequest",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeSend",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeSwap",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:beforeTransition",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:configRequest",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:confirm",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:error",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:evalDisallowedError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:eventFilter:error",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:historyCacheError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:historyCacheHit",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:historyCacheMiss",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:historyCacheMissLoad",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:historyCacheMissLoadError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:historyItemCreated",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:historyRestore",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:invalidPath",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:load",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:onLoadError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:oobAfterSwap",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:oobBeforeSwap",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:oobErrorNoTarget",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:partialAfterSwap",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:partialBeforeSwap",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:partialErrorNoTarget",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:processTemplate",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:prompt",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:pushedIntoHistory",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:replacedInHistory",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:responseError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:restored",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:sendAbort",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:sendError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:swapError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:syntax:error",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:targetError",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:timeout",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:trigger",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:validateUrl",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:validation:failed",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:validation:halted",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:validation:validate",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:xhr:abort",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:xhr:loadend",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:xhr:loadstart",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:xhr:progress",
+          "source": {
+            "package": "htmx.org",
+            "release": "2.0.11",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+            "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        }
+      ],
+      "eventPatterns": [],
+      "extensions": [],
+      "extensionPolicy": "No external extension semantics admitted: the core tarball does not pin separately distributed 2.x extension packages. Literal defineExtension names can bind hx-ext uses without evaluating implementations.",
+      "registration": {
+        "api": "htmx.defineExtension",
+        "source": {
+          "package": "htmx.org",
+          "release": "2.0.11",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+          "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+          "path": "dist/htmx.js"
+        },
+        "uses": "hx-ext comma-separated names; ignore:name removes an inherited extension",
+        "navigation": "HTX5-AC4"
+      },
+      "responseTemplateSyntax": {
+        "source": {
+          "package": "htmx.org",
+          "release": "2.0.11",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz",
+          "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
+          "path": "dist/htmx.js"
+        },
+        "form": "template[hx] with type=partial",
+        "policy": "Static authored response marker; not an hx-partial attribute. Fragment interpretation belongs to HRF1/HRF2."
+      }
+    },
+    {
+      "profile": "htmx-4",
+      "release": "4.0.0",
+      "source": {
+        "package": "htmx.org",
+        "release": "4.0.0",
+        "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+        "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+        "path": "dist/htmx.js"
+      },
+      "reference": "https://four.htmx.org/reference/",
+      "attributes": [
+        {
+          "name": "hx-action",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-boost",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-config",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-confirm",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-delete",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-disable",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-encoding",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-get",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-headers",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "HCON or JSON; script forms remain unevaluated"
+        },
+        {
+          "name": "hx-history-elt",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "Local presence marker selected by #restoreHistory using [hx-history-elt]; :inherited markers are not recognized and ancestors do not supply an effective value. No live history state is modelled."
+        },
+        {
+          "name": "hx-ignore",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-include",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-indicator",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-method",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-morph-skip",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-morph-skip-children",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-on",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "Local hx-on=\"event[filter] modifiers -> JavaScript; event -> JavaScript\" or hx-on:event / hx-on::event with JavaScript body. Suffixes require config.metaCharacter (default colon); hx-on-click is not recognized by default. Computed metaCharacter stays unknown; filters, selectors and JavaScript bodies remain authored, unevaluated regions.",
+          "grammarSource": "#handleHxOnAttributes, #onTrigger"
+        },
+        {
+          "name": "hx-patch",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-post",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-preserve",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-push-url",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-put",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-query",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-replace-url",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-select",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-select-oob",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-status:<status>",
+          "namePattern": "^hx-status:(?:[0-9]{3}|[0-9]{2}x|[0-9]xx)$",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "grammarSource": "#handleStatusCodes, #attributeValue, HCON.merge",
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "HCON or JSON authored response configuration, including target selectors and swap specifications; exact three-digit status, two-digit prefix plus x, or one-digit prefix plus xx. Bare hx-status is not recognized. Decode authored regions only; never observe responses or select a live status branch."
+        },
+        {
+          "name": "hx-swap",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-swap-oob",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "Local response-fragment marker selected by #processOOB using [hx-swap-oob]; its own authored value supplies the swap specification. :inherited markers are not recognized and ancestors do not supply an effective value."
+        },
+        {
+          "name": "hx-sync",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-target",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-trigger",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-validate",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "authored value decoded by the pinned reference; never evaluated"
+        },
+        {
+          "name": "hx-vals",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "HCON or JSON; script forms remain unevaluated"
+        }
+      ],
+      "aliases": {
+        "source": {
+          "package": "htmx.org",
+          "release": "4.0.0",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+          "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+          "path": "dist/htmx.js"
+        },
+        "standardPrefix": "hx-",
+        "dataPrefix": "data-hx-",
+        "policy": "Default secondary prefix is data-hx-; a computed/configured prefix is unknown, never guessed."
+      },
+      "inheritance": {
+        "source": {
+          "package": "htmx.org",
+          "release": "4.0.0",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+          "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+          "path": "dist/htmx.js"
+        },
+        "default": "explicit",
+        "marker": ":inherited",
+        "append": ":append",
+        "combined": ":inherited:append",
+        "implicitCompatibility": "config.implicitInheritance is a runtime setting; do not assume its evaluation. Facts describe authored default-profile rules or remain conditional.",
+        "removed": ["hx-inherit", "hx-disinherit"]
+      },
+      "trigger": {
+        "source": {
+          "package": "htmx.org",
+          "release": "4.0.0",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+          "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+          "path": "dist/htmx.js"
+        },
+        "grammarSource": "#parseTriggerSpecs, HCON.split, HCON.parse, #onTrigger",
+        "form": "HCON-aware comma-separated event[JavaScript-filter] plus HCON modifier pairs; quoted values and nested brackets preserve inner commas",
+        "modifiers": [
+          "once",
+          "changed",
+          "delay",
+          "throttle",
+          "from",
+          "target",
+          "consume",
+          "halt",
+          "prevent",
+          "stop",
+          "capture",
+          "passive",
+          "root",
+          "rootMargin",
+          "threshold"
+        ],
+        "queue": [],
+        "specialEvents": ["load", "revealed", "intersect", "every"],
+        "intervals": ["ms", "s", "m"],
+        "filterOwner": "EMB0 attaches authored JavaScript; values are never executed; template holes retain unknown parts.",
+        "queueNote": "No hx-trigger queue modifier is interpreted by the pinned #onTrigger; hx-sync supplies request scheduling strategy. HCON parses additional authored keys without proving their semantics."
+      },
+      "swap": {
+        "source": {
+          "package": "htmx.org",
+          "release": "4.0.0",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+          "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+          "path": "dist/htmx.js"
+        },
+        "grammarSource": "#parseSwapSpec, HCON.parse, #normalizeSwapStyle, #swap",
+        "form": "optional leading style followed by HCON modifier pairs or JSON",
+        "default": "innerHTML",
+        "strategies": [
+          "innerHTML",
+          "outerHTML",
+          "textContent",
+          "outerSync",
+          "innerMorph",
+          "outerMorph",
+          "beforebegin",
+          "afterbegin",
+          "beforeend",
+          "afterend",
+          "delete",
+          "none"
+        ],
+        "aliases": {
+          "before": "beforebegin",
+          "after": "afterend",
+          "prepend": "afterbegin",
+          "append": "beforeend"
+        },
+        "modifiers": [
+          "swap",
+          "settle",
+          "transition",
+          "scroll",
+          "scrollTarget",
+          "show",
+          "showTarget",
+          "focusScroll",
+          "ignoreTitle",
+          "target",
+          "strip",
+          "swapEmpty"
+        ],
+        "policy": "Decode authored strategy, timing and target only. No live swap, settle phase, history state or runtime class fact."
+      },
+      "events": [
+        {
+          "name": "htmx:abort",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:cleanup",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:history:push",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:history:replace",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:history:update",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:implicitInheritance",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:init",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:process",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:request",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:settle",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:swap",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:after:viewTransition",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:cleanup",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:history:restore",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:history:update",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:init",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:morph:attr",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:morph:node",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:on:init",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:process",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:request",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:response",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:settle",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:swap",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:before:viewTransition",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:config:request",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:confirm",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:error",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:finally:request",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:finally:swap",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:response:error",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        },
+        {
+          "name": "htmx:scope",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "kind": "DOM-event; no component event facet"
+        }
+      ],
+      "eventPatterns": [
+        {
+          "pattern": "htmx:process:<template-type>",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "policy": "Authored custom template type, not an invented finite event."
+        }
+      ],
+      "extensions": [
+        {
+          "name": "htmx-2-compat",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/htmx-2-compat.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": [],
+          "events": [
+            "htmx:afterOnLoad",
+            "htmx:afterProcessNode",
+            "htmx:afterRequest",
+            "htmx:afterSettle",
+            "htmx:afterSwap",
+            "htmx:beforeCleanupElement",
+            "htmx:beforeHistorySave",
+            "htmx:beforeHistoryUpdate",
+            "htmx:beforeOnLoad",
+            "htmx:beforeProcessNode",
+            "htmx:beforeRequest",
+            "htmx:beforeSend",
+            "htmx:beforeSwap",
+            "htmx:beforeTransition",
+            "htmx:configRequest",
+            "htmx:historyRestore",
+            "htmx:load",
+            "htmx:pushedIntoHistory",
+            "htmx:replacedInHistory",
+            "htmx:targetError"
+          ],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-alpine-compat",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-alpine-compat.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": [],
+          "events": [],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-browser-indicator",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-browser-indicator.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-browser-indicator"],
+          "events": [],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-compat",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-compat.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": [],
+          "events": [
+            "htmx:afterOnLoad",
+            "htmx:afterProcessNode",
+            "htmx:afterRequest",
+            "htmx:afterSettle",
+            "htmx:afterSwap",
+            "htmx:beforeCleanupElement",
+            "htmx:beforeHistorySave",
+            "htmx:beforeHistoryUpdate",
+            "htmx:beforeOnLoad",
+            "htmx:beforeProcessNode",
+            "htmx:beforeRequest",
+            "htmx:beforeSend",
+            "htmx:beforeSwap",
+            "htmx:beforeTransition",
+            "htmx:configRequest",
+            "htmx:historyRestore",
+            "htmx:load",
+            "htmx:pushedIntoHistory",
+            "htmx:replacedInHistory",
+            "htmx:targetError"
+          ],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-csp",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-csp.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-csp", "hx-nonce"],
+          "events": ["htmx:security:strip", "htmx:security:violation"],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-download",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-download.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": [],
+          "events": ["htmx:download:complete", "htmx:download:progress", "htmx:download:start"],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-head",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-head.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-head"],
+          "events": [
+            "htmx:head:after:merge",
+            "htmx:head:before:add",
+            "htmx:head:before:merge",
+            "htmx:head:before:remove"
+          ],
+          "coreAttributeReferences": ["hx-preserve"],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-history-cache",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-history-cache.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": [],
+          "events": [
+            "htmx:history:cache:after:restore",
+            "htmx:history:cache:after:save",
+            "htmx:history:cache:before:restore",
+            "htmx:history:cache:before:save",
+            "htmx:history:cache:hit",
+            "htmx:history:cache:miss"
+          ],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-live",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-live.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-live"],
+          "events": [],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-multipart",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-multipart.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": [
+            "hx-last-part-id",
+            "hx-multipart",
+            "hx-multipart:close",
+            "hx-multipart:connect"
+          ],
+          "events": [
+            "htmx:multipart:after:connection",
+            "htmx:multipart:after:part",
+            "htmx:multipart:before:connection",
+            "htmx:multipart:before:part",
+            "htmx:multipart:close",
+            "htmx:multipart:error"
+          ],
+          "coreAttributeReferences": ["hx-trigger"],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-pending",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-pending.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-pending"],
+          "events": [],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-preload",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-preload.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-preload"],
+          "events": [],
+          "coreAttributeReferences": ["hx-get", "hx-vals"],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-prompt",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-prompt.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-prompt"],
+          "events": ["htmx:prompt"],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-ptag",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-ptag.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-ptag"],
+          "events": [],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-sse",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-sse.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-sse", "hx-sse:close", "hx-sse:connect"],
+          "events": [
+            "htmx:sse:after:connection",
+            "htmx:sse:after:message",
+            "htmx:sse:before:connection",
+            "htmx:sse:before:message",
+            "htmx:sse:close",
+            "htmx:sse:error"
+          ],
+          "coreAttributeReferences": ["hx-config", "hx-trigger"],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-targets",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-targets.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-targets"],
+          "events": [],
+          "coreAttributeReferences": [],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-upsert",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-upsert.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": [],
+          "events": [],
+          "coreAttributeReferences": ["hx-target"],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        },
+        {
+          "name": "hx-ws",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/ext/hx-ws.js"
+          },
+          "activation": "Only a statically resolved authored registration/import of this pinned bundled extension establishes availability; merely writing its attribute does not.",
+          "attributes": ["hx-ws", "hx-ws:connect", "hx-ws:send"],
+          "events": [
+            "htmx:ws:after:connection",
+            "htmx:ws:after:message:incoming",
+            "htmx:ws:after:message:outgoing",
+            "htmx:ws:before:connection",
+            "htmx:ws:before:message:incoming",
+            "htmx:ws:before:message:outgoing",
+            "htmx:ws:close",
+            "htmx:ws:error"
+          ],
+          "coreAttributeReferences": [
+            "hx-config",
+            "hx-select",
+            "hx-select-oob",
+            "hx-swap",
+            "hx-target",
+            "hx-trigger",
+            "hx-vals"
+          ],
+          "inventoryRule": "Listed literal attribute/event names come from this exact source. Dynamic suffixes and custom behaviours retain their authored unknown part; they do not invent complete finite populations."
+        }
+      ],
+      "extensionPolicy": "Bundled dist/ext/*.js only, at the same exact 4.0.0 pin. Custom registrations are authored names with unknown semantics; unpinned external extensions are unsupported.",
+      "registration": {
+        "api": "htmx.registerExtension",
+        "source": {
+          "package": "htmx.org",
+          "release": "4.0.0",
+          "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+          "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+          "path": "dist/htmx.js"
+        },
+        "uses": "extension-owned attributes; no core hx-ext",
+        "navigation": "excluded by scope ruling htmx-four-extension-registration"
+      }
+    }
+  ],
+  "policy": "Every profile contains independent attribute, inheritance, grammar, event and extension tables with exact artifact provenance. Shared spelling never supplies another profile source. Inventories describe static syntax, not runtime support."
+}

@@ -19,6 +19,7 @@
 //!   virtual-time failsafes that make a broken impl fail loudly instead of
 //!   hanging).
 
+use crate::provider_query::ProviderQuery;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -664,6 +665,8 @@ struct MockInner {
     /// When set, a gated hover SUCCEEDS once released (an answer that was in
     /// flight when its engine was retired) instead of failing.
     gated_hover_succeeds: std::sync::atomic::AtomicBool,
+    /// When set, every hover ends in the typed coordinate conflict.
+    hover_conflicts: std::sync::atomic::AtomicBool,
     /// When set, `configure_paths` fails (an engine rejecting replay).
     configure_fails: std::sync::atomic::AtomicBool,
     /// The ambient request deadline observed by every `open_file` call.
@@ -673,6 +676,8 @@ struct MockInner {
     activation_settlement_gate: parking_lot::Mutex<Option<Arc<Semaphore>>>,
     /// When set, a gated activation settlement fails instead of certifying.
     activation_settlement_fails: std::sync::atomic::AtomicBool,
+    /// The admission every `get_hover` query arrived with.
+    hover_admissions: parking_lot::Mutex<Vec<crate::provider_query::QueryAdmission>>,
 }
 
 /// A recording `TypeProvider` mock. Cloning shares the recorded state (so the
@@ -700,10 +705,12 @@ impl MockProvider {
                 cache_only_loads: std::sync::atomic::AtomicBool::new(false),
                 shutdowns: AtomicUsize::new(0),
                 gated_hover_succeeds: std::sync::atomic::AtomicBool::new(false),
+                hover_conflicts: std::sync::atomic::AtomicBool::new(false),
                 configure_fails: std::sync::atomic::AtomicBool::new(false),
                 open_deadlines: parking_lot::Mutex::new(Vec::new()),
                 activation_settlement_gate: parking_lot::Mutex::new(None),
                 activation_settlement_fails: std::sync::atomic::AtomicBool::new(false),
+                hover_admissions: parking_lot::Mutex::new(Vec::new()),
             }),
         }
     }
@@ -962,7 +969,7 @@ impl TypeProvider for MockProvider {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -976,7 +983,7 @@ impl TypeProvider for MockProvider {
 
     fn get_completion_details<'a>(
         &'a self,
-        _path: &'a str,
+        _query: &'a ProviderQuery,
         _offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
@@ -993,7 +1000,16 @@ impl TypeProvider for MockProvider {
         Box::pin(async move { Ok(enriched) })
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let path = query.path();
+        self.inner
+            .hover_admissions
+            .lock()
+            .push(query.admission().clone());
         self.record(MockCall::Hover {
             path: path.to_string(),
             offset,
@@ -1003,7 +1019,16 @@ impl TypeProvider for MockProvider {
             _ => None,
         };
         let succeeds = self.inner.gated_hover_succeeds.load(Ordering::SeqCst);
+        let conflicts = self.inner.hover_conflicts.load(Ordering::SeqCst);
+        let conflict_path = path.to_string();
         Box::pin(async move {
+            if conflicts {
+                return Err(crate::provider_query::ProviderQueryConflict::new(
+                    &conflict_path,
+                    crate::provider_query::ConflictKind::Moved,
+                )
+                .into());
+            }
             if let Some(gate) = gate {
                 let _permit = gate.acquire().await;
                 if !succeeds {
@@ -1018,25 +1043,33 @@ impl TypeProvider for MockProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -1044,7 +1077,7 @@ impl TypeProvider for MockProvider {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -1052,7 +1085,7 @@ impl TypeProvider for MockProvider {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -1060,13 +1093,16 @@ impl TypeProvider for MockProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -1074,7 +1110,7 @@ impl TypeProvider for MockProvider {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -1399,7 +1435,14 @@ async fn make_harness(initial: MockProvider, replacement: MockProvider) -> Resil
 /// is only a failsafe against a monitor that never retires the engine.
 async fn await_down(provider: &ProviderHub<MockProvider>) {
     for _ in 0..100_000 {
-        if provider.get_hover("/probe.vue.tsx", 0).await.is_err() {
+        if provider
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface("/probe.vue.tsx"),
+                0,
+            )
+            .await
+            .is_err()
+        {
             return;
         }
         tokio::task::yield_now().await;
@@ -1525,6 +1568,7 @@ impl ProviderEstablisher<TsserverTypeProvider> for RealTsserverBackend {
                 Some(&carrier_store_dir),
                 false,
                 Some(crash_notify),
+                None,
             )
             .await
             .map(Arc::new)
@@ -1914,7 +1958,9 @@ impl RealRecoveryHarness {
                 if self
                     .provider
                     .get_hover(
-                        &self.carriers[0].companion_path,
+                        &crate::provider_query::ProviderQuery::at_engine_surface(
+                            &self.carriers[0].companion_path,
+                        ),
                         self.carriers[0].hover_offset,
                     )
                     .await
@@ -1952,7 +1998,12 @@ impl RealRecoveryHarness {
             loop {
                 last = self
                     .provider
-                    .get_hover(&carrier.companion_path, carrier.hover_offset)
+                    .get_hover(
+                        &crate::provider_query::ProviderQuery::at_engine_surface(
+                            &carrier.companion_path,
+                        ),
+                        carrier.hover_offset,
+                    )
                     .await
                     .unwrap_or_default();
                 if let Some(hover) = &last {
@@ -2493,7 +2544,11 @@ async fn completion_details_forward_to_the_serving_engine() {
         make_resilient(initial, MockProvider::new("tsserver")).await;
 
     let enriched = provider
-        .get_completion_details("/p/App.vue.tsx", 8, &[bare_completion("alpha")])
+        .get_completion_details(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/p/App.vue.tsx"),
+            8,
+            &[bare_completion("alpha")],
+        )
         .await
         .expect("completion details must answer");
 
@@ -2614,7 +2669,13 @@ async fn make_flaky(
 /// advances through the monitor's backoff sleeps; the bound is a failsafe.
 async fn spin_until(provider: &ProviderHub<MockProvider>, up: bool) -> bool {
     for _ in 0..50_000 {
-        let answered = provider.get_hover("/probe.vue.tsx", 0).await.is_ok();
+        let answered = provider
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface("/probe.vue.tsx"),
+                0,
+            )
+            .await
+            .is_ok();
         if answered == up {
             return true;
         }
@@ -2664,7 +2725,13 @@ async fn persistently_failing_respawn_exhausts_budget_and_stays_down() {
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     let attempts_after_budget = spawn_attempts.load(Ordering::Relaxed);
     assert!(
-        provider.get_hover("/probe.vue.tsx", 0).await.is_err(),
+        provider
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface("/probe.vue.tsx"),
+                0
+            )
+            .await
+            .is_err(),
         "a persistently failing backend stays down (fails closed) after the budget"
     );
     assert_eq!(
@@ -2681,7 +2748,12 @@ async fn persistently_failing_respawn_exhausts_budget_and_stays_down() {
     for fixture in &RECOVERY_CARRIERS {
         assert!(
             provider
-                .get_hover(fixture.companion_path, fixture.hover_offset)
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface(
+                        fixture.companion_path
+                    ),
+                    fixture.hover_offset
+                )
                 .await
                 .is_err(),
             "a persistently failed respawn must fail closed for {} typed queries",
@@ -2721,7 +2793,10 @@ async fn an_exhausted_hub_reports_exhaustion_not_eternal_restarting() {
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
     let error = provider
-        .get_hover("/probe.vue.tsx", 0)
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/probe.vue.tsx"),
+            0,
+        )
         .await
         .expect_err("an exhausted hub fails closed");
     assert!(
@@ -2753,7 +2828,14 @@ async fn await_cond(mut cond: impl FnMut() -> bool, what: &str) {
 /// through the monitor's restart backoff.
 async fn await_live(provider: &ProviderHub<MockProvider>) {
     for _ in 0..1_000 {
-        if provider.get_hover("/probe-live.vue.tsx", 0).await.is_ok() {
+        if provider
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface("/probe-live.vue.tsx"),
+                0,
+            )
+            .await
+            .is_ok()
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2779,7 +2861,14 @@ async fn drive_killer_to_quarantine(
     initial.set_blocking_failing_hover(companion, Arc::clone(&gate_one));
     let killer_one = tokio::spawn({
         let provider = Arc::clone(provider);
-        async move { provider.get_hover(companion, offset).await }
+        async move {
+            provider
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                    offset,
+                )
+                .await
+        }
     });
     await_cond(
         || {
@@ -2807,7 +2896,14 @@ async fn drive_killer_to_quarantine(
     replacement.set_blocking_failing_hover(companion, Arc::clone(&gate_two));
     let killer_two = tokio::spawn({
         let provider = Arc::clone(provider);
-        async move { provider.get_hover(companion, offset).await }
+        async move {
+            provider
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                    offset,
+                )
+                .await
+        }
     });
     await_cond(
         || {
@@ -2949,7 +3045,12 @@ async fn killer_request_is_quarantined_and_never_replayed_into_restarted_engine(
 
     // The killer fingerprint now fails closed WITHOUT touching the engine.
     let replays_before = hover_count(&replacement, companion, 42);
-    let quarantined = provider.get_hover(companion, 42).await;
+    let quarantined = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+            42,
+        )
+        .await;
     assert!(
         matches!(quarantined, Ok(None)),
         "the quarantined killer request must fail closed (empty result), got {quarantined:?}"
@@ -2961,7 +3062,12 @@ async fn killer_request_is_quarantined_and_never_replayed_into_restarted_engine(
     );
 
     // Everything else on the same file is served by the restarted engine.
-    let neighbor = provider.get_hover(companion, 43).await;
+    let neighbor = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+            43,
+        )
+        .await;
     assert!(neighbor.is_ok(), "a non-killer request must be served");
     assert!(
         hover_count(&replacement, companion, 43) > 0,
@@ -2987,7 +3093,15 @@ async fn quarantine_clears_when_the_file_content_changes() {
     drive_killer_to_quarantine(&harness, &provider, &initial, &replacement, companion, 42).await;
     let replays_before = hover_count(&replacement, companion, 42);
     assert!(
-        matches!(provider.get_hover(companion, 42).await, Ok(None)),
+        matches!(
+            provider
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                    42
+                )
+                .await,
+            Ok(None)
+        ),
         "killer stays quarantined while the content is unchanged"
     );
     assert_eq!(
@@ -3001,7 +3115,12 @@ async fn quarantine_clears_when_the_file_content_changes() {
         .await
         .unwrap();
 
-    let served = provider.get_hover(companion, 42).await;
+    let served = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+            42,
+        )
+        .await;
     assert!(
         served.is_ok(),
         "after a content change the request is served"
@@ -3035,7 +3154,14 @@ async fn a_discarded_answer_from_a_retired_engine_keeps_its_crash_strikes() {
         .store(true, Ordering::SeqCst);
     let in_flight = tokio::spawn({
         let provider = Arc::clone(&provider);
-        async move { provider.get_hover(companion, offset).await }
+        async move {
+            provider
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                    offset,
+                )
+                .await
+        }
     });
     await_cond(
         || hover_count(&initial, companion, offset) == 1,
@@ -3075,6 +3201,94 @@ async fn a_discarded_answer_from_a_retired_engine_keeps_its_crash_strikes() {
         1,
         "a discarded answer must not erase the crash strikes of its fingerprint"
     );
+}
+
+/// A coordinate conflict is evidence neither that a request harms the engine
+/// nor that it is safe: settling one on the serving engine must leave the
+/// crash strikes its fingerprint accumulated exactly where they were.
+#[tokio::test(start_paused = true)]
+async fn a_coordinate_conflict_keeps_its_fingerprints_crash_strikes() {
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone()).await;
+    let provider = Arc::clone(&harness.provider);
+    let companion = "/p/Conflicted.svelte.jsx";
+    let offset = 42u32;
+    let fp = QueryFingerprint::new("hover", companion, u64::from(offset), 0);
+    let strikes = || {
+        provider
+            .state
+            .shared
+            .query_watch
+            .lock()
+            .unwrap()
+            .strike_count(&fp)
+    };
+
+    let gate = Arc::new(Semaphore::new(0));
+    initial.set_blocking_failing_hover(companion, Arc::clone(&gate));
+    let in_flight = tokio::spawn({
+        let provider = Arc::clone(&provider);
+        async move {
+            provider
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                    offset,
+                )
+                .await
+        }
+    });
+    await_cond(
+        || hover_count(&initial, companion, offset) == 1,
+        "the hover reached the first engine",
+    )
+    .await;
+    harness.crash_notify.notify_one();
+    await_down(&provider).await;
+    gate.add_permits(1);
+    assert!(in_flight.await.unwrap().is_err());
+    assert_eq!(strikes(), 1, "the crash must strike the in-flight request");
+    harness.spawn_gate.add_permits(1);
+    await_live(&provider).await;
+
+    replacement
+        .inner
+        .hover_conflicts
+        .store(true, Ordering::SeqCst);
+    let conflicted = provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+            offset,
+        )
+        .await
+        .expect_err("the serving engine answers with the typed conflict");
+    assert!(
+        conflicted.query_conflict,
+        "typed conflict, got {conflicted}"
+    );
+    assert_eq!(
+        hover_count(&replacement, companion, offset),
+        1,
+        "the struck request reached the serving engine"
+    );
+    assert_eq!(
+        strikes(),
+        1,
+        "a conflict must not erase the crash strikes of its fingerprint"
+    );
+
+    replacement
+        .inner
+        .hover_conflicts
+        .store(false, Ordering::SeqCst);
+    provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+            offset,
+        )
+        .await
+        .expect("a real answer");
+    assert_eq!(strikes(), 0, "a successful completion still self-heals");
 }
 
 /// A state update whose submitter deadline elapses before the actor settles the
@@ -3151,7 +3365,12 @@ async fn repeated_killer_request_does_not_burn_the_restart_budget() {
     harness.spawn_gate.add_permits(8);
     let replays_before = hover_count(&replacement, companion, 42);
     for _ in 0..25 {
-        let replayed = provider.get_hover(companion, 42).await;
+        let replayed = provider
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                42,
+            )
+            .await;
         assert!(
             matches!(replayed, Ok(None)),
             "every replayed killer fails closed, got {replayed:?}"
@@ -3177,7 +3396,13 @@ async fn repeated_killer_request_does_not_burn_the_restart_budget() {
     );
     // The engine is still live for everything else — never verter-only mode.
     assert!(
-        provider.get_hover(companion, 43).await.is_ok(),
+        provider
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface(companion),
+                43
+            )
+            .await
+            .is_ok(),
         "the restarted engine keeps serving non-quarantined requests"
     );
 }
@@ -3419,7 +3644,14 @@ async fn a_retired_engine_answer_never_settles_for_its_replacement() {
         .store(true, Ordering::SeqCst);
     let in_flight = tokio::spawn({
         let provider = Arc::clone(&provider);
-        async move { provider.get_hover("/p/Slow.vue.tsx", 7).await }
+        async move {
+            provider
+                .get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface("/p/Slow.vue.tsx"),
+                    7,
+                )
+                .await
+        }
     });
     await_cond(
         || hover_count(&initial, "/p/Slow.vue.tsx", 7) == 1,
@@ -3523,14 +3755,26 @@ async fn a_hung_establishment_is_bounded_and_arms_the_retry_cooldown() {
     );
 
     let started = tokio::time::Instant::now();
-    assert!(hub.get_hover("/w/a.ts", 0).await.is_err());
+    assert!(hub
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/w/a.ts"),
+            0
+        )
+        .await
+        .is_err());
     assert_eq!(
         started.elapsed(),
         std::time::Duration::from_millis(50),
         "the establishment fails at exactly its own bound"
     );
     assert!(!hub.is_serving());
-    assert!(hub.get_hover("/w/a.ts", 0).await.is_err());
+    assert!(hub
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/w/a.ts"),
+            0
+        )
+        .await
+        .is_err());
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         1,
@@ -3578,7 +3822,12 @@ async fn an_engine_that_rejects_replay_is_torn_down_and_never_serves() {
     hub.configure_paths("/w", serde_json::json!({ "@/*": ["src/*"] }))
         .await
         .unwrap();
-    let demand = hub.get_hover("/w/a.ts", 0).await;
+    let demand = hub
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/w/a.ts"),
+            0,
+        )
+        .await;
 
     assert!(demand.is_err(), "got {demand:?}");
     assert!(!hub.is_serving());
@@ -3649,7 +3898,10 @@ async fn a_failed_forward_retires_the_epoch_and_replays_before_serving_again() {
     harness.spawn_gate.add_permits(1);
     harness.notifier.await_started(2).await;
     provider
-        .get_hover("/p/A.ts", 3)
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/p/A.ts"),
+            3,
+        )
         .await
         .expect("the replacement serves after the replay");
     assert_eq!(
@@ -3696,7 +3948,10 @@ async fn failed_close_keeps_the_prior_surface_until_reopen() {
     harness.spawn_gate.add_permits(1);
     harness.notifier.await_started(2).await;
     provider
-        .get_hover("/p/A.ts", 3)
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/p/A.ts"),
+            3,
+        )
         .await
         .expect("the replacement serves the prior surface");
     assert!(
@@ -3747,7 +4002,12 @@ async fn an_on_demand_hub_reconciles_a_failed_forward_on_the_next_demand() {
     ));
 
     // A query demand establishes the first engine; a mutation alone never does.
-    hub.get_hover("/p/A.ts", 0).await.unwrap();
+    hub.get_hover(
+        &crate::provider_query::ProviderQuery::at_engine_surface("/p/A.ts"),
+        0,
+    )
+    .await
+    .unwrap();
     hub.open_file("/p/A.ts", "const a = 1;").await.unwrap();
 
     initial.set_failing_updates();
@@ -3766,9 +4026,12 @@ async fn an_on_demand_hub_reconciles_a_failed_forward_on_the_next_demand() {
 
     // The next demand reconciles: a fresh engine, the desired state replayed
     // into it (the rejected update included), and only then the answer.
-    hub.get_hover("/p/A.ts", 3)
-        .await
-        .expect("the fresh engine serves");
+    hub.get_hover(
+        &crate::provider_query::ProviderQuery::at_engine_surface("/p/A.ts"),
+        3,
+    )
+    .await
+    .expect("the fresh engine serves");
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(
         replacement
@@ -3911,7 +4174,13 @@ async fn concurrent_demands_establish_once_and_warm_use_adds_no_establishment() 
     let demands: Vec<_> = (0..8)
         .map(|offset| {
             let hub = Arc::clone(&hub);
-            tokio::spawn(async move { hub.get_hover("/w/a.ts", offset).await })
+            tokio::spawn(async move {
+                hub.get_hover(
+                    &crate::provider_query::ProviderQuery::at_engine_surface("/w/a.ts"),
+                    offset,
+                )
+                .await
+            })
         })
         .collect();
     await_cond(|| attempts.load(Ordering::SeqCst) == 1, "one establishment").await;
@@ -3923,7 +4192,12 @@ async fn concurrent_demands_establish_once_and_warm_use_adds_no_establishment() 
     assert_eq!(hub.serving_epoch(), Some(ProviderEpoch(1)));
 
     for offset in 0..20 {
-        hub.get_hover("/w/a.ts", offset).await.unwrap();
+        hub.get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("/w/a.ts"),
+            offset,
+        )
+        .await
+        .unwrap();
         hub.update_file("/w/a.ts", "const warm = 1;").await.unwrap();
     }
     assert_eq!(
@@ -3998,9 +4272,20 @@ async fn a_wedged_or_failed_instance_never_blocks_an_independent_healthy_instanc
         make_resilient(healthy_engine.clone(), MockProvider::new("tsgo")).await;
 
     let served = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        assert!(failing.get_hover("/c/x.ts", 0).await.is_err());
+        assert!(failing
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface("/c/x.ts"),
+                0
+            )
+            .await
+            .is_err());
         healthy.open_file("/b/App.ts", "const b = 1;").await?;
-        healthy.get_hover("/b/App.ts", 3).await
+        healthy
+            .get_hover(
+                &crate::provider_query::ProviderQuery::at_engine_surface("/b/App.ts"),
+                3,
+            )
+            .await
     })
     .await
     .expect("a held or failed instance must not delay an independent instance");
@@ -4759,7 +5044,13 @@ async fn first_overlay_failed_compensation_retires_only_its_incarnation() {
         .synchronize(epoch, 2, |_, _| true, |_| None)
         .await
         .is_err());
-    assert!(hub.get_hover(unit.as_str(), 0).await.is_err());
+    assert!(hub
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(unit.as_str()),
+            0
+        )
+        .await
+        .is_err());
     assert!(
         hub.establish_rearming(|| None).await.is_err(),
         "the failed attach cannot re-arm at the same discriminant"
@@ -4774,7 +5065,13 @@ async fn first_overlay_failed_compensation_retires_only_its_incarnation() {
         )
         .await
         .unwrap();
-    healthy.get_hover(unit.as_str(), 0).await.unwrap();
+    healthy
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(unit.as_str()),
+            0,
+        )
+        .await
+        .unwrap();
     assert_eq!(healthy.serving_epoch(), Some(healthy_epoch));
     assert_eq!(healthy_engine.inner.shutdowns.load(Ordering::SeqCst), 0);
     assert!(healthy_engine.calls().iter().any(|call| matches!(call,
@@ -4903,7 +5200,13 @@ async fn failed_compensation_settles_inside_the_request_deadline_and_leaves_reco
         Some(epoch),
         "the crash monitor must respawn a replacement generation"
     );
-    assert!(hub.get_hover(unit.as_str(), 0).await.is_ok());
+    assert!(hub
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(unit.as_str()),
+            0
+        )
+        .await
+        .is_ok());
     assert_eq!(
         engine.inner.shutdowns.load(Ordering::SeqCst),
         1,
@@ -5801,14 +6104,24 @@ async fn managed_recovery_rebinds_proof_and_interrupts_a_held_generated_write() 
         harness.provider.applied_content(unit),
         crate::traits::AppliedContent::NotApplied
     ));
-    let denied = harness.provider.get_hover(unit, 0).await.unwrap_err();
+    let denied = harness
+        .provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(unit),
+            0,
+        )
+        .await
+        .unwrap_err();
     assert_eq!(
         denied.admission_refusal,
         Some(AdmissionRefusal::GeneratedUnitExcluded)
     );
     harness
         .provider
-        .get_hover("d:/ws/healthy.ts", 0)
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("d:/ws/healthy.ts"),
+            0,
+        )
         .await
         .unwrap();
     harness.provider.shutdown().await.unwrap();
@@ -6183,7 +6496,12 @@ async fn cache_only_loads_remain_held_during_forward_and_replay() {
             .unwrap(),
         FileLoadDisposition::Held
     );
-    hub.get_hover("/w/replay.ts", 0).await.unwrap();
+    hub.get_hover(
+        &crate::provider_query::ProviderQuery::at_engine_surface("/w/replay.ts"),
+        0,
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         hub.applied_content("/w/replay.ts"),
         AppliedContent::NotApplied
@@ -6373,4 +6691,358 @@ async fn content_drift_preserves_activation_completion_ownership() {
             }
         }
     }
+}
+
+/// A read-only query binds the serving incarnation and the project membership
+/// it was admitted under — never the workspace content generation. An
+/// unrelated document's edit leaves it current (and its generated-unit proof
+/// reused), while a membership change or a replaced engine still refuses it
+/// with its own distinct reason. A write witness under the same drift stays
+/// fenced exactly as before.
+#[tokio::test]
+async fn read_query_admission_ignores_content_drift_but_not_membership_or_incarnation() {
+    use super::{AdmissionRefusal, ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = CanonicalPath::new("d:/ws/src/Foo.vue.tsx");
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proof = decide_generated_unit_admission(
+        &snapshot,
+        &CanonicalPath::new(project),
+        std::slice::from_ref(&unit),
+    );
+    assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+
+    let engine = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), MockProvider::new("tsgo")).await;
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    let basis = ProjectBasis::new(Arc::clone(&publication), 1, 1);
+    let live = Arc::new(std::sync::Mutex::new(basis.clone()));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || Some(live.lock().unwrap().clone()))
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let input = ProjectBindingInput::new(source.into(), project.into(), Vec::new(), basis, reader);
+    let write_witness = harness.provider.bind_project(input.clone()).unwrap();
+    let query = harness.provider.bind_query(input.clone()).unwrap();
+    let resolutions = AtomicUsize::new(0);
+    let admit = |witness| {
+        harness
+            .provider
+            .admit_query(witness, std::slice::from_ref(&unit), || {
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                proof.clone()
+            })
+    };
+    let admitted = admit(&query).unwrap();
+
+    // An unrelated document's edit advances only the content generation.
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    assert!(harness.provider.check_query(&query).is_ok());
+    assert!(harness.provider.check_query_admission(&admitted).is_ok());
+    let rebound = harness
+        .provider
+        .bind_query(input.clone())
+        .expect("a query binds across content drift");
+    admit(&rebound).expect("and is admitted on the proof already decided");
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness.provider.check_project(&write_witness),
+        Err(AdmissionRefusal::StaleBasis),
+        "a write stays fenced on the whole basis"
+    );
+
+    // A republished project graph or a new project generation moves membership.
+    *live.lock().unwrap() = ProjectBasis::new(
+        Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot))),
+        2,
+        1,
+    );
+    assert_eq!(
+        harness.provider.check_query(&query),
+        Err(AdmissionRefusal::StaleBasis)
+    );
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 2, 2);
+    assert_eq!(
+        harness.provider.check_query_admission(&admitted),
+        Err(AdmissionRefusal::StaleBasis)
+    );
+    assert!(harness.provider.bind_query(input.clone()).is_err());
+
+    // A replaced engine is a different incarnation.
+    *live.lock().unwrap() = ProjectBasis::new(Arc::clone(&publication), 2, 1);
+    assert!(harness.provider.check_query(&query).is_ok());
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    harness.notifier.await_started(2).await;
+    assert_eq!(
+        harness.provider.check_query(&query),
+        Err(AdmissionRefusal::StaleProvider)
+    );
+    assert!(
+        engine.calls().is_empty(),
+        "admission never reaches the engine"
+    );
+}
+
+/// A managed read is admitted and settled on what decides its project
+/// membership, never the workspace content generation: an unrelated document's
+/// edit while a carrier hover is in flight costs neither the answer nor a
+/// second engine call, while a project-generation move still refuses it. The
+/// query reaches the engine stamped with the serving incarnation and the
+/// project it was admitted into.
+#[tokio::test]
+async fn a_managed_read_survives_unrelated_content_drift_with_one_engine_call() {
+    use super::{AdmissionRefusal, GeneratedUnitInput, ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
+    use verter_workspace::{CanonicalPath, MemoryOptions, MemoryWorkspace};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let source = "d:/ws/src/Foo.vue";
+    let unit = "d:/ws/src/Foo.vue.tsx";
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.into()],
+        default_resolve_extensions: None,
+    });
+    workspace.inject_file(source.into(), Arc::<str>::from("<template/>"));
+    workspace.inject_file(project.into(), Arc::<str>::from(r#"{"include":["src"]}"#));
+    let publication = Arc::new(PublishedRoot::new_vfs_only(Arc::new(
+        build_workspace_snapshot_simple(
+            vec![configured_project(
+                &workspace,
+                project,
+                root,
+                &CanonicalPath::new(root),
+                ProjectId(0),
+            )],
+            SnapshotGeneration(1),
+        ),
+    )));
+    // The live workspace generations: (content, project).
+    let live = Arc::new(parking_lot::Mutex::new((1_u64, 1_u64)));
+    let basis = {
+        let publication = Arc::clone(&publication);
+        let live = Arc::clone(&live);
+        move || {
+            let (content, project) = *live.lock();
+            ProjectBasis::new(Arc::clone(&publication), content, project)
+        }
+    };
+    let engine = MockProvider::new("tsgo");
+    let harness = make_harness(engine.clone(), MockProvider::new("tsgo")).await;
+    harness
+        .provider
+        .set_generated_unit_resolver(Arc::new({
+            let basis = basis.clone();
+            let publication = Arc::clone(&publication);
+            move |path| {
+                if path != unit {
+                    return None;
+                }
+                let units = vec![CanonicalPath::new(unit)];
+                let proof = verter_workspace::decide_generated_unit_admission(
+                    &publication.snapshot,
+                    &CanonicalPath::new(project),
+                    &units,
+                );
+                let reader = {
+                    let basis = basis.clone();
+                    Arc::new(move || Some(basis()))
+                };
+                Some(Ok(GeneratedUnitInput {
+                    binding: ProjectBindingInput::new(
+                        source.into(),
+                        project.into(),
+                        Vec::new(),
+                        basis(),
+                        reader,
+                    ),
+                    units,
+                    proof,
+                }))
+            }
+        }))
+        .unwrap();
+    harness.provider.open_file(unit, "carrier").await.unwrap();
+
+    let gate = Arc::new(Semaphore::new(0));
+    engine.set_blocking_failing_hover(unit, Arc::clone(&gate));
+    engine
+        .inner
+        .gated_hover_succeeds
+        .store(true, Ordering::SeqCst);
+    let mut tap = engine.attach_tap();
+    let hover_calls = || {
+        engine
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::Hover { path, .. } if path == unit))
+            .count()
+    };
+
+    let hub = Arc::clone(&harness.provider);
+    let in_flight = tokio::spawn(async move {
+        hub.get_hover(&ProviderQuery::at_engine_surface(unit), 3)
+            .await
+    });
+    while !matches!(tap.recv().await, Some(MockCall::Hover { .. })) {}
+    // Another document is edited while the hover is at the engine.
+    live.lock().0 = 2;
+    gate.add_permits(1);
+    in_flight
+        .await
+        .unwrap()
+        .expect("unrelated content drift never refuses a read");
+    assert_eq!(hover_calls(), 1, "exactly one engine call");
+    assert_eq!(
+        engine.inner.hover_admissions.lock().last().cloned(),
+        Some(crate::provider_query::QueryAdmission {
+            incarnation: harness.provider.serving_epoch(),
+            project: Some(Arc::from(project)),
+        }),
+        "the engine sees the incarnation and project the hub admitted it under"
+    );
+
+    // A project-generation move is a membership change: still refused.
+    let gate = Arc::new(Semaphore::new(0));
+    engine.set_blocking_failing_hover(unit, Arc::clone(&gate));
+    let hub = Arc::clone(&harness.provider);
+    let in_flight = tokio::spawn(async move {
+        hub.get_hover(&ProviderQuery::at_engine_surface(unit), 3)
+            .await
+    });
+    while !matches!(tap.recv().await, Some(MockCall::Hover { .. })) {}
+    live.lock().1 = 2;
+    gate.add_permits(1);
+    let refused = in_flight.await.unwrap().expect_err("membership moved");
+    assert_eq!(
+        refused.admission_refusal,
+        Some(AdmissionRefusal::StaleBasis)
+    );
+}
+
+/// A republished workspace supersedes every read-query cache entry decided
+/// under the old publication: admitting under the new one releases the old
+/// snapshot instead of retaining it until the cache fills, while a content
+/// edit under the same publication keeps its decided proof.
+#[tokio::test]
+async fn a_republish_releases_the_superseded_publication_from_the_read_caches() {
+    use super::{ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
+    use verter_workspace::canonical_path::CanonicalPath;
+    use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
+    use verter_workspace::published_state::PublishedRoot;
+    use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
+    use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
+
+    let root = "d:/ws";
+    let project = "d:/ws/tsconfig.json";
+    let sources = ["d:/ws/src/Foo.vue", "d:/ws/src/Bar.vue"];
+    let units = sources.map(|source| CanonicalPath::new(&format!("{source}.tsx")));
+    let workspace = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    for source in sources {
+        workspace.inject_file(source.to_string(), Arc::<str>::from("<template/>"));
+    }
+    workspace.inject_file(
+        project.to_string(),
+        Arc::<str>::from(r#"{"include":["src/**/*"]}"#),
+    );
+    let snapshot = Arc::new(build_workspace_snapshot_simple(
+        vec![configured_project(
+            &workspace,
+            project,
+            root,
+            &CanonicalPath::new(root),
+            ProjectId(0),
+        )],
+        SnapshotGeneration(1),
+    ));
+    let proofs = units.clone().map(|unit| {
+        let proof = decide_generated_unit_admission(
+            &snapshot,
+            &CanonicalPath::new(project),
+            std::slice::from_ref(&unit),
+        );
+        assert!(matches!(proof, GeneratedUnitAdmission::Admitted(_)));
+        proof
+    });
+
+    let harness = make_harness(MockProvider::new("tsgo"), MockProvider::new("tsgo")).await;
+    let live = Arc::new(std::sync::Mutex::new(None::<ProjectBasis>));
+    let reader = {
+        let live = Arc::clone(&live);
+        Arc::new(move || live.lock().unwrap().clone())
+            as Arc<dyn Fn() -> Option<ProjectBasis> + Send + Sync>
+    };
+    let admit_under = |which: usize, basis: ProjectBasis| {
+        *live.lock().unwrap() = Some(basis.clone());
+        let input = ProjectBindingInput::new(
+            sources[which].into(),
+            project.into(),
+            Vec::new(),
+            basis,
+            Arc::clone(&reader),
+        );
+        let witness = harness.provider.bind_query(input).expect("binds");
+        harness
+            .provider
+            .admit_query(&witness, std::slice::from_ref(&units[which]), || {
+                proofs[which].clone()
+            })
+            .expect("admitted");
+    };
+
+    let superseded = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    admit_under(0, ProjectBasis::new(Arc::clone(&superseded), 1, 1));
+    let held_after_one_proof = Arc::strong_count(&superseded);
+    admit_under(1, ProjectBasis::new(Arc::clone(&superseded), 2, 1));
+    assert_eq!(
+        Arc::strong_count(&superseded),
+        held_after_one_proof + 1,
+        "a content edit under the same publication keeps the first decided proof          beside the second"
+    );
+
+    let republished = Arc::new(PublishedRoot::new_vfs_only(Arc::clone(&snapshot)));
+    admit_under(1, ProjectBasis::new(Arc::clone(&republished), 2, 1));
+    assert_eq!(
+        Arc::strong_count(&superseded),
+        1,
+        "nothing but this test still holds the superseded publication"
+    );
 }

@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::backend::*;
 use crate::protocol::Completion;
-use crate::traits::TypeProvider;
+use crate::traits::{ProviderQuery, TypeProvider};
 
 /// Adapts a `TypeProvider` to implement `GeneratedQueryBackend`.
 ///
@@ -53,14 +53,18 @@ impl TypeProviderAdapter {
         path: &str,
         generated_offset: u32,
     ) -> Result<BackendTypeData, BackendError> {
+        // The offset was computed against the bytes this adapter synced, not
+        // a captured provider surface: the query binds to what the engine
+        // holds when its frame is placed.
+        let query = ProviderQuery::at_engine_surface(path);
         let completions = self
             .provider
-            .get_completions(path, generated_offset, Some("."))
+            .get_completions(&query, generated_offset, Some("."))
             .await
             .map_err(|e| BackendError::BackendReported(e.message))?;
         let detailed = self
             .provider
-            .get_completion_details(path, generated_offset, &completions.items)
+            .get_completion_details(&query, generated_offset, &completions.items)
             .await
             .map_err(|e| BackendError::BackendReported(e.message))?;
         let members = completion_items_to_backend_members(if detailed.is_empty() {
@@ -98,7 +102,7 @@ impl TypeProviderAdapter {
     ) -> Result<BackendTypeData, BackendError> {
         let definitions = self
             .provider
-            .get_definition(path, generated_offset)
+            .get_definition(&ProviderQuery::at_engine_surface(path), generated_offset)
             .await
             .map_err(|e| BackendError::BackendReported(e.message))?;
         crate::type_runtime_trace_event!(
@@ -117,7 +121,10 @@ impl TypeProviderAdapter {
                 .await?;
             let hover = self
                 .provider
-                .get_hover(&location.path, location.start)
+                .get_hover(
+                    &ProviderQuery::at_engine_surface(location.path.as_str()),
+                    location.start,
+                )
                 .await
                 .map_err(|e| BackendError::BackendReported(e.message))?;
             // Admission gates on the STRUCTURED display signature: a hover
@@ -382,7 +389,10 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                         BackendTypeQuery::TypeAtOffset => {
                             let hover = self
                                 .provider
-                                .get_hover(&path, generated_offset)
+                                .get_hover(
+                                    &ProviderQuery::at_engine_surface(path.as_str()),
+                                    generated_offset,
+                                )
                                 .await
                                 .map_err(|e| BackendError::BackendReported(e.message))?;
 
@@ -431,7 +441,10 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                         BackendTypeQuery::DocumentationAtOffset => {
                             let hover = self
                                 .provider
-                                .get_hover(&path, generated_offset)
+                                .get_hover(
+                                    &ProviderQuery::at_engine_surface(path.as_str()),
+                                    generated_offset,
+                                )
                                 .await
                                 .map_err(|e| BackendError::BackendReported(e.message))?;
 
@@ -637,10 +650,11 @@ mod tests {
 
         fn get_completions(
             &self,
-            path: &str,
+            query: &ProviderQuery,
             offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
+            let path = query.path();
             self.completion_calls
                 .lock()
                 .unwrap()
@@ -651,10 +665,11 @@ mod tests {
 
         fn get_completion_details<'a>(
             &'a self,
-            path: &'a str,
+            query: &'a ProviderQuery,
             offset: u32,
             items: &'a [Completion],
         ) -> ProviderFuture<'a, Vec<Completion>> {
+            let path = query.path();
             self.detail_calls
                 .lock()
                 .unwrap()
@@ -663,7 +678,12 @@ mod tests {
             Box::pin(async move { Ok(result) })
         }
 
-        fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        fn get_hover(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Option<HoverInfo>> {
+            let path = query.path();
             self.hover_calls
                 .lock()
                 .unwrap()
@@ -682,7 +702,12 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        fn get_definition(
+            &self,
+            query: &ProviderQuery,
+            offset: u32,
+        ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+            let path = query.path();
             self.definition_calls
                 .lock()
                 .unwrap()
@@ -693,7 +718,7 @@ mod tests {
 
         fn get_type_definition(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             Box::pin(async { Ok(Vec::new()) })
@@ -701,7 +726,7 @@ mod tests {
 
         fn get_references(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeLocation>> {
             Box::pin(async { Ok(Vec::new()) })
@@ -709,7 +734,7 @@ mod tests {
 
         fn get_rename_locations(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<RenameLocation>> {
             Box::pin(async { Ok(Vec::new()) })
@@ -717,7 +742,7 @@ mod tests {
 
         fn get_signature_help(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Option<SignatureHelp>> {
             Box::pin(async { Ok(None) })
@@ -725,7 +750,7 @@ mod tests {
 
         fn get_code_actions(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _start_offset: u32,
             _end_offset: u32,
             _diagnostics: &[ProviderDiagnosticContext],
@@ -733,13 +758,16 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        fn get_semantic_tokens(
+            &self,
+            _query: &ProviderQuery,
+        ) -> ProviderFuture<'_, Vec<SemanticToken>> {
             Box::pin(async { Ok(Vec::new()) })
         }
 
         fn get_document_highlights(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _offset: u32,
         ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
             Box::pin(async { Ok(Vec::new()) })
@@ -747,7 +775,7 @@ mod tests {
 
         fn get_inlay_hints(
             &self,
-            _path: &str,
+            _query: &ProviderQuery,
             _start_offset: u32,
             _end_offset: u32,
         ) -> ProviderFuture<'_, Vec<InlayHint>> {

@@ -439,6 +439,8 @@ impl ArtifactNode for CompileOutputNodePureContent {
 /// cheaper own-content / override-hash predicates.
 pub(crate) struct CompileOutputNodeFactValidatedSession {
     inflight: InflightTable<QueryFlightKey<CompileOutputSessionKey>>,
+    /// The account a published slot's evidence pages are claimed into.
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl CompileOutputNodeFactValidatedSession {
@@ -449,6 +451,18 @@ impl CompileOutputNodeFactValidatedSession {
     pub(crate) fn new() -> Self {
         Self {
             inflight: InflightTable::new(),
+            retention_account: verter_session_query::retention::StoreAccount::default(),
+        }
+    }
+
+    /// A node whose published slots claim their evidence pages into
+    /// `account`.
+    pub(crate) fn with_retention_account(
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        Self {
+            inflight: InflightTable::new(),
+            retention_account: account,
         }
     }
 
@@ -456,22 +470,20 @@ impl CompileOutputNodeFactValidatedSession {
     ///
     /// Returns `Some(value)` only when:
     /// 1. A slot exists for `profile_hash`.
-    /// 2. The slot's carrier is `Cacheable` (i.e. not an overflowed
-    ///    signature that snuck in).
-    /// 3. The slot's `semantic_hash` and `content_override_hash` match
+    /// 2. The slot's `semantic_hash` and `content_override_hash` match
     ///    the supplied references.
-    /// 4. `acquire_view` yields a proven-current view (it returns
+    /// 3. `acquire_view` yields a proven-current view (it returns
     ///    `None` when the manager could not prove the view current,
     ///    which misses to cold).
-    /// 5. The slot's path-precise fact signature validates against that
+    /// 4. The slot's path-precise fact signature validates against that
     ///    view (`validate_facts`), when the fact rail is non-empty.
     ///
     /// `acquire_view` is the cost gate. The caller threads the
     /// (potentially expensive) store-view read through it, and this
     /// method invokes it at most once — and ONLY after the cheap
-    /// predicates (steps 1–3) confirm there is a real candidate slot
-    /// worth validating. A cold miss (no slot), an overflowed carrier,
-    /// or a hash mismatch returns before `acquire_view` runs, so those
+    /// predicates (steps 1–2) confirm there is a real candidate slot
+    /// worth validating. A cold miss (no slot) or a hash mismatch
+    /// returns before `acquire_view` runs, so those
     /// paths never pay for the view read.
     ///
     /// `acquire_view` runs whether or not the fact rail is empty: an
@@ -497,14 +509,6 @@ impl CompileOutputNodeFactValidatedSession {
         F: FnOnce(&V, &ReadSetSignature) -> bool,
     {
         let slot = profile_state.compile_slot_for_node(profile_hash)?;
-        // Carrier-defence: overflowed slots must never satisfy a warm
-        // read — the cold-build producer refuses to publish them.
-        // Double-sided enforcement (producer refuses; lookup refuses)
-        // prevents a regression of either side from accepting stale
-        // warm hits.
-        if !slot.fact_dep_signature.is_cacheable() {
-            return None;
-        }
         if slot.semantic_hash != *live_semantic_hash
             || slot.content_override_hash != live_content_override_hash
         {
@@ -537,11 +541,16 @@ impl CompileOutputNodeFactValidatedSession {
     /// Publish a freshly compiled value into the session slot. Routes
     /// through the `SignatureAdmission` carrier: `Cacheable` publishes
     /// the slot under the path-precise signature; `NonCacheable`
-    /// (overflow / forced refusal / budget exceeded) refuses
+    /// (non-cacheable read / forced refusal / budget exceeded) refuses
     /// admission AND removes any prior slot for the same
     /// `(canonical, profile_hash)` so the carrier invariant `present
     /// in compile_slots ⇒ admitted cacheable entry` holds across
     /// re-computes.
+    ///
+    /// A slot retains its signature's evidence pages, so a `Cacheable`
+    /// publish first claims them into a refusable reservation; a refused
+    /// claim publishes nothing, removes the prior slot like any other
+    /// refusal, and leaves the compiled value with its caller.
     ///
     /// Returns `SessionPublishOutcome::Admitted` when the slot was
     /// published, or `SessionPublishOutcome::Refused(reason)` when
@@ -556,6 +565,13 @@ impl CompileOutputNodeFactValidatedSession {
     ) -> SessionPublishOutcome {
         match admission {
             SignatureAdmission::Cacheable(signature) => {
+                if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
+                    self.retention_account.get(),
+                    &signature.facts,
+                ) {
+                    profile_state.compile_slot_remove_for_node(profile_hash);
+                    return SessionPublishOutcome::Refused(refusal.non_admission_reason());
+                }
                 let slot = CompileSlot {
                     semantic_hash: value.semantic_hash,
                     content_override_hash: value.content_override_hash,
@@ -627,12 +643,6 @@ impl CompileOutputNodeFactValidatedSession {
         F: FnOnce(&ReadSetSignature) -> bool,
     {
         let slot = profile_state.compile_slot_for_node(profile_hash)?;
-        // Carrier-defence, mirroring `lookup`: an overflowed slot must
-        // never satisfy any warm read (the producer refuses to publish
-        // them; this is the read-side half of the double-sided guard).
-        if !slot.fact_dep_signature.is_cacheable() {
-            return None;
-        }
         if !slot.fact_dep_signature.facts.is_empty() && !validate_facts(&slot.fact_dep_signature) {
             return None;
         }

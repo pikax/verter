@@ -103,7 +103,7 @@ real_provider_test!(
                 for _ in 0..40 {
                     if let Ok(Some(info)) = session
                         .provider()
-                        .get_hover(&path, hover_offset(&check, hover.authored))
+                        .get_hover(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&path), hover_offset(&check, hover.authored))
                         .await
                     {
                         text = info.contents;

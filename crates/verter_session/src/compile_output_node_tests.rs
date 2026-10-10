@@ -383,7 +383,6 @@ fn session_peek_signature_round_trips_admitted_signature() {
     node.publish(&mut state, 42, admission, value([0u8; 16]), 0);
     let observed = node.peek_signature(&state, 42).expect("admitted signature");
     assert_eq!(observed.facts.len(), 1);
-    assert!(!observed.overflowed);
 }
 
 /// The last-good rail rides on the same fact-validated slot as the
@@ -603,4 +602,151 @@ fn concurrent_publish_and_remove_canonical_never_orphans_content_entry() {
          remove_canonical — an orphaned (backref-less) entries row \
          would breach the force-recompute contract"
     );
+}
+
+/// A signature wider than one page, sealed into pages none of which a cache
+/// admission has claimed yet.
+fn wide_signature() -> ReadSetSignature {
+    let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        .map(|index| FactVersionRef::FileWholeHash {
+            canonical_id: format!("/wide/{index:05}.ts"),
+            hash: [1u8; 16],
+        })
+        .collect();
+    ReadSetSignature::new(
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+    )
+}
+
+fn signature_pages(
+    signature: &ReadSetSignature,
+) -> Vec<verter_session_query::facts::receipt::ResultReceipt> {
+    signature
+        .facts
+        .iter()
+        .filter_map(|fact| match fact {
+            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A published slot owns its wide signature's pages as refusable retained
+/// bytes, drained when the slot goes; an account that refuses that
+/// footprint publishes nothing and drops the prior slot.
+#[test]
+fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let semantic = [0x12u8; 16];
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let node = CompileOutputNodeFactValidatedSession::with_retention_account(StoreAccount::new(
+        Arc::clone(&account),
+    ));
+    let mut state = ProfileState::default();
+    let outcome = node.publish(
+        &mut state,
+        42,
+        SignatureAdmission::Cacheable(wide_signature()),
+        value(semantic),
+        0,
+    );
+    assert_eq!(outcome, SessionPublishOutcome::Admitted);
+    let signature = node
+        .peek_signature(&state, 42)
+        .expect("the slot is published");
+    let pages = signature_pages(&signature);
+    assert!(!pages.is_empty(), "premise: the signature is paged");
+    assert!(pages
+        .iter()
+        .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
+    let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+    assert_eq!(account.snapshot().retained_bytes, page_bytes);
+    drop((pages, signature, state));
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        0,
+        "dropping the slot drains its pages"
+    );
+
+    let tight = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let node = CompileOutputNodeFactValidatedSession::with_retention_account(StoreAccount::new(
+        Arc::clone(&tight),
+    ));
+    let mut state = ProfileState::default();
+    node.publish(
+        &mut state,
+        42,
+        SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature())),
+        value(semantic),
+        0,
+    );
+    let outcome = node.publish(
+        &mut state,
+        42,
+        SignatureAdmission::Cacheable(wide_signature()),
+        value(semantic),
+        1,
+    );
+    assert_eq!(
+        outcome,
+        SessionPublishOutcome::Refused(verter_audit::NonAdmissionReason::RetentionPressure)
+    );
+    assert!(
+        node.peek_signature(&state, 42).is_none(),
+        "a refused claim publishes nothing and drops the prior slot"
+    );
+    assert_eq!(tight.snapshot().retained_bytes, 0);
+}
+
+#[test]
+fn raw_template_slot_claims_wide_signature_pages() {
+    use crate::types::{DerivedRawState, RawTemplateSlotAdmission};
+    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+    for (limit, admitted) in [(usize::MAX, true), (1, false)] {
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: limit,
+            ..RetentionLimits::defaults()
+        });
+        let signature = wide_signature();
+        let pages = signature_pages(&signature);
+        let mut state = DerivedRawState::default();
+        let template = Arc::new(
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot {
+                css_var_names: vec!["color".into()],
+                ..Default::default()
+            },
+        );
+        state.install_raw_template_analysis(
+            Arc::clone(&template),
+            RawTemplateSlotAdmission {
+                store_published: true,
+                source_version: Some(verter_scheduler::node::SourceVersion {
+                    incarnation: 1,
+                    generation: 1,
+                }),
+                has_src_blocks: false,
+                default_extraction: true,
+                template_class_signature: Some(signature),
+            },
+            &account,
+        );
+        assert_eq!(state.raw_template_analysis().is_some(), admitted);
+        assert_eq!(template.css_var_names, ["color"]);
+        let expected = if admitted {
+            ChargeClass::Retained
+        } else {
+            ChargeClass::Pinned
+        };
+        assert!(!pages.is_empty());
+        assert!(pages
+            .iter()
+            .all(|page| page.retained_charge_class() == Some(expected)));
+        drop((state, pages));
+        assert_eq!(account.snapshot().retained_bytes, 0);
+    }
 }

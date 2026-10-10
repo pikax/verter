@@ -34,9 +34,11 @@ use super::singleflight::{
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::FactValidation;
 use crate::resolver_core::resolver_context::RequestFlags;
+use verter_audit::NonAdmissionReason;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::store_view::StoreViewCompatToken;
+use verter_session_query::retention::SemanticRetentionAccount;
 
 /// Per-compute context threaded into a node's `compute` / `validate`.
 ///
@@ -159,6 +161,37 @@ pub trait ArtifactNode {
     /// Removal-side counterpart of [`Self::post_publish`], fired when the
     /// substrate removes a published entry. Default: no-op.
     fn removal_cleanup(&self, _key: &Self::Key, _entry: &Arc<CacheEntry<Self::Value>>) {}
+    /// The account a published entry's evidence pages are claimed into.
+    /// Default: the process account.
+    fn retention_account(&self) -> Arc<SemanticRetentionAccount> {
+        SemanticRetentionAccount::process_local()
+    }
+}
+
+/// Claim the evidence pages a cold winner's cacheable `signature` reaches
+/// before the entry is published: the entry retains them, so they join a
+/// refusable reservation on `account`. A refused claim answers the
+/// non-admission reason the winner returns its value under, uncached; the
+/// complete entry still passes the validity fence and projection, which
+/// bubbles its facts before delivering the value without publishing.
+fn claim_published_pages(
+    account: &Arc<SemanticRetentionAccount>,
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+) -> Result<(), NonAdmissionReason> {
+    verter_session_query::facts::receipt::claim_evidence_pages(account, &signature.facts)
+        .map_err(|refusal| refusal.non_admission_reason())
+}
+
+/// The post-compute fence applies equally to retained and unretained entries.
+fn computed_signature_is_current(
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    self_roots: &[Arc<str>],
+    generation: u64,
+    flags: &RequestFlags,
+    resolver: &dyn FactValidation,
+) -> bool {
+    generation == flags.current_project_generation()
+        && signature.validate_with_self_roots(resolver, self_roots)
 }
 
 /// Cooperative warm-or-cold lookup over an [`ArtifactNode`].
@@ -222,12 +255,35 @@ pub fn lookup<N: ArtifactNode>(
                     signature,
                     self_root_canonicals,
                     validated_at_generation,
-                } => ComputeAdmission::Cacheable(CacheEntry {
-                    value,
-                    signature,
-                    self_root_canonicals,
-                    validated_at_generation,
-                }),
+                } => {
+                    let retention = claim_published_pages(&node.retention_account(), &signature);
+                    let entry = CacheEntry {
+                        value,
+                        signature,
+                        self_root_canonicals,
+                        validated_at_generation,
+                    };
+                    match retention {
+                        Ok(()) => ComputeAdmission::Cacheable(entry),
+                        Err(reason) => {
+                            let _fence = node.publish_fence().map(parking_lot::RwLock::read);
+                            if !computed_signature_is_current(
+                                &entry.signature,
+                                &entry.self_root_canonicals,
+                                entry.validated_at_generation,
+                                flags,
+                                resolver,
+                            ) {
+                                return ComputeAdmission::Failed;
+                            }
+                            entry.signature.bubble(resolver);
+                            ComputeAdmission::ReturnOnly {
+                                value: entry.value,
+                                reason,
+                            }
+                        }
+                    }
+                }
                 CacheAdmission::ReturnOnly { value, reason } => {
                     ComputeAdmission::ReturnOnly { value, reason }
                 }
@@ -247,10 +303,13 @@ pub fn lookup<N: ArtifactNode>(
             // Post-compute revalidation: gate the freshly built entry's
             // stamp against the LIVE generation. A generation bump that
             // landed during the cold window rejects the publish.
-            entry.validated_at_generation == flags.current_project_generation()
-                && entry
-                    .signature
-                    .validate_with_self_roots(resolver, &entry.self_root_canonicals)
+            computed_signature_is_current(
+                &entry.signature,
+                &entry.self_root_canonicals,
+                entry.validated_at_generation,
+                flags,
+                resolver,
+            )
         },
         |removed_key: &N::Key, removed: &Arc<CacheEntry<N::Value>>| {
             node.removal_cleanup(removed_key, removed)
@@ -370,6 +429,12 @@ pub trait QueryNode {
     fn lower_unadmitted(&self, _value: &Self::Value) -> Option<Self::Value> {
         None
     }
+
+    /// The account a published entry's evidence pages are claimed into.
+    /// Default: the process account.
+    fn retention_account(&self) -> Arc<SemanticRetentionAccount> {
+        SemanticRetentionAccount::process_local()
+    }
 }
 
 /// Query-identity cooperative lookup + publish entry points.
@@ -440,6 +505,8 @@ pub mod query {
                         self_root_canonicals,
                         validated_at_generation,
                     } => {
+                        let retention =
+                            claim_published_pages(&node.retention_account(), &signature);
                         // Build the discriminant from the EXACT generation
                         // the candidate is stamped with, NOT from
                         // `cx.generation()` (the lookup-entry snapshot). A
@@ -451,14 +518,40 @@ pub mod query {
                         // replace-vs-coexist identity contract.
                         let discriminant =
                             node.discriminant(&key, &value, &signature, validated_at_generation);
-                        ComputeAdmission::Cacheable(Candidate {
+                        let entry = Candidate {
                             discriminant,
                             value,
                             signature,
                             self_root_canonicals,
                             admission_seq: 0,
                             validated_at_generation,
-                        })
+                        };
+                        match retention {
+                            Ok(()) => ComputeAdmission::Cacheable(entry),
+                            Err(reason) => {
+                                let _fence = node.publish_fence().map(parking_lot::RwLock::read);
+                                if !computed_signature_is_current(
+                                    &entry.signature,
+                                    &entry.self_root_canonicals,
+                                    entry.validated_at_generation,
+                                    flags,
+                                    resolver,
+                                ) {
+                                    return match node.lower_unadmitted(&entry.value) {
+                                        Some(value) => {
+                                            entry.signature.bubble(resolver);
+                                            ComputeAdmission::ReturnOnly { value, reason }
+                                        }
+                                        None => ComputeAdmission::Failed,
+                                    };
+                                }
+                                entry.signature.bubble(resolver);
+                                ComputeAdmission::ReturnOnly {
+                                    value: entry.value,
+                                    reason,
+                                }
+                            }
+                        }
                     }
                     CacheAdmission::ReturnOnly { value, reason } => {
                         ComputeAdmission::ReturnOnly { value, reason }
@@ -488,10 +581,13 @@ pub mod query {
                 })
             },
             |candidate: &Candidate<N::Discriminant, N::Value>| {
-                candidate.validated_at_generation == flags.current_project_generation()
-                    && candidate
-                        .signature
-                        .validate_with_self_roots(resolver, &candidate.self_root_canonicals)
+                computed_signature_is_current(
+                    &candidate.signature,
+                    &candidate.self_root_canonicals,
+                    candidate.validated_at_generation,
+                    flags,
+                    resolver,
+                )
             },
             // publish_core — the non-reentrant publish step under the
             // store's slot/shard guard. Returns the FIFO victims for

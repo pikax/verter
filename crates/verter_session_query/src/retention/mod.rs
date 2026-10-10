@@ -682,6 +682,35 @@ impl RetentionCharge {
         self.class
     }
 
+    /// Move `bytes` of this charge into a separate charge of the same class
+    /// on the same account.
+    ///
+    /// The account is not touched: the bytes stay charged exactly once,
+    /// now released by whichever of the two charges holds them. This is how
+    /// one reservation granted for several allocations is handed to the
+    /// owners of each, so each is released when its own owner drops.
+    ///
+    /// # Panics
+    ///
+    /// When `bytes` exceeds what this charge holds: a reservation is split
+    /// only into the shares it was granted for, so an over-split is a
+    /// miscount that would leave an allocation holding less than its
+    /// storage — never clamped into a plausible smaller share.
+    #[must_use]
+    pub fn split_off(&mut self, bytes: usize) -> Self {
+        assert!(
+            bytes <= self.bytes,
+            "split_off({bytes}) exceeds the {} bytes this charge holds",
+            self.bytes
+        );
+        self.bytes -= bytes;
+        Self {
+            account: self.account.clone(),
+            class: self.class,
+            bytes,
+        }
+    }
+
     /// Reclassify an [`ChargeClass::Active`] charge as
     /// [`ChargeClass::Retained`] when the in-flight work it covered
     /// decided to publish.
@@ -731,6 +760,11 @@ impl Drop for RetentionCharge {
 pub struct ResolutionRetention(Arc<SemanticRetentionAccount>);
 
 impl ResolutionRetention {
+    /// Bind resolution publications to an aggregate retention account.
+    #[must_use]
+    pub fn new(account: Arc<SemanticRetentionAccount>) -> Self {
+        Self(account)
+    }
     /// The adapter over the process-local account.
     #[must_use]
     pub fn process_local() -> Self {
@@ -745,6 +779,15 @@ impl Default for ResolutionRetention {
 }
 
 impl crate::retention::resolution_charge::ResolutionRetentionAccount for ResolutionRetention {
+    fn reserve_retained_with_evidence(
+        &self,
+        bytes: usize,
+        facts: &[crate::facts::fact_cache::FactVersionRef],
+    ) -> Option<crate::retention::resolution_charge::ResolutionRetentionCharge> {
+        crate::facts::receipt::reserve_retained_with_evidence(&self.0, bytes, &[facts])
+            .admitted()
+            .map(crate::retention::resolution_charge::ResolutionRetentionCharge::new)
+    }
     fn reserve_retained(
         &self,
         bytes: usize,

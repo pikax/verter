@@ -173,8 +173,20 @@ async fn lifecycle_is_cached_without_activation_and_replayed_once_on_first_query
         "nothing reaches managed tsgo before an observed fallback demand"
     );
 
-    provider.get_hover("/w/App.vue.tsx", 8).await.unwrap();
-    provider.get_hover("/w/App.vue.tsx", 8).await.unwrap();
+    provider
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("/w/App.vue.tsx"),
+            8,
+        )
+        .await
+        .unwrap();
+    provider
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("/w/App.vue.tsx"),
+            8,
+        )
+        .await
+        .unwrap();
 
     assert_eq!(
         spawn_count.load(Ordering::SeqCst),
@@ -244,7 +256,13 @@ async fn activation_replays_live_files_in_first_open_order_with_latest_contents(
         .await
         .unwrap();
 
-    provider.get_hover("/w/a-last.ts", 0).await.unwrap();
+    provider
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("/w/a-last.ts"),
+            0,
+        )
+        .await
+        .unwrap();
 
     let replayed = managed
         .calls()
@@ -408,7 +426,10 @@ async fn lazy_real_tsgo_quick_info_matches_the_eager_file_lifecycle() {
         )
         .await;
         let eager_hover = eager
-            .get_hover(&consumer_path, hover_offset)
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer_path),
+                hover_offset,
+            )
             .await
             .expect("eager real-tsgo hover")
             .expect("eager real-tsgo QuickInfo");
@@ -433,7 +454,10 @@ async fn lazy_real_tsgo_quick_info_matches_the_eager_file_lifecycle() {
         )
         .await;
         let lazy_hover = lazy
-            .get_hover(&consumer_path, hover_offset)
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer_path),
+                hover_offset,
+            )
             .await
             .expect("lazy real-tsgo hover")
             .expect("lazy real-tsgo QuickInfo");
@@ -470,8 +494,14 @@ async fn concurrent_first_queries_singleflight_the_managed_factory() {
     }));
 
     let (left, right) = tokio::join!(
-        provider.get_hover("/w/App.vue.tsx", 1),
-        provider.get_hover("/w/App.vue.tsx", 2)
+        provider.get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("/w/App.vue.tsx"),
+            1
+        ),
+        provider.get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("/w/App.vue.tsx"),
+            2
+        )
     );
     left.unwrap();
     right.unwrap();
@@ -542,12 +572,22 @@ async fn failed_activation_retries_after_cooldown_and_recovers() {
     }
     // First activation fails (attempt 1).
     assert!(provider
-        .get_hover(CARRIERS[0].companion_path, CARRIERS[0].hover_offset)
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                CARRIERS[0].companion_path
+            ),
+            CARRIERS[0].hover_offset
+        )
         .await
         .is_err());
     // Immediate retry: cached error, NO new factory run (storm protection).
     assert!(provider
-        .get_hover(CARRIERS[1].companion_path, CARRIERS[1].hover_offset)
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                CARRIERS[1].companion_path
+            ),
+            CARRIERS[1].hover_offset
+        )
         .await
         .is_err());
     assert_eq!(
@@ -570,7 +610,12 @@ async fn failed_activation_retries_after_cooldown_and_recovers() {
     .await;
     for fixture in &CARRIERS {
         provider
-            .get_hover(fixture.companion_path, fixture.hover_offset)
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                    fixture.companion_path,
+                ),
+                fixture.hover_offset,
+            )
             .await
             .expect("a transient activation failure must recover after the cooldown");
     }
@@ -802,6 +847,7 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
                     Some(&carrier_store_dir),
                     false,
                     None,
+                    None,
                 )
                 .await?;
                 Ok(Arc::new(real) as Arc<dyn TypeProvider>)
@@ -826,7 +872,12 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
 
     assert!(
         provider
-            .get_hover(&carriers[0].companion_path, carriers[0].hover_offset)
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                    &carriers[0].companion_path
+                ),
+                carriers[0].hover_offset
+            )
             .await
             .is_err(),
         "first real managed activation is intentionally unavailable"
@@ -852,7 +903,12 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
             last = provider
-                .get_hover(&carrier.companion_path, carrier.hover_offset)
+                .get_hover(
+                    &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                        &carrier.companion_path,
+                    ),
+                    carrier.hover_offset,
+                )
                 .await
                 .expect("real lazy typed query must reach tsserver");
             if last.as_ref().is_some_and(|hover| {
@@ -915,7 +971,10 @@ async fn a_cancelled_demand_never_starts_another_activation() {
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_millis(150),
-            provider.get_hover("/w/a.tsx", 0),
+            provider.get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface("/w/a.tsx"),
+                0
+            ),
         )
         .await
         .is_err(),
@@ -930,7 +989,10 @@ async fn a_cancelled_demand_never_starts_another_activation() {
     // The next request joins the activation that is still in flight.
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(150),
-        provider.get_hover("/w/a.tsx", 0),
+        provider.get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("/w/a.tsx"),
+            0,
+        ),
     )
     .await;
     assert_eq!(

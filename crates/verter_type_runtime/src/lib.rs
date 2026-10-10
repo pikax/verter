@@ -43,6 +43,7 @@ mod pending;
 pub mod protocol;
 pub mod provider_adapter;
 pub mod provider_hub;
+pub mod provider_query;
 pub mod semantic_tokens;
 pub mod trace;
 pub mod traits;
