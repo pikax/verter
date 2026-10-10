@@ -522,6 +522,184 @@ async fn a_target_edited_before_settlement_fails_the_request() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_target_changed_before_decode_or_settlement_refuses_the_answer() {
+    for client in [Client::DocumentChanges, Client::ChangesOnly] {
+        for barrier in [RequestBarrier::ProviderDecode, RequestBarrier::Settlement] {
+            for route in [
+                CrossFileRoute::Rename,
+                CrossFileRoute::CodeAction,
+                CrossFileRoute::Definition,
+                CrossFileRoute::References,
+            ] {
+                let scenario = Scenario::new(client).await;
+                scenario
+                    .fixture
+                    .server()
+                    .documents
+                    .did_close(&scenario.util_uri);
+                scenario
+                    .fixture
+                    .provider
+                    .hold_engine_target(&scenario.util_canonical, UTIL);
+                let at = scenario.arm(route).await;
+                let server = scenario.fixture.server().clone();
+                let canonical = scenario.util_canonical.clone();
+                scenario.fixture.barriers.clear();
+                scenario.fixture.barriers.arm(
+                    barrier,
+                    Arc::new(move |_| {
+                        server
+                            .documents
+                            .host()
+                            .notify_upsert(&canonical, Arc::from(format!("// moved\n{UTIL}")));
+                        Box::pin(async {})
+                    }),
+                );
+                let error = match route {
+                    CrossFileRoute::Rename => scenario.rename(at).await.err(),
+                    CrossFileRoute::CodeAction => scenario.code_action(at).await.err(),
+                    CrossFileRoute::Definition | CrossFileRoute::References => {
+                        scenario.locations(route, at).await.err()
+                    }
+                };
+                assert_eq!(
+                    error.map(|error| error.code),
+                    Some(tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                    "{client:?}/{route:?}/{barrier:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_navigation_keeps_closed_reexport_intermediates_until_settlement() {
+    let app = "<script setup lang=\"ts\">\nimport { helper } from './util'\nconsole.log(helper)\n</script>\n";
+    let fixture = Fixture::with_files(
+        &[
+            (APP_PATH, "vue", app),
+            (
+                "src/util.ts",
+                "typescript",
+                "export { helper } from './middle'\n",
+            ),
+            (
+                "src/middle.ts",
+                "typescript",
+                "export { helper } from './leaf'\n",
+            ),
+            ("src/leaf.ts", "typescript", "export const helper = 1\n"),
+        ],
+        verter_session::HostConfig::default(),
+    )
+    .await;
+    for path in ["src/util.ts", "src/middle.ts", "src/leaf.ts"] {
+        fixture
+            .server()
+            .documents
+            .did_close(&workspace_uri(&fixture.workspace_id, path));
+    }
+    let position = super::super::server_tests::find_document_position(
+        fixture.server(),
+        &fixture.uri,
+        "helper }",
+        1,
+    );
+    let params = || GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: fixture.uri.clone(),
+            },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let answer = fixture
+        .server()
+        .goto_definition(params())
+        .await
+        .expect("unmoved native answer");
+    assert!(format!("{answer:?}").contains("/leaf.ts"));
+    let server = fixture.server().clone();
+    let middle = crate::documents::uri_to_canonical_id(&workspace_uri(
+        &fixture.workspace_id,
+        "src/middle.ts",
+    ));
+    fixture.barriers.clear();
+    fixture.barriers.arm(
+        RequestBarrier::Settlement,
+        Arc::new(move |_| {
+            let _ = server
+                .documents
+                .host()
+                .upsert(verter_session::UpsertRequest {
+                    canonical_id: None,
+                    input_id: middle.clone(),
+                    source: Arc::from("export const helper = 2\n"),
+                    file_language: verter_session::FileLanguage::script_ts(),
+                    aliases: Vec::new(),
+                })
+                .expect("replace intermediate");
+            Box::pin(async {})
+        }),
+    );
+    let error = fixture
+        .server()
+        .goto_definition(params())
+        .await
+        .expect_err("changed intermediate refuses the answer");
+    assert_eq!(
+        error.code,
+        tower_lsp_server::jsonrpc::ErrorCode::ContentModified
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_assembly_retries_analysis_a_source_b_after_source_returns_to_a() {
+    let scenario = Scenario::new(Client::ChangesOnly).await;
+    let server = scenario.fixture.server();
+    server.documents.did_close(&scenario.util_uri);
+    let host = server.documents.host();
+    let mut attempts = 0;
+    let (_, source) = server
+        .read_child_at_one_revision(&scenario.util_canonical, || {
+            let capture = match host.capture_export_span(&scenario.util_canonical, "msg") {
+                verter_session::NativeExportRead::Captured(capture) => capture,
+                other => panic!("fixture export: {other:?}"),
+            };
+            attempts += 1;
+            let commit = |source: &str| {
+                let _ = host
+                    .upsert(verter_session::UpsertRequest {
+                        canonical_id: None,
+                        input_id: scenario.util_canonical.clone(),
+                        source: Arc::from(source),
+                        file_language: verter_session::FileLanguage::script_ts(),
+                        aliases: Vec::new(),
+                    })
+                    .expect("source transition");
+            };
+            if attempts == 1 {
+                commit(&format!("// moved\n{UTIL}"));
+            }
+            let source = host
+                .get_source(&scenario.util_canonical)
+                .expect("source for geometry");
+            if attempts == 1 {
+                commit(UTIL);
+            }
+            Some((capture.start, source))
+        })
+        .expect("coherent retry");
+    assert_eq!(
+        attempts, 2,
+        "the mixed first read is rejected despite equal endpoint hashes"
+    );
+    assert_eq!(&*source, UTIL);
+}
+
 /// A completion-resolve `additionalTextEdits` import is placed through the
 /// carrier revision the captured provider surface was built from. It lands on
 /// the unmoved document, and a document that moved after the capture yields no
