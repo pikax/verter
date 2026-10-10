@@ -179,7 +179,6 @@ fn finalized_output_signature(
             Some(verter_session_query::facts::fact_cache::ReadSetSignature::new(facts))
         }
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
         | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => None,
     }
 }
@@ -1279,10 +1278,8 @@ impl VerterHost {
     ///   the publish only covers mutations landing AFTER the seed
     ///   capture; this consult refuses on the serve's own publication
     ///   status even when the token still matches.
-    /// - **Signature overflow (R20).** A finalised signature exceeding
-    ///   the cap is refused admission.
     ///
-    /// On either refusal the producer still returns the freshly
+    /// On a refusal the producer still returns the freshly
     /// computed value to its caller (return-only semantics) — only the
     /// cache publish is skipped.
     /// Publish the cold-build result into the project-global

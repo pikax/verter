@@ -139,7 +139,7 @@ use super::singleflight_publish::{
 ///   admission flow inserts the entry into the map; joiners re-read the
 ///   freshly-published entry and run `validate` against their own view.
 /// - `ReturnOnly { value, reason }` — the result is valid but NOT
-///   cacheable (e.g. the producer's fact-signature tracer overflowed).
+///   cacheable (e.g. the producer's tracer consumed a non-cacheable read).
 ///   The admission flow does NOT insert into the map. A `ReturnOnly`
 ///   outcome carries no `Entry` and no dep-signature carrier, so it CANNOT be
 ///   view-validated against a cooperative joiner's own view. It is
@@ -856,7 +856,7 @@ where
 /// Cooperative cold-compute admission with a first-class
 /// `ComputeAdmission` outcome. Generalises
 /// [`cooperative_get_or_insert_with_post_publish`] by lifting the
-/// "valid-but-non-cacheable" case (overflowed fact signature, e.g.)
+/// "valid-but-non-cacheable" case (a non-cacheable read, e.g.)
 /// into the admission contract via [`ComputeAdmission::ReturnOnly`].
 ///
 /// **Three-way outcome contract.**

@@ -457,3 +457,123 @@ fn discriminant_generation_tracks_candidate_stamp_not_lookup_snapshot() {
         "both calls took the cold path (lookup_candidate always misses)"
     );
 }
+
+/// An `ArtifactNode` whose cold compute returns one shared signature wider
+/// than a page, claimed into the node's own account.
+struct WideArtifactNode {
+    entries: dashmap::DashMap<u32, Arc<CacheEntry<String>>>,
+    inflight: InflightTable<QueryFlightKey<u32>>,
+    signature: ReadSetSignature,
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+}
+
+impl WideArtifactNode {
+    fn new(account: Arc<verter_session_query::retention::SemanticRetentionAccount>) -> Self {
+        let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+            .map(|index| FactVersionRef::FileWholeHash {
+                canonical_id: format!("/wide/{index:05}.ts"),
+                hash: [1u8; 16],
+            })
+            .collect();
+        Self {
+            entries: dashmap::DashMap::new(),
+            inflight: InflightTable::new(),
+            signature: ReadSetSignature::new(
+                verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+            ),
+            account,
+        }
+    }
+
+    fn page_classes(&self) -> Vec<Option<verter_session_query::retention::ChargeClass>> {
+        self.signature
+            .facts
+            .iter()
+            .filter_map(|fact| match fact {
+                FactVersionRef::Receipt(page) if page.is_page() => {
+                    Some(page.retained_charge_class())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl ArtifactNode for WideArtifactNode {
+    type Key = u32;
+    type Value = String;
+
+    fn entries(&self) -> &dashmap::DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
+        &self.entries
+    }
+
+    fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
+        &self.inflight
+    }
+
+    fn compute(&self, key: &Self::Key, cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
+        CacheAdmission::Cacheable {
+            value: format!("v{key}"),
+            signature: self.signature.clone(),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            validated_at_generation: cx.generation(),
+        }
+    }
+
+    fn validate(
+        &self,
+        _key: &Self::Key,
+        entry: &CacheEntry<Self::Value>,
+        _cx: &ComputeCtx<'_>,
+    ) -> Option<Self::Value> {
+        Some(entry.value.clone())
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(&self.account)
+    }
+}
+
+/// A cold winner about to publish a wide signature claims its pages into a
+/// refusable reservation; an account that refuses that footprint returns
+/// the complete value uncached and leaves every page pinned.
+#[test]
+fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
+    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let flags: &RequestFlags = ctx.request_flags();
+
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let node = WideArtifactNode::new(Arc::clone(&account));
+    let _ = lookup(&node, 7u32, ctx, flags);
+    let classes = node.page_classes();
+    assert!(!classes.is_empty(), "premise: the signature is paged");
+    assert!(classes
+        .iter()
+        .all(|class| *class == Some(ChargeClass::Retained)));
+    assert!(account.snapshot().retained_bytes > 0);
+    drop(node);
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        0,
+        "the last holder's drop drains the pages"
+    );
+
+    let tight = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let node = WideArtifactNode::new(Arc::clone(&tight));
+    assert_eq!(
+        lookup(&node, 7u32, ctx, flags).as_deref(),
+        Some("v7"),
+        "a refused claim still delivers the complete value"
+    );
+    assert!(node.entries.is_empty(), "a refused claim publishes nothing");
+    assert!(node
+        .page_classes()
+        .iter()
+        .all(|class| *class == Some(ChargeClass::Pinned)));
+    assert_eq!(tight.snapshot().retained_bytes, 0);
+}

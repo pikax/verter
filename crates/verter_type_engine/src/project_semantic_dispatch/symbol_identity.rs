@@ -710,9 +710,7 @@ fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
         QueryError::OpenSurface | QueryError::UnmodeledPosition => {
             PropCallableRoleUnresolvedReason::MissingDependency
         }
-        QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => {
-            PropCallableRoleUnresolvedReason::BudgetExceeded
-        }
+        QueryError::BudgetExceeded(_) => PropCallableRoleUnresolvedReason::BudgetExceeded,
         QueryError::AliasCycle { .. }
         | QueryError::RecursiveRef { .. }
         | QueryError::RaiseAliasCycle

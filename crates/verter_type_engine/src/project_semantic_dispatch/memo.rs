@@ -871,7 +871,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     /// winner through `ReturnOnly`.
     ///
     /// The closure reports a [`ComputedEntry`]: a bool this cache cannot ROOT
-    /// (an overflowed signature, an unobservable keyed content version, a
+    /// (a non-cacheable read, an unobservable keyed content version, a
     /// request-partial resolution) still rides `ReturnOnly` back to the winner,
     /// so the caller never re-derives a verdict it already has.
     pub fn get_or_compute<P, Prepare, F>(
@@ -1083,8 +1083,8 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     /// verdict on the floor).
     ///
     /// A non-cacheable verdict (a fenced serve / lease miss / unrootable route /
-    /// unobservable source env consumed anywhere in the compute, or a
-    /// fact-signature overflow) publishes NOTHING: the value is returned to the
+    /// unobservable source env consumed anywhere in the compute, or
+    /// mutation instability) publishes NOTHING: the value is returned to the
     /// winner through `ReturnOnly`. Refusal is CACHE-ONLY — the value stays
     /// `Complete`, never a fabricated `Partial`.
     ///
@@ -1267,8 +1267,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     }
 
     /// Run `compute` under a fact tracer that is bound to no request port: the
-    /// basis is the engine's own unbound observers (the overflow counter and
-    /// the test forcing knobs).
+    /// basis is the engine's own unbound observers (the test forcing
+    /// knobs).
     #[cfg(any(test, feature = "test-support"))]
     pub fn traced_unbound<R>(
         &self,
@@ -1279,7 +1279,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     ) {
         crate::fact_signature_helpers::install_fact_tracer(
             &crate::fact_signature_helpers::FactTracerBasisSource::unbound_observers(
-                &self.binding.observers.overflow,
                 &self.binding.observers.forcing,
             ),
             compute,

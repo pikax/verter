@@ -1476,65 +1476,46 @@ fn cancellation_discovered_inside_the_cold_build_never_warms() {
 }
 
 #[test]
-fn partial_and_signature_overflow_discovered_during_force_never_warm() {
-    for overflow in [false, true] {
-        let host = make_host();
-        upsert(&host, SOURCE_V1);
-        let dispatch = ProjectSemanticDispatch::new(&host);
-        let locator = whole("Owned");
-        let operand = mint(&dispatch, locator.clone());
-        let key = locator_key(&host, &dispatch, locator.clone());
-        let force_key = force_key(
-            &dispatch,
-            &operand,
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-        );
-        if overflow {
-            host.test_force
-                .engine
-                .force_fact_tracer_overflow_observations
-                .store(
-                    verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
-                    Ordering::Relaxed,
-                );
-        } else {
-            host.test_force
-                .engine
-                .force_result_partial_for_tests
-                .store(true, Ordering::Relaxed);
-        }
-        let result =
-            dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded));
-        if overflow {
-            assert!(matches!(
-                result,
-                QueryResult::Error(QueryError::SignatureOverflow)
-            ));
-        } else {
-            assert!(matches!(
-                result,
-                QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
-            ));
-        }
-        assert_eq!(dispatch_warm_for(&key), 0);
-        assert_eq!(
-            host.project_type_store()
-                .semantic_graph()
-                .slot_candidate_count_for_tests(&key),
-            0
-        );
-        // The outer `Instantiate` (force) family slot the force wrapper
-        // itself would have published to must ALSO stay at zero
-        // candidates — a partial/overflow discovered mid-force must not
-        // leave a stray warm `Instantiate` entry even though the nested
-        // `LowerLocator` slot above is the one directly poisoned.
-        assert_eq!(
-            host.project_type_store()
-                .semantic_graph()
-                .slot_candidate_count_for_tests(&force_key),
-            0
-        );
-    }
+fn partial_discovered_during_force_never_warms() {
+    let host = make_host();
+    upsert(&host, SOURCE_V1);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let locator = whole("Owned");
+    let operand = mint(&dispatch, locator.clone());
+    let key = locator_key(&host, &dispatch, locator.clone());
+    let force_key = force_key(
+        &dispatch,
+        &operand,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    host.test_force
+        .engine
+        .force_result_partial_for_tests
+        .store(true, Ordering::Relaxed);
+    let result =
+        dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded));
+    assert!(matches!(
+        result,
+        QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+    ));
+    assert_eq!(dispatch_warm_for(&key), 0);
+    assert_eq!(
+        host.project_type_store()
+            .semantic_graph()
+            .slot_candidate_count_for_tests(&key),
+        0
+    );
+    // The outer `Instantiate` (force) family slot the force wrapper
+    // itself would have published to must ALSO stay at zero
+    // candidates — a partial discovered mid-force must not
+    // leave a stray warm `Instantiate` entry even though the nested
+    // `LowerLocator` slot above is the one directly poisoned.
+    assert_eq!(
+        host.project_type_store()
+            .semantic_graph()
+            .slot_candidate_count_for_tests(&force_key),
+        0
+    );
 }
 
 #[test]

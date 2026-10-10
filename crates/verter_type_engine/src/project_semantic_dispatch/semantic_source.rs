@@ -1179,7 +1179,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // basis while the entry's fact signature validates against the LIVE view. A
         // fenced serve is non-cacheable but NOT partial, so the
         // `result_is_partial()`-only gate below cannot reject it; the scope's
-        // CACHEABILITY verdict (which also folds a fact-signature overflow) is the
+        // CACHEABILITY verdict (which also folds mutation instability) is the
         // rail the `ShapeCacheDb` admission funnel consults.
         let value = self.with_shape_scope(|scope| {
             let id = crate::semantic_query::SyntheticBindingId::from_carrier_key(key);
