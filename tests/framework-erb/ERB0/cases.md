@@ -15,15 +15,19 @@ Products: `erb-version-lock.json` (V), `erb-capability-matrix.json` (M),
 | P01 | V | a release `pin` of `~> 8.1` | floating pin: not an exact version |
 | P02 | V | a release `pin` of `latest` | floating tag is never a release |
 | P03 | V | a release `pin` of `8.1.0.beta1` or `6.0.0.rc1` | prerelease is not admitted |
-| P04 | V | an `actionview` release with `pin` `7.2.2` or `admittedLine` `7.2` | Rails 7.x is legacy |
+| P04 | V | an `actionview` release with `pin` `7.2.2` or `releaseLine` `7.2` | Rails 7.x is legacy |
 | P05 | V | a release with no `source`, or a `source` not naming the exact pin | pin without its named source |
 | P06 | V | a profile listing two `engineRelease` values, or a versions array | one profile holds exactly one release |
-| P07 | V | a release `pin` outside its own `admittedLine` (`1.14.0` in line `1.13`) | pin diverged from its admitted line |
+| P07 | V | a release `pin` outside its own `releaseLine` (`1.14.0` in line `1.13`) | pin diverged from its descriptive release line |
 | P08 | V | a second erubi profile for an unannounced major (`erb.erubi-2`) while `nextMajor.announced` is false | next major admitted before announcement and ratification |
 | P09 | V | a profile with no `tags`, no `trimModes` or no `closeRule` | profile does not record its tag set, trim modes and first-`%>` close rule |
 | P10 | V | `closeRule` changed to a rule that skips `%>` inside Ruby strings | close rule diverges from both engines (first `%>`) |
-| P11 | V | `<%==` listed as a tag of `erb.erb-6.0` | fabricated feature: the erb gem has no `<%==` tag |
-| P12 | V | `%%>` listed as a close marker of `erb.erubi-1.13` | fabricated feature: Erubi does not recognise `%%>` |
+| P11 | V | `<%==` listed as a tag of `erb.erb-6.0.7` | fabricated feature: the erb gem has no `<%==` tag |
+| P12 | V | `%%>` listed as a close marker of `erb.erubi-1.13.1` | fabricated feature: Erubi does not recognise `%%>` |
+| P13 | V | `releaseLaw` admits every patch of `releaseLine` | only exact ratified pins are admitted; a line is metadata |
+| P14 | V | `<%-` / `-%>` applicability omits `%-` | both `-` and `%-` recognise the trim delimiters |
+| P15 | V | implicit Erubi trimming drops leading whitespace without a following newline | leading whitespace at EOF must be preserved |
+| P16 | V | Action View `text/plain` escaping inverts `<%=` and `<%==` | both forms are raw under Action View's adapter |
 
 ## ERB0-AC2 — owned matrix (`ERB0-matrix`)
 
@@ -58,7 +62,11 @@ Products: `erb-version-lock.json` (V), `erb-capability-matrix.json` (M),
 | A08 | A | a state row where `on` without a profile gives `active` | `on` without a named profile |
 | A09 | A | a state row where a lockfile-free `auto` gives `active` | activation without a lockfile or explicit `on` |
 | A10 | A | selection order with `erb` before `actionview` | selection order is actionview, then erubi, then erb |
-| A11 | A | a gem outside its admitted line falling back to a later gem | an unsupported version never falls back |
+| A11 | A | a gem different from its exact ratified pin falling back to a later gem | an unsupported version never falls back |
+| A12 | A | `erb 6.0.8` activates the profile pinned to `6.0.7` | an unratified patch in the same line is unsupported-version |
+| A13 | A | `actionview 8.1.0` with `erubi 1.13.0` activates the pinned Action View / Erubi profile | distinct installed releases cannot share the pinned profile identity |
+| A14 | A | `actionview 8.1.4` with `erubi 1.13.0` activates, or substitutes the pinned engine release | the selected host also requires the exact pinned engine; unsupported-version |
+| A15 | A | `actionview 8.1.4` with no resolved `erubi` spec activates using an inferred engine pin | unavailable-engine-release; no fabricated resolved release |
 
 ## ERB0-AC4 — coexistence declared (`ERB0-coexistence`)
 
@@ -80,3 +88,28 @@ Products: `erb-version-lock.json` (V), `erb-capability-matrix.json` (M),
 | OK2 | Every matrix operation has exactly one cell per profile and one producer. |
 | OK3 | Every profile id the activation policy selects exists in the version lock. |
 | OK4 | Every coexistence `operation` exists in the matrix. |
+| OK5 | With neither actionview nor erubi present, resolved `erb 6.0.7` selects `erb.erb-6.0.7` and retains release `erb-6.0.7`; `erb 6.0.8` is unsupported. |
+| OK6 | Resolved `actionview 8.1.4` with `erubi 1.13.1` selects `erb.erubi-1.13.1` and retains both exact releases; standalone `erubi 1.13.1` selects that engine profile with escaping unknown. |
+
+## Boundary controls for the deferred validator and scanner corpus
+
+These expectations come from the pinned official sources, without executing
+Ruby. ERB1G checks that the contract records them; ERB1 and ERB9 use the source
+pairs for scanner and composition conformance.
+
+| Id | Profile / configuration | Source | Expected boundary or text |
+| -- | ----------------------- | ------ | ------------------------- |
+| B01 | `erb.erb-6.0.7`, trim `%-` | `<%- value -%>` | code island with `<%-` and `-%>` delimiters, as under trim `-` |
+| B02 | `erb.erb-6.0.7`, no trim | `<%- value -%>` | ordinary `<%` / `%>` delimiters; the minus bytes stay in opaque code |
+| B03 | `erb.erubi-1.13.1`, trim on | `  <% foo %>` at EOF | two leading spaces preserved as text |
+| B04 | `erb.erubi-1.13.1`, trim on | `  <% foo %>\n` | leading spaces and following newline trimmed |
+| B05 | `erb.erubi-1.13.1`, trim on | `  <%# foo %>` at EOF versus `  <%# foo %>\n` | EOF preserves two spaces; newline control trims them |
+| B06 | `erb.erubi-1.13.1`, trim off | `  <% foo %>\n` | leading spaces and newline preserved |
+| B07 | Action View 8.1.4, HTML versus `text/plain` | `<%= value %>` and `<%== value %>` | HTML uses escaping for `=` and raw output for `==`; `text/plain` uses raw output for both (plain-text hosting remains excluded) |
+
+Sources: [ERB 6.0.7 compiler](https://github.com/ruby/erb/blob/v6.0.7/lib/erb/compiler.rb)
+(`prepare_trim_mode`, `TrimScanner`, `ExplicitScanner`),
+[Erubi 1.13.1](https://github.com/jeremyevans/erubi/blob/1.13.1/lib/erubi.rb)
+(`DEFAULT_REGEXP`, code and comment branches), and
+[Action View 8.1.4 adapter](https://github.com/rails/rails/blob/v8.1.4/actionview/lib/action_view/template/handlers/erb/erubi.rb)
+(`add_expression`).

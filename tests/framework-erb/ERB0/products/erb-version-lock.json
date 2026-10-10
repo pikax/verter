@@ -5,31 +5,31 @@
   "node": "ERB0",
   "kind": "lock",
   "pinRule": "every-release-is-an-exact-pinned-version-with-a-named-source",
-  "releaseLaw": "One profile holds exactly one engine release. A resolved version in a profile's admitted line activates that profile; the pin is the release the profile's conformance expectations are written against. Anything outside an admitted line is unsupported-version and is never coerced.",
+  "releaseLaw": "One profile holds exactly one engine release. Only a resolved version equal to the exact ratified pin activates its profile. releaseLine is descriptive metadata, never an admission range. Every other version, including a different patch in the same line, is unsupported-version and is never coerced. A newly ratified release needs a distinct release and profile identity.",
   "releases": [
     {
-      "id": "actionview-8.1",
+      "id": "actionview-8.1.4",
       "gem": "actionview",
       "pin": "8.1.4",
-      "admittedLine": "8.1",
+      "releaseLine": "8.1",
       "role": "template host: its ERB handler compiles every Action View template",
       "source": "https://rubygems.org/gems/actionview/versions/8.1.4",
       "behaviourSource": "https://github.com/rails/rails/blob/v8.1.4/actionview/lib/action_view/template/handlers/erb.rb"
     },
     {
-      "id": "erubi-1.13",
+      "id": "erubi-1.13.1",
       "gem": "erubi",
       "pin": "1.13.1",
-      "admittedLine": "1.13",
+      "releaseLine": "1.13",
       "role": "engine: Action View's default erb_implementation",
       "source": "https://rubygems.org/gems/erubi/versions/1.13.1",
       "behaviourSource": "https://github.com/jeremyevans/erubi/blob/1.13.1/lib/erubi.rb"
     },
     {
-      "id": "erb-6.0",
+      "id": "erb-6.0.7",
       "gem": "erb",
       "pin": "6.0.7",
-      "admittedLine": "6.0",
+      "releaseLine": "6.0",
       "role": "engine: the erb gem's ERB::Compiler",
       "source": "https://rubygems.org/gems/erb/versions/6.0.7",
       "behaviourSource": "https://github.com/ruby/erb/blob/v6.0.7/lib/erb/compiler.rb"
@@ -37,15 +37,15 @@
   ],
   "profiles": [
     {
-      "id": "erb.erubi-1.13",
-      "engineRelease": "erubi-1.13",
-      "hostRelease": "actionview-8.1",
-      "selectedWhen": "the package's Gemfile.lock resolves actionview in an admitted line, or (without actionview) resolves erubi in an admitted line, or an explicit on names this profile",
+      "id": "erb.erubi-1.13.1",
+      "engineRelease": "erubi-1.13.1",
+      "hostRelease": "actionview-8.1.4",
+      "selectedWhen": "the package's Gemfile.lock resolves actionview 8.1.4 and erubi 1.13.1, or (without actionview) resolves erubi 1.13.1, or an explicit on names this profile",
       "tags": [
         { "open": "<%", "close": "%>", "kind": "code" },
         { "open": "<%-", "close": "%>", "kind": "code", "note": "the - indicator is handled exactly like <%" },
         { "open": "<%=", "close": "%>", "kind": "output" },
-        { "open": "<%==", "close": "%>", "kind": "output-inverted-escape" },
+        { "open": "<%==", "close": "%>", "kind": "output-raw-actionview", "note": "standalone Erubi escaping is unknown" },
         { "open": "<%#", "close": "%>", "kind": "comment" },
         { "open": "<%%", "close": "%>", "kind": "literal", "emits": "the tag text with its first % removed" }
       ],
@@ -55,7 +55,7 @@
           "id": "erubi-trim",
           "default": true,
           "actionViewSetting": "erb_trim_mode == \"-\" (default \"-\")",
-          "rule": "a code tag (with or without -) or a comment tag that is alone on its line drops that line's leading whitespace and trailing newline"
+          "rule": "a code tag (with or without -) or a comment tag preceded only by spaces or tabs on its line and immediately followed by optional spaces or tabs and a newline drops that leading whitespace and the trailing spaces or tabs and newline; at EOF without that newline, leading whitespace is preserved"
         },
         {
           "id": "erubi-no-trim",
@@ -68,28 +68,28 @@
       "percentPercentClose": "not recognised: %%> ends the tag at its %>, and the extra % stays in the tag body",
       "percentLines": "not recognised",
       "escaping": {
-        "actionView": "<%= is HTML-escaped through the output buffer and <%== is raw, except that templates of type text/plain (escape_ignore_list) invert it",
+        "actionView": "<%= is HTML-escaped through the output buffer and <%== is raw; templates of type text/plain (escape_ignore_list) make both forms raw",
         "standaloneErubi": "escape is an application option Verter cannot read: <%= versus <%== escaping is unknown"
       },
       "encodingTag": "a leading <%# encoding: ... %> comment is removed by Action View before compilation"
     },
     {
-      "id": "erb.erb-6.0",
-      "engineRelease": "erb-6.0",
-      "hostRelease": "actionview-8.1",
+      "id": "erb.erb-6.0.7",
+      "engineRelease": "erb-6.0.7",
+      "hostRelease": "actionview-8.1.4",
       "hostRelation": "Action View 8.1 does not compile templates with this engine; the profile is selected only when the lockfile resolves erb and neither actionview nor erubi, or an explicit on names it",
-      "selectedWhen": "the package's Gemfile.lock resolves erb in an admitted line and resolves neither actionview nor erubi, or an explicit on names this profile",
+      "selectedWhen": "the package's Gemfile.lock resolves erb 6.0.7 and resolves neither actionview nor erubi, or an explicit on names this profile",
       "tags": [
         { "open": "<%", "close": "%>", "kind": "code" },
         { "open": "<%=", "close": "%>", "kind": "output" },
         { "open": "<%#", "close": "%>", "kind": "comment" },
         { "open": "<%%", "kind": "literal", "emits": "<%" },
-        { "open": "<%-", "close": "-%>", "kind": "code", "trimMode": "-" }
+        { "open": "<%-", "close": "-%>", "kind": "code", "trimModes": ["-", "%-"] }
       ],
       "closeMarkers": ["%>", "%%>", "-%>"],
       "unrecognised": [
         "<%== is not a tag: it scans as <%= followed by a code byte =",
-        "<%- and -%> are tag delimiters only under trim mode -"
+        "<%- and -%> are tag delimiters only under trim modes - and %-"
       ],
       "trimModes": [
         { "id": "none", "rule": "no trimming; % lines not recognised" },

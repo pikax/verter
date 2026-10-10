@@ -6,8 +6,8 @@
   "kind": "lock",
   "cellRule": "one cell per operation x host x profile; each cell names exactly one producer node and the acceptance items that prove it; an operation Verter does not provide is a truthful exclusion with no producer",
   "profiles": [
-    "erb.erubi-1.13",
-    "erb.erb-6.0"
+    "erb.erubi-1.13.1",
+    "erb.erb-6.0.7"
   ],
   "hosts": [
     {
@@ -288,9 +288,9 @@
   ],
   "cells": [
     {
-      "id": "scan.islands@erb.erubi-1.13",
+      "id": "scan.islands@erb.erubi-1.13.1",
       "operation": "scan.islands",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -298,12 +298,12 @@
       ],
       "layer": "parse",
       "status": "admitted",
-      "profileNote": "<%== is an inverted-escape output tag; %%> is not recognised"
+      "profileNote": "<%== is a raw-output tag under Action View; standalone Erubi escaping is unknown; %%> is not recognised"
     },
     {
-      "id": "scan.islands@erb.erb-6.0",
+      "id": "scan.islands@erb.erb-6.0.7",
       "operation": "scan.islands",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -311,12 +311,12 @@
       ],
       "layer": "parse",
       "status": "admitted",
-      "profileNote": "%%> is a literal %> inside a tag; <%== is not a tag; <%- and -%> are delimiters only under trim mode -"
+      "profileNote": "%%> is a literal %> inside a tag; <%== is not a tag; <%- and -%> are delimiters only under trim modes - and %-"
     },
     {
-      "id": "scan.block-structure@erb.erubi-1.13",
+      "id": "scan.block-structure@erb.erubi-1.13.1",
       "operation": "scan.block-structure",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -326,9 +326,9 @@
       "status": "admitted"
     },
     {
-      "id": "scan.block-structure@erb.erb-6.0",
+      "id": "scan.block-structure@erb.erb-6.0.7",
       "operation": "scan.block-structure",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -338,9 +338,9 @@
       "status": "admitted"
     },
     {
-      "id": "scan.recovery@erb.erubi-1.13",
+      "id": "scan.recovery@erb.erubi-1.13.1",
       "operation": "scan.recovery",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -350,9 +350,9 @@
       "status": "admitted"
     },
     {
-      "id": "scan.recovery@erb.erb-6.0",
+      "id": "scan.recovery@erb.erb-6.0.7",
       "operation": "scan.recovery",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -362,9 +362,9 @@
       "status": "admitted"
     },
     {
-      "id": "scan.incremental@erb.erubi-1.13",
+      "id": "scan.incremental@erb.erubi-1.13.1",
       "operation": "scan.incremental",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -374,9 +374,9 @@
       "status": "admitted"
     },
     {
-      "id": "scan.incremental@erb.erb-6.0",
+      "id": "scan.incremental@erb.erb-6.0.7",
       "operation": "scan.incremental",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB1",
       "acceptance": [
@@ -386,9 +386,9 @@
       "status": "admitted"
     },
     {
-      "id": "compose.templated-html@erb.erubi-1.13",
+      "id": "compose.templated-html@erb.erubi-1.13.1",
       "operation": "compose.templated-html",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERBH1",
       "acceptance": [
@@ -401,9 +401,9 @@
       "status": "admitted"
     },
     {
-      "id": "compose.templated-html@erb.erb-6.0",
+      "id": "compose.templated-html@erb.erb-6.0.7",
       "operation": "compose.templated-html",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERBH1",
       "acceptance": [
@@ -416,9 +416,9 @@
       "status": "admitted"
     },
     {
-      "id": "compose.regions@erb.erubi-1.13",
+      "id": "compose.regions@erb.erubi-1.13.1",
       "operation": "compose.regions",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB2",
       "acceptance": [
@@ -430,9 +430,9 @@
       "status": "admitted"
     },
     {
-      "id": "compose.regions@erb.erb-6.0",
+      "id": "compose.regions@erb.erb-6.0.7",
       "operation": "compose.regions",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB2",
       "acceptance": [
@@ -444,9 +444,9 @@
       "status": "admitted"
     },
     {
-      "id": "compose.hosts@erb.erubi-1.13",
+      "id": "compose.hosts@erb.erubi-1.13.1",
       "operation": "compose.hosts",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB2",
       "acceptance": [
@@ -456,9 +456,9 @@
       "status": "admitted"
     },
     {
-      "id": "compose.hosts@erb.erb-6.0",
+      "id": "compose.hosts@erb.erb-6.0.7",
       "operation": "compose.hosts",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB2",
       "acceptance": [
@@ -468,9 +468,9 @@
       "status": "admitted"
     },
     {
-      "id": "activation.inactive-zero-work@erb.erubi-1.13",
+      "id": "activation.inactive-zero-work@erb.erubi-1.13.1",
       "operation": "activation.inactive-zero-work",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB2",
       "acceptance": [
@@ -480,9 +480,9 @@
       "status": "admitted"
     },
     {
-      "id": "activation.inactive-zero-work@erb.erb-6.0",
+      "id": "activation.inactive-zero-work@erb.erb-6.0.7",
       "operation": "activation.inactive-zero-work",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB2",
       "acceptance": [
@@ -492,9 +492,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.block-pairs@erb.erubi-1.13",
+      "id": "op.block-pairs@erb.erubi-1.13.1",
       "operation": "op.block-pairs",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -504,9 +504,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.block-pairs@erb.erb-6.0",
+      "id": "op.block-pairs@erb.erb-6.0.7",
       "operation": "op.block-pairs",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -516,9 +516,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.linked-editing@erb.erubi-1.13",
+      "id": "op.linked-editing@erb.erubi-1.13.1",
       "operation": "op.linked-editing",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -528,9 +528,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.linked-editing@erb.erb-6.0",
+      "id": "op.linked-editing@erb.erb-6.0.7",
       "operation": "op.linked-editing",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -540,9 +540,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.html-features@erb.erubi-1.13",
+      "id": "op.html-features@erb.erubi-1.13.1",
       "operation": "op.html-features",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -552,9 +552,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.html-features@erb.erb-6.0",
+      "id": "op.html-features@erb.erb-6.0.7",
       "operation": "op.html-features",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -564,9 +564,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.semantic-tokens@erb.erubi-1.13",
+      "id": "op.semantic-tokens@erb.erubi-1.13.1",
       "operation": "op.semantic-tokens",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -576,9 +576,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.semantic-tokens@erb.erb-6.0",
+      "id": "op.semantic-tokens@erb.erb-6.0.7",
       "operation": "op.semantic-tokens",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -588,9 +588,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.structure@erb.erubi-1.13",
+      "id": "op.structure@erb.erubi-1.13.1",
       "operation": "op.structure",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -600,9 +600,9 @@
       "status": "admitted"
     },
     {
-      "id": "op.structure@erb.erb-6.0",
+      "id": "op.structure@erb.erb-6.0.7",
       "operation": "op.structure",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB3",
       "acceptance": [
@@ -612,9 +612,9 @@
       "status": "admitted"
     },
     {
-      "id": "sinks.raw-output@erb.erubi-1.13",
+      "id": "sinks.raw-output@erb.erubi-1.13.1",
       "operation": "sinks.raw-output",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB4S",
       "acceptance": [
@@ -624,12 +624,12 @@
       ],
       "layer": "facts",
       "status": "admitted",
-      "profileNote": "under Action View <%== is raw and <%= escaped (inverted for text/plain templates); standalone Erubi escaping is unknown"
+      "profileNote": "under Action View <%== is raw and <%= escaped (both forms raw for text/plain templates); standalone Erubi escaping is unknown"
     },
     {
-      "id": "sinks.raw-output@erb.erb-6.0",
+      "id": "sinks.raw-output@erb.erb-6.0.7",
       "operation": "sinks.raw-output",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB4S",
       "acceptance": [
@@ -642,9 +642,9 @@
       "profileNote": "<%= is never escaped by this engine, so every output hole is a raw sink"
     },
     {
-      "id": "format.document@erb.erubi-1.13",
+      "id": "format.document@erb.erubi-1.13.1",
       "operation": "format.document",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB5F",
       "acceptance": [
@@ -656,9 +656,9 @@
       "status": "admitted"
     },
     {
-      "id": "format.document@erb.erb-6.0",
+      "id": "format.document@erb.erb-6.0.7",
       "operation": "format.document",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB5F",
       "acceptance": [
@@ -670,9 +670,9 @@
       "status": "admitted"
     },
     {
-      "id": "lint.markup@erb.erubi-1.13",
+      "id": "lint.markup@erb.erubi-1.13.1",
       "operation": "lint.markup",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB4",
       "acceptance": [
@@ -684,9 +684,9 @@
       "status": "admitted"
     },
     {
-      "id": "lint.markup@erb.erb-6.0",
+      "id": "lint.markup@erb.erb-6.0.7",
       "operation": "lint.markup",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB4",
       "acceptance": [
@@ -698,9 +698,9 @@
       "status": "admitted"
     },
     {
-      "id": "lint.percent-close-in-ruby-string@erb.erubi-1.13",
+      "id": "lint.percent-close-in-ruby-string@erb.erubi-1.13.1",
       "operation": "lint.percent-close-in-ruby-string",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB4",
       "acceptance": [
@@ -711,9 +711,9 @@
       "profileNote": "Erubi does not recognise %%>; ERB4 offers only a fix this profile reads, or records why there is none"
     },
     {
-      "id": "lint.percent-close-in-ruby-string@erb.erb-6.0",
+      "id": "lint.percent-close-in-ruby-string@erb.erb-6.0.7",
       "operation": "lint.percent-close-in-ruby-string",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB4",
       "acceptance": [
@@ -724,9 +724,9 @@
       "profileNote": "the %%> fix applies: this engine reads %%> as a literal %>"
     },
     {
-      "id": "assists.structure@erb.erubi-1.13",
+      "id": "assists.structure@erb.erubi-1.13.1",
       "operation": "assists.structure",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERBA",
       "acceptance": [
@@ -739,9 +739,9 @@
       "status": "admitted"
     },
     {
-      "id": "assists.structure@erb.erb-6.0",
+      "id": "assists.structure@erb.erb-6.0.7",
       "operation": "assists.structure",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERBA",
       "acceptance": [
@@ -754,9 +754,9 @@
       "status": "admitted"
     },
     {
-      "id": "fragments.html-response@erb.erubi-1.13",
+      "id": "fragments.html-response@erb.erubi-1.13.1",
       "operation": "fragments.html-response",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "HRF1-ERB",
       "acceptance": [
@@ -769,9 +769,9 @@
       "status": "admitted"
     },
     {
-      "id": "fragments.html-response@erb.erb-6.0",
+      "id": "fragments.html-response@erb.erb-6.0.7",
       "operation": "fragments.html-response",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "HRF1-ERB",
       "acceptance": [
@@ -784,9 +784,9 @@
       "status": "admitted"
     },
     {
-      "id": "client.registration@erb.erubi-1.13",
+      "id": "client.registration@erb.erubi-1.13.1",
       "operation": "client.registration",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERBP0",
       "acceptance": [
@@ -798,9 +798,9 @@
       "status": "admitted"
     },
     {
-      "id": "client.registration@erb.erb-6.0",
+      "id": "client.registration@erb.erb-6.0.7",
       "operation": "client.registration",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERBP0",
       "acceptance": [
@@ -812,9 +812,9 @@
       "status": "admitted"
     },
     {
-      "id": "qualification.conformance@erb.erubi-1.13",
+      "id": "qualification.conformance@erb.erubi-1.13.1",
       "operation": "qualification.conformance",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB9",
       "acceptance": [
@@ -825,9 +825,9 @@
       "status": "admitted"
     },
     {
-      "id": "qualification.conformance@erb.erb-6.0",
+      "id": "qualification.conformance@erb.erb-6.0.7",
       "operation": "qualification.conformance",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB9",
       "acceptance": [
@@ -838,9 +838,9 @@
       "status": "admitted"
     },
     {
-      "id": "qualification.incremental@erb.erubi-1.13",
+      "id": "qualification.incremental@erb.erubi-1.13.1",
       "operation": "qualification.incremental",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB9",
       "acceptance": [
@@ -850,9 +850,9 @@
       "status": "admitted"
     },
     {
-      "id": "qualification.incremental@erb.erb-6.0",
+      "id": "qualification.incremental@erb.erb-6.0.7",
       "operation": "qualification.incremental",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB9",
       "acceptance": [
@@ -862,9 +862,9 @@
       "status": "admitted"
     },
     {
-      "id": "qualification.exposure@erb.erubi-1.13",
+      "id": "qualification.exposure@erb.erubi-1.13.1",
       "operation": "qualification.exposure",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERB9",
       "acceptance": [
@@ -874,9 +874,9 @@
       "status": "admitted"
     },
     {
-      "id": "qualification.exposure@erb.erb-6.0",
+      "id": "qualification.exposure@erb.erb-6.0.7",
       "operation": "qualification.exposure",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERB9",
       "acceptance": [
@@ -886,9 +886,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.capability-truth@erb.erubi-1.13",
+      "id": "terminal.capability-truth@erb.erubi-1.13.1",
       "operation": "terminal.capability-truth",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [
@@ -898,9 +898,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.capability-truth@erb.erb-6.0",
+      "id": "terminal.capability-truth@erb.erb-6.0.7",
       "operation": "terminal.capability-truth",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [
@@ -910,9 +910,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.step-down@erb.erubi-1.13",
+      "id": "terminal.step-down@erb.erubi-1.13.1",
       "operation": "terminal.step-down",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [
@@ -922,9 +922,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.step-down@erb.erb-6.0",
+      "id": "terminal.step-down@erb.erb-6.0.7",
       "operation": "terminal.step-down",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [
@@ -934,9 +934,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.mcp@erb.erubi-1.13",
+      "id": "terminal.mcp@erb.erubi-1.13.1",
       "operation": "terminal.mcp",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [
@@ -946,9 +946,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.mcp@erb.erb-6.0",
+      "id": "terminal.mcp@erb.erb-6.0.7",
       "operation": "terminal.mcp",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [
@@ -958,9 +958,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.docs@erb.erubi-1.13",
+      "id": "terminal.docs@erb.erubi-1.13.1",
       "operation": "terminal.docs",
-      "profile": "erb.erubi-1.13",
+      "profile": "erb.erubi-1.13.1",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [
@@ -970,9 +970,9 @@
       "status": "admitted"
     },
     {
-      "id": "terminal.docs@erb.erb-6.0",
+      "id": "terminal.docs@erb.erb-6.0.7",
       "operation": "terminal.docs",
-      "profile": "erb.erb-6.0",
+      "profile": "erb.erb-6.0.7",
       "host": "verter-lsp.erb-document",
       "producer": "ERBT",
       "acceptance": [

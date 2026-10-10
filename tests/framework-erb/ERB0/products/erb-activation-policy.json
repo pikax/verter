@@ -14,27 +14,28 @@
       "read": "as data: the resolved specs (name and exact version) of the lockfile's GEM sections",
       "never": ["Gemfile", "bundle", "ruby", "any gem or Rails process"],
       "selection": [
-        { "order": 1, "gem": "actionview", "profile": "erb.erubi-1.13", "admittedLine": "8.1" },
-        { "order": 2, "gem": "erubi", "profile": "erb.erubi-1.13", "admittedLine": "1.13" },
-        { "order": 3, "gem": "erb", "profile": "erb.erb-6.0", "admittedLine": "6.0" }
+        { "order": 1, "gem": "actionview", "profile": "erb.erubi-1.13.1", "release": "actionview-8.1.4", "exactVersion": "8.1.4" },
+        { "order": 2, "gem": "erubi", "profile": "erb.erubi-1.13.1", "release": "erubi-1.13.1", "exactVersion": "1.13.1" },
+        { "order": 3, "gem": "erb", "profile": "erb.erb-6.0.7", "release": "erb-6.0.7", "exactVersion": "6.0.7" }
       ],
-      "selectionRule": "the first gem present in the resolved specs decides; a later gem is never consulted once an earlier one is present. A present gem outside its admitted line gives unsupported-version with that version, never a fallback to a later gem",
-      "engineLineCheck": "when actionview selects erb.erubi-1.13, a resolved erubi outside 1.13 gives unsupported-version"
+      "selectionRule": "the first gem present in the resolved specs decides; a later gem is never consulted once an earlier one is present. A present gem different from its exact ratified pin gives unsupported-version with that version, never a fallback to a later gem",
+      "engineReleaseCheck": "when actionview 8.1.4 selects erb.erubi-1.13.1, erubi must resolve to exactly 1.13.1; any other resolved version gives unsupported-version, and a missing erubi spec gives unavailable-engine-release, never an inferred pin",
+      "identityRule": "activation retains the selected exact resolved release and, for Action View, the exact engine release; profile identity comes from the ratified exact-release row, never releaseLine"
     },
     {
       "id": "explicit-on",
       "provenance": "explicit",
       "setting": "frameworks.erb = on, naming one profile id from erb-version-lock.json",
-      "rule": "without a lockfile, only an explicit on that names a profile activates; on without a profile, or naming an unknown or unadmitted profile, activates nothing and reports why. With a lockfile, on never admits a release the lockfile resolves outside an admitted line"
+      "rule": "without a lockfile, only an explicit on that names a profile activates; on without a profile, or naming an unknown or unadmitted profile, activates nothing and reports why. With a lockfile, on never admits a release the lockfile resolves different from an exact ratified pin"
     }
   ],
   "states": [
     { "setting": "off", "result": "off for every file; zero ERB work" },
-    { "setting": "auto", "lockfile": "present, admitted", "result": "active with provenance lockfile at the selected profile" },
-    { "setting": "auto", "lockfile": "present, gem outside admitted line", "result": "unsupported-version with the resolved version and reason" },
+    { "setting": "auto", "lockfile": "present, admitted", "result": "active with provenance lockfile, the exact resolved release and selected exact-release profile" },
+    { "setting": "auto", "lockfile": "present, gem differs from exact ratified pin", "result": "unsupported-version with the resolved version and reason" },
     { "setting": "auto", "lockfile": "present, none of the three gems", "result": "inactive" },
     { "setting": "auto", "lockfile": "absent", "result": "inactive" },
-    { "setting": "on <profile>", "lockfile": "absent", "result": "active with provenance explicit at the named profile" },
+    { "setting": "on <profile>", "lockfile": "absent", "result": "active with provenance explicit at the named exact-release profile and its ratified pins" },
     { "setting": "on", "lockfile": "absent", "result": "not activated: on must name a profile" }
   ],
   "forbiddenSources": [

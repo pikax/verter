@@ -43,14 +43,16 @@ which REG0's lock runner discovers.
 
 One profile per engine, each holding exactly one release (VID0 `R04`, `R05`):
 
-| Profile | Engine | Pin | Admitted line | Host |
+| Profile | Engine | Exact admitted release | Release line (metadata) | Host |
 | ------- | ------ | --- | ------------- | ---- |
-| `erb.erubi-1.13` | Erubi | 1.13.1 | 1.13 | Action View 8.1.4 (line 8.1) |
-| `erb.erb-6.0` | `erb` gem | 6.0.7 | 6.0 | none: Action View 8.1 compiles templates with Erubi |
+| `erb.erubi-1.13.1` | Erubi | 1.13.1 | 1.13 | Action View 8.1.4 (line 8.1) |
+| `erb.erb-6.0.7` | `erb` gem | 6.0.7 | 6.0 | none: Action View 8.1 compiles templates with Erubi |
 
-The pins are the charter's starting pins. A resolved version in a profile's
-admitted line activates that profile; the pin is the release its conformance
-expectations are written against. Anything else is `unsupported-version`
+The pins are the exact releases ratified by this contract. Only an exact match
+activates its profile; the release line is descriptive metadata, never an
+admission range. A different patch in the same line is `unsupported-version`,
+and a newly ratified release needs a distinct release and profile identity.
+Anything else is `unsupported-version`
 (`R06`): Rails 7.x is legacy, prereleases are never admitted, and a range,
 `latest` or a `Gemfile` requirement is never a release (`R07`, `R08`). A next
 major becomes a second profile only once announced and ratified in this lock;
@@ -61,19 +63,21 @@ What each profile records, from the engines' own sources:
 - **Action View's handler** defaults `erb_implementation` to Erubi and
   `erb_trim_mode` to `"-"`, and builds Erubi with `trim` on and `escape` on only
   for `text/plain` templates. So in Action View `<%=` is escaped through the
-  output buffer and `<%==` is raw, inverted for `text/plain`.
+  output buffer and `<%==` is raw; both forms are raw for `text/plain`.
 - **Erubi 1.13.1** recognises `<%`, `<%-` (same as `<%`), `<%=`, `<%==`, `<%#`
   and `<%%` (emits the tag text literally). The tag body is the shortest run up
   to the first `%>`. `%%>` is not recognised. With `trim` on, a code or comment
-  tag alone on its line drops that line's surrounding whitespace. Outside
+  tag preceded only by spaces or tabs on its line and immediately followed by
+  optional spaces or tabs and a newline drops that surrounding whitespace and
+  newline. At EOF without that newline, leading whitespace is preserved. Outside
   Action View its escaping is an application option Verter cannot read, so it
   is unknown.
 - **The `erb` gem 6.0** recognises `<%`, `<%=`, `<%#`, the literal `<%%`, and
   `%%>` as a literal `%>` inside a tag. `<%==` is not a tag. Trim modes are
   none, `%`, `<>`, `>`, `-`, `%<>`, `%>` and `%-`; `<%-`/`-%>` are delimiters
-  only under `-`, and `%` lines only under a mode containing `%`. The mode is a
-  constructor argument the calling code chooses, so without configuration it is
-  unknown and never guessed. `<%=` is never escaped.
+  only under `-` and `%-`, and `%` lines only under a mode containing `%`. The
+  mode is a constructor argument the calling code chooses, so without
+  configuration it is unknown and never guessed. `<%=` is never escaped.
 - **Both engines close a tag at the first `%>`**, whatever Ruby string or
   comment it falls in. ERB1 reports that break (`ERB1-AC1`); ERB4 diagnoses it
   (`ERB4-AC3`). The `%%>` fix applies only to the `erb` gem profile; for Erubi,
@@ -86,9 +90,12 @@ What each profile records, from the engines' own sources:
 FWA1's `FrameworkActivation` record is the only activation source (`FWA1-AC7`).
 The `erb` row reads `Gemfile.lock` at the package root as data, taking the
 resolved specs: `actionview` first, else `erubi`, else `erb`. The first present
-gem decides; a present gem outside its admitted line is `unsupported-version`
-and never falls back to a later gem. `Gemfile`, `bundle` and Ruby are never
-read or run.
+gem decides; a present gem different from its exact ratified pin is
+`unsupported-version` and never falls back to a later gem. `Gemfile`, `bundle` and Ruby are never
+read or run. Action View 8.1.4 also requires the exact Erubi 1.13.1 resolved spec;
+a different engine release is unsupported, and a missing spec reports
+`unavailable-engine-release`. Activation retains both exact resolved releases;
+it never substitutes the ratified pins for different installed releases.
 
 Without a lockfile, only `frameworks.erb = on` naming a profile id activates;
 `on` without a profile activates nothing and says why. `off` disables the
@@ -169,9 +176,9 @@ moves unchanged to ERB1G (`ERB1G-ACV`).
 
 | Item | Met by | Planted rows |
 | ---- | ------ | ------------ |
-| `ERB0-AC1` pinned profiles | `erb-version-lock.json` | `P01`–`P12` |
+| `ERB0-AC1` pinned profiles | `erb-version-lock.json` | `P01`–`P16` |
 | `ERB0-AC2` owned matrix | `erb-capability-matrix.json` | `M01`–`M14` |
-| `ERB0-AC3` activation and associations | `erb-activation-policy.json` | `A01`–`A11` |
+| `ERB0-AC3` activation and associations | `erb-activation-policy.json` | `A01`–`A15` |
 | `ERB0-AC4` coexistence declared | `erb-coexistence.json` | `C01`–`C07` |
 
 The abort condition does not apply: FWA1's charter carries a gem-derived

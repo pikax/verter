@@ -834,9 +834,6 @@ export const CI_INERT_PATHS = Object.freeze([
   // Product, architecture and evidence inventories that only local verifiers
   // or the docs build read.
   "tests/documentation/**",
-  // Framework stage-0 lock data, read by no ci.yml job until a lock spec and
-  // its runner land beside it.
-  "tests/framework-erb/**",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",
