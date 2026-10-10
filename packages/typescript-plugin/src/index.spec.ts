@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { appendCarrierStoreRecord, writeCarrierStoreFixture } from "./helpers/carrierStoreFixture";
+import { CARRIER_STORE_HEAD_FILE, carrierSnapshotFile } from "./helpers/carrierJournal";
 import { DiskCarrierStoreReader } from "./helpers/carrierStore";
 import fs from "node:fs";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
@@ -522,13 +523,13 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     return { session, command };
   }
 
-  /** `vueAndSvelteManifest()` with `A.vue`'s companion advanced to version 6 at `blobRel`. */
-  function advancedManifest(blobRel: string): Manifest {
+  /** `vueAndSvelteManifest()` with `A.vue`'s companion advanced to `version` at `blobRel`. */
+  function advancedManifest(blobRel: string, version = 6): Manifest {
     const manifest = vueAndSvelteManifest();
-    manifest.epoch = 2;
+    manifest.epoch = version - 4;
     manifest.projects["/ws/tsconfig.json"].ready_files[`${COMMAND_SOURCE}.tsx`] = {
-      content_hash: "a2",
-      version: 6,
+      content_hash: `a${version - 4}`,
+      version,
       script_kind: "TSX",
       role: "CarrierIde",
       map_hash: "0",
@@ -566,7 +567,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
     const snapshot = info.languageServiceHost.getScriptSnapshot(COMMAND_SOURCE);
     expect(snapshot.getText(0, snapshot.getLength())).toBe(blob);
     const reads = () => blobReads.mock.calls.length;
-    return { dir, info, scriptInfo, command, reads };
+    return { dir, info, plugin, scriptInfo, command, reads };
   }
 
   /** Convert `offset` both ways `rounds` times, asserting no file is read or opened meanwhile. */
@@ -824,6 +825,128 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
         expect(scriptInfo.lineOffsetToPosition(1, 4)).toBe(3);
       });
     }
+  });
+
+  it("gives a command of another Session its own memo when it runs re-entrantly inside this one", () => {
+    const dir = track(writeStore(vueAndSvelteManifest(), { "blobs/A.vue.tsx": COMMAND_V1 }));
+    const scriptInfo = fakeScriptInfo(COMMAND_SOURCE);
+    const blobReads = vi.spyOn(DiskCarrierStoreReader.prototype, "readBlobSync");
+    const plugin = init({ typescript: ts } as any);
+    const [outer, inner] = [fakeSession(), fakeSession()];
+    for (const { session } of [outer, inner]) {
+      const info = createInfo(dir, { diskFiles: { [COMMAND_SOURCE]: "<template />" } });
+      info.session = session;
+      info.project.projectService.getScriptInfo = (fileName: string) =>
+        fileName === COMMAND_SOURCE ? scriptInfo : undefined;
+      plugin.create(info);
+      info.languageServiceHost.getScriptSnapshot(COMMAND_SOURCE);
+    }
+    const reads = () => blobReads.mock.calls.length;
+
+    outer.command(() => {
+      const start = reads();
+      expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual({ line: 3, offset: 1 });
+      expect(reads()).toBe(start + 1);
+      inner.command(() => {
+        // Another Session's command re-entered: its own memo, so it samples once more...
+        expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual({ line: 3, offset: 1 });
+        expect(reads()).toBe(start + 2);
+        // ...and only once.
+        convertWithoutStoreAccess(scriptInfo, V1_OFFSET, { line: 3, offset: 1 }, 20);
+      });
+      // Back in the outer Session's command its memo is restored: nothing is re-sampled.
+      convertWithoutStoreAccess(scriptInfo, V1_OFFSET, { line: 3, offset: 1 }, 20);
+      expect(reads()).toBe(start + 2);
+    });
+    // Both boundaries closed: the next command of either Session samples afresh.
+    inner.command(() => {
+      const start = reads();
+      expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual({ line: 3, offset: 1 });
+      expect(reads()).toBe(start + 1);
+    });
+  });
+
+  it("memoizes the whole callback for the command: a re-entrant close or serving-mode change applies at the next command", () => {
+    {
+      // The project closes midway through the command.
+      const { info, scriptInfo, command, reads } = commandCarrier();
+      command(() => {
+        expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual({ line: 3, offset: 1 });
+        info.project.isClosed = () => true;
+        const sampled = reads();
+        convertWithoutStoreAccess(scriptInfo, V1_OFFSET, { line: 3, offset: 1 }, 20);
+        expect(reads()).toBe(sampled);
+      });
+      command(() => {
+        expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual(original(V1_OFFSET));
+      });
+      expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual(original(V1_OFFSET));
+    }
+    {
+      // The serving mode flips to editor-owned membership midway through the command.
+      const { dir, plugin, scriptInfo, command, reads } = commandCarrier();
+      command(() => {
+        expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual({ line: 3, offset: 1 });
+        plugin.onConfigurationChanged!({
+          carrierStoreDir: dir,
+          [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+        });
+        const sampled = reads();
+        convertWithoutStoreAccess(scriptInfo, V1_OFFSET, { line: 3, offset: 1 }, 20);
+        expect(reads()).toBe(sampled);
+      });
+      command(() => {
+        expect(scriptInfo.positionToLineOffset(V1_OFFSET)).toEqual(original(V1_OFFSET));
+      });
+    }
+  });
+
+  it("recovers from a corrupt head, journal or base snapshot at the next command", () => {
+    const COMMAND_V3 = "/* v3 */\nlet third = 3;\nthirdUnknown;\n";
+    const COMMAND_V4 = "// v4\n\nfourthUnknown;\n";
+    const { dir, scriptInfo, command, reads } = commandCarrier();
+    const headPath = join(dir, CARRIER_STORE_HEAD_FILE);
+    const generation = () =>
+      (JSON.parse(readFileSync(headPath, "utf8")) as { generation: number }).generation;
+    /** One command on the last good fold: sampled once, never re-read. */
+    const staysOn = (offset: number) =>
+      command(() => {
+        const before = reads();
+        expect(scriptInfo.positionToLineOffset(offset)).toEqual({ line: 3, offset: 1 });
+        expect(reads()).toBe(before + 1);
+        convertWithoutStoreAccess(scriptInfo, offset, { line: 3, offset: 1 }, 20);
+      });
+    const nextCommandObserves = (offset: number) =>
+      command(() => {
+        expect(scriptInfo.positionToLineOffset(offset)).toEqual({ line: 3, offset: 1 });
+      });
+
+    // Corrupt head: the reader keeps its last good fold (version 5).
+    writeFileSync(join(dir, "blobs/A-v2.vue.tsx"), COMMAND_V2, "utf8");
+    const healthyHead = readFileSync(headPath, "utf8");
+    writeFileSync(headPath, "{ not json", "utf8");
+    staysOn(V1_OFFSET);
+    // Head repaired, then version 6 published.
+    writeFileSync(headPath, healthyHead, "utf8");
+    writeCarrierStoreFixture(dir, advancedManifest("blobs/A-v2.vue.tsx"));
+    nextCommandObserves(V2_OFFSET);
+
+    // Corrupt journal tail: ignored, fail closed, still version 6.
+    appendCarrierStoreRecord(dir, Buffer.from("not a journal record\n"));
+    staysOn(V2_OFFSET);
+    // A compaction replaces the journal and publishes version 7.
+    writeFileSync(join(dir, "blobs/A-v3.vue.tsx"), COMMAND_V3, "utf8");
+    writeCarrierStoreFixture(dir, advancedManifest("blobs/A-v3.vue.tsx", 7));
+    nextCommandObserves(COMMAND_V3.indexOf("thirdUnknown"));
+
+    // Corrupt base: a new generation whose snapshot is unreadable keeps version 7.
+    writeFileSync(join(dir, "blobs/A-v4.vue.tsx"), COMMAND_V4, "utf8");
+    writeCarrierStoreFixture(dir, advancedManifest("blobs/A-v4.vue.tsx", 8));
+    writeFileSync(join(dir, carrierSnapshotFile(generation())), "garbage", "utf8");
+    staysOn(COMMAND_V3.indexOf("thirdUnknown"));
+    // Republished intact: the next command observes version 8.
+    writeCarrierStoreFixture(dir, advancedManifest("blobs/A-v4.vue.tsx", 8));
+    nextCommandObserves(COMMAND_V4.indexOf("fourthUnknown"));
   });
 
   it("delegates companion snapshot and version requests through the project host lifecycle", () => {
@@ -6095,13 +6218,34 @@ describe("real tsserver Session: one coordinate sample per synchronous diagnosti
       writeStore(manifest, { "blobs/A.vue.tsx": generated }),
     );
 
+    // Events tsserver emits (`host.write`), each with the companion-read count
+    // at the moment it was written — after that event's conversions ran.
+    const events: Array<{ event: string; diagnostics: number; reads: number }> = [];
+    let sampleCount = () => 0;
     const host: ts.server.ServerHost = {
       ...ts.sys,
       setTimeout,
       clearTimeout,
       setImmediate,
       clearImmediate,
-      write: () => {},
+      write: (message: string) => {
+        try {
+          const parsed = JSON.parse(message.slice(message.indexOf("{"))) as {
+            type?: string;
+            event?: string;
+            body?: { diagnostics?: unknown[] };
+          };
+          if (parsed.type === "event" && parsed.event !== undefined) {
+            events.push({
+              event: parsed.event,
+              diagnostics: parsed.body?.diagnostics?.length ?? 0,
+              reads: sampleCount(),
+            });
+          }
+        } catch {
+          // not a protocol message
+        }
+      },
       watchFile: () => ({ close() {} }),
       watchDirectory: () => ({ close() {} }),
       require: (_initialPath, moduleName) =>
@@ -6129,7 +6273,8 @@ describe("real tsserver Session: one coordinate sample per synchronous diagnosti
       byteLength: Buffer.byteLength,
       hrtime: process.hrtime,
       logger: silent,
-      canUseEvents: false,
+      canUseEvents: true,
+      eventHandler: () => {},
       noGetErrOnBackgroundUpdate: true,
       globalPlugins: ["@verter/typescript-plugin"],
       pluginProbeLocations: [projectDir],
@@ -6171,6 +6316,7 @@ describe("real tsserver Session: one coordinate sample per synchronous diagnosti
       execute("configure", {});
 
       const blobReads = vi.spyOn(DiskCarrierStoreReader.prototype, "readBlobSync");
+      sampleCount = () => blobReads.mock.calls.length;
       const diagnostics = (command: string) =>
         execute(command, { file: source, projectFileName: tsconfig })
           .response as ts.server.protocol.Diagnostic[];
@@ -6203,6 +6349,38 @@ describe("real tsserver Session: one coordinate sample per synchronous diagnosti
       const third = diagnostics("suggestionDiagnosticsSync");
       expect(Array.isArray(third)).toBe(true);
       expect(blobReads.mock.calls.length).toBe(afterFirst + 2);
+
+      // Background error checks run on timers OUTSIDE any command and format
+      // every diagnostic inside `sendDiagnosticsEvent`: each event's endpoints
+      // share one sample (a syntax check with no diagnostic converts nothing).
+      const beforeEvents = blobReads.mock.calls.length;
+      events.length = 0;
+      execute("geterr", { files: [source], delay: 0 });
+      for (let waited = 0; waited < 500; waited += 1) {
+        if (events.some((event) => event.event === "requestCompleted")) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      const samplesPerEvent: Record<string, number> = {};
+      const diagnosticsPerEvent: Record<string, number> = {};
+      let previous = beforeEvents;
+      for (const event of events) {
+        samplesPerEvent[event.event] = event.reads - previous;
+        diagnosticsPerEvent[event.event] = event.diagnostics;
+        previous = event.reads;
+      }
+      expect(Object.keys(samplesPerEvent)).toEqual(
+        expect.arrayContaining([
+          "syntaxDiag",
+          "semanticDiag",
+          "suggestionDiag",
+          "requestCompleted",
+        ]),
+      );
+      expect(diagnosticsPerEvent.semanticDiag).toBeGreaterThanOrEqual(planted.length);
+      expect(samplesPerEvent.syntaxDiag).toBe(0);
+      expect(samplesPerEvent.semanticDiag).toBe(1);
+      expect(samplesPerEvent.suggestionDiag).toBe(1);
+      expect(blobReads.mock.calls.length).toBe(beforeEvents + 2);
     } finally {
       process.chdir(cwd);
       execute("close", { file: source });

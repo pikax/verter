@@ -161,39 +161,72 @@ type ManagedCarrierCoordinateMemo = WeakMap<
   Map<string, ManagedCarrierCoordinateSource | undefined>
 >;
 
-/** The memo of the outermost `Session.executeCommand` in progress, if any. */
+/** One Session's command in progress: its memo and the nesting depth of the boundary. */
+interface CommandMemoContext {
+  memo: ManagedCarrierCoordinateMemo | undefined;
+  depth: number;
+}
+
+/** Per-Session command contexts; a Session absent here has the boundary uninstalled. */
+const commandMemoContexts = new WeakMap<object, CommandMemoContext>();
+
+/** The memo of the Session whose command is executing right now, if any. */
 let activeCommandMemo: ManagedCarrierCoordinateMemo | undefined;
 
-/** Sessions whose `executeCommand` already carries the command boundary. */
-const commandBoundarySessions = new WeakSet<object>();
+/**
+ * Run `work` inside `session`'s command boundary: the OUTERMOST call for that
+ * Session creates its memo and discards it in `finally`, nested calls of the
+ * same Session share it, and a command of ANOTHER Session entered re-entrantly
+ * switches to that Session's own memo and restores the outer one afterwards.
+ */
+function runWithCommandMemo<T>(session: object, work: () => T): T {
+  let context = commandMemoContexts.get(session);
+  if (context === undefined) {
+    context = { memo: undefined, depth: 0 };
+    commandMemoContexts.set(session, context);
+  }
+  const previous = activeCommandMemo;
+  if (context.depth === 0) context.memo = new WeakMap();
+  context.depth += 1;
+  activeCommandMemo = context.memo;
+  try {
+    return work();
+  } finally {
+    context.depth -= 1;
+    if (context.depth === 0) context.memo = undefined;
+    activeCommandMemo = previous;
+  }
+}
+
+/**
+ * The Session methods inside which tsserver converts positions synchronously:
+ * every request runs in `executeCommand` (reached by `onMessage`, which needs no
+ * wrapper of its own), and every background error check — the timer-driven
+ * `syntaxDiag`/`semanticDiag`/`suggestionDiag`/`regionSemanticDiag` events —
+ * formats its diagnostics inside `sendDiagnosticsEvent`.
+ */
+const COMMAND_BOUNDARY_METHODS = ["executeCommand", "sendDiagnosticsEvent"] as const;
 
 /**
  * Install, once per tsserver `Session`, the boundary the coordinate memo lives
- * in. tsserver converts every diagnostic, location and request position of one
- * command synchronously inside `executeCommand`; the OUTERMOST call creates the
- * memo before the original command runs and discards it in `finally`, nested
- * calls share it, and `onMessage` needs no wrapper because it reaches
- * `executeCommand`. Outside a command — a timer-driven host callback, a project
- * refresh — nothing is memoized and every conversion samples the store exactly
- * as it always did.
+ * in. Outside a command or diagnostics event — any other timer-driven host
+ * callback, a project refresh — nothing is memoized and every conversion
+ * samples the store exactly as it always did.
  */
 function installCommandBoundary(session: unknown): void {
-  if (typeof session !== "object" || session === null || commandBoundarySessions.has(session)) {
+  if (typeof session !== "object" || session === null || commandMemoContexts.has(session)) {
     return;
   }
-  const candidate = session as { executeCommand?: (...args: unknown[]) => unknown };
+  const candidate = session as Record<string, unknown>;
   if (typeof candidate.executeCommand !== "function") return;
-  commandBoundarySessions.add(session);
-  const original = candidate.executeCommand;
-  candidate.executeCommand = function (this: unknown, ...args: unknown[]) {
-    if (activeCommandMemo !== undefined) return original.apply(this, args);
-    activeCommandMemo = new WeakMap();
-    try {
-      return original.apply(this, args);
-    } finally {
-      activeCommandMemo = undefined;
-    }
-  };
+  commandMemoContexts.set(session, { memo: undefined, depth: 0 });
+  for (const method of COMMAND_BOUNDARY_METHODS) {
+    const original = candidate[method];
+    if (typeof original !== "function") continue;
+    candidate[method] = function (this: unknown, ...args: unknown[]) {
+      return runWithCommandMemo(session, () => original.apply(this, args));
+    };
+  }
 }
 
 /**
@@ -1024,16 +1057,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       // One tsserver command converts a position per diagnostic/location end
       // (and the request's own positions); the source is sampled once per
       // command for this project's store and served to every conversion in it.
-      patchManagedCarrierCoordinates(scriptInfo, projectKey, () => {
-        if (editorOwnsMembership || info.project.isClosed()) return undefined;
-        return memoizedCoordinateSource(store, fileName, () => {
+      // The whole callback — liveness and serving-mode checks included — is the
+      // memoized result, so one command sees one answer for this source.
+      patchManagedCarrierCoordinates(scriptInfo, projectKey, () =>
+        memoizedCoordinateSource(store, fileName, () => {
+          if (editorOwnsMembership || info.project.isClosed()) return undefined;
           const ready = store.readyFileForSource(fileName);
           const text = ready === undefined ? undefined : carrierContent(fileName);
           return ready === undefined || text === undefined
             ? undefined
             : { version: `${ready.version}:${ready.content_hash}`, text };
-        });
-      });
+        }),
+      );
     };
 
     const synchronizeManagedCarrierScriptInfo = (
