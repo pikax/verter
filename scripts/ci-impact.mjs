@@ -62,7 +62,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -801,33 +801,58 @@ export const ESCAPE_HATCHES = Object.freeze([
  * framework vertical lists its contract data, so an executable spec or a new
  * product added beside it later still fails the audit until it is classified.
  *
+ * A framework vertical's entries live in its own file,
+ * `scripts/ci-inert-paths.d/framework-<name>.json`, never in the shared list:
+ * verticals land in bursts, and entries appended to one shared list made every
+ * landing conflict with every other open vertical. A `tests/framework-<name>/`
+ * glob anywhere else is a selection error, as is a malformed file.
+ *
  * Every tracked path a ci.yml job reads by NAME rather than content is out of
  * reach of any path list: `tracked_paths_are_portable` checks the names of
  * every tracked file whenever the rust lane runs, so a non-portable name added
  * under an inert tree is caught by the next change that runs it.
  */
 const INERT_PATHS_FILE = "scripts/ci-inert-paths.json";
+const INERT_PATHS_DIR = "scripts/ci-inert-paths.d";
+const FRAMEWORK_TREE = /^tests\/framework-([^/]+)\//;
+
+function readInertEntries(root, file) {
+  const entries = JSON.parse(readFileSync(resolve(root, file), "utf8"));
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error("expected a non-empty array of { glob, reason } entries");
+  }
+  for (const entry of entries) {
+    if (typeof entry?.glob !== "string" || entry.glob.trim() === "") {
+      throw new Error("every entry needs a glob");
+    }
+    if (typeof entry.reason !== "string" || entry.reason.trim() === "") {
+      throw new Error(`${JSON.stringify(entry.glob)} must say why no ci.yml job reads it`);
+    }
+    const framework = FRAMEWORK_TREE.exec(entry.glob)?.[1];
+    const home = framework === undefined ? null : `${INERT_PATHS_DIR}/framework-${framework}.json`;
+    if (home !== null && file !== home) {
+      throw new Error(`${JSON.stringify(entry.glob)} belongs in ${home}`);
+    }
+  }
+  return entries.map((entry) => entry.glob);
+}
 
 /** Never throws, for the same reason as the STP1 inventory read. */
 function readInertPaths(root) {
+  let file = INERT_PATHS_FILE;
   try {
-    const entries = JSON.parse(readFileSync(resolve(root, INERT_PATHS_FILE), "utf8"));
-    if (!Array.isArray(entries) || entries.length === 0) {
-      throw new Error("expected a non-empty array of { glob, reason } entries");
+    const globs = readInertEntries(root, file);
+    const dir = resolve(root, INERT_PATHS_DIR);
+    const fragments = existsSync(dir)
+      ? readdirSync(dir).filter((name) => name.endsWith(".json")).sort()
+      : [];
+    for (const name of fragments) {
+      file = `${INERT_PATHS_DIR}/${name}`;
+      globs.push(...readInertEntries(root, file));
     }
-    for (const entry of entries) {
-      if (typeof entry?.reason !== "string" || entry.reason.trim() === "") {
-        throw new Error(`${JSON.stringify(entry?.glob)} must say why no ci.yml job reads it`);
-      }
-    }
-    const globs = entries.map((entry) => entry.glob);
     return { globs, compiled: globs.map(compileGlob), error: null };
   } catch (error) {
-    return {
-      globs: [],
-      compiled: [],
-      error: { file: INERT_PATHS_FILE, message: error.message },
-    };
+    return { globs: [], compiled: [], error: { file, message: error.message } };
   }
 }
 

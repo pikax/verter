@@ -1,0 +1,30 @@
+[
+  {
+    "glob": "tests/framework-astro/AST0/cases.md",
+    "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-astro/AST0/corpus/**/*.astro",
+    "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-astro/AST0/manifest.json",
+    "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-astro/AST0/products/astro-activation-policy.json",
+    "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-astro/AST0/products/astro-capability-matrix.json",
+    "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-astro/AST0/products/astro-version-lock.json",
+    "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-astro/evidence/AST0/cases.md",
+    "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  }
+]
