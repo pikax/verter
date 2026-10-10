@@ -113,6 +113,7 @@
       "any value already in the baseline enum (0-5)",
       "any class-A value (6-9)",
       "any value allocated to another family (3, 4, 6-11, 13, 14)"
-    ]
+    ],
+    "rejectionPrecedence": "The first matching rejected rule determines the failure reason, in order: tag-non-adapter, tag-reused, tag-class-a, tag-allocated."
   }
 }

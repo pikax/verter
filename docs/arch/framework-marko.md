@@ -175,6 +175,10 @@ matrix records this as `facetWireMapping`.
 lands in MRK1 with the adapter descriptor (`MRK1-AC6`). `OPEN_CANONICAL` (5)
 is a structural non-tag and is rejected, as are any baseline value (0–5),
 any class-A value (6–9) and any value allocated to another family.
+The lock's `wireTag.rejected` rules use first-match precedence: structural
+non-tag (`tag-non-adapter`), baseline reuse (`tag-reused`), class-A reservation
+(`tag-class-a`), then another family's allocation (`tag-allocated`). Values
+3 and 4 therefore report `tag-reused`, and 6–9 report `tag-class-a`.
 
 ### 7. Build exclusion (ruling 4)
 

@@ -80,6 +80,11 @@ Abbreviations: **L** = `products/marko-version-lock.json`, **M** =
 
 ## MRK0-AC5 — wire tag ratified
 
+Apply L `wireTag.rejected` in list order, first match wins, as recorded by
+`wireTag.rejectionPrecedence`: `tag-non-adapter`, `tag-reused`,
+`tag-class-a`, then `tag-allocated`. Thus 3 and 4 report `tag-reused`,
+6–9 report `tag-class-a`, and 5 reports `tag-non-adapter`.
+
 | Case | Planted row | Expected failure reason |
 | ---- | ----------- | ----------------------- |
 | `open-canonical-tag` | L `wireTag.name = "FRAMEWORK_TAG_OPEN_CANONICAL"`, `value = 5` | `tag-non-adapter`: `OPEN_CANONICAL` is a structural non-tag |
