@@ -131,7 +131,7 @@
             "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "implicit object merge; nearer authored keys override inherited keys; subject to the pinned attribute-specific implementation",
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
           "value": "JSON or explicit js:/javascript: expression where supported"
         },
         {
@@ -312,7 +312,7 @@
             "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "implicit object merge; nearer authored keys override inherited keys; subject to the pinned attribute-specific implementation",
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
           "value": "JSON or explicit js:/javascript: expression where supported"
         },
         {
@@ -420,7 +420,7 @@
             "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "implicit object merge; nearer authored keys override inherited keys; subject to the pinned attribute-specific implementation",
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
           "value": "JSON or explicit js:/javascript: expression where supported"
         },
         {
@@ -432,7 +432,7 @@
             "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "implicit object merge; nearer authored keys override inherited keys; subject to the pinned attribute-specific implementation",
+          "inheritance": "implicit object merge via getValuesForElement, visiting child before ancestors; assign an authored key only when accumulated values[key] == null (null or undefined); nearer non-nullish accumulated values, including false, 0 and empty string, block ancestor assignment; ancestor keys fill nullish slots; absent ancestor keys leave those slots unchanged; unset terminates the merge with null; JavaScript-derived values remain unknown and are never evaluated",
           "value": "deprecated JavaScript expression"
         }
       ],
@@ -1721,6 +1721,7 @@
           "show",
           "showTarget",
           "focusScroll",
+          "ignoreTitle",
           "target",
           "strip",
           "swapEmpty"

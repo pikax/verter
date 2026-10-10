@@ -34,7 +34,10 @@
         "four-arrow-on-missing",
         "four-status-family-missing",
         "two-status-family",
-        "four-status-invalid-suffix"
+        "four-status-invalid-suffix",
+        "two-object-merge-nullish-precedence",
+        "two-object-merge-non-nullish-precedence",
+        "four-ignore-title-modifier-missing"
       ]
     },
     {

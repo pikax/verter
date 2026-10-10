@@ -59,6 +59,14 @@ supports `innerMorph`/`outerMorph`. A 2.x rule never supplies a 4.x answer.
 Script filters attach through EMB0 and stay unevaluated. Template holes
 retain unknown parts and cannot produce complete negative answers.
 
+In 2.0.11, `hx-vals`, `hx-headers`, `hx-request` and `hx-vars` share the
+child-first `getValuesForElement` object merge. Non-nullish accumulated values,
+including false, zero and empty string, block ancestor assignment. Ancestor keys
+fill null or undefined slots; a nearer null does not override an ancestor's
+non-null value. `unset` terminates the merge with null. JavaScript values remain
+unknown and are never evaluated. The 4.0.0 swap grammar includes
+the HCON `ignoreTitle` modifier; recording it does not model title changes.
+
 The handler grammars also differ: 2.0.11 recognizes event-suffixed colon and
 dash forms but ignores bare `hx-on`. 4.0.0 admits bare `hx-on="click -> code"`
 and event suffixes using the configured meta character (colon by default);
