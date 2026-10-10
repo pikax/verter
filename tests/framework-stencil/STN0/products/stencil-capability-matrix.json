@@ -46,7 +46,7 @@
     },
     {
       "id": "tag-definition",
-      "operation": "extra-definition",
+      "operation": "extra-tag-definition",
       "host": "lsp-enhancement",
       "profile": "stencil-tsx",
       "producer": "STN5",
@@ -59,7 +59,7 @@
     },
     {
       "id": "watch-definition",
-      "operation": "extra-definition",
+      "operation": "extra-watch-definition",
       "host": "lsp-enhancement",
       "profile": "stencil-tsx",
       "producer": "STN5",
@@ -72,7 +72,7 @@
     },
     {
       "id": "listen-definition",
-      "operation": "extra-definition",
+      "operation": "extra-listen-definition",
       "host": "lsp-enhancement",
       "profile": "stencil-tsx",
       "producer": "STN5",

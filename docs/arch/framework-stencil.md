@@ -31,6 +31,8 @@ excluded version. No user code or config is executed to discover identity.
 
 [The capability matrix](../../tests/framework-stencil/STN0/products/stencil-capability-matrix.json)
 binds each operation/host/profile to one producer and receiving acceptance.
+`extra-tag-definition`, `extra-watch-definition` and `extra-listen-definition`
+are distinct semantic operations sharing LSPX11's extra-definition capability.
 [The host table](../../tests/framework-stencil/STN0/products/stencil-host-table.json)
 records tsgo operations and limitations per cell. All editor cells are
 `lsp-enhancement` on `stencil-tsx`, through LSPX11. The shared kernel remains the

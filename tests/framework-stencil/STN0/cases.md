@@ -39,6 +39,12 @@ acceptance, and no invented product claim. The CEM cell belongs to HWC3-AC2;
 STN3-AC2 supplies neutral facts and provenance, never CEM bytes. Cell inclusion
 records planned ownership, not shipped support.
 
+The definition operations are `extra-tag-definition`, `extra-watch-definition`
+and `extra-listen-definition`. They share LSPX11's extra-definition capability,
+but have distinct semantic cell identities: the tag operation receives
+STN5-AC2; watch and listen each receive STN5-AC3. Copying any of these rows with
+a new id and the same operation/host/profile is still a duplicate.
+
 | Twin                     | Planted row                                                                | Expected failure                                                |
 | ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | unowned-cell             | Remove/empty a cell producer                                               | Cell has no sole producer                                       |
