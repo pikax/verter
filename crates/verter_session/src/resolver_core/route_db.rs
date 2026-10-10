@@ -638,17 +638,6 @@ impl RouteDb {
         self.barrel_surfaces.insert(key, surface, facts);
     }
 
-    /// R20 instrumentation: total `signature_overflow_count` across
-    /// every backing `ValidatedFactCache` on this `RouteDb`. A non-
-    /// zero value means a producer flattened transitive facts where
-    /// it should have folded a downstream materialiser's
-    /// `semantic_hash`. The pre-canary + final canary both assert
-    /// this stays at 0 over the steady-state loop.
-    #[must_use]
-    pub fn signature_overflow_count(&self) -> u64 {
-        self.routes.signature_overflow_count() + self.barrel_surfaces.signature_overflow_count()
-    }
-
     /// R20 instrumentation: total `admission_refused_count` across
     /// every backing `ValidatedFactCache` on this `RouteDb`.
     /// Producers that admit via the loose `insert_arc` path keep

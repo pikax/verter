@@ -29,6 +29,8 @@ accepted until its reconciling owner (AST9) re-pins it.
 | `beta-channel-admitted-as-second-profile` | append `7.4.0-beta.1` to `V#/admittedReleases` | a prerelease minor of the admitted major is not a next major; two releases in one manifest (R04) |
 | `unknown-version-pin` | `V#/admittedReleases/0/version` = `7.3.99` | not a published release of the named source |
 | `missing-official-source` | delete `V#/admittedReleases/0/source` | every pin names an official source |
+| `missing-release-integrity` | delete `V#/admittedReleases/0/integrity` | the admitted release records its published package integrity |
+| `missing-release-license` | delete `V#/admittedReleases/0/license` | the admitted release records its published package licence |
 | `two-releases-in-one-manifest` | `V#/admittedReleases/0/version` = `["7.3.7", "7.3.8"]` | one manifest declares exactly one release (R04) |
 | `legacy-major-profile` | `V#/admittedReleases/0/version` = `6.4.8` | Astro 5 and 6 are not profiles |
 | `wdx1-diverged-pin-uninventoried` | delete the `astro@5.0.0` entry from `V#/divergedPins` while the live `tests/web-product/WDX1/fixtures/mixed-framework/case.json` row still pins `astro@5.0.0` | a repository pin that differs from the admitted release must be inventoried as a diverged pin with its reconciling owner; the unchanged inventoried row is part of the clean twin and is accepted until AST9 re-pins the scenario |

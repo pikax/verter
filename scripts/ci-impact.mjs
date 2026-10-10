@@ -843,6 +843,7 @@ export const CI_INERT_PATHS = Object.freeze([
   "tests/framework-astro/AST0/products/astro-capability-matrix.json",
   "tests/framework-astro/AST0/products/astro-version-lock.json",
   "tests/framework-astro/evidence/AST0/cases.md",
+  "tests/framework-liquid/**",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",

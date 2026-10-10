@@ -60,11 +60,10 @@ fn component_meta_outcome_from_tracer(
             }
             Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }
-        // Both size and STABILITY refusals propagate transitively: the
-        // value is served, nothing is published, and every enclosing
-        // scope inherits the refusal.
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+        // A STABILITY refusal propagates transitively: the value is
+        // served, nothing is published, and every enclosing scope inherits
+        // the refusal.
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }
     };

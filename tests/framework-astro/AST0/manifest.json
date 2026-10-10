@@ -31,6 +31,8 @@
         "beta-channel-admitted-as-second-profile",
         "unknown-version-pin",
         "missing-official-source",
+        "missing-release-integrity",
+        "missing-release-license",
         "two-releases-in-one-manifest",
         "legacy-major-profile",
         "wdx1-diverged-pin-uninventoried",

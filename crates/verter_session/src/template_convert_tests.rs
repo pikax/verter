@@ -727,7 +727,7 @@ fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
                 },
             }]),
             verter_session_query::analysis::template_class_facts::TemplateClassFactsCompleteness::Complete,
-            verter_session_query::facts::fact_cache::ReadSetSignature::new(std::sync::Arc::from([])),
+            Some(verter_session_query::facts::fact_cache::ReadSetSignature::new(std::sync::Arc::from([]))),
         );
 
     let raw = RawTemplateData {

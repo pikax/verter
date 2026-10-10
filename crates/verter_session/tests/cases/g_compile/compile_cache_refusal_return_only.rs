@@ -1,13 +1,13 @@
 //! Discriminating test: the compile-tier producer refuses
-//! `compile_slots.insert` when the finalised fact tracer reports
-//! `Overflow`.
+//! `compile_slots.insert` when the finalised fact tracer reports a
+//! non-cacheable read.
 //!
-//! If overflow collapsed to an empty signature and published anyway,
+//! If a refusal collapsed to an empty signature and published anyway,
 //! the warm-hit oracle's `is_empty()` short-circuit would validate the
 //! empty signature trivially, so the compile slot would stay "warm"
 //! indefinitely and downstream cross-file edits would be masked. The
 //! integration test pins the carrier invariant
-//! `present in compile_slots ⇒ admitted cache entry`: on overflow, no
+//! `present in compile_slots ⇒ admitted cache entry`: on refusal, no
 //! slot lands.
 //!
 //! With typed `SignatureAdmission`: the cold-build path matches
@@ -17,12 +17,13 @@
 //! cache admission is refused.
 //!
 //! Discrimination: a build that admits the slot with an empty signature
-//! on overflow would FAIL this test; the overflow-refusing build holds
+//! on refusal would FAIL this test; the refusing build holds
 //! the assertion.
 
 use verter_session::for_tests::{
-    compile_force_overflow_observations_for_tests, compile_scheduler_artifact_present_for_tests,
+    compile_scheduler_artifact_present_for_tests,
     compile_scheduler_last_known_good_artifact_present_for_tests,
+    force_fact_tracer_refusal_for_tests,
 };
 use verter_session::{
     CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind,
@@ -50,15 +51,15 @@ fn prime_compile(host: &VerterHost, canonical: &str) {
     });
 }
 
-/// Discriminator: when the compile cold-compute tracer overflows
-/// (forced by `compile_force_overflow_observations_for_tests`), the
+/// Discriminator: when the compile cold-compute tracer refuses admission
+/// (forced by `force_fact_tracer_refusal_for_tests`), the
 /// resulting `CompileSlot` MUST NOT be published into `compile_slots`.
 ///
-/// Collapsing overflow into an empty signature would publish the slot
+/// Collapsing refusal into an empty signature would publish the slot
 /// anyway with an empty fact rail that trivially validated forever — a
-/// stale-cacheable state. The producer refuses the insert on overflow.
+/// stale-cacheable state. The producer refuses the insert.
 #[test]
-fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
+fn compile_fact_tracer_refusal_does_not_publish_compile_slot() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -69,25 +70,24 @@ fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
          <template><div>{{ n }}</div></template>\n",
     );
 
-    // Force the compile-tier tracer past FACT_SIGNATURE_CAP (1024)
-    // by injecting 1100 synthetic `FileWholeHash` observations into
-    // the tracer scope. The finalised tracer returns `Overflow`.
-    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
+    // Force every tracer scope to note a non-cacheable read. The
+    // finalised compile tracer returns `NonCacheable`.
+    let _guard = force_fact_tracer_refusal_for_tests(&host);
 
     prime_compile(&host, "/src/Comp.vue");
 
     let profile = CompileProfile::default();
     // The slot MUST NOT be present in `compile_slots`. The carrier
     // invariant is: `present in compile_slots ⇒ admitted cache entry`,
-    // and an overflowed signature is non-cacheable.
+    // and a refused signature is non-cacheable.
     let slot_present = host
         .compile_slot_fact_dep_signature("/src/Comp.vue", &profile)
         .is_some();
     assert!(
         !slot_present,
         "carrier invariant: compile cold-build MUST refuse `compile_slots.insert` when \
-         the finalised fact tracer reports `Overflow`. A published slot here means \
-         the producer collapsed overflow into an empty signature and published \
+         the finalised fact tracer reports a non-cacheable read. A published slot here means \
+         the producer collapsed refusal into an empty signature and published \
          anyway."
     );
     // The warm-hit predicate must also report false, since no slot
@@ -95,7 +95,7 @@ fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
     // wasn't masked by some downstream backfill path.
     assert!(
         !host.compile_slot_is_warm("/src/Comp.vue", &profile),
-        "no slot means `compile_slot_is_warm` is false; an overflowed publish \
+        "no slot means `compile_slot_is_warm` is false; a refused publish \
          that snuck through would leave `compile_slot_is_warm` true with an \
          empty signature that validates vacuously."
     );
@@ -103,19 +103,19 @@ fn compile_fact_signature_overflow_does_not_publish_compile_slot() {
 
 /// Discriminator: a successful compile publishes a slot, then a
 /// subsequent re-compile of the same `(canonical, profile)` that
-/// overflows MUST remove the prior slot. The carrier invariant
+/// refuses admission MUST remove the prior slot. The carrier invariant
 /// strengthens from "present in compile_slots ⇒ admitted cache entry"
 /// to "present in compile_slots ⇒ admitted cache entry for the
-/// current version (any prior slot whose re-compute overflowed is
+/// current version (any prior slot whose re-compute refused is
 /// removed)".
 ///
 /// A refusal-only branch that skipped `compile_slots.insert` but did
 /// NOT remove any prior slot would let a stale-cacheable entry from the
 /// earlier successful compile satisfy warm-hit reads after the
-/// re-compute overflowed. The producer's `NonCacheable` arm calls
+/// re-compute refused. The producer's `NonCacheable` arm calls
 /// `compile_slots.remove(&profile_hash)` first.
 #[test]
-fn overflow_recompile_removes_prior_slot_for_same_key() {
+fn refused_recompile_removes_prior_slot_for_same_key() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -138,9 +138,9 @@ fn overflow_recompile_removes_prior_slot_for_same_key() {
          vacuous."
     );
 
-    // Phase 2: force overflow on the next compile. The producer
-    // observes 1100 synthetic facts → tracer finalises with `Overflow`.
-    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
+    // Phase 2: force a refusal on the next compile: the tracer
+    // finalises `NonCacheable`.
+    let _guard = force_fact_tracer_refusal_for_tests(&host);
 
     // Re-prime: same `(canonical, profile)` cold-recomputes (the
     // upsert tick bump invalidates the warm-hit fast path, so the
@@ -161,27 +161,27 @@ fn overflow_recompile_removes_prior_slot_for_same_key() {
     assert!(
         host.compile_slot_fact_dep_signature("/src/Comp.vue", &profile)
             .is_none(),
-        "carrier invariant: a re-compute that overflows MUST remove \
+        "carrier invariant: a re-compute that refuses admission MUST remove \
          any prior slot for the same `(canonical, profile)`. A refusal \
          branch that skipped the insert but did not remove the prior \
-         slot would let stale data survive an overflowed re-compute."
+         slot would let stale data survive a refused re-compute."
     );
 }
 
-/// Discriminator: an overflowed compile MUST NOT commit a scheduler
+/// Discriminator: a refused compile MUST NOT commit a scheduler
 /// artifact snapshot. The artifact substrate (scheduler-backed
 /// `try_get_artifact` and pending Artifact requests) is the second
 /// observable warm-hit substrate — refusing only the `compile_slots`
-/// insert leaks the overflowed result via the scheduler artifact
+/// insert leaks the refused result via the scheduler artifact
 /// path.
 ///
 /// If the `scheduler.commit_artifact(...)` block ran unconditionally
 /// for both `Cacheable` and `NonCacheable` admission, then
 /// `try_get_artifact(canonical, profile_hash)` would return
-/// `Some(snapshot)` after an overflowed compile. The artifact commit is
+/// `Some(snapshot)` after a refused compile. The artifact commit is
 /// gated on `Cacheable` admission.
 #[test]
-fn overflow_skips_scheduler_artifact_commit() {
+fn refusal_skips_scheduler_artifact_commit() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -194,9 +194,8 @@ fn overflow_skips_scheduler_artifact_commit() {
 
     let profile = CompileProfile::default();
 
-    // Force the tracer past FACT_SIGNATURE_CAP. The finalised tracer
-    // returns `Overflow`.
-    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
+    // Force a refusal: the finalised tracer returns `NonCacheable`.
+    let _guard = force_fact_tracer_refusal_for_tests(&host);
     prime_compile(&host, "/src/Comp.vue");
 
     // The compile_slots refusal already pins the per-slot invariant.
@@ -204,17 +203,17 @@ fn overflow_skips_scheduler_artifact_commit() {
     // artifact layer.
     assert!(
         !compile_scheduler_artifact_present_for_tests(&host, "/src/Comp.vue", &profile),
-        "carrier invariant: an overflowed compile MUST NOT commit a \
+        "carrier invariant: a refused compile MUST NOT commit a \
          scheduler artifact snapshot. The artifact substrate is the \
          second warm-hit observation path; refusing only the \
          `compile_slots.insert` would leave `try_get_artifact` \
-         returning the overflowed result. The artifact commit is \
+         returning the refused result. The artifact commit is \
          gated on `Cacheable` admission."
     );
 }
 
 /// Discriminator: a successful compile commits an artifact, then a
-/// subsequent re-compute that refuses cache admission (overflowed
+/// subsequent re-compute that refuses cache admission (a refused
 /// fact tracer) MUST evict the prior artifact snapshot. Symmetric to
 /// the `compile_slots.remove(...)` invariant at the per-slot
 /// substrate, this pins the eviction at the SCHEDULER artifact
@@ -234,7 +233,7 @@ fn overflow_skips_scheduler_artifact_commit() {
 /// exercised by the dedicated scheduler-level test
 /// `remove_artifact_not_newer_than_preserves_newer_generation_artifact`.
 #[test]
-fn overflow_recompile_evicts_prior_scheduler_artifact() {
+fn refused_recompile_evicts_prior_scheduler_artifact() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_vue(
         &host,
@@ -260,9 +259,9 @@ fn overflow_recompile_evicts_prior_scheduler_artifact() {
          vacuous."
     );
 
-    // Re-upsert + forced overflow drives the producer's refusal arm
+    // Re-upsert + forced refusal drives the producer's refusal arm
     // after a prior successful artifact was committed.
-    let _guard = compile_force_overflow_observations_for_tests(&host, 1100);
+    let _guard = force_fact_tracer_refusal_for_tests(&host);
     upsert_vue(
         &host,
         "/src/Comp.vue",
@@ -283,7 +282,7 @@ fn overflow_recompile_evicts_prior_scheduler_artifact() {
     // evicts it and both probes return `None`.
     assert!(
         !compile_scheduler_artifact_present_for_tests(&host, "/src/Comp.vue", &profile),
-        "carrier invariant: an overflowed re-compile MUST NOT leave a \
+        "carrier invariant: a refused re-compile MUST NOT leave a \
          stale current-generation artifact visible via \
          `try_get_artifact`."
     );
@@ -293,7 +292,7 @@ fn overflow_recompile_evicts_prior_scheduler_artifact() {
             "/src/Comp.vue",
             &profile,
         ),
-        "carrier invariant: an overflowed re-compile MUST evict any \
+        "carrier invariant: a refused re-compile MUST evict any \
          prior artifact from the scheduler's artifact map (visible via \
          `last_known_good_artifact`). A refusal arm that removes only \
          `compile_slots` leaves the prior artifact in the scheduler \
