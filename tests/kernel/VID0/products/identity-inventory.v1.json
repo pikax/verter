@@ -101,7 +101,7 @@
     {
       "id": "I04",
       "name": "ReleaseId",
-      "axis": "exact semantic release declared by one manifest",
+      "axis": "exact semantic release; one per semantic-profile or project-profile manifest; a carrier manifest declares none",
       "disposition": "new",
       "homePaths": [
         "crates/verter_identity/src/successor/"
@@ -368,7 +368,7 @@
     {
       "id": "R04",
       "group": "release",
-      "rule": "One manifest declares exactly one ReleaseId. A manifest naming two releases, or a versions array, is a structural manifest failure.",
+      "rule": "One semantic-profile or project-profile manifest declares exactly one ReleaseId. A carrier manifest declares none (I03 never contains a ReleaseId; R02 keeps CarrierProfileId equal when ReleaseId changes). A manifest naming two releases, or a versions array, is a structural manifest failure.",
       "executableOwner": "VID0T",
       "receivingAcceptance": "VID0T-AC2"
     },
