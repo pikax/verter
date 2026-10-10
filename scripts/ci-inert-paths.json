@@ -160,6 +160,10 @@
     "reason": "Reviewed Preact contract inventory; no ci.yml lane reads these bytes yet. PRE1-ACV removes this entry when its validator lands."
   },
   {
+    "glob": "tests/framework-stencil/**",
+    "reason": "Reviewed Stencil contract data; no ci.yml lane reads it. Executable lock proofs belong to the later adapter delivery, which must register its consuming lane's path ownership."
+  },
+  {
     "glob": "tests/jetbrains-baseline/**",
     "reason": "Baseline products; the one the DX harness reads is owned by the dx filter."
   },
