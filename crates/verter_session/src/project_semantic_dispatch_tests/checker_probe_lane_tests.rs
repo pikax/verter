@@ -32,6 +32,132 @@ pub(super) struct ProbeProject<'a> {
 const PROBE_ROOT: &str = "/wb";
 pub(super) const PROBE_FILE: &str = "/wb/checker_probe.ts";
 
+/// Set, to the exact path of the one test it admits, in the child process
+/// [`in_a_fresh_process`] runs that test in. A process inheriting any other
+/// value — a stray one, or another test's — is no child of that test and
+/// re-executes it like any parent.
+const FRESH_PROCESS_CHILD: &str = "VERTER_FRESH_PROCESS_TEST_CHILD";
+
+/// The line the child prints once its test's body returned.
+const FRESH_PROCESS_TOKEN: &str = "fresh-process test answered";
+
+/// The line [`a_fresh_process_probe_reports_its_process`]'s body prints:
+/// the id of the process it ran in.
+const FRESH_PROCESS_PROBE: &str = "fresh-process probe body ran in process";
+
+/// The path of the test this expands in, as libtest names it
+/// (`module::test`, without the crate), for [`in_a_fresh_process`].
+macro_rules! test_path {
+    () => {{
+        fn here() {}
+        let name = std::any::type_name_of_val(&here);
+        let name = name.strip_suffix("::here").unwrap_or(name);
+        name.split_once("::").map_or(name, |(_, rest)| rest)
+    }};
+}
+pub(super) use test_path;
+
+/// Run `body`, the whole of the test named `test` ([`test_path!`]), in a
+/// fresh process of this test binary — nothing evaluated before it, on any
+/// stack: a thread the body spawns has exactly the stack it asked for
+/// (never a larger one a runtime cached from an earlier thread), and an
+/// overflow aborts that process alone, failing this one test instead of
+/// the whole run. The child runs the one test, with its output shown, and
+/// prints a token after the body; the parent requires both the token and a
+/// clean exit, and shows the child's output in turn. The body runs in
+/// place only in a process whose marker names this very test.
+pub(super) fn in_a_fresh_process(test: &str, body: impl FnOnce()) {
+    if std::env::var_os(FRESH_PROCESS_CHILD).is_some_and(|marker| marker.to_str() == Some(test)) {
+        body();
+        println!("{FRESH_PROCESS_TOKEN}: {test}");
+        return;
+    }
+    // `--include-ignored`: an ignored test run by hand re-executes as itself.
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            test,
+            "--include-ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FRESH_PROCESS_CHILD, test)
+        .output()
+        .expect("run the test in a child process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(&format!("{FRESH_PROCESS_TOKEN}: {test}")),
+        "the child process running `{test}` failed (status {:?}):\n{stdout}\n{stderr}",
+        output.status
+    );
+    print!("{stdout}");
+}
+
+/// A fresh-process test whose body reports the process it ran in, for
+/// [`a_fresh_process_marker_admits_only_the_test_it_names`].
+#[test]
+fn a_fresh_process_probe_reports_its_process() {
+    in_a_fresh_process(test_path!(), || {
+        println!("{FRESH_PROCESS_PROBE} {}", std::process::id());
+    });
+}
+
+/// The child marker admits only the test it names. A process of this
+/// binary started with an arbitrary marker, or one naming another test,
+/// runs the probe's body in a child of its own (the body reports a process
+/// other than the one started), where a process started with the probe's
+/// exact path runs it in place (the body reports that very process). The
+/// markers are set on the processes started here, never on this one.
+#[test]
+fn a_fresh_process_marker_admits_only_the_test_it_names() {
+    const PROBE: &str = "project_semantic_dispatch_tests::checker_probe_lane_tests::a_fresh_process_probe_reports_its_process";
+    let body_process_under = |marker: &str| -> (u32, u32) {
+        let child = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", PROBE, "--nocapture", "--test-threads=1"])
+            .env(FRESH_PROCESS_CHILD, marker)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("start the probe's process");
+        let started = child.id();
+        let output = child.wait_with_output().expect("the probe's process ends");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the probe passes under the marker {marker:?} (status {:?}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The report may share its line with the runner's own `test … ...`
+        // prefix, so it is found anywhere in a line.
+        let body_process = stdout
+            .lines()
+            .find_map(|line| {
+                let (_, rest) = line.split_once(FRESH_PROCESS_PROBE)?;
+                rest.trim().parse::<u32>().ok()
+            })
+            .unwrap_or_else(|| panic!("the probe's body reports its process:\n{stdout}"));
+        (started, body_process)
+    };
+    for marker in [
+        "1",
+        "arbitrary",
+        "project_semantic_dispatch_tests::checker_probe_lane_tests::some_other_test",
+    ] {
+        let (started, body) = body_process_under(marker);
+        assert_ne!(
+            started, body,
+            "the marker {marker:?} must not admit the body in place"
+        );
+    }
+    let (started, body) = body_process_under(PROBE);
+    assert_eq!(
+        started, body,
+        "the probe's own path admits the body in the process it names"
+    );
+}
+
 /// Answer `probe` in TYPE position over a module of `source` and hand the
 /// reduced node to `read`: the checker's answer, which after an operation
 /// exhausted its allowance is the checker's recovery.
@@ -213,9 +339,38 @@ pub(super) fn flow_return_outcome_in(
     Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
     crate::host_flow_return_audit::FlowReturnError,
 > {
-    let host = probe_host(project);
+    flow_return_outcome_on_host(&probe_host(project), source, function)
+}
+
+/// [`flow_return_outcome_in`] on `host`, a probe host the caller configured
+/// (a budget set on its stores, say): the probe module is (re)written on it
+/// and `function`'s return read through the audited boundary.
+pub(super) fn flow_return_outcome_on_host(
+    host: &Arc<crate::VerterHost>,
+    source: &str,
+    function: &str,
+) -> Result<
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
+    crate::host_flow_return_audit::FlowReturnError,
+> {
+    flow_return_audited_on_host(host, source, function)
+        .into_result()
+        .map(|result| result.degradation())
+}
+
+/// [`flow_return_outcome_on_host`] with the audit record the request
+/// produced: the probe module is (re)written on `host` and `function`'s
+/// return read through the audited boundary.
+pub(super) fn flow_return_audited_on_host(
+    host: &Arc<crate::VerterHost>,
+    source: &str,
+    function: &str,
+) -> verter_audit::AuditedResult<
+    Arc<verter_type_engine::semantic_query::FlowReturnResult>,
+    crate::host_flow_return_audit::FlowReturnError,
+> {
     crate::u6_flow_shape_corpus_tests::upsert(
-        &host,
+        host,
         PROBE_FILE,
         &crate::u6_flow_shape_corpus_tests::module_script(source),
         crate::FileLanguage::script_ts(),
@@ -234,8 +389,6 @@ pub(super) fn flow_return_outcome_in(
         &identity,
         verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
     )
-    .into_result()
-    .map(|result| result.degradation())
 }
 
 /// The audited body-derived return of the probe module's `function`.
@@ -379,6 +532,85 @@ pub(super) fn tuple_labels(source: &str, probe: &str) -> Vec<Option<String>> {
             ),
         }
     })
+}
+
+/// Every `(function, checker print of its return)` row of `source` whose
+/// `ReturnType<typeof function>` probe, read in `project` from ONE host
+/// holding the module once, does not match the print structurally, or
+/// whose body-derived return is not complete (a degraded value, or no
+/// value at all). The module is the checker's own program: every probe is
+/// a function of it beside the functions it reads, so the rows are checked
+/// in one host as the checker checks one file, and an answer a row leaves
+/// in the host's memo is one the rows after it can read.
+pub(super) fn return_failures_in_one_host(
+    project: ProbeProject<'_>,
+    source: &str,
+    rows: &[(&str, &str)],
+) -> Vec<String> {
+    let host = probe_host(project);
+    let mut module = format!("{source}\n");
+    for (index, (function, _)) in rows.iter().enumerate() {
+        module.push_str(&format!(
+            "export function __checker_probe_{index}() {{ \
+                const __probe: ReturnType<typeof {function}> = null as any; \
+                return __probe; \
+            }}\n"
+        ));
+    }
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(&module),
+        crate::FileLanguage::script_ts(),
+    );
+    // Every return is read through the audited boundary first; the
+    // reductions below then run on one dispatch over the host as those
+    // reads left it.
+    let mut failures = Vec::new();
+    let mut probes = Vec::with_capacity(rows.len());
+    for (index, (function, checker)) in rows.iter().enumerate() {
+        match flow_return_of(&host, function) {
+            Some(result) => {
+                if let Some(degradation) = result.degradation() {
+                    failures.push(format!("`{function}` is degraded: {degradation:?}"));
+                }
+            }
+            None => failures.push(format!("`{function}` produced no value")),
+        }
+        match flow_return_of(&host, &format!("__checker_probe_{index}")) {
+            Some(result) => probes.push((*function, *checker, result)),
+            None => failures.push(format!(
+                "`ReturnType<typeof {function}>` produced no flow-return result"
+            )),
+        }
+    }
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _demand_scope = project.ambient_lib.map(|_| {
+        super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(PROBE_FILE))
+    });
+    for (function, checker, result) in probes {
+        let expected = checker_syntax::parse(checker)
+            .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
+        let node = dispatch
+            .normalize_node_keeping_declaration_refs_for_tests(
+                result.return_type(),
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            )
+            .into_usable_node()
+            .unwrap_or_else(|| {
+                panic!("the probe `ReturnType<typeof {function}>` reduced to a partial demand")
+            });
+        if !checker_syntax::matches_node(&dispatch, node, &expected, 0) {
+            failures.push(format!(
+                "`ReturnType<typeof {function}>`: the checker answers `{checker}`, the lane measured `{}`",
+                render_node(&dispatch, node, 0)
+            ));
+        }
+    }
+    failures
 }
 
 /// [`mismatches`] with every probe read from ONE host, in row order: each
