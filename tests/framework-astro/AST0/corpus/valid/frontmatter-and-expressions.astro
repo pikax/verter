@@ -1,0 +1,19 @@
+---
+import type { HTMLAttributes } from "astro/types";
+
+interface Props extends HTMLAttributes<"section"> {
+  title: string;
+  count?: number;
+}
+
+const { title, count = 0, ...rest } = Astro.props;
+const doubled = count * 2;
+const label = `${title} (${doubled})`;
+---
+
+<section {...rest}>
+  <h1>{title}</h1>
+  <p>{count > 0 ? `Seen ${count} times` : "Never seen"}</p>
+  <p>{label.toUpperCase()}</p>
+  <p>{1 < 2 && "less"}{" "}{"literal } brace"}</p>
+</section>
