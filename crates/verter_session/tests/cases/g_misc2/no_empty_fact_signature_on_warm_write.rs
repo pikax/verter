@@ -9,10 +9,9 @@
 //!
 //! 1. **Tracer install.** The cold-compute body runs inside
 //!    `install_fact_tracer(host, || { ... })`. The helper installs
-//!    a fresh `FactReadSetCell` on TLS, runs the body, finalises
-//!    the read set, and on `FactReadSetFinalise::Overflow` emits a
-//!    `FactSignatureOverflow` event and increments
-//!    the per-host `signature_overflow_at_install` counter.
+//!    a fresh `FactReadSetCell` on TLS, runs the body, re-checks the
+//!    scope's compaction basis, and finalises the read set into its
+//!    complete (paged when wide) signature.
 //!    Without the install scope,
 //!    the cold body's per-fact `observe_fan_out_borrowed` calls
 //!    fan into NOTHING — the producer publishes a value with an
@@ -52,7 +51,7 @@
 //!   checks that the tracer-wrapping wasn't pointless.
 //! - A `with_fact_tracer` cold body that does NOT route through
 //!   `install_fact_tracer` (a regression that would skip the
-//!   overflow event emission). The brief's escalation rule says
+//!   basis re-check the shared finaliser performs). The brief's escalation rule says
 //!   `with_fact_tracer` directly is permitted for caches that
 //!   publish into bespoke `DashMap`-backed caches (e.g.
 //!   `ComponentMetaResultDb`) — those don't admit into a
@@ -155,7 +154,7 @@ impl std::fmt::Display for Violation {
         let detail = match self.kind {
             ViolationKind::DirectWithFactTracerWithStrictAdmission => {
                 "direct `with_fact_tracer` call paired with `insert_arc_with_kind` \
-                 — use `install_fact_tracer` so the overflow event fires"
+                 — use `install_fact_tracer` so the shared finaliser runs"
             }
             ViolationKind::InstallFactTracerWithLooseAdmission => {
                 "`install_fact_tracer` scope paired with a loose `insert_arc(...)` admission \
@@ -494,7 +493,7 @@ fn cold_compute_paths_use_install_fact_tracer_and_strict_admission() {
         "cold-compute pairings must use BOTH `install_fact_tracer` AND \
          `insert_arc_with_kind`. The strict-admission path enforces R20 \
          empty-signature refusal; `install_fact_tracer` ensures the \
-         overflow event fires on FactReadSetFinalise::Overflow. Allow-listed \
+         shared finaliser re-checks the basis and seals the read set. Allow-listed \
          direct `with_fact_tracer` call sites (bespoke DashMap caches):\n  - {}\n\n\
          Fix: route the cold body through `install_fact_tracer(host, || {{ ... }})` \
          and admit via `<cache>.insert_arc_with_kind(key, value, facts, \"<kind>\")`.\n\n{}",

@@ -8,7 +8,14 @@
   },
   "companionInventory": "demand-inventory.v1.json",
   "rule": "Each case states its input, the required outcome with exact work and audit counts, and the forbidden outcome, and names the node whose test makes it executable. DEM0 ships no test; the executable owner adds it. Work counts are per profile and per epoch over five work families: framework projection, script-fact capture, TypeInfo operation, index contribution and carrier parse, plus semantic-oracle calls made by activation. Audit records follow DR28: one ActivationPlanned per stage-one plan (one source unit under one activation epoch), counting that plan's regions only, and one DemandPlanned per stage-four plan (one request or batch). An epoch emits as many ActivationPlanned records as source units it plans, never one workspace-wide record. Cases DC01-DC05 run under UAO0-AC-R2.",
-  "workFamilies": ["framework-projection", "script-fact-capture", "typeinfo-operation", "index-contribution", "carrier-parse", "activation-oracle-call"],
+  "workFamilies": [
+    "framework-projection",
+    "script-fact-capture",
+    "typeinfo-operation",
+    "index-contribution",
+    "carrier-parse",
+    "activation-oracle-call"
+  ],
   "cases": [
     {
       "id": "DC01",
@@ -17,7 +24,12 @@
       "required": "App.svelte keeps its CarrierProfileId. Its Svelte region is Dormant { Off }. Svelte work: 0 framework projection, 0 script-fact capture, 0 TypeInfo operations, 0 index contributions; carrier parse runs only if a non-Svelte demand needs the carrier. Audit: exactly one ActivationPlanned for App.svelte's stage-one plan under that epoch, with dormant = 1 for its Svelte region, and no DemandPlanned containing a Svelte capability. Other source units planned in the same epoch emit their own ActivationPlanned records. Vue files in the same workspace are unaffected.",
       "forbidden": "Any Svelte projection, script-fact or TypeInfo work; reclassifying App.svelte as a TypeScript script; a per-request audit record for the dormant region; a filtered or re-minted CatalogSnapshot",
       "rules": ["DR04", "DR08", "DR26", "DR28"],
-      "existingEvidence": ["a_narrowed_admission_composes_only_the_admitted_verticals", "an_unadmitted_vertical_is_invisible_to_classification", "an_unadmitted_verticals_sources_fail_closed_on_the_real_host", "no_provider_registration_is_zero_cost_not_applicable"],
+      "existingEvidence": [
+        "a_narrowed_admission_composes_only_the_admitted_verticals",
+        "an_unadmitted_vertical_is_invisible_to_classification",
+        "an_unadmitted_verticals_sources_fail_closed_on_the_real_host",
+        "no_provider_registration_is_zero_cost_not_applicable"
+      ],
       "evidenceNote": "The existing tests pin today's process-flag narrowing (DEM-D02, D09), which this case replaces; they discriminate the zero-work half only.",
       "executableOwner": "UAO0",
       "successorPath": ["DEM0", "UAO0"],
@@ -30,7 +42,10 @@
       "required": "Vue work for Comp.vue: 0 framework projection, 0 script-fact capture, 0 TypeInfo operations, 0 carrier parse. Audit: at most one ActivationPlanned for Comp.vue's stage-one plan and 0 DemandPlanned naming Comp.vue.",
       "forbidden": "Projection, parse or component-information work triggered by selection alone; eager diagnostics publication or prewarm for an unrequested file",
       "rules": ["DR16", "DR26", "DR27", "DR28"],
-      "existingEvidence": ["build_eval_script_source_without_parse_artifact_is_zero_work", "cancellation_before_entry_performs_zero_semantic_work"],
+      "existingEvidence": [
+        "build_eval_script_source_without_parse_artifact_is_zero_work",
+        "cancellation_before_entry_performs_zero_semantic_work"
+      ],
       "evidenceNote": "No existing test pins selected-but-unrequested work for a carrier; DEM-D01 and DEM-D06 are the eager routes this case replaces.",
       "executableOwner": "UAO0",
       "successorPath": ["DEM0", "UAO0"],
@@ -68,7 +83,11 @@
       "required": "The in-flight E1 request completes ReturnOnly or is cancelled and is never published warm; no result is served after E2 is observed. The queued request is never admitted under E2. Only E3's plan runs. Audit: one ActivationPlanned for App.vue's stage-one plan under each minted epoch that plans it (E1, E2, E3), and one DemandPlanned only for each admitted demand plan. E3's answers equal a fresh host at E3.",
       "forbidden": "A stale E1 answer published or served after E2; work admitted under a superseded epoch; E3 reusing an entry warmed under E1, including a refusal",
       "rules": ["DR21", "DR25", "DR29", "DR30"],
-      "existingEvidence": ["a_superseded_compile_never_writes_its_diagnostics_over_the_newer_revision", "a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers", "cancel_before_submit_refuses_without_admission"],
+      "existingEvidence": [
+        "a_superseded_compile_never_writes_its_diagnostics_over_the_newer_revision",
+        "a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers",
+        "cancel_before_submit_refuses_without_admission"
+      ],
       "evidenceNote": "These pin revision supersession and pre-admission cancellation for compile and dispatch; no activation epoch exists today.",
       "executableOwner": "UAO0",
       "successorPath": ["DEM0", "UAO0"],
@@ -78,7 +97,7 @@
       "id": "DC06",
       "name": "post-snapshot facts cannot mutate the current generation",
       "input": "App.vue's stage-one plan selects the Vue profile from the activation record. After the project snapshot publishes, import resolution shows that the only role-bearing import resolves to a userland module, not the canonical vue export.",
-      "required": "Stage two records Withdrawn { cause } for that snapshot. The stage-one generation, its carrier artifacts and its projection are unchanged and not re-run. Stage one makes 0 semantic-oracle calls. A later change to a selection input reaches stage one only as a new epoch.",
+      "required": "Stage two records Withdrawn { cause } for that snapshot. The stage-one generation, its carrier artifacts and its projection are unchanged and not re-run. Stage one makes 0 semantic-oracle calls. A later change to a selection input reaches stage one only as a new epoch. A consulted captured role-resolution fact changing with identical source bytes and SelectionInputs creates a new DR09 plan when the ordered evidence identities change; it never modifies the old generation.",
       "forbidden": "Stage two adding a profile, changing the carrier or re-running projection under the same generation; stage one calling TypeScript, the shared resolver or TypeInfo",
       "rules": ["DR07", "DR11", "DR12", "DR13"],
       "existingEvidence": ["script_fact_capture_is_syntax_only"],
@@ -107,7 +126,11 @@
       "required": "Both hosts carry the same CatalogSnapshot identity. In host A every .svelte region is Dormant { Off } and keeps its CarrierProfileId; host B selects the Svelte profile. A framework-surface request naming the Svelte profile on host A returns a typed outcome chosen by COX0 under CAT-F01, never a fabricated empty surface.",
       "forbidden": "A process flag or init option filtering or re-minting the catalog; different catalog identities between hosts A and B; a dormant profile answering as an empty supported surface",
       "rules": ["DR01", "DR04", "DR08"],
-      "existingEvidence": ["unknown_name_is_rejected_naming_the_supported_set", "wasm_frameworks_key_narrows_the_constructed_host", "unknown_adapter_id_returns_malformed_payload"],
+      "existingEvidence": [
+        "unknown_name_is_rejected_naming_the_supported_set",
+        "wasm_frameworks_key_narrows_the_constructed_host",
+        "unknown_adapter_id_returns_malformed_payload"
+      ],
       "evidenceNote": "These pin today's admission validation and the typed MalformedPayload for an unregistered adapter (CAT0 RM02).",
       "executableOwner": "COX0",
       "successorPath": ["DEM0", "COX0"],
@@ -193,7 +216,10 @@
       "required": "Both publish nothing and leave no warm entry and no refusal. A retry answers what a fresh host answers.",
       "forbidden": "A partial plan or partial diagnostics published; a cancellation recorded as a reusable refusal",
       "rules": ["DR29", "DR30"],
-      "existingEvidence": ["a_cancelled_request_publishes_nothing_and_an_uncancelled_retry_completes", "cancellation_before_entry_performs_zero_semantic_work"],
+      "existingEvidence": [
+        "a_cancelled_request_publishes_nothing_and_an_uncancelled_retry_completes",
+        "cancellation_before_entry_performs_zero_semantic_work"
+      ],
       "executableOwner": "COX0",
       "successorPath": ["DEM0", "COX0"],
       "receivingAcceptance": "COX0-AC3"

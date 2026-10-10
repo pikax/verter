@@ -835,6 +835,7 @@ export const CI_INERT_PATHS = Object.freeze([
   // or the docs build read.
   "tests/documentation/**",
   "tests/framework-ember-glimmer/**",
+  "tests/framework-liquid/**",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",

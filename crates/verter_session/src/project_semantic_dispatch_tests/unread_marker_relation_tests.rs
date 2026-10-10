@@ -32,7 +32,6 @@ fn marker_kinds() -> Vec<QueryError> {
         QueryError::TypeParamCycle,
         QueryError::Cancelled,
         QueryError::UnstableState { attempts: 3 },
-        QueryError::SignatureOverflow,
         QueryError::StaleSemanticOperand,
         QueryError::IncompleteSemanticOperand {
             reasons: PartialReasonSet::BUDGET_EXCEEDED,

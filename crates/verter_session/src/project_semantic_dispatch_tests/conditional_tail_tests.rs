@@ -84,17 +84,17 @@ fn a_tail_recursive_conditional_runs_to_its_value() {
 /// points on one alias: the checker's limit, where Verter answers; just
 /// inside Verter's budget, where it still answers; and at the budget's
 /// step, the checker's TS2589. A lower budget than production's stands in
-/// for it on the same path, so the run stays quick.
+/// for it on the same path, so the run stays quick (each step of `Rep`
+/// copies the tuple built so far, so a run's cost grows with the square of
+/// its length: the checker's 1,000th step is the one run of that length
+/// here, and the budget's two points are taken at 200).
 ///
 /// Measured: `Len<Rep<999>>` is `999`; `Rep<1000>` is `any` under TS2589,
 /// the checker's limit, where Verter's full answer has 1,000 elements.
 #[test]
 fn a_tail_run_answers_past_the_checker_step_and_fails_at_verters_budget() {
-    const BUDGET: u32 = 1_100;
-    let failures = mismatches(
-        FIXTURE,
-        &[("Len<Rep<999>>", "999"), ("Len<Rep<1000>>", "1000")],
-    );
+    const BUDGET: u32 = 200;
+    let failures = mismatches(FIXTURE, &[("Len<Rep<1000>>", "1000")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET);
     let inside = BUDGET - 1;
@@ -119,7 +119,7 @@ fn a_tail_run_answers_past_the_checker_step_and_fails_at_verters_budget() {
 #[test]
 fn a_run_that_cannot_reach_a_value_is_ts2589() {
     assert_ts2589(FIXTURE, "Same<0>", RecoveryBasis::Certified);
-    let _budget = super::connected_demand::TailBudgetForTests::install(1_100);
+    let _budget = super::connected_demand::TailBudgetForTests::install(200);
     assert_ts2589(FIXTURE, "Loop<0>", RecoveryBasis::Budget);
 }
 
@@ -250,7 +250,10 @@ fn assert_ts2589(source: &str, probe: &str, basis: RecoveryBasis) {
 }
 
 /// The lib `Awaited<T>` conditional's tail run goes on past the checker's
-/// 1,000th step to its answer.
+/// 1,000th step to its answer (the one run of that length here: each step
+/// of `P` copies the counter tuple built so far, so a run's cost grows with
+/// the square of its length, and the runs under the checker's limit are
+/// [`an_awaited_tail_run_fails_at_verters_budget`]'s shorter ones).
 ///
 /// TypeScript 7.0.2, all four `strictNullChecks` × `noImplicitAny`
 /// settings, over [`THENABLES`]: `Awaited<P<999>>` is `"done"` and
@@ -258,13 +261,7 @@ fn assert_ts2589(source: &str, probe: &str, basis: RecoveryBasis) {
 /// Verter's full answer is `"done"`.
 #[test]
 fn an_awaited_tail_run_answers_past_the_checker_step() {
-    let failures = mismatches(
-        THENABLES,
-        &[
-            ("Awaited<P<999>>", r#""done""#),
-            ("Awaited<P<1000>>", r#""done""#),
-        ],
-    );
+    let failures = mismatches(THENABLES, &[("Awaited<P<1000>>", r#""done""#)]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
