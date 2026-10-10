@@ -27,6 +27,13 @@ Until HTX1 lands, the products have reviewed case definitions rather than
 executable rejection coverage. The future lock command is
 `node --test tests/framework-htmx/HTX0/htmx-lock.spec.ts`.
 
+The docs-only contract tree is explicitly CI-inert in `scripts/ci-impact.mjs`:
+no current CI lane executes its validation. When HTX1-ACV lands the validator,
+it must assign the validator and every consumed contract product to the
+executing lane's `PATH_FILTERS`; this inert classification does not replace
+that ownership. This follows the ratified `htmx-contract-ci-classification`
+scope exception and adds no gate here.
+
 ## Profiles and provenance
 
 | Profile  | Exact reference release | Registry selection at ratification | Inheritance                                                    |
@@ -52,6 +59,17 @@ supports `innerMorph`/`outerMorph`. A 2.x rule never supplies a 4.x answer.
 Script filters attach through EMB0 and stay unevaluated. Template holes
 retain unknown parts and cannot produce complete negative answers.
 
+The handler grammars also differ: 2.0.11 recognizes event-suffixed colon and
+dash forms but ignores bare `hx-on`. 4.0.0 admits bare `hx-on="click -> code"`
+and event suffixes using the configured meta character (colon by default);
+it ignores dash suffixes under that default. Its `hx-status:<status>` family
+accepts exact three-digit codes and `40x`/`4xx`-style patterns with authored
+HCON/JSON response configuration, including selector regions. These values
+use explicit inheritance. In contrast, `hx-history-elt` and `hx-swap-oob`
+are local structural markers: neither their `:inherited` spellings nor an
+ancestor marker supplies an effective descendant value. This records static
+syntax, without observing handlers, history, responses or swaps.
+
 The 2.x core supports authored `defineExtension` names and `hx-ext` uses,
 but separately distributed extension implementations have no admitted pin
 here. Their semantics are unsupported. The 4.0.0 tarball bundles extensions
@@ -62,10 +80,11 @@ No extension is loaded or executed by Verter.
 
 The published 4.0.0 core exports `registerExtension`, with extension-owned
 attributes rather than `defineExtension`/`hx-ext`. The latter operation is
-therefore admitted only for 2.x. The recorded operator question
-`htmx-four-extension-registration` offers adding distinct 4.x registration
-navigation through successor-charter ratification; until that ruling, the
-matrix truthfully excludes it. Both profiles keep all other admitted cells.
+therefore admitted only for 2.x. The operator ruling
+`htmx-four-extension-registration` retains this operation for 2.x and
+truthfully excludes it for 4.0.0; replacement registration navigation would
+require successor-charter ratification. Both profiles keep all other admitted
+cells.
 
 HTX9 uses the pinned official grammar and reads upstream release-tag HTML
 fixtures as static feature inputs. It vendors selected fixtures with their

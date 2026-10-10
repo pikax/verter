@@ -26,7 +26,15 @@
         "missing-source",
         "shared-vocabulary-without-profile-source",
         "shared-inheritance-or-events",
-        "two-releases-one-profile"
+        "two-releases-one-profile",
+        "four-history-marker-inherited",
+        "four-swap-oob-inherited",
+        "two-unsuffixed-on",
+        "four-dash-on-default",
+        "four-arrow-on-missing",
+        "four-status-family-missing",
+        "two-status-family",
+        "four-status-invalid-suffix"
       ]
     },
     {

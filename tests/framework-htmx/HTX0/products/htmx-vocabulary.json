@@ -204,7 +204,8 @@
             "path": "dist/htmx.js"
           },
           "inheritance": "local-or-structural; not implicitly inherited",
-          "value": "event-suffixed hx-on:event / hx-on::event and dash alternatives; legacy unsuffixed form per pinned source; JavaScript stays unevaluated"
+          "value": "event-suffixed hx-on:event / hx-on::event and dash alternatives hx-on-event / hx-on--event / hx-on-htmx-event; unsuffixed hx-on is not recognized; JavaScript stays unevaluated",
+          "grammarSource": "processHxOnWildcard"
         },
         {
           "name": "hx-params",
@@ -1325,8 +1326,8 @@
             "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "explicit :inherited for attributeValue consumers",
-          "value": "authored value decoded by the pinned reference; never evaluated"
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "Local presence marker selected by #restoreHistory using [hx-history-elt]; :inherited markers are not recognized and ancestors do not supply an effective value. No live history state is modelled."
         },
         {
           "name": "hx-ignore",
@@ -1410,7 +1411,8 @@
             "path": "dist/htmx.js"
           },
           "inheritance": "structural-or-local; do not invent an effective inherited value",
-          "value": "event suffix plus JavaScript body; hx-on:event and hx-on::event, dash alternatives per pinned source"
+          "value": "Local hx-on=\"event[filter] modifiers -> JavaScript; event -> JavaScript\" or hx-on:event / hx-on::event with JavaScript body. Suffixes require config.metaCharacter (default colon); hx-on-click is not recognized by default. Computed metaCharacter stays unknown; filters, selectors and JavaScript bodies remain authored, unevaluated regions.",
+          "grammarSource": "#handleHxOnAttributes, #onTrigger"
         },
         {
           "name": "hx-patch",
@@ -1521,6 +1523,20 @@
           "value": "authored value decoded by the pinned reference; never evaluated"
         },
         {
+          "name": "hx-status:<status>",
+          "namePattern": "^hx-status:(?:[0-9]{3}|[0-9]{2}x|[0-9]xx)$",
+          "source": {
+            "package": "htmx.org",
+            "release": "4.0.0",
+            "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+            "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+            "path": "dist/htmx.js"
+          },
+          "grammarSource": "#handleStatusCodes, #attributeValue, HCON.merge",
+          "inheritance": "explicit :inherited for attributeValue consumers",
+          "value": "HCON or JSON authored response configuration, including target selectors and swap specifications; exact three-digit status, two-digit prefix plus x, or one-digit prefix plus xx. Bare hx-status is not recognized. Decode authored regions only; never observe responses or select a live status branch."
+        },
+        {
           "name": "hx-swap",
           "source": {
             "package": "htmx.org",
@@ -1541,8 +1557,8 @@
             "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "explicit :inherited for attributeValue consumers",
-          "value": "authored value decoded by the pinned reference; never evaluated"
+          "inheritance": "structural-or-local; do not invent an effective inherited value",
+          "value": "Local response-fragment marker selected by #processOOB using [hx-swap-oob]; its own authored value supplies the swap specification. :inherited markers are not recognized and ancestors do not supply an effective value."
         },
         {
           "name": "hx-sync",
@@ -2451,7 +2467,7 @@
           "path": "dist/htmx.js"
         },
         "uses": "extension-owned attributes; no core hx-ext",
-        "navigation": "excluded pending scope ruling htmx-four-extension-registration"
+        "navigation": "excluded by scope ruling htmx-four-extension-registration"
       }
     }
   ],
