@@ -311,12 +311,16 @@ travels with detached application; dropping the issuer does not renew it.
 A basis drift observed AFTER a provider write landed splits on what drifted. A
 content-only drift (another document's edit while the engine was awaited) leaves
 the publication that decided membership unchanged, so the healthy engine holds
-nothing the live basis excludes: the settlement is refused `StaleBasis`, nothing
-is recorded, the engine keeps serving, and the issuer's fresh admission
+nothing the live basis excludes: the admission is refused `StaleBasis`, the
+engine keeps serving, and the issuer's fresh admission
 re-applies idempotently (the direct shared write additionally closes its one
 path). Only a replaced publication or project generation — where the engine may
 now hold an excluded unit — retires the epoch or arms its recovery. Restarting a
 project engine on every concurrent edit is the failure this split prevents.
+Every dispatched activation retains its refresh completion observer even when
+the post-dispatch admission check refuses it. Successful completion rechecks the
+engine's applied-byte receipts; failure retires the acknowledging incarnation.
+An old incarnation's completion never certifies or retires its replacement.
 Replay re-admits a content-only drift once at each validation checkpoint against
 the same provider and epoch, without repeating provider writes. Before carrier
 activation and installation, all replay admissions are refreshed in one bounded

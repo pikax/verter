@@ -1426,6 +1426,15 @@ async fn run_actor<P>(
                                 .await
                                 {
                                     Ok(Ok(settlement)) => {
+                                        // Dispatch transfers completion ownership even if
+                                        // the admission raced a content/publication change.
+                                        // Retirement is fenced by the acknowledging epoch.
+                                        observe_settlement(
+                                            &settlements,
+                                            serving.epoch,
+                                            &mutation,
+                                            settlement,
+                                        );
                                         match current() {
                                             Ok(()) => {
                                                 desired.apply(&mutation, lane);
@@ -1434,12 +1443,6 @@ async fn run_actor<P>(
                                                     &shared,
                                                     serving.provider.as_ref(),
                                                     &mutation,
-                                                );
-                                                observe_settlement(
-                                                    &settlements,
-                                                    serving.epoch,
-                                                    &mutation,
-                                                    settlement,
                                                 );
                                                 let mut watch =
                                                     shared.query_watch.lock().unwrap_or_else(
@@ -1464,7 +1467,7 @@ async fn run_actor<P>(
                                                 // so the healthy engine holds nothing the live
                                                 // basis excludes: retiring it would restart a
                                                 // whole project engine on every concurrent edit.
-                                                // Only the settlement is refused — nothing is
+                                                // Only the admission is refused — nothing is
                                                 // recorded as applied or replayable, and the
                                                 // issuer's fresh admission re-applies idempotently.
                                                 Err(AdmissionRefusal::StaleBasis)
@@ -1604,6 +1607,12 @@ async fn run_actor<P>(
                         .await
                         {
                             Ok(Ok(settlement)) => {
+                                observe_settlement(
+                                    &settlements,
+                                    serving.epoch,
+                                    &mutation,
+                                    settlement,
+                                );
                                 if let Err(reason) = requests.iter().try_for_each(|request| {
                                     admission::check_current(&shared, request)
                                 }) {
@@ -1629,12 +1638,6 @@ async fn run_actor<P>(
                                 }
                                 let disposition =
                                     note_receipt(&shared, serving.provider.as_ref(), &mutation);
-                                observe_settlement(
-                                    &settlements,
-                                    serving.epoch,
-                                    &mutation,
-                                    settlement,
-                                );
                                 Ok(AppliedReceipt {
                                     epoch: Some(serving.epoch),
                                     disposition,

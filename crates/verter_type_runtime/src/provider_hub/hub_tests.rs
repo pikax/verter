@@ -6304,3 +6304,73 @@ async fn a_failed_activation_settlement_retires_the_engine_that_acknowledged_it(
         crate::traits::AppliedContent::NotApplied
     );
 }
+
+/// Refusing an admission after dispatch must not abandon the engine's refresh
+/// completion, even when only content (not membership) changed concurrently.
+#[tokio::test(start_paused = true)]
+async fn content_drift_preserves_activation_completion_ownership() {
+    for managed in [false, true] {
+        for fails in [false, true] {
+            let engine = MockProvider::new("tsserver");
+            let (hub, _crash, _spawn_gate) =
+                make_resilient(engine.clone(), MockProvider::new("tsserver")).await;
+            let source = "d:/ws/src/A.vue";
+            let companion = "d:/ws/src/A.vue.tsx";
+            let project = "d:/ws/tsconfig.json";
+            hub.register_carrier_metadata(source, companion, "app", project)
+                .await
+                .unwrap();
+            let resolver = replay_drift_resolver(engine.clone(), false);
+            hub.set_generated_unit_resolver(Arc::clone(&resolver))
+                .unwrap();
+            let gate = Arc::new(Semaphore::new(0));
+            *engine.inner.activation_settlement_gate.lock() = Some(Arc::clone(&gate));
+            engine
+                .inner
+                .activation_settlement_fails
+                .store(fails, Ordering::SeqCst);
+            let members = vec![crate::traits::CarrierActivation {
+                source_path: source.into(),
+                companion_path: companion.into(),
+                project_file_name: project.into(),
+                script_kind: crate::traits::CarrierScriptKind::Tsx,
+            }];
+            if managed {
+                let error = hub.activate_carrier_members(&members).await.unwrap_err();
+                assert_eq!(
+                    error.admission_refusal,
+                    Some(super::AdmissionRefusal::StaleBasis)
+                );
+            } else {
+                let input = resolver(companion).unwrap().unwrap();
+                let witness = hub.bind_project(input.binding).unwrap();
+                let admission = hub
+                    .admit_request(&witness, &input.units, Some(&input.proof))
+                    .unwrap();
+                let error = hub
+                    .apply_overlay_batch(vec![(admission, members[0].clone())])
+                    .await
+                    .unwrap_err();
+                assert_eq!(error, super::AdmissionRefusal::StaleBasis);
+            }
+            assert!(
+                hub.serving_epoch().is_some(),
+                "content drift alone keeps the engine"
+            );
+            gate.add_permits(1);
+            if fails {
+                await_down(&hub).await;
+            } else {
+                await_cond(
+                    || {
+                        hub.applied_content(companion)
+                            == crate::traits::AppliedContent::Applied(Arc::from("app"))
+                    },
+                    "refused admission still observes successful refresh completion",
+                )
+                .await;
+                assert!(hub.serving_epoch().is_some());
+            }
+        }
+    }
+}
