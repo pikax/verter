@@ -1,0 +1,94 @@
+[
+  {
+    "glob": "docs/**",
+    "reason": "Prose. A page a lane reads (the audit footprint, the generated typeinfo counts, the signature-kernel page and evidence, docs/package.json) is owned by that lane's filter."
+  },
+  { "glob": ".github/BENCHMARK.md", "reason": "Prose." },
+  { "glob": ".github/INTEGRATION_TEST.md", "reason": "Prose." },
+  { "glob": "AGENTS.md", "reason": "Prose." },
+  { "glob": "CONTRIBUTING.md", "reason": "Prose." },
+  { "glob": "LICENSE", "reason": "Prose; editor-packages.yml packages it on its own trigger." },
+  { "glob": "readme.md", "reason": "Prose." },
+  {
+    "glob": "CLAUDE.md",
+    "reason": "Read for its existence only: verter_session tests locate the repository root by it."
+  },
+  {
+    "glob": ".claude/**",
+    "reason": "Agent skills. The component-meta skill a Rust test cross-checks is owned by the rust filter."
+  },
+  { "glob": ".husky/**", "reason": "The local pre-commit hook." },
+  { "glob": ".lintstagedrc.cjs", "reason": "The local pre-commit hook's configuration." },
+  { "glob": ".vscode/**", "reason": "Editor settings." },
+  {
+    "glob": ".github/workflows/benchmark.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
+    "glob": ".github/workflows/corpus-gate.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
+    "glob": ".github/workflows/dx-extended.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
+    "glob": ".github/workflows/editor-packages.yml",
+    "reason": "Runs on its own trigger and inside the release rehearsal, which a release pull request runs regardless of paths."
+  },
+  {
+    "glob": ".github/workflows/integration-test.yml",
+    "reason": "Runs on its own trigger and after a publish; no ci.yml job reads the file."
+  },
+  {
+    "glob": ".github/workflows/lsp-benchmark.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
+    "glob": ".github/workflows/meta-benchmark.yml",
+    "reason": "Runs on its own trigger; no ci.yml job reads the file."
+  },
+  {
+    "glob": "tests/documentation/**",
+    "reason": "Documentation products the local DOC verifiers and the docs deploy read."
+  },
+  {
+    "glob": "tests/framework-*/**",
+    "reason": "Each framework vertical's reviewed contract data. A harness that reads a product claims its paths in its own lane filter."
+  },
+  {
+    "glob": "tests/jetbrains-baseline/**",
+    "reason": "Baseline products; the one the DX harness reads is owned by the dx filter."
+  },
+  {
+    "glob": "tests/kernel/**",
+    "reason": "Kernel architecture inventories; only the docs cite them."
+  },
+  { "glob": "tests/playground/**", "reason": "Products a local verifier reads." },
+  { "glob": "tests/product-experience/**", "reason": "Products local verifiers read." },
+  { "glob": "tests/skills/**", "reason": "Skill evidence." },
+  {
+    "glob": "tests/test-layout/**",
+    "reason": "The mapping argument of a manual relocation check."
+  },
+  {
+    "glob": "tests/vscode-product/**",
+    "reason": "Product inventories; the two ARH7 reads are owned by the arch filter."
+  },
+  { "glob": "tests/vscode-web/**", "reason": "Products a local verifier reads." },
+  { "glob": "tests/web-product/**", "reason": "Product inventories nothing reads." },
+  {
+    "glob": "tests/workspace-responsiveness/**",
+    "reason": "Captures and inventories; the products the DX harness reads are owned by the dx filter."
+  },
+  { "glob": "examples/*", "reason": "Example application; examples/reference is the arch lane's." },
+  { "glob": "examples/src/**", "reason": "Example application sources." },
+  { "glob": "tools/debug/**", "reason": "A manual debugging helper." },
+  { "glob": "tools/tsgo-api-gate/**", "reason": "A manually run tsgo API gate." },
+  { "glob": "mcp/README.md", "reason": "Prose." },
+  { "glob": "mcp/verter-http.mcp.json", "reason": "A manual MCP client configuration." },
+  {
+    "glob": "test-results/**",
+    "reason": "A tracked test report js-build-test overwrites before reading it."
+  }
+]
