@@ -1095,8 +1095,11 @@ pub struct ProjectTypeStore {
     /// ([`SemanticRetentionAccount::process_local`]), so a workspace with
     /// three loaded projects admits against one ceiling rather than
     /// three. A test may inject a private account to drive pressure
-    /// deterministically without perturbing concurrent tests.
-    retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    /// deterministically without perturbing concurrent tests. Nodes that
+    /// charge the same aggregate account (compile session slots, the
+    /// engine's stores) receive clones of this handle — they share the
+    /// account, they never mint one.
+    retention_account: verter_session_query::retention::StoreAccount,
     /// Gate that defers close-time payload releases until no computation is
     /// in flight (see [`semantic_activity`]).
     activity_gate: semantic_activity::SemanticActivityGate,
@@ -1161,7 +1164,17 @@ impl ProjectTypeStore {
     pub fn retention_account(
         &self,
     ) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
-        &self.retention_account
+        self.retention_account.get()
+    }
+
+    /// The store's retention-account handle. Shared, never minted: a
+    /// node whose admissions charge the same aggregate account as this
+    /// store receives a clone of this handle. Production stores hold the
+    /// ONE process-local account; only test support binds a private one,
+    /// at this store's own test constructor.
+    #[must_use]
+    pub(crate) fn retention_store_account(&self) -> verter_session_query::retention::StoreAccount {
+        self.retention_account.clone()
     }
 
     /// Compose the host's store: wired to the host's
@@ -1190,7 +1203,7 @@ impl ProjectTypeStore {
         store_account: verter_session_query::retention::StoreAccount,
         task_registry: verter_execution::tasks::TaskRegistry,
     ) -> (Self, EngineGrants) {
-        let retention_account = Arc::clone(store_account.get());
+        let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
         // `counters` so the `snapshot()` method sees in-place updates.
