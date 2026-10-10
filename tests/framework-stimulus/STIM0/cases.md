@@ -81,7 +81,7 @@ row fails STIM1-ACV; writing this table does not claim those experiments ran.
 
 ## Route inventory and handoff
 
-The pinned tokenizer and frame controller linked in the vocabulary products own
+The pinned tokenizer, frame controller and document frame redirector linked in the vocabulary products own
 these version-specific boundaries. The following are future codec/relation
 verification obligations, not executed tests in this contract:
 
@@ -91,7 +91,11 @@ verification obligations, not executed tests in this contract:
 | The same pair separated by U+00A0 (NBSP) or U+000B (vertical tab), including leading/trailing ECMAScript whitespace | The same two ordered tokens; an HTML ASCII-only splitter fails this boundary | STIM1 descriptor codec verification |
 | `data-turbo-frame="_parent"` inside a frame with no ancestor frame | Reserved target; no missing-frame diagnostic or frame-id rename relation | STIM4T static frame relation verification |
 | The same target inside a nested frame | Relation to the nearest ancestor frame, conditional on its disabled state; no runtime navigation | STIM4T static frame relation verification |
-| A literal `turbo-frame id="_parent"` elsewhere, with and without a real ancestor frame | Literal ID has no precedence: resolve the ancestor or retain the no-ancestor disposition | STIM4T static frame relation verification |
+| A frame-origin link targeting `_parent`, with a literal `turbo-frame id="_parent"` elsewhere, with and without a real ancestor frame | Literal ID has no precedence in the current frame controller: resolve the ancestor or retain the no-ancestor disposition | STIM4T static frame relation verification |
+| `<a href="/next" data-turbo-frame="_parent">` outside every frame, alongside an enabled document-level `<turbo-frame id="_parent">` | Document redirector selects the literal ID; retain its authored definition/reference/rename relation. The selected controller has no ancestor and falls back to that frame; no runtime navigation | STIM4T static frame relation verification |
+| The same document-origin link with no literal `_parent` frame | Redirector selects no frame; no ancestor relation, missing reserved-target diagnostic or authored ID rename relation | STIM4T static frame relation verification |
+| The same document-origin link with a disabled literal `_parent` frame | Redirector excludes the disabled frame; retain the disabled-state condition and do not claim an enabled target or ancestor relation | STIM4T static frame relation verification |
+| The same document-origin link with an enabled literal `_parent` frame nested inside another frame | Redirector selects the literal ID; retain that authored ID relation separately from the selected controller's subsequent ancestor resolution | STIM4T static frame relation verification |
 | An ordinary frame ID matching an authored frame | Preserve the ordinary authored ID relation | STIM4T static frame relation verification |
 
 No existing production route is displaced by this contract; there is no legacy

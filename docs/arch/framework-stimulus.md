@@ -59,9 +59,16 @@ names or declarations needing evaluation remain unknown or incomplete.
 Turbo contributes frame, stream and stream-source declarations; the eight stream
 actions; frame-id relations; `data-turbo*` attributes and `turbo-*` meta facts.
 `_top`, `_self` and `_parent` are frame keywords. In the pinned release, `_parent`
-resolves to the nearest ancestor frame, not a literal frame ID. Without an ancestor,
-the current frame does not intercept navigation; this is not a missing frame-id
-relation. Stimulus action lists use ECMAScript whitespace and line terminators,
+uses ancestor lookup for frame-origin navigation. Without an ancestor, the
+current frame controller does not intercept; this is not a missing frame-id
+relation. For document-origin navigation, the pinned
+[frame redirector](https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/core/frames/frame_redirector.js)
+can select an enabled literal `turbo-frame id="_parent"`; preserve its authored
+definition/reference/rename relation. The selected controller then resolves its
+ancestor, falling back to the selected frame when no ancestor exists. An absent
+or disabled literal target is not selected by the redirector. The case table
+hands both origins and their controls to STIM4T.
+Stimulus action lists use ECMAScript whitespace and line terminators,
 including NBSP and vertical tab, retaining ordered tokens and source spans.
 Selectors go to the shared selector parser.
 No navigation, fetch, stream execution, morphing or cache behavior is simulated.
