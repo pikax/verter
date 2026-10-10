@@ -1,0 +1,488 @@
+{
+  "id": "embedded-case-table.v1",
+  "schema": 1,
+  "contractNode": "EMB0",
+  "describesHead": {
+    "landingTitle": "docs(arch): ratify the Angular release, activation, parser, host and (#822)",
+    "date": "2026-10-10"
+  },
+  "implementer": {
+    "implementationOwner": "EMB0I",
+    "successorPath": ["EMB0", "EMB0I"],
+    "receivingAcceptance": "EMB0I-AC4",
+    "home": "crates/verter_language/tests/cases/embedded_codec.rs"
+  },
+  "proofSelection": "Contract data only. Existing exact projection/identity/refusal tests are cited in docs/arch/kernel/embedded-codecs.md; new shared-codec behavior and cases belong to EMB0I. Consumer-specific integrations supplement, not replace, primitive acceptance.",
+  "cases": [
+    {
+      "id": "EMB-K01",
+      "group": "profile",
+      "input": "Same literal-shaped raw chunks under Vue, Angular and Lit profiles",
+      "required": "Shared primitives; canonical activation, grammar and hole dispositions differ only by admitted profile policy",
+      "forbidden": "Framework switch/name matching in neutral codec",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC1"
+    },
+    {
+      "id": "EMB-K02",
+      "group": "unicode",
+      "input": "Cooked code units [0xD800] and [0xDC00], separately",
+      "required": "NonUnicodeCookedLiteral before embedded parsing, no embedded byte offset minted",
+      "forbidden": "U+FFFD/WTF-8/false UTF-8 position",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC2"
+    },
+    {
+      "id": "EMB-K03",
+      "group": "unicode",
+      "input": "Authored \\uD83D\\uDE00; cooked units [0xD83D,0xDE00]",
+      "required": "Scalar U+1F600 as UTF-8 F0 9F 98 80; whole scalar maps to authored escape range; interior-byte queries refused",
+      "forbidden": "Surrogate-half UTF-8 offset",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC2"
+    },
+    {
+      "id": "EMB-K04",
+      "group": "unicode",
+      "input": "Tagged template chunk with invalid \\u{ZZ}; cooked absent; cooked policy",
+      "required": "MissingCookedValue before parsing",
+      "forbidden": "Automatic raw fallback or empty complete value",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC2"
+    },
+    {
+      "id": "EMB-K05",
+      "group": "raw",
+      "input": "Same invalid tagged escape, explicitly raw profile",
+      "required": "Exact authored raw spelling admitted if profile grammar permits; no cooked identity",
+      "forbidden": "Cooked absence rejects an otherwise raw-selected chunk",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC1"
+    },
+    {
+      "id": "EMB-K06",
+      "group": "escape",
+      "input": "Authored \\u00E9, escaped backtick, escaped quote and escaped ${ opener",
+      "required": "Delimiter/escape policy declared; exact whole-escape provenance and UTF-8 scalar boundaries",
+      "forbidden": "Linear interpolation across an escape or invented hole",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K07",
+      "group": "terminator",
+      "input": "Actual CRLF and lone CR in raw versus profile-normalized cooked chunks",
+      "required": "Raw bytes preserved; normalization records contraction and elided preimage; following offsets exact",
+      "forbidden": "Silent byte loss or wire columns cached as core geometry",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K08",
+      "group": "continuation",
+      "input": "Backslash + LF and backslash + CRLF in host literal",
+      "required": "Host policy removes continuation from cooked bytes, map retains elision and next scalar origin",
+      "forbidden": "Zero-width fabricated editable origin",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K09",
+      "group": "indentation",
+      "input": "Indented multiline literal; tabs, non-ASCII and empty line",
+      "required": "Declared indentation policy with exact removed-byte records; no implicit normalization",
+      "forbidden": "Dedent based on guessed language/hardware",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K10",
+      "group": "empty",
+      "input": "Empty literal, empty quasi at beginning/end and adjacent holes",
+      "required": "Offset zero/end valid only in exact domain; empty chunks preserve ordered hole lineage",
+      "forbidden": "Drop empty chunk and reorder holes",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K11",
+      "group": "unicode",
+      "input": "Literal é, astral scalar, combining mark, ZWJ and BOM",
+      "required": "UTF-8 scalar boundaries, unchanged spelling unless declared policy transforms it",
+      "forbidden": "ASCII assumption or grapheme offset replacing byte offset",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K12",
+      "group": "holes",
+      "input": "Lit html chunk with ${user.name} in text/attribute and nested tagged template",
+      "required": "Ordered expression ranges and parent lineage exact; placeholder bytes synthetic; profile selects hole class",
+      "forbidden": "Placeholder parsed as authored expression or dynamic execution",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K13",
+      "group": "holes",
+      "input": "Angular template built from variable or interpolated literal",
+      "required": "Profile reports unsupported/dynamic attachment; neutral codec does not invent activation",
+      "forbidden": "Evaluate variable or borrow Lit hole semantics",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC1"
+    },
+    {
+      "id": "EMB-K14",
+      "group": "bounds",
+      "input": "Nested regions at admitted limit and one deeper",
+      "required": "At limit exact; over limit typed partiality before excess work, no complete cache admission",
+      "forbidden": "Unbounded recursion",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC4"
+    },
+    {
+      "id": "EMB-K15",
+      "group": "composition",
+      "input": "Syntax -> preprocessor -> compiler -> runtime stage, with authored non-ASCII text",
+      "required": "Distinct stage identities/provenance; exact unit/content/map-basis joins; final admitted positions authored UTF-8",
+      "forbidden": "Collapse stages to one unqualified map",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K16",
+      "group": "composition",
+      "input": "Pug mixin output duplicated or relocated; stylesheet transform missing map",
+      "required": "Ordered provenance or Unmappable; rename/safe fixes refused without unique reversible preimage",
+      "forbidden": "Nearest token, spanning gaps, guessed unique edit",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K17",
+      "group": "external",
+      "input": "Two Angular components share external template; relative asset path in template",
+      "required": "One resource unit/base URI, distinct attachment contexts; no component-file-start blame",
+      "forbidden": "Alias resource identity to component URI",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K18",
+      "group": "regions",
+      "input": "MDX nested JSX/ESM, Glimmer template tag, Marko script/style and Astro frontmatter",
+      "required": "Exact parent/child region geometry from profile; identity of surrounding regions survives local edit",
+      "forbidden": "Universal grammar or projection mask",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K19",
+      "group": "basis",
+      "input": "One composition stage has old ContentId/MapRevision or wrong source unit",
+      "required": "Typed mismatched/stale basis refusal; no complete publication",
+      "forbidden": "Re-map stale position approximately",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K20",
+      "group": "edit",
+      "input": "Range reaches synthetic bytes, rewritten interior or discontiguous/repeated origins",
+      "required": "Unmappable or ordered display provenance; no rename/safe edit unless every stage proves unique reversible range",
+      "forbidden": "Independent endpoint mapping treated as invertibility",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K21",
+      "group": "ordering",
+      "input": "Same map segments and holes with perturbed discovery order, coincident mappings",
+      "required": "Canonical output ordering and declared coincident-segment order preserved; conflicting origins ambiguous",
+      "forbidden": "Last writer wins",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-K22",
+      "group": "incremental",
+      "input": "Splice/revert inside escape, between surrogate escapes, across CRLF, delimiter and hole boundary",
+      "required": "Incremental equals fresh bytes/maps/partiality/lineage/order; unaffected regions unchanged",
+      "forbidden": "Warm complete entry survives changed observed basis",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC4"
+    },
+    {
+      "id": "EMB-K23",
+      "group": "incremental",
+      "input": "Malformed literal then repair; cancellation/stale publication during decoding",
+      "required": "Fresh equals incremental; degraded/cancelled/stale work never warms complete result",
+      "forbidden": "Empty complete fallback or stale admission",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC4"
+    },
+    {
+      "id": "EMB-K24",
+      "group": "fuzz",
+      "input": "Bounded deterministic generated UTF-8 chunks, cooked code units, escapes, holes, edits and stage joins",
+      "required": "Fresh/incremental and compose/direct answers agree on exact boundaries or same typed refusal; seed reproducible; depth/input bounded",
+      "forbidden": "Oracle using same decode algorithm or unbounded soak",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC4"
+    },
+    {
+      "id": "EMB-K25",
+      "group": "work",
+      "input": "Input sizes n and 2n; identity raw, transformed cooked, many chunks/holes and nested chain; repeat warm query",
+      "required": "Counts/growth reported for validation/decode/map allocation; bound by input bytes+segments+holes+admitted depth; warm reuse avoids duplicate decode",
+      "forbidden": "Copy each prefix or parse/resolve in map callback; timing gate",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC4"
+    },
+    {
+      "id": "EMB-K26",
+      "group": "work",
+      "input": "Plain carrier, inactive profile and selected-but-unrequested region controls",
+      "required": "No decode/embedded parse/map work without admitted demand; unchanged plain-carrier behavior",
+      "forbidden": "Eager decode all carriers",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC4"
+    }
+  ],
+  "integrationBindings": [
+    {
+      "consumer": "EMB-C01",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "ALP1",
+      "successorPath": ["EMB0", "EMB0I", "ALP1"],
+      "receivingAcceptance": "ALP1-AC2",
+      "criterion": "Alpine attribute directive value codecs"
+    },
+    {
+      "consumer": "EMB-C02",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "ANG1",
+      "successorPath": ["EMB0", "EMB0I", "ANG1"],
+      "receivingAcceptance": "ANG1-AC2",
+      "criterion": "Angular syntax geometry without activation"
+    },
+    {
+      "consumer": "EMB-C03",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "ANG1M",
+      "successorPath": ["EMB0", "EMB0I", "ANG1M"],
+      "receivingAcceptance": "ANG1M-AC1",
+      "criterion": "Angular inline/external template/style attachments and resource bases"
+    },
+    {
+      "consumer": "EMB-C04",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "AST1",
+      "successorPath": ["EMB0", "EMB0I", "AST1"],
+      "receivingAcceptance": "AST1-AC2",
+      "criterion": "Astro grammar recovery geometry"
+    },
+    {
+      "consumer": "EMB-C05",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "AST1M",
+      "successorPath": ["EMB0", "EMB0I", "AST1M"],
+      "receivingAcceptance": "AST1M-AC1",
+      "criterion": "Astro frontmatter/expression/script/style attachments"
+    },
+    {
+      "consumer": "EMB-C06",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "DATA5",
+      "successorPath": ["EMB0", "EMB0I", "DATA5"],
+      "receivingAcceptance": "DATA5-AC2",
+      "criterion": "Markdown fence embedded-region isolation"
+    },
+    {
+      "consumer": "EMB-C07",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "DDB1",
+      "successorPath": ["EMB0", "EMB0I", "DDB1"],
+      "receivingAcceptance": "DDB1-AC2",
+      "criterion": "DynamoDB expressions in authored literals"
+    },
+    {
+      "consumer": "EMB-C08",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "DIAL2",
+      "successorPath": ["EMB0", "EMB0I", "DIAL2"],
+      "receivingAcceptance": "DIAL2-AC2",
+      "criterion": "Pug expansion and repeated mixin origins"
+    },
+    {
+      "consumer": "EMB-C09",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "DIAL7",
+      "successorPath": ["EMB0", "EMB0I", "DIAL7"],
+      "receivingAcceptance": "DIAL7-AC2",
+      "criterion": "Stylesheet/PostCSS transform maps and unmappable edits"
+    },
+    {
+      "consumer": "EMB-C10",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "EAK1",
+      "successorPath": ["EMB0", "EMB0I", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2",
+      "criterion": "Vue proven defineComponent template literal extraction"
+    },
+    {
+      "consumer": "EMB-C11",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "GLM1",
+      "successorPath": ["EMB0", "EMB0I", "GLM1"],
+      "receivingAcceptance": "GLM1-AC2",
+      "criterion": "Glimmer/Handlebars syntax geometry"
+    },
+    {
+      "consumer": "EMB-C12",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "GLM1M",
+      "successorPath": ["EMB0", "EMB0I", "GLM1M"],
+      "receivingAcceptance": "GLM1M-AC1",
+      "criterion": "GJS/GTS tag and colocated template attachments"
+    },
+    {
+      "consumer": "EMB-C13",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "HTX1",
+      "successorPath": ["EMB0", "EMB0I", "HTX1"],
+      "receivingAcceptance": "HTX1-AC2",
+      "criterion": "htmx attribute value codecs"
+    },
+    {
+      "consumer": "EMB-C14",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "LIT1",
+      "successorPath": ["EMB0", "EMB0I", "LIT1"],
+      "receivingAcceptance": "LIT1-AC2",
+      "criterion": "Lit dialect profiles consume INT-TT adapter, no Lit-local codec"
+    },
+    {
+      "consumer": "EMB-C15",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "LSO1",
+      "successorPath": ["EMB0", "EMB0I", "LSO1"],
+      "receivingAcceptance": "LSO1-AC2",
+      "criterion": "Carrier recovery preserves region geometry"
+    },
+    {
+      "consumer": "EMB-C16",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "MDX1M",
+      "successorPath": ["EMB0", "EMB0I", "MDX1M"],
+      "receivingAcceptance": "MDX1M-AC1",
+      "criterion": "MDX ESM/expression/JSX attachments"
+    },
+    {
+      "consumer": "EMB-C17",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "MRK1",
+      "successorPath": ["EMB0", "EMB0I", "MRK1"],
+      "receivingAcceptance": "MRK1-AC2",
+      "criterion": "Marko grammar recovery geometry"
+    },
+    {
+      "consumer": "EMB-C18",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "MRK1M",
+      "successorPath": ["EMB0", "EMB0I", "MRK1M"],
+      "receivingAcceptance": "MRK1M-AC1",
+      "criterion": "Marko script/style/expression attachments"
+    },
+    {
+      "consumer": "EMB-C19",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "PRE1",
+      "successorPath": ["EMB0", "EMB0I", "PRE1"],
+      "receivingAcceptance": "PRE1-AC2",
+      "criterion": "Preact carrier attachments"
+    },
+    {
+      "consumer": "EMB-C20",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "QWK1",
+      "successorPath": ["EMB0", "EMB0I", "QWK1"],
+      "receivingAcceptance": "QWK1-AC2",
+      "criterion": "Qwik 2 carrier attachments"
+    },
+    {
+      "consumer": "EMB-C21",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "RCT1",
+      "successorPath": ["EMB0", "EMB0I", "RCT1"],
+      "receivingAcceptance": "RCT1-AC2",
+      "criterion": "React carrier attachments"
+    },
+    {
+      "consumer": "EMB-C22",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "RGX1",
+      "successorPath": ["EMB0", "EMB0I", "RGX1"],
+      "receivingAcceptance": "RGX1-AC2",
+      "criterion": "Regex host-literal and pattern map levels"
+    },
+    {
+      "consumer": "EMB-C23",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "SLD1",
+      "successorPath": ["EMB0", "EMB0I", "SLD1"],
+      "receivingAcceptance": "SLD1-AC2",
+      "criterion": "Solid carrier attachments"
+    },
+    {
+      "consumer": "EMB-C24",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "STN1",
+      "successorPath": ["EMB0", "EMB0I", "STN1"],
+      "receivingAcceptance": "STN1-AC2",
+      "criterion": "Stencil carrier attachments"
+    },
+    {
+      "consumer": "EMB-C25",
+      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "implementationOwner": "STP38",
+      "successorPath": ["EMB0", "EMB0I", "STP38"],
+      "receivingAcceptance": "STP38-AC1",
+      "criterion": "External blocks and preprocessor source-identity maps"
+    },
+    {
+      "consumer": "EMB-C26",
+      "caseGroups": ["holes", "ordering", "incremental"],
+      "implementationOwner": "INT-TT",
+      "successorPath": ["EMB0", "EMB0I", "INT-TT"],
+      "receivingAcceptance": "INT-TT-AC1",
+      "criterion": "Shared tagged-template adapter, tag-profile registry and hole placeholders over EMB0I"
+    }
+  ]
+}

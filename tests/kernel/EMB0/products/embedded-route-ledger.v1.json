@@ -1,0 +1,630 @@
+{
+  "id": "embedded-route-ledger.v1",
+  "schema": 1,
+  "contractNode": "EMB0",
+  "describesHead": {
+    "landingTitle": "docs(arch): ratify the Angular release, activation, parser, host and (#822)",
+    "date": "2026-10-10"
+  },
+  "inheritedRouteFile": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+  "inheritedRoutes": [
+    {
+      "id": "D01",
+      "category": "central-framework-switch",
+      "unit": "Closed carrier grammar enum and its matches",
+      "symbols": [
+        "CarrierGrammarConfig::{Vue, Svelte}",
+        "carrier_identity",
+        "grammar_fingerprint",
+        "parse_options_for_accepted",
+        "parse_key_for_accepted"
+      ],
+      "paths": [
+        "crates/verter_language/src/carrier_grammar.rs",
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_session/src/carrier_publication_store/mod.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D02",
+      "category": "central-framework-switch",
+      "unit": "Closed per-capability installed enums and frozen built-in catalogs",
+      "symbols": [
+        "InstalledCarrierFrontend",
+        "InstalledParseAdmission",
+        "InstalledSemanticAuthority",
+        "InstalledProjectionBackend",
+        "InstalledHostIntegration",
+        "InstalledRuntimeBackend",
+        "KnownRegisteredCompiler",
+        "built_in_frontend_catalog",
+        "built_in_semantic_catalog",
+        "built_in_projection_catalog",
+        "built_in_host_integration_catalog",
+        "built_in_runtime_catalog"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_compiler/src/framework_common/vue_host_integration.rs",
+        "crates/verter_compiler/src/standalone.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D03",
+      "category": "central-framework-switch",
+      "unit": "Closed Vue/Svelte request and product enums in the compiler and session",
+      "symbols": [
+        "FrameworkOption",
+        "FrameworkCompileRequest",
+        "DirectExecutionInputs",
+        "PreparedCarrier",
+        "FrameworkDomain",
+        "BoundRenderedMain",
+        "BoundCompiledProducts",
+        "BoundNativeHostRequest"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/compile_request/mod.rs",
+        "crates/verter_compiler/src/standalone.rs",
+        "crates/verter_compiler/src/assembly/fragment.rs",
+        "crates/verter_session/src/host_resolve/compile_request_build.rs",
+        "crates/verter_session/src/host_resolve/native_host_binding.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D04",
+      "category": "central-framework-switch",
+      "unit": "Parse-identity and directive switches on adapter spelling",
+      "symbols": [
+        "FrameworkSyntaxProfile::{Vue, Svelte, Script, Requested}",
+        "syntax_profile_id_for",
+        "default_parse_identity_for",
+        "parse_identity_for",
+        "ParseOptions.{delimiters, custom_elements, svelte_loose}",
+        "DirectiveFamily::{Vue, Svelte}",
+        "parse_artifact JS module-kind is_vue branch"
+      ],
+      "paths": [
+        "crates/verter_language/src/parse_identity.rs",
+        "crates/verter_language/src/parse_artifact.rs",
+        "crates/verter_language/src/parse_artifact/carrier_inventory.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D05",
+      "category": "central-framework-switch",
+      "unit": "Core is_vue()/is_svelte() predicate branches outside the LSP and MCP",
+      "symbols": [
+        "FileLanguage::is_vue",
+        "FileLanguage::is_svelte",
+        "FrameworkAdapterId::is_vue",
+        "FrameworkAdapterId::is_svelte",
+        "FileLanguage::vue()/svelte() and FrameworkAdapterId::vue()/svelte() call sites used for dispatch"
+      ],
+      "paths": [
+        "crates/verter_language/src/language.rs",
+        "crates/verter_language/src/ids.rs",
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_compiler/src/script/process.rs",
+        "crates/verter_compiler/src/svelte/runtime/client_surface_imports.rs",
+        "crates/verter_session/src/carrier_publication_store/mod.rs",
+        "crates/verter_session/src/framework/synth.rs",
+        "crates/verter_session/src/framework/self_file.rs",
+        "crates/verter_session/src/host_compile_audit.rs",
+        "crates/verter_session/src/host_manage/analysis_io.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/vue_exec/mod.rs",
+        "crates/verter_validation_probe/src/corpus/mod.rs",
+        "crates/verter_semantic_source/src/rune_ambient.rs",
+        "crates/verter_tsc/src/checker.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D06",
+      "category": "central-framework-switch",
+      "unit": "Hard-coded host framework registrations and descriptors",
+      "symbols": [
+        "FrameworkAdapterRegistry::built_in",
+        "FrameworkAdapterRegistry::built_in_admitting",
+        "vue_registration",
+        "svelte_registration",
+        "built_in_descriptors",
+        "vue_descriptor",
+        "svelte_descriptor",
+        "FrameworkCapabilityCatalog::built_in",
+        "FrameworkAdapterRegistry::scratch_synthesizing_adapter_id"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/registry.rs",
+        "crates/verter_session/src/framework/descriptor.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D07",
+      "category": "central-framework-switch",
+      "unit": "Hard-coded extension table and process-global language registry",
+      "symbols": [
+        "LanguageRegistry::built_in",
+        "LanguageRegistry::global",
+        "SVELTE_RUNE_MODULE_LANGUAGE_ID"
+      ],
+      "paths": ["crates/verter_language/src/registry.rs"],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D08",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Conflated file-language identity and untagged interned ids",
+      "symbols": [
+        "FileLanguage::Framework { adapter_id, language_id }",
+        "FileLanguage::FrameworkTemplate { adapter_id, owner_hint }",
+        "ScriptFlavor::AdapterModule { adapter_id, language_id }",
+        "FrameworkAdapterId(Arc<str>)",
+        "LanguageId(Arc<str>)"
+      ],
+      "paths": ["crates/verter_language/src/language.rs", "crates/verter_language/src/ids.rs"],
+      "disposition": "replace",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D12",
+      "category": "duplicate-component-information-authority",
+      "unit": "Component-meta resolver, cache and schema authority",
+      "symbols": [
+        "MetaSession::get_component_meta and its batch/resolution/payload/surface/type-expansion variants",
+        "VerterHost::get_component_meta_via_view",
+        "VerterHost::get_component_meta_with_resolution",
+        "resolve_component_meta_parts",
+        "component_meta_resolved_macros",
+        "component_meta_type_registry",
+        "ComponentMetaResultDb / ComponentMetaResultKey",
+        "CachedComponentMetaResult",
+        "ComponentMetaHost / ComponentMetaSession",
+        "component_meta_payload::{ComponentMetaSurface, TypeHandle, assemble_volar_payload, assemble_surface_from_analysis, resolve_type_expansion}",
+        "component_meta_resolution_policy",
+        "COMPONENT_META_SCHEMA_VERSION / component_meta_payload / encode_component_meta_payload",
+        "FfiComponentMeta / FfiComponentMetaOutputLane"
+      ],
+      "paths": [
+        "crates/verter_session/src/meta.rs",
+        "crates/verter_session/src/meta/output_api.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry_resolution.rs",
+        "crates/verter_session/src/resolver_core/component_meta",
+        "crates/verter_session/src/component_meta_result_db.rs",
+        "crates/verter_session/src/component_meta_cached_result.rs",
+        "crates/verter_session/src/component_meta_result_admission.rs",
+        "crates/verter_session/src/component_meta_host.rs",
+        "crates/verter_session/src/component_meta_payload.rs",
+        "crates/verter_session/src/component_meta_resolution_policy",
+        "crates/verter_session/src/meta_resolve",
+        "crates/verter_protocol/src/component_meta.rs",
+        "crates/verter_protocol/src/types.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "TIF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D13",
+      "category": "duplicate-component-information-authority",
+      "unit": "Macro-only public-API projection authority",
+      "symbols": [
+        "VerterHost::get_public_api / get_public_api_batch / get_public_api_with_mode / get_public_api_projection",
+        "ComponentPublicContract / PublicProp",
+        "ComponentApiProjector and its Vue/Svelte impls",
+        "FfiComponentPublicContract / FfiPublicProp / FfiPublicEvent / FfiPublicSlot / FfiPublicApiResult / PublicApiProjectionSubject"
+      ],
+      "paths": [
+        "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
+        "crates/verter_session/src/framework/public_contract.rs",
+        "crates/verter_session/src/framework/api_projector.rs",
+        "crates/verter_session/src/framework/api_projectors",
+        "crates/verter_protocol/src/types.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "TIF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D14",
+      "category": "duplicate-component-information-authority",
+      "unit": "Off-store framework-surface result caches",
+      "symbols": [
+        "FrameworkSurfaceStore / ErasedFrameworkSurfaceStore / StoredSurfaceDto",
+        "VueSurfaceKey / SvelteSurfaceKey"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/surface_store.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/mod.rs"
+      ],
+      "disposition": "delete",
+      "deletionOwner": "TIF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D15",
+      "category": "duplicate-component-information-authority",
+      "unit": "Legacy serde TypeInfo request vocabulary beside the graph envelope",
+      "symbols": ["FfiEvaluateTypeExpressionRequest", "FfiImportSpec", "FfiSymbolEntry"],
+      "paths": [
+        "crates/verter_protocol/src/typeinfo.rs",
+        "crates/verter_ffi/src/convert/typeinfo.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "TIF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "D16",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Untagged non-editor public positions",
+      "symbols": [
+        "NAPI get_code_actions(offset: u32) (UTF-16 by doc comment only)",
+        "WASM getCodeActions(offset: u32)",
+        "NapiTextEdit { spanStart, spanEnd }",
+        "NapiDocumentSymbol positions",
+        "NapiSourceRange { start, end }",
+        "NapiPreprocessorDiagnostic { line, column }",
+        "compile_request_response hard-coded OffsetEncoding::Utf16",
+        "MCP QuickFixParams.offset (byte offset)",
+        "proto GraphSpanRef { start, end }",
+        "proto GraphDiagnostic span offsets"
+      ],
+      "paths": [
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "crates/verter_napi/src/compile_request_response.rs",
+        "crates/verter_mcp/src/server.rs",
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "crates/verter_ffi/src/convert/offset.rs"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "ENCF0",
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
+      "receivingAcceptance": "ENCF0-AC1"
+    },
+    {
+      "id": "D17",
+      "category": "untagged-coordinate-or-public-identity",
+      "unit": "Fixed-UTF-16 editor contracts",
+      "symbols": [
+        "virtual_types.rs provider UTF16 literals",
+        "merge/position.rs mapped-run columns always UTF-16",
+        "utf16OffsetToPosition in the VS Code client"
+      ],
+      "paths": [
+        "crates/verter_lsp/src/type_provider/project_sync/virtual_types.rs",
+        "crates/verter_lsp/src/type_provider/merge/position.rs",
+        "packages/vue-vscode/src/utils.ts"
+      ],
+      "disposition": "replace",
+      "deletionOwner": "ENCL0",
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
+      "receivingAcceptance": "ENCL0-AC1"
+    },
+    {
+      "id": "D18",
+      "category": "duplicate-component-information-authority",
+      "unit": "Per-request framework component scan",
+      "symbols": ["build_workspace_components"],
+      "paths": ["crates/verter_lsp/src/server_utils.rs"],
+      "disposition": "replace",
+      "deletionOwner": "IDX0",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "IDX0"],
+      "receivingAcceptance": "IDX0-AC1"
+    }
+  ],
+  "inheritedCoordinateFile": "tests/kernel/ENC0/products/boundary-route-ledger.v1.json",
+  "coordinateRule": "ENC0 P01-P24 and P32 retain ENCL0/ENCF0 ownership and their concrete intended contracts; no new wire is added here.",
+  "routes": [
+    {
+      "id": "EMB-D01",
+      "route": "Alpine attribute directive value codecs private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "ALP1",
+      "successorPath": ["EMB0", "EMB0I", "ALP1"],
+      "receivingAcceptance": "ALP1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D02",
+      "route": "Angular syntax geometry without activation private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "ANG1",
+      "successorPath": ["EMB0", "EMB0I", "ANG1"],
+      "receivingAcceptance": "ANG1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D03",
+      "route": "Angular inline/external template/style attachments and resource bases private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "ANG1M",
+      "successorPath": ["EMB0", "EMB0I", "ANG1M"],
+      "receivingAcceptance": "ANG1M-AC1",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D04",
+      "route": "Astro grammar recovery geometry private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "AST1",
+      "successorPath": ["EMB0", "EMB0I", "AST1"],
+      "receivingAcceptance": "AST1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D05",
+      "route": "Astro frontmatter/expression/script/style attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "AST1M",
+      "successorPath": ["EMB0", "EMB0I", "AST1M"],
+      "receivingAcceptance": "AST1M-AC1",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D06",
+      "route": "Markdown fence embedded-region isolation private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "DATA5",
+      "successorPath": ["EMB0", "EMB0I", "DATA5"],
+      "receivingAcceptance": "DATA5-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D07",
+      "route": "DynamoDB expressions in authored literals private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "DDB1",
+      "successorPath": ["EMB0", "EMB0I", "DDB1"],
+      "receivingAcceptance": "DDB1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D08",
+      "route": "Pug expansion and repeated mixin origins private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "DIAL2",
+      "successorPath": ["EMB0", "EMB0I", "DIAL2"],
+      "receivingAcceptance": "DIAL2-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D09",
+      "route": "Stylesheet/PostCSS transform maps and unmappable edits private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "DIAL7",
+      "successorPath": ["EMB0", "EMB0I", "DIAL7"],
+      "receivingAcceptance": "DIAL7-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D10",
+      "route": "Vue proven defineComponent template literal extraction private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "EAK1",
+      "successorPath": ["EMB0", "EMB0I", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D11",
+      "route": "Glimmer/Handlebars syntax geometry private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "GLM1",
+      "successorPath": ["EMB0", "EMB0I", "GLM1"],
+      "receivingAcceptance": "GLM1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D12",
+      "route": "GJS/GTS tag and colocated template attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "GLM1M",
+      "successorPath": ["EMB0", "EMB0I", "GLM1M"],
+      "receivingAcceptance": "GLM1M-AC1",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D13",
+      "route": "htmx attribute value codecs private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "HTX1",
+      "successorPath": ["EMB0", "EMB0I", "HTX1"],
+      "receivingAcceptance": "HTX1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D14",
+      "route": "Lit dialect profiles consume INT-TT adapter, no Lit-local codec private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "LIT1",
+      "successorPath": ["EMB0", "EMB0I", "LIT1"],
+      "receivingAcceptance": "LIT1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D15",
+      "route": "Carrier recovery preserves region geometry private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "LSO1",
+      "successorPath": ["EMB0", "EMB0I", "LSO1"],
+      "receivingAcceptance": "LSO1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D16",
+      "route": "MDX ESM/expression/JSX attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "MDX1M",
+      "successorPath": ["EMB0", "EMB0I", "MDX1M"],
+      "receivingAcceptance": "MDX1M-AC1",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D17",
+      "route": "Marko grammar recovery geometry private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "MRK1",
+      "successorPath": ["EMB0", "EMB0I", "MRK1"],
+      "receivingAcceptance": "MRK1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D18",
+      "route": "Marko script/style/expression attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "MRK1M",
+      "successorPath": ["EMB0", "EMB0I", "MRK1M"],
+      "receivingAcceptance": "MRK1M-AC1",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D19",
+      "route": "Preact carrier attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "PRE1",
+      "successorPath": ["EMB0", "EMB0I", "PRE1"],
+      "receivingAcceptance": "PRE1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D20",
+      "route": "Qwik 2 carrier attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "QWK1",
+      "successorPath": ["EMB0", "EMB0I", "QWK1"],
+      "receivingAcceptance": "QWK1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D21",
+      "route": "React carrier attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "RCT1",
+      "successorPath": ["EMB0", "EMB0I", "RCT1"],
+      "receivingAcceptance": "RCT1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D22",
+      "route": "Regex host-literal and pattern map levels private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "RGX1",
+      "successorPath": ["EMB0", "EMB0I", "RGX1"],
+      "receivingAcceptance": "RGX1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D23",
+      "route": "Solid carrier attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "SLD1",
+      "successorPath": ["EMB0", "EMB0I", "SLD1"],
+      "receivingAcceptance": "SLD1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D24",
+      "route": "Stencil carrier attachments private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "STN1",
+      "successorPath": ["EMB0", "EMB0I", "STN1"],
+      "receivingAcceptance": "STN1-AC2",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D25",
+      "route": "External blocks and preprocessor source-identity maps private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "STP38",
+      "successorPath": ["EMB0", "EMB0I", "STP38"],
+      "receivingAcceptance": "STP38-AC1",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    },
+    {
+      "id": "EMB-D26",
+      "route": "Shared tagged-template adapter, tag-profile registry and hole placeholders over EMB0I private literal decoder/map composer",
+      "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
+      "deletionOwner": "INT-TT",
+      "successorPath": ["EMB0", "EMB0I", "INT-TT"],
+      "receivingAcceptance": "INT-TT-AC5",
+      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+    }
+  ],
+  "categoryCoverage": {
+    "central framework switch": {
+      "referenced": ["D01", "D02", "D03", "D04", "D05", "D06", "D07"],
+      "newEmbeddedPopulation": [],
+      "rejection": "No framework branch in shared codec policies; consumer adoption and EMB0I-AC1 enforce this."
+    },
+    "untagged coordinate/public identity": {
+      "referenced": ["D08", "D16", "D17"],
+      "newEmbeddedPopulation": [],
+      "rejection": "No standalone EmbeddedSourceId, unqualified map basis or escaping private UTF-16/WTF-8 offset; EMB0I-AC2/AC3."
+    },
+    "duplicate component information authority": {
+      "referenced": ["D12", "D13", "D14", "D15", "D18"],
+      "newEmbeddedPopulation": [],
+      "rejection": "Attachments consume TypeInfo; inherited TIF1/IDX0 deletion owners stay sole."
+    }
+  },
+  "retainedAuthorities": [
+    {
+      "path": "crates/verter_compiler/src/code_transform",
+      "reason": "Accepted mapping products and map emission, not a duplicate literal codec."
+    },
+    {
+      "path": "crates/verter_session/src/content_mapper.rs",
+      "reason": "Accepted exact projection/refusal plane, not a second codec."
+    },
+    {
+      "path": "crates/verter_session/src/block_content.rs",
+      "reason": "Qualified external/preprocessor map identity and publication authority; STP38 integrates without a second authority."
+    },
+    {
+      "path": "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
+      "symbol": "decode_html_entities",
+      "reason": "Vue runtime HTML-entity semantics, not cooked authored literal geometry."
+    },
+    {
+      "path": "crates/verter_compiler/src/svelte/runtime/reactive_fold.rs",
+      "symbol": "cooked_quasi",
+      "reason": "Svelte runtime constant folding, not authored embedded-region geometry."
+    }
+  ],
+  "cutover": "No production deletion in EMB0 or EMB0I. Exactly one consumer-local owner retires/rejects each private geometry route after equivalence; inherited deletion owners are unchanged."
+}
