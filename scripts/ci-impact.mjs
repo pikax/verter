@@ -834,6 +834,7 @@ export const CI_INERT_PATHS = Object.freeze([
   // Product, architecture and evidence inventories that only local verifiers
   // or the docs build read.
   "tests/documentation/**",
+  "tests/framework-erb/ERB0/**",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",
