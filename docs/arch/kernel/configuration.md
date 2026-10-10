@@ -26,14 +26,16 @@ the [constitution](constitution.md) or the identity decision assign.
 
 The reviewed contract data lives in `tests/kernel/CFG0/products/`:
 
-| File | Holds |
-| ---- | ----- |
-| `configuration-inventory.v1.json` | Contract rules `CR01`–`CR24`, outcomes `CF-O01`–`CF-O14`, consumers `CF-C01`–`CF-C19`, retained host inputs `CF-H01`–`CF-H04`, displaced routes `CF-D01`–`CF-D10`, the UAK0 routes it references, coverage of each deletion category, empty populations, the open binding gap `G01`, findings and transferred obligations |
-| `configuration-case-table.v1.json` | Cases `CC01`–`CC17`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable |
+| File                               | Holds                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `configuration-inventory.v1.json`  | Contract rules `CR01`–`CR24`, outcomes `CF-O01`–`CF-O14`, consumers `CF-C01`–`CF-C19`, retained host inputs `CF-H01`–`CF-H04`, displaced routes `CF-D01`–`CF-D10`, the UAK0 routes it references, coverage of each deletion category, empty populations, the closed ownership gap `G01`, receiving contracts, findings and transferred obligations |
+| `configuration-case-table.v1.json` | Cases `CC01`–`CC17`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable                                                                                                                                                                                          |
 
-Every `successorPath` starts at CFG0 and follows predecessor edges in the
-controller-owned plan. UAK0, UAK1 and VID0 rows keep their owners; CFG0 only
-references them.
+Every `successorPath` starts at CFG0. CFG1-owned rows run CFG0, BR0, CFG1.
+The seven receiving consumers insert that prefix ahead of their existing edges.
+UAO0 is a separate CFG1 validation binding. `UAO0-AC-R1` and `UAO0-AC-R2`
+retain `CFG1-AC1`–`CFG1-AC4` as prerequisites.
+UAK0, UAK1 and VID0 rows keep their owners; CFG0 only references them.
 
 ## Envelope v1
 
@@ -54,17 +56,18 @@ evaluates JavaScript to read it.
   exactly one downstream translator. The envelope knows its name and owner,
   never its fields. The sections known at this decision are:
 
-  | Section | Schema owner |
-  | ------- | ------------ |
-  | `lint` | LNTCFG0 |
-  | `assist` | LK3 |
-  | `format` | FCFG0 |
-  | `build` | TSB4X (first row: `build.solid`) |
-  | `mcp` | AGM5 (per-tool and per-family switches) |
+  | Section  | Schema owner                            |
+  | -------- | --------------------------------------- |
+  | `lint`   | LNTCFG0                                 |
+  | `assist` | LK3                                     |
+  | `format` | FCFG0                                   |
+  | `build`  | TSB4X (first row: `build.solid`)        |
+  | `mcp`    | AGM5 (per-tool and per-family switches) |
 
   Registering a section name is a catalog row (CAT0), not an envelope change,
   so adding one does not bump `version`. UAO0 reconciles the catalog rows with
   this table.
+
 - **CR04.** Spellings decode once, at capture, into typed identities. A
   framework family key, a release, a profile key, an embedded-language kind, a
   dialect and a coexistence capability cell each decode through the catalog
@@ -80,7 +83,7 @@ evaluates JavaScript to read it.
 The envelope owns these three schemas. No other base section exists.
 
 - **`frameworks`** — `{ "<family>": "auto" | "off" | { "state": "on",
-  "release": "<exact release>" } }`. `auto` is the default. `on` must name a
+"release": "<exact release>" } }`. `auto` is the default. `on` must name a
   spelling that decodes to a `ReleaseId` (VID0 `I04`). A decoded `ReleaseId`
   that is not admitted is a valid configuration value; FWA1 reports
   `unsupported-version` and does not coerce it (VID0 `R06`). A floating tag,
@@ -92,7 +95,7 @@ The envelope owns these three schemas. No other base section exists.
   key would be a cycle (`Invalid(ActivationKeyInProfile)`).
 - **`embedded`** — tag bindings and default dialects for embedded-language
   recognition. `embedded.tags` is a list of `{ "kind", "module", "export",
-  "dialect"? }`: a tag is bound to an import source and export, never to a
+"dialect"? }`: a tag is bound to an import source and export, never to a
   spelling alone. `embedded.dialects` maps a kind to its default dialect
   (`{ "sql": "postgresql" }`). This covers SQL dialect and tags, Cypher tags,
   and Vue/Svelte embedded-document tags. INT5 owns activation from tags, SQL2
@@ -286,13 +289,13 @@ produces a new effective configuration, never an edit of the old one.
 
 Every effective-configuration query returns one of:
 
-| Outcome | Meaning |
-| ------- | ------- |
-| `Complete` | Every layer read, decoded and merged |
+| Outcome                   | Meaning                                                                                                                                                                |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Complete`                | Every layer read, decoded and merged                                                                                                                                   |
 | `Invalid { diagnostics }` | Syntax error, unknown or scope-restricted key, unsupported version, unknown framework release or profile key, root in an extended file, a target outside the workspace |
-| `Cycle { chain }` | An `extends` cycle |
-| `NeedInputs { paths }` | A prepared-input host did not supply a file and did not prove it absent |
-| `Uncaptured { reason }` | An executable ecosystem config that static capture cannot read and no authorized execution captured |
+| `Cycle { chain }`         | An `extends` cycle                                                                                                                                                     |
+| `NeedInputs { paths }`    | A prepared-input host did not supply a file and did not prove it absent                                                                                                |
+| `Uncaptured { reason }`   | An executable ecosystem config that static capture cannot read and no authorized execution captured                                                                    |
 
 An `Invalid` file makes every scope that reads it `Invalid`. It never falls
 back to defaults, and scopes that do not read it are unaffected.
@@ -302,36 +305,36 @@ back to defaults, and scopes that do not read it are unaffected.
 UAK0 and VID0 do not cover these ten. Each has one production-capable
 deletion owner.
 
-| Route | Unit | Disposition | Deletion owner |
-| ----- | ---- | ----------- | -------------- |
-| `CF-D01` | `.verterrc.json` project reader (`discover_lint_config`, `load_verterrc`, `VerterProjectConfig`) in `verter_diagnostics`, used by the LSP and MCP | replace with the `lint` section; never merged beside the envelope | LNTCFG0 (`LNTCFG0-AC1`) |
-| `CF-D02` | Legacy ESLint JSON reader (`load_eslint_config`: `.eslintrc.json`, package.json `eslintConfig`, `vue/` rules only) | replace with captured ESLint snapshots and the static translator | LNTCFG0 (`LNTCFG0-AC1`) |
-| `CF-D03` | Lint settings from client and process inputs: `merge_init_options` over `initializationOptions.lint`, `verter.lint.*` and `verter.mcp.lintPreset`, MCP `McpServerConfig.lint_preset` | replace with the user layer and the `lint` section | LNTCFG0 (`LNTCFG0-AC1`) |
-| `CF-D04` | Rust-side Vite config capture: `analyze_vite_config`, `execute_trusted_vite_config` (spawns Node from the LSP host), `LKG_CACHE`, `ViteConfigOptions`, `$/verter/viteConfigTrustRequired` | replace with JS-host capture adapters and `HostAliasFact` | SM1 (`SM1-AC1`) |
-| `CF-D05` | SSR and Nuxt detection by file-name probe (`detect_ssr_project`: `nuxt.config.*`, `.nuxt/`; unplugin `detectNuxt`) | replace with Nuxt profile applicability from captured facts | NUX0 (`NUX0-AC1`) |
-| `CF-D06` | Duplicate tsconfig readers: `verter_workspace::config` and `virtual_config` (a second `extends` walk that follows only a string `extends`), `verter_tsc::tsconfig`, component-meta `parseTsconfig` (no `extends`) | replace with one captured tsconfig lineage and discovery read set | PM1 (`PM1-AC3`) |
-| `CF-D07` | Whole-workspace re-initialisation on any configuration-file change (`is_config_file` → `trigger_registry_rebuild`; `WorkspaceChange::ConfigChanged` graph rebuild) | replace with read-set invalidation and atomic snapshot publication | PM3 (`PM3-AC3`) |
-| `CF-D08` | Host-config wire that accepts unknown fields silently (`FfiHostConfig` has no `deny_unknown_fields`; `WasmHostConfigWire` flattens it) | reject unknown fields through the versioned public envelope | PUB0T (`PUB0T-AC4`) |
-| `CF-D09` | unplugin `template.compilerOptions.isCustomElement`, documented but not forwarded (`typedRenderRequest` sends `isCustomElement: []`) | capture the consumer policy and invalidate on change | VCE0 (`VCE0-AC2`) |
-| `CF-D10` | `verter.lint.*` client changes neither restart nor notify the server, so lint settings stay stale until restart | replace with user-layer revisions under `CR16` | LNTCFG0 (`LNTCFG0-AC3`) |
+| Route    | Unit                                                                                                                                                                                                              | Disposition                                                        | Deletion owner          |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------- |
+| `CF-D01` | `.verterrc.json` project reader (`discover_lint_config`, `load_verterrc`, `VerterProjectConfig`) in `verter_diagnostics`, used by the LSP and MCP                                                                 | replace with the `lint` section; never merged beside the envelope  | LNTCFG0 (`LNTCFG0-AC1`) |
+| `CF-D02` | Legacy ESLint JSON reader (`load_eslint_config`: `.eslintrc.json`, package.json `eslintConfig`, `vue/` rules only)                                                                                                | replace with captured ESLint snapshots and the static translator   | LNTCFG0 (`LNTCFG0-AC1`) |
+| `CF-D03` | Lint settings from client and process inputs: `merge_init_options` over `initializationOptions.lint`, `verter.lint.*` and `verter.mcp.lintPreset`, MCP `McpServerConfig.lint_preset`                              | replace with the user layer and the `lint` section                 | LNTCFG0 (`LNTCFG0-AC1`) |
+| `CF-D04` | Rust-side Vite config capture: `analyze_vite_config`, `execute_trusted_vite_config` (spawns Node from the LSP host), `LKG_CACHE`, `ViteConfigOptions`, `$/verter/viteConfigTrustRequired`                         | replace with JS-host capture adapters and `HostAliasFact`          | SM1 (`SM1-AC1`)         |
+| `CF-D05` | SSR and Nuxt detection by file-name probe (`detect_ssr_project`: `nuxt.config.*`, `.nuxt/`; unplugin `detectNuxt`)                                                                                                | replace with Nuxt profile applicability from captured facts        | NUX0 (`NUX0-AC1`)       |
+| `CF-D06` | Duplicate tsconfig readers: `verter_workspace::config` and `virtual_config` (a second `extends` walk that follows only a string `extends`), `verter_tsc::tsconfig`, component-meta `parseTsconfig` (no `extends`) | replace with one captured tsconfig lineage and discovery read set  | PM1 (`PM1-AC3`)         |
+| `CF-D07` | Whole-workspace re-initialisation on any configuration-file change (`is_config_file` → `trigger_registry_rebuild`; `WorkspaceChange::ConfigChanged` graph rebuild)                                                | replace with read-set invalidation and atomic snapshot publication | PM3 (`PM3-AC3`)         |
+| `CF-D08` | Host-config wire that accepts unknown fields silently (`FfiHostConfig` has no `deny_unknown_fields`; `WasmHostConfigWire` flattens it)                                                                            | reject unknown fields through the versioned public envelope        | PUB0T (`PUB0T-AC4`)     |
+| `CF-D09` | unplugin `template.compilerOptions.isCustomElement`, documented but not forwarded (`typedRenderRequest` sends `isCustomElement: []`)                                                                              | capture the consumer policy and invalidate on change               | VCE0 (`VCE0-AC2`)       |
+| `CF-D10` | `verter.lint.*` client changes neither restart nor notify the server, so lint settings stay stale until restart                                                                                                   | replace with user-layer revisions under `CR16`                     | LNTCFG0 (`LNTCFG0-AC3`) |
 
 CFG0 references these routes owned elsewhere:
 
-| Route | Owner | Concern |
-| ----- | ----- | ------- |
-| UAK0 `D09` | COX0 | Framework admission through `--frameworks`, `FrameworkOptions` and the NAPI/WASM `frameworks` option; its configuration successor is the `frameworks` base section read by FWA1. `NapiMetaProject` ignores `frameworks`, which belongs to the same population |
-| UAK0 `D10` | COX0 | The `vue` configuration section the client sends and the server never reads (`initializationOptions.configuration`) |
-| UAK0 `D19` | PM1 | `ProjectRegistry` and `ProjectConfig` as the per-project configuration authority |
-| VID0 `V-D05` | FWA1 | Svelte release admission by string prefix |
+| Route        | Owner | Concern                                                                                                                                                                                                                                                       |
+| ------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| UAK0 `D09`   | COX0  | Framework admission through `--frameworks`, `FrameworkOptions` and the NAPI/WASM `frameworks` option; its configuration successor is the `frameworks` base section read by FWA1. `NapiMetaProject` ignores `frameworks`, which belongs to the same population |
+| UAK0 `D10`   | COX0  | The `vue` configuration section the client sends and the server never reads (`initializationOptions.configuration`)                                                                                                                                           |
+| UAK0 `D19`   | PM1   | `ProjectRegistry` and `ProjectConfig` as the per-project configuration authority                                                                                                                                                                              |
+| VID0 `V-D05` | FWA1  | Svelte release admission by string prefix                                                                                                                                                                                                                     |
 
 Deletion-category coverage:
 
-| Category | Recorded here | Referenced |
-| -------- | ------------- | ---------- |
-| central framework switch | `CF-D05` | UAK0 `D10` |
-| untagged coordinate/public identity | `CF-D08` | UAK0 `D09`, `D19`, VID0 `V-D05` |
-| duplicate component information authority | none: no configuration route carries component information | — |
-| configuration authority (this decision's own population) | `CF-D01`–`CF-D04`, `CF-D06`, `CF-D07`, `CF-D09`, `CF-D10` | — |
+| Category                                                 | Recorded here                                              | Referenced                      |
+| -------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------- |
+| central framework switch                                 | `CF-D05`                                                   | UAK0 `D10`                      |
+| untagged coordinate/public identity                      | `CF-D08`                                                   | UAK0 `D09`, `D19`, VID0 `V-D05` |
+| duplicate component information authority                | none: no configuration route carries component information | —                               |
+| configuration authority (this decision's own population) | `CF-D01`–`CF-D04`, `CF-D06`, `CF-D07`, `CF-D09`, `CF-D10`  | —                               |
 
 ### Retained host inputs
 
@@ -350,18 +353,48 @@ their owners and never enter an effective configuration:
   `CompileProfile`. Their option vocabulary is CMP0's; CMP0-F assigns any
   later move to a profile-scoped key.
 
-## Open binding gap
+## Envelope implementation owner and receiving contracts
 
-**`G01` — the envelope loader has no implementation owner.** No production
-code reads `verter.config.jsonc` at this head, and no plan node owns the
-loader: envelope parsing (`CR01`–`CR04`), the base-section schemas, the
-precedence merge (`CR05`–`CR12`), the effective-configuration key and read set
-(`CR13`–`CR17`), the user layer and prepared inputs (`CR22`, `CR23`). The
-charter's 2026-10-02 amendment records this finite gap. It covers `CF-O01`,
-`CF-O02`, `CF-O03`, `CF-O04`, `CF-O06`, `CF-O07` and `CF-O14`. Their
-implementation ownership is unresolved under that exception. UAO0 reports a
-missing loader as a finding against this binding table and does not implement
-it. Every other outcome has one owner.
+The captured `cfg0-envelope-loader-owner` and `cfg1-plan-node` rulings assign
+the loader to CFG1, after CFG0 and BR0. They supersede the earlier unowned
+loader exception. `G01` is closed as an ownership gap; no loader exists at
+this head, and closing the gap does not claim runtime delivery.
+
+| Receiving acceptance | Outcomes           | Rules          | Obligation                                                                                                         |
+| -------------------- | ------------------ | -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `CFG1-AC1`           | `CF-O01`, `CF-O04` | `CR01`–`CR04`  | Envelope parsing, closed base-section schemas, decode-once identities and fail-closed outcomes                     |
+| `CFG1-AC2`           | `CF-O02`, `CF-O03` | `CR05`–`CR12`  | Deterministic precedence, leaf provenance and ordered opaque product contributions                                 |
+| `CFG1-AC3`           | `CF-O06`           | `CR13`–`CR18`  | Effective keys, read sets, section/profile invalidation, demand-owned placement and degraded results never warming |
+| `CFG1-AC4`           | `CF-O07`, `CF-O14` | `CR22`, `CR23` | Explicit revisioned user layer and prepared inputs through the same core parser and merger                         |
+
+CFG1 does not absorb downstream schemas, activation semantics or capture
+services. CENV1C retains static ecosystem capture (`CR19`, `CR21`); CENV5
+retains authorised dynamic evaluation into a new snapshot (`CR20`). CENV2
+retains secret handles (`CR24`). UAO0 owns executable inventory validation
+and case-table proofs, and never implements a substitute loader.
+
+The seven receiving consumers must follow CFG1 as well as their existing
+predecessors. Their existing acceptances consume these prerequisites:
+
+| Receiver | Receiving acceptance       | CFG1 prerequisites                                                         |
+| -------- | -------------------------- | -------------------------------------------------------------------------- |
+| CENV1C   | `CENV1C-AC1`               | `AC2`, `AC3`, `AC4` for effective provenance and revisioned inputs         |
+| FWA1     | `FWA1-AC3`, `FWA1-AC6`     | `AC1`, `AC2`, `AC3` for decoded framework switches; admission stays FWA1's |
+| LNTCFG0  | `LNTCFG0-AC2`              | `AC2`, `AC3` for ordered lint contributions and invalidation               |
+| FCFG0    | `FCFG0-AC2`                | `AC2`, `AC3` for ordered format contributions and invalidation             |
+| INT5     | `INT5-AC5`                 | `AC1`, `AC2`, `AC3` for decoded embedded bindings                          |
+| EDOC1    | `EDOC1-AC1`                | `AC1`, `AC2`, `AC3` for embedded-document bindings                         |
+| COXD2    | `COXD2-AC2`                | `AC1`–`AC4` for scoped coexistence choices                                 |
+
+UAO0 is a separate CFG1 validation binding. `UAO0-AC-R1` and `UAO0-AC-R2`
+retain `CFG1-AC1`–`CFG1-AC4` as prerequisites and never implement a substitute
+loader.
+
+Ruling `cfg1-receiving-contract` (2026-10-10) authorises CFG1 after CFG0 and
+BR0, the four acceptances above, and a CFG1 predecessor edge on CENV1C, FWA1,
+LNTCFG0, FCFG0, INT5, EDOC1, COXD2 and UAO0. The inventory's
+`receivingContracts` records that authorisation. These products do not
+implement the loader.
 
 ## Findings recorded for the receiving owners
 
@@ -374,15 +407,17 @@ it. Every other outcome has one owner.
   `workspace/didChangeConfiguration` handler. The VS Code client restarts the
   server for some settings and does nothing for others (`CF-D10`).
 - **The `.verterrc.json` `ssr` key has no successor key.** `CF-D01`'s lint
-  and ignore keys move to `lint`; its `ssr` key waits on `G01`.
+  and ignore keys move to `lint`; its `ssr` migration requires CFG1's
+  base-section decoding and provenance (`CFG1-AC1`, `CFG1-AC2`). This repair
+  introduces no successor `ssr` key and permits no silent drop.
 - **Settings sent and never read.** `initializationOptions.frameworks` (UAK0
   `D09`) and `initializationOptions.configuration` (UAK0 `D10`).
 
 ## Empty populations
 
 - **No `verter.config.*` loader.** The only mention is a design note in
-  `docs/plans/framework-plugin-system.md`. The gap is `G01`; this head has
-  none to delete.
+  `docs/plans/framework-plugin-system.md`. CFG1 owns implementation; this
+  head has none to delete.
 - **No ambient global configuration.** No production code reads
   `dirs::home_dir`, XDG directories or `~/.config`. `HOME` is read only to
   locate Node (`CF-H03`).
@@ -403,10 +438,10 @@ coverage and bounded inspection discriminate it. The diff adds no test.
 
 - **AC1 — ownership contract.** The inventory binds every outcome, consumer
   and displaced route to one existing plan node, a successor path from CFG0
-  and a receiving acceptance ID, except the loader outcomes held by `G01`
-  (`CF-O01`, `CF-O02`, `CF-O03`, `CF-O04`, `CF-O06`, `CF-O07`, `CF-O14`).
-  Their implementation ownership is unresolved. UAO0 reports that gap and
-  does not implement the loader.
+  and a receiving acceptance ID. The seven loader outcomes bind to
+  `CFG1-AC1`–`CFG1-AC4` above. Ruling `cfg1-receiving-contract` (2026-10-10)
+  authorises those obligations and the CFG0 → BR0 → CFG1 order. Documentation
+  records the contract; it does not implement the loader.
   The executable validator is UAO0's (`UAO0-AC-R1`), and so are the
   precedence, fail-closed, provenance and invalidation fixtures: `CC01`–`CC04`,
   `CC06`, `CC07`, `CC13` and `CC17` (`UAO0-AC-R2`). Every other case names its own
@@ -433,6 +468,7 @@ coverage and bounded inspection discriminate it. The diff adds no test.
 
   New tests for the envelope and the case table belong to UAO0 and to the
   owners named per case.
+
 - **AC3 — incremental equivalence: not applicable.** No cache, cancellation,
   stale-publication or partial-result authority is touched, and no production
   byte changes. `CR16`, `CR17`, `CC07`, `CC08` and `CC17` bind the later proof.
