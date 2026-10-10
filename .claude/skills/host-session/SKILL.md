@@ -385,7 +385,11 @@ retained bytes at a publication no later than that position; an unpublished out-
 settles, including completions, completion details/resolve and signature help. The LSP's bounded
 provider recovery re-binds a conflicted query to the surface it records now (no resync); the hub
 never counts a conflict as crash evidence (it completes neutrally, neither recording an error nor
-erasing crash strikes). No position is ever fabricated.
+erasing crash strikes). No position is ever fabricated. Tsserver reserves its FIFO slot within
+the ambient hop budget, with the 120-second writer-stall backstop when no deadline is installed.
+A reservation failure releases the pending registration without cancelling an unseen sequence;
+only a full, silent backstop wait contributes hang evidence. Once the frame is placed, the response
+wait remains unbounded so a healthy cold project can finish.
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
 before receiving them, and the install announces exactly what it dropped

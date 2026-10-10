@@ -4371,6 +4371,100 @@ fn test_transport_with_notify(
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn bound_stdin_reservation_respects_the_ambient_deadline_without_recovery() {
+    for background_epoch in [None, Some(0)] {
+        let (stdin_tx, mut stdin_rx) = mpsc::channel(1);
+        stdin_tx
+            .try_send(TsserverStdinMessage::Frame(vec![]))
+            .unwrap();
+        let transport = test_transport(stdin_tx);
+        let budget = std::time::Duration::from_secs(1);
+        let started = tokio::time::Instant::now();
+        let result = crate::deadline::with_deadline(budget, async {
+            tokio::time::timeout(
+                budget,
+                transport.request_bound(
+                    "quickinfo",
+                    WireBinding::Plain(serde_json::json!({})),
+                    background_epoch,
+                ),
+            )
+            .await
+        })
+        .await
+        .expect("the transport must refuse before the caller deadline");
+        assert!(result
+            .err()
+            .expect("the writer cannot accept a frame")
+            .message
+            .contains("stdin enqueue timed out"));
+        assert!(started.elapsed() < budget);
+        assert_eq!(pending_len(&transport), 0);
+        assert!(
+            transport
+                .cancellation
+                .as_ref()
+                .unwrap()
+                .written
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "an unplaced request must not cancel an unseen sequence"
+        );
+        assert_eq!(transport.pending.background_seq.load(Ordering::Acquire), 0);
+        assert_eq!(
+            transport.liveness.strikes(),
+            0,
+            "a shortened wait is not hang evidence"
+        );
+        stdin_rx.recv().await.unwrap();
+        assert!(
+            matches!(stdin_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no query frame was placed"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bound_stdin_reservation_has_a_backstop_without_an_ambient_deadline() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel(1);
+    stdin_tx
+        .try_send(TsserverStdinMessage::Frame(vec![]))
+        .unwrap();
+    let transport = test_transport(stdin_tx);
+    let result = tokio::time::timeout(
+        LOADING_WEDGE_SILENCE_CAP * 2,
+        transport.request_bound("quickinfo", WireBinding::Plain(serde_json::json!({})), None),
+    )
+    .await
+    .expect("an unscoped transport without recovery must not wait forever");
+    assert!(result
+        .err()
+        .expect("the writer cannot accept a frame")
+        .message
+        .contains("stdin enqueue timed out"));
+    assert_eq!(pending_len(&transport), 0);
+    assert!(transport
+        .cancellation
+        .as_ref()
+        .unwrap()
+        .written
+        .lock()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        transport.liveness.strikes(),
+        1,
+        "a full silent writer-stall wait is hang evidence"
+    );
+    stdin_rx.recv().await.unwrap();
+    assert!(matches!(
+        stdin_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
 #[tokio::test]
 async fn silence_watchdog_restarts_without_timing_out_the_request() {
     let pending = Arc::new(TsserverPendingRequests::default());

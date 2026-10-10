@@ -1266,10 +1266,30 @@ impl TsserverTransport {
                 // The stdin slot is reserved first, so placing the frame is a
                 // synchronous step the ledger can bracket: nothing else reaches
                 // stdin between a frame's ledger record and its position.
-                let Ok(permit) = self.stdin_tx.reserve().await else {
-                    registration.disarm();
-                    self.pending.table.take(seq);
-                    return Err(TypeProviderError::new("stdin writer closed"));
+                // A blocked writer has made no engine progress. Bound this wait
+                // even when no recovery notifier or caller deadline is installed;
+                // once placed, healthy slow engine work keeps its unbounded wait.
+                let hop = crate::deadline::hop_budget(LOADING_WEDGE_SILENCE_CAP);
+                let issued_at = std::time::Instant::now();
+                let permit = match tokio::time::timeout(hop, self.stdin_tx.reserve()).await {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => {
+                        registration.disarm();
+                        self.pending.table.take(seq);
+                        return Err(TypeProviderError::new("stdin writer closed"));
+                    }
+                    Err(_) => {
+                        // The frame was never placed: release the registration
+                        // without cancelling a sequence the engine has not seen.
+                        registration.disarm();
+                        self.pending.table.take(seq);
+                        if hop >= LOADING_WEDGE_SILENCE_CAP {
+                            self.note_hang_failure(command, issued_at);
+                        }
+                        return Err(TypeProviderError::new(format!(
+                            "request '{command}' stdin enqueue timed out after {hop:?}"
+                        )));
+                    }
                 };
                 let frame = |arguments: serde_json::Value| {
                     let message = serde_json::json!({
