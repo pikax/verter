@@ -99,6 +99,10 @@ verification obligations, not executed tests in this contract:
 | The same document-origin link with a disabled literal `_parent` frame | Redirector excludes the disabled frame; retain the disabled-state condition and do not claim an enabled target or ancestor relation | STIM4T static frame relation verification |
 | The same document-origin link with an enabled literal `_parent` frame nested inside another frame | Redirector selects the literal ID; retain that authored ID relation separately from the selected controller's subsequent ancestor resolution | STIM4T static frame relation verification |
 | An ordinary frame ID matching an authored frame | Preserve the ordinary authored ID relation | STIM4T static frame relation verification |
+| `<turbo-frame id="messages" target="_top"><a href="/next" data-turbo-frame="_self">Next</a></turbo-frame>`, alongside an enabled `<turbo-frame id="_self">` | Literal `_self` takes precedence over the current frame; preserve its authored definition/reference/rename relation | STIM4T static frame relation verification |
+| The same frame-origin link with no literal `_self` frame | Fall back to `messages` despite its `_top` target; retain the current-frame relation, with no missing-frame diagnostic or literal `_self` ID rename relation | STIM4T static frame relation verification |
+| The same frame-origin link with a disabled literal `_self` frame | The literal target prevents interception; preserve its disabled-state condition and do not substitute `messages` as an enabled target | STIM4T static frame relation verification |
+| `<a href="/next" data-turbo-frame="_self">` outside every frame, with and without an enabled literal `<turbo-frame id="_self">` | The document redirector selects the enabled literal ID and preserves its authored relation; without that literal frame it selects no frame, with no current-frame fallback | STIM4T static frame relation verification |
 
 No existing production route is displaced by this contract; there is no legacy
 deletion. HWC2 owns HTML, ERBH1 owns template facts, the shared CSS selector parser

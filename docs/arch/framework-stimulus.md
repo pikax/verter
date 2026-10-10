@@ -63,7 +63,15 @@ action reads the button's. The case table hands this pair to STIM1.
 
 Turbo contributes frame, stream and stream-source declarations; the eight stream
 actions; frame-id relations; `data-turbo*` attributes and `turbo-*` meta facts.
-`_top`, `_self` and `_parent` are frame keywords. In the pinned release, `_parent`
+`_top`, `_self` and `_parent` are frame keywords. The pinned
+[frame controller](https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/core/frames/frame_controller.js)
+looks up a literal `turbo-frame id="_self"` before falling back to the current
+frame. An enabled literal target preserves its authored definition/reference/
+rename relation; without a literal frame, `_self` selects the current frame even when that
+frame has `target="_top"`. A disabled literal target prevents interception
+instead of falling back. For document-origin navigation, `_self` selects only
+an enabled literal frame; without one there is no current-frame fallback.
+The case table hands these controls to STIM4T. In the pinned release, `_parent`
 uses ancestor lookup for frame-origin navigation. Without an ancestor, the
 current frame controller does not intercept; this is not a missing frame-id
 relation. For document-origin navigation, the pinned
