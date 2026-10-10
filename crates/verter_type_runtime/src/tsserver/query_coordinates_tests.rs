@@ -88,6 +88,39 @@ fn beta_offset(content: &str) -> u32 {
 }
 
 #[tokio::test]
+async fn a_writer_dropped_after_reservation_refuses_the_query_and_releases_its_registration() {
+    let (provider, engine) = provider();
+    let file = "/ws/src/a.ts";
+    provider.transport.ledger.deliver_with(
+        [SurfaceEffect::deliver(file.to_string(), DISPATCHED.into())],
+        || (),
+    );
+    let Engine { stdin_rx, pending } = engine;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        provider.transport.request_query(
+            "quickinfo",
+            &ProviderQuery::at_engine_surface(file),
+            file,
+            move |_| {
+                // Argument conversion runs after reserve succeeds and before
+                // Permit::send, which cannot report that the receiver vanished.
+                drop(stdin_rx);
+                Some(serde_json::json!({ "file": file, "line": 1, "offset": 1 }))
+            },
+        ),
+    )
+    .await
+    .expect("a lost writer must fail without awaiting a response");
+    let Err(error) = result else {
+        panic!("a lost writer cannot serve the query");
+    };
+    assert_eq!(error.message, "stdin writer closed");
+    assert_eq!(pending.table.len(), 0, "no response registration survives");
+    assert_eq!(pending.interactive_in_flight.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
 async fn hover_range_decodes_from_the_dispatched_bytes_across_a_content_replacement() {
     let (provider, mut engine) = provider();
     let file = "/ws/src/a.ts";

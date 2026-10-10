@@ -1337,6 +1337,13 @@ impl TsserverTransport {
                         Err(DispatchRefusal::Conflict(conflict)) => Err(conflict.into()),
                     },
                 };
+                // A reserved permit cannot report a receiver lost before send.
+                // Refuse that delivery before awaiting a response it cannot earn.
+                if matches!(placed.as_ref(), Ok(Some(_))) && self.stdin_tx.is_closed() {
+                    registration.disarm();
+                    self.pending.table.take(seq);
+                    return Err(TypeProviderError::new("stdin writer closed"));
+                }
                 let query = match placed {
                     Ok(Some(query)) => query,
                     Ok(None) => {

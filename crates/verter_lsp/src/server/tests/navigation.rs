@@ -3473,6 +3473,113 @@ async fn rename_locations_refuse_a_target_moved_between_dispatch_and_decode() {
 }
 
 #[tokio::test]
+async fn foreign_target_answers_refuse_engine_bytes_changed_before_return() {
+    use crate::type_provider::protocol::{TypeCodeEdit, TypeLocation};
+    use crate::type_provider::traits::ProviderQuery;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Route {
+        Definition,
+        TypeDefinition,
+        References,
+        Rename,
+        CodeActions,
+    }
+
+    for route in [
+        Route::Definition,
+        Route::TypeDefinition,
+        Route::References,
+        Route::Rename,
+        Route::CodeActions,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let origin = "/ws/src/App.vue.tsx";
+        let target = "/ws/src/Child.vue.tsx";
+        let location = TypeLocation {
+            path: target.to_string(),
+            start: 6,
+            end: 9,
+        };
+        provider.set_definitions(origin, 3, vec![location.clone()]);
+        provider.set_type_definitions(origin, 3, vec![location.clone()]);
+        provider.set_references(origin, 3, vec![location]);
+        provider.set_rename_locations(
+            origin,
+            3,
+            vec![RenameLocation {
+                path: target.to_string(),
+                start: 6,
+                end: 9,
+            }],
+        );
+        provider.set_code_actions(
+            origin,
+            3,
+            6,
+            vec![TypeCodeAction {
+                title: "Rename binding".to_string(),
+                kind: Some("quickfix".to_string()),
+                edits: vec![TypeCodeEdit {
+                    path: target.to_string(),
+                    start: 6,
+                    end: 9,
+                    new_text: "message".to_string(),
+                }],
+            }],
+        );
+        provider.hold_engine_target(target, "const msg = 1;");
+        let query = ProviderQuery::at_engine_surface(origin);
+        let answer = || async {
+            match route {
+                Route::Definition => provider.get_definition(&query, 3).await.map(|r| r.len()),
+                Route::TypeDefinition => provider
+                    .get_type_definition(&query, 3)
+                    .await
+                    .map(|r| r.len()),
+                Route::References => provider.get_references(&query, 3).await.map(|r| r.len()),
+                Route::Rename => provider
+                    .get_rename_locations(&query, 3)
+                    .await
+                    .map(|r| r.len()),
+                Route::CodeActions => provider
+                    .get_code_actions(&query, 3, 6, &[])
+                    .await
+                    .map(|r| r.len()),
+            }
+        };
+        assert_eq!(
+            answer().await.expect("an unmoved target settles"),
+            1,
+            "{route:?}"
+        );
+
+        let barriers = Arc::new(crate::server::test_support::RequestBarriers::default());
+        provider.set_request_barriers(Arc::clone(&barriers));
+        barriers.arm(
+            crate::server::test_support::RequestBarrier::ProviderDecode,
+            Arc::new({
+                let provider = Arc::downgrade(&provider);
+                move |_| {
+                    provider
+                        .upgrade()
+                        .expect("the querying provider is alive")
+                        .hold_engine_target(target, "// moved\nconst msg = 1;");
+                    Box::pin(async {})
+                }
+            }),
+        );
+        let error = answer()
+            .await
+            .expect_err("a target moved before return refuses the answer");
+        assert!(
+            error.query_conflict,
+            "{route:?}: typed conflict, got {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn contract_builtin_directive_definition_is_fail_closed_empty() {
     // There is nothing authored to jump to for a built-in directive: the
     // definition stays empty (never a fabricated target).

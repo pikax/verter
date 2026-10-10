@@ -518,6 +518,18 @@ mod inner {
             })
         }
 
+        /// Settle foreign targets after every response wait, including the
+        /// decode barrier, before handing their locations back to the caller.
+        fn barriered_targets<'a, T: Send + 'a>(
+            &self,
+            held: Vec<(String, Option<Arc<str>>)>,
+            answer: ProviderFuture<'a, T>,
+        ) -> ProviderFuture<'a, T> {
+            let answer = self.barriered(answer);
+            let state = Arc::clone(&self.state);
+            Box::pin(async move { settle_targets(&state, &held, answer.await) })
+        }
+
         fn note_recorded(&self) {
             self.call_recorded.notify_waiters();
         }
@@ -1856,15 +1868,17 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            let state = Arc::clone(&self.state);
-            self.barriered(Box::pin(async move {
-                if fail {
-                    return Err(TypeProviderError::new(
-                        "scripted transient definition failure".to_string(),
-                    ));
-                }
-                settle_targets(&state, &held, result)
-            }))
+            self.barriered_targets(
+                held,
+                Box::pin(async move {
+                    if fail {
+                        return Err(TypeProviderError::new(
+                            "scripted transient definition failure".to_string(),
+                        ));
+                    }
+                    result
+                }),
+            )
         }
 
         fn get_type_definition(
@@ -1896,15 +1910,17 @@ mod inner {
                 .check_targets(query, result.iter().map(|loc| loc.path.as_str()))
                 .map(|()| result);
             drop(state);
-            let state = Arc::clone(&self.state);
-            self.barriered(Box::pin(async move {
-                if fail {
-                    return Err(TypeProviderError::new(
-                        "scripted transient type-definition failure".to_string(),
-                    ));
-                }
-                settle_targets(&state, &held, result)
-            }))
+            self.barriered_targets(
+                held,
+                Box::pin(async move {
+                    if fail {
+                        return Err(TypeProviderError::new(
+                            "scripted transient type-definition failure".to_string(),
+                        ));
+                    }
+                    result
+                }),
+            )
         }
 
         fn get_references(
@@ -1943,10 +1959,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            let state = Arc::clone(&self.state);
-            self.barriered(Box::pin(
-                async move { settle_targets(&state, &held, result) },
-            ))
+            self.barriered_targets(held, Box::pin(async move { result }))
         }
 
         fn get_rename_locations(
@@ -1981,14 +1994,16 @@ mod inner {
                 };
                 (result, held, block)
             };
-            let state = Arc::clone(&self.state);
-            self.barriered(Box::pin(async move {
-                if let Some((arrived, release)) = block {
-                    arrived.notify_one();
-                    release.notified().await;
-                }
-                settle_targets(&state, &held, result)
-            }))
+            self.barriered_targets(
+                held,
+                Box::pin(async move {
+                    if let Some((arrived, release)) = block {
+                        arrived.notify_one();
+                        release.notified().await;
+                    }
+                    result
+                }),
+            )
         }
 
         fn get_signature_help(
@@ -2061,10 +2076,7 @@ mod inner {
             let checked = state.check_targets(query, edit_targets());
             let result = checked.map(|()| result);
             drop(state);
-            let state = Arc::clone(&self.state);
-            self.barriered(Box::pin(
-                async move { settle_targets(&state, &held, result) },
-            ))
+            self.barriered_targets(held, Box::pin(async move { result }))
         }
 
         fn get_semantic_tokens(
