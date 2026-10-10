@@ -759,6 +759,11 @@ test("a framework vertical's listed contract data runs no lane, and listing it i
     "tests/framework-astro/AST0/corpus/islands/Counter.astro",
     "tests/framework-astro/AST0/products/astro-capability-matrix.json",
     "tests/framework-liquid/LIQ0/products/liquid-vocabulary.json",
+    "tests/framework-ember-glimmer/GLM0/manifest.json",
+    "tests/framework-ember-glimmer/GLM0/cases.md",
+    "tests/framework-ember-glimmer/GLM0/products/glimmer-version-lock.json",
+    "tests/framework-ember-glimmer/GLM0/products/glimmer-capability-matrix.json",
+    "tests/framework-ember-glimmer/GLM0/products/glimmer-activation-policy.json",
   ]);
   assert.equal(vertical.impact.full, false, JSON.stringify(vertical.impact.fullReasons));
   assert.deepEqual(gatesOn(vertical.gates), []);
@@ -768,6 +773,8 @@ test("a framework vertical's listed contract data runs no lane, and listing it i
   for (const file of [
     "tests/framework-astro/AST0/conformance.spec.mjs",
     "tests/framework-astro/AST0/products/astro-new-product.json",
+    "tests/framework-ember-glimmer/GLM0/glimmer-lock.spec.ts",
+    "tests/framework-ember-glimmer/GLM0/products/glimmer-new-product.json",
     "tests/framework-newcomer/NEW0/manifest.json",
   ]) {
     assert.equal(isCiInert(file), false, file);

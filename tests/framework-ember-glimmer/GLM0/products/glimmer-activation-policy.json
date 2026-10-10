@@ -1,0 +1,55 @@
+{
+  "schema": "GlimmerActivationPolicy",
+  "version": 1,
+  "product": "GlimmerActivationPolicy",
+  "node": "GLM0",
+  "kind": "lock",
+  "family": "ember-glimmer",
+  "activationAuthority": {
+    "sole": "FWA1",
+    "record": "FrameworkActivation { package, framework, state: active | inactive | unsupported-version | off | unproven, admittedRelease, mode, provenance }",
+    "home": "crates/verter_session/src/framework/project_capabilities.rs",
+    "receivingAcceptance": ["FWA1-AC1", "FWA1-AC3", "FWA1-AC5"],
+    "scope": "per workspace package, published per PM snapshot"
+  },
+  "row": {
+    "framework": "ember-glimmer",
+    "detectionPackage": "ember-source",
+    "admission": "the PM-resolved installed ember-source version of the owning package equals an admittedReleases[].version in glimmer-version-lock.json",
+    "releaseTable": "tests/framework-ember-glimmer/GLM0/products/glimmer-version-lock.json#/framework/admittedReleases",
+    "switch": "frameworks.ember-glimmer = auto | off | { state: on, release: <exact release> } (CFG0)",
+    "states": [
+      { "state": "active", "when": "auto or on, and the resolved installed ember-source version is admitted", "work": "full vertical" },
+      { "state": "inactive", "when": "auto and the owning package does not resolve ember-source", "work": "zero" },
+      { "state": "unsupported-version", "when": "ember-source resolves to a version not in admittedReleases (including 7.x and any beta or alpha), or on names an unadmitted release", "work": "zero, plus an unsupported report naming the version and the excluded-release reason" },
+      { "state": "off", "when": "frameworks.ember-glimmer = off", "work": "zero, whatever is installed" },
+      { "state": "unproven", "when": "the package or its installed version is not yet resolved by PM", "work": "zero; never cached as a warm negative and never replaced by a name-based guess (DEM0 DR24)" }
+    ],
+    "capabilityBit": "an active record sets the ember-glimmer ProjectCapabilitySnapshot bit for the owning package",
+    "gatedLanguageRows": [
+      { "extension": "gjs", "row": "LanguageRow::gated", "activeLanguage": "Framework { adapter_id: ember-glimmer, script: js }", "inactiveLanguage": "FileLanguage::script_ts() (today's unknown-extension route)" },
+      { "extension": "gts", "row": "LanguageRow::gated", "activeLanguage": "Framework { adapter_id: ember-glimmer, script: ts }", "inactiveLanguage": "FileLanguage::script_ts() (today's unknown-extension route)" },
+      { "extension": "hbs", "row": "LanguageRow::gated", "activeLanguage": "FileLanguage::FrameworkTemplate with an owner_hint (GLM1M-AC4)", "inactiveLanguage": "no Verter classification" }
+    ]
+  },
+  "zeroWorkWhenNotActive": ["parse", "region attachment", "facts", "TS companion", "carrier-store publication", "lint", "format", "LSP carrier features", "semantic tokens"],
+  "zeroWorkReceivingAcceptance": [
+    { "node": "GLM1M", "acceptance": "GLM1M-AC5" },
+    { "node": "GLM1S", "acceptance": "GLM1S-AC5" },
+    { "node": "GLM8", "acceptance": "GLM8-AC1" }
+  ],
+  "forbiddenActivationSources": [
+    { "source": "file extension (.gjs, .gts, .hbs)", "reason": "extension-only activation is name-based" },
+    { "source": "presence of ember-cli-build.js, ember-cli-update.json or .ember-cli", "reason": "file-name presence is name-based" },
+    { "source": "directory names (app/, addon/, components/, templates/)", "reason": "directory-name activation is name-based" },
+    { "source": "a declared package.json range without a resolved install", "reason": "FWA1-AC1: resolved, not declared" },
+    { "source": "@glimmer/component or @glint/* installed without ember-source", "reason": "the detection package is ember-source only" },
+    { "source": "LK6 lint.ember pack enablement", "reason": "LK6 selects which lint.ember packs run; it is a consumer of FWA1, never an activation source for the vertical" },
+    { "source": "the GLM1G TextMate grammar or client-side colouring", "reason": "client-side lexical colouring is not a Verter activation" },
+    { "source": "any second record type or per-node activation predicate beside FrameworkActivation", "reason": "FWA1 is the only activation source" }
+  ],
+  "abortCheck": {
+    "condition": "FWA1 cannot express a per-package, version-admitted ember-source activation",
+    "observed": "not triggered: the FWA1 charter publishes one FrameworkActivation per package and file per PM snapshot, admits by the resolved installed version against this lock, and DEM0 DR01 makes that record the only activation input"
+  }
+}

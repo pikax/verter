@@ -1,0 +1,159 @@
+{
+  "schema": "GlimmerVersionLock",
+  "version": 1,
+  "product": "GlimmerVersionLock",
+  "node": "GLM0",
+  "kind": "lock",
+  "describesHead": {
+    "title": "docs(arch): define the compiler request, policy and stage identity (#819)",
+    "date": "2026-10-09"
+  },
+  "registryObservedOn": "2026-10-09",
+  "pinRule": "every version is one exact published version with a named official source; no range, dist-tag, floating channel, canary, nightly, alpha, unstable or legacy line; a pin that differs from the value the same package carries elsewhere in this lock is diverged",
+  "framework": {
+    "family": "ember-glimmer",
+    "detectionPackage": "ember-source",
+    "officialSource": {
+      "registry": "https://registry.npmjs.org/ember-source",
+      "repository": "https://github.com/emberjs/ember.js",
+      "releaseNotes": "https://github.com/emberjs/ember.js/releases"
+    },
+    "admittedReleases": [
+      {
+        "id": "ember-source-6.12",
+        "package": "ember-source",
+        "version": "6.12.0",
+        "channel": "stable",
+        "registryTag": "lts",
+        "profiles": ["strict-gjs", "strict-gts", "colocated-hbs"],
+        "rationale": "The charter pins the latest 6.x. 6.12.0 is the last published 6.x release and carries the registry `lts` tag on 2026-10-09."
+      }
+    ],
+    "excludedReleases": [
+      {
+        "selector": "ember-source 6.0.0-6.11.x",
+        "reason": "superseded-minor: one release per manifest (VID0); only the latest 6.x is admitted"
+      },
+      {
+        "selector": "ember-source < 6.0.0",
+        "reason": "legacy-major: framework-common admits no legacy line"
+      },
+      {
+        "selector": "ember-source 7.x stable (registry latest 7.3.0 on 2026-10-09)",
+        "reason": "unratified-major: excluded by the ratified decision to admit 6.12.0 only; admitting 7.x needs an explicit re-ratification and a re-pin of this lock"
+      },
+      {
+        "selector": "ember-source beta channel (7.4.0-beta.1 on 2026-10-09)",
+        "reason": "beta-excluded: the beta channel now ships a 7.x prerelease, not a 6.x one; excluded by the ratified decision to admit 6.12.0 only, and admitting it needs an explicit re-ratification and a re-pin of this lock"
+      },
+      {
+        "selector": "ember-source alpha, canary and any -alpha.N build",
+        "reason": "canary-excluded: framework-common admits no canary or nightly"
+      }
+    ],
+    "unsupportedModes": [
+      { "mode": "classic-component", "marker": "@ember/component", "reason": "pre-Octane component model; Octane/Polaris Glimmer components only" },
+      { "mode": "classic-class", "marker": "EmberObject.extend / classic class syntax", "reason": "pre-Octane class model" },
+      { "mode": "action-helper", "marker": "{{action}}", "reason": "classic event binding; Octane uses {{on}} and {{fn}}" },
+      { "mode": "mut-helper", "marker": "{{mut}}", "reason": "classic two-way binding helper" },
+      { "mode": "implicit-this-fallback", "marker": "{{foo}} resolving to this.foo", "reason": "removed from Octane templates; strict and loose templates require this. or @" },
+      { "mode": "pre-octane-resolution", "marker": "pre-Octane resolver lookups (partials, controller-only templates without a component class)", "reason": "pre-Octane resolution model" }
+    ]
+  },
+  "companions": [
+    {
+      "package": "@glimmer/component",
+      "version": "2.1.1",
+      "role": "type-authority",
+      "officialSource": "https://registry.npmjs.org/@glimmer/component",
+      "consumers": ["GLM3"],
+      "note": "Component<Signature> base types the GLM3 facets are checked against"
+    }
+  ],
+  "oracles": [
+    {
+      "package": "@glint/ember-tsc",
+      "version": "1.11.6",
+      "role": "test-only-oracle",
+      "officialSource": "https://github.com/typed-ember/glint",
+      "consumers": ["GLM9"],
+      "note": "Glint type-check CLI; projection oracle only, never a host"
+    },
+    {
+      "package": "@glint/template",
+      "version": "1.9.0",
+      "role": "test-only-oracle",
+      "officialSource": "https://github.com/typed-ember/glint",
+      "consumers": ["GLM9"],
+      "note": "Glint template type declarations; the exact version @glint/ember-tsc 1.11.6 depends on"
+    },
+    {
+      "package": "@glint/tsserver-plugin",
+      "version": "2.7.9",
+      "role": "test-only-oracle",
+      "officialSource": "https://github.com/typed-ember/glint",
+      "consumers": ["GLM9"],
+      "note": "oracle for expected tsserver-side answers only; never the host (decision 4)"
+    },
+    {
+      "package": "content-tag",
+      "version": "4.2.1",
+      "role": "test-only-oracle",
+      "officialSource": "https://github.com/embroider-build/content-tag",
+      "consumers": ["GLM1M", "GLM9"],
+      "note": "<template> range oracle; never a production parser (PAR0 CL14)"
+    },
+    {
+      "package": "@glimmer/syntax",
+      "version": "0.95.0",
+      "role": "test-only-oracle",
+      "officialSource": "https://github.com/glimmerjs/glimmer-vm",
+      "consumers": ["GLM1", "GLM9"],
+      "note": "template AST oracle; never a production parser (PAR0 CL14)"
+    },
+    {
+      "package": "ember-template-lint",
+      "version": "7.9.3",
+      "role": "test-only-oracle",
+      "officialSource": "https://github.com/ember-template-lint/ember-template-lint",
+      "consumers": ["GLM8", "LEM1"],
+      "note": "same line the LEM1 profile locks; registry latest 7.9.4 is not admitted until LEM1 re-pins"
+    },
+    {
+      "package": "eslint-plugin-ember",
+      "version": "13.6.0",
+      "role": "test-only-oracle",
+      "officialSource": "https://github.com/ember-cli/eslint-plugin-ember",
+      "consumers": ["GLM8", "LEM1"],
+      "note": "same line the LEM1 profile locks; registry latest 13.6.1 is not admitted until LEM1 re-pins"
+    }
+  ],
+  "notAdmittedOracles": [
+    {
+      "package": "prettier (glimmer printer)",
+      "reason": "not in the charter's oracle set; GLM8F uses checked-in expected outputs written from the official Handlebars/Glimmer grammar"
+    },
+    {
+      "package": "@glint/core, @glint/environment-ember-loose, @glint/environment-ember-template-imports",
+      "reason": "Glint 1.x legacy environment packages, superseded by @glint/ember-tsc + @glint/template"
+    }
+  ],
+  "wireTag": {
+    "name": "FRAMEWORK_TAG_EMBER_GLIMMER",
+    "value": 13,
+    "allocation": "framework-common wire-tag table: REACT 3, SOLID 4, PREACT 6, QWIK 7, STENCIL 8, LIT 9, ASTRO 10, ANGULAR 11, MARKO 12, EMBER_GLIMMER 13, MDX 14",
+    "reservedStructuralNonTags": [
+      { "name": "FRAMEWORK_TAG_NONE", "value": 0 },
+      { "name": "FRAMEWORK_TAG_OPEN_CANONICAL", "value": 5 }
+    ],
+    "classARange": { "from": 6, "to": 9 },
+    "liveTagsAtHead": [
+      { "name": "FRAMEWORK_TAG_VUE", "value": 1 },
+      { "name": "FRAMEWORK_TAG_SVELTE", "value": 2 },
+      { "name": "FRAMEWORK_TAG_REACT", "value": 3 },
+      { "name": "FRAMEWORK_TAG_SOLID", "value": 4 }
+    ],
+    "landsWith": { "node": "GLM1", "acceptance": "GLM1-AC6", "preAllocatedBy": "REG0" },
+    "tagDisposition": "Registered once the GLM1 adapter descriptor registers; OPEN_CANONICAL keeps tag_disposition == None and never identifies an adapter"
+  }
+}
