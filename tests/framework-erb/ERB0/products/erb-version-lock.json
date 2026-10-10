@@ -1,0 +1,126 @@
+{
+  "schema": "ErbVersionLock",
+  "version": 1,
+  "product": "ErbVersionLock",
+  "node": "ERB0",
+  "kind": "lock",
+  "pinRule": "every-release-is-an-exact-pinned-version-with-a-named-source",
+  "releaseLaw": "One profile holds exactly one engine release. Only a resolved version equal to the exact ratified pin activates its profile. releaseLine is descriptive metadata, never an admission range. Every other version, including a different patch in the same line, is unsupported-version and is never coerced. A newly ratified release needs a distinct release and profile identity.",
+  "releases": [
+    {
+      "id": "actionview-8.1.4",
+      "gem": "actionview",
+      "pin": "8.1.4",
+      "releaseLine": "8.1",
+      "role": "template host: its ERB handler compiles every Action View template",
+      "source": "https://rubygems.org/gems/actionview/versions/8.1.4",
+      "behaviourSource": "https://github.com/rails/rails/blob/v8.1.4/actionview/lib/action_view/template/handlers/erb.rb"
+    },
+    {
+      "id": "erubi-1.13.1",
+      "gem": "erubi",
+      "pin": "1.13.1",
+      "releaseLine": "1.13",
+      "role": "engine: Action View's default erb_implementation",
+      "source": "https://rubygems.org/gems/erubi/versions/1.13.1",
+      "behaviourSource": "https://github.com/jeremyevans/erubi/blob/1.13.1/lib/erubi.rb"
+    },
+    {
+      "id": "erb-6.0.7",
+      "gem": "erb",
+      "pin": "6.0.7",
+      "releaseLine": "6.0",
+      "role": "engine: the erb gem's ERB::Compiler",
+      "source": "https://rubygems.org/gems/erb/versions/6.0.7",
+      "behaviourSource": "https://github.com/ruby/erb/blob/v6.0.7/lib/erb/compiler.rb"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "erb.erubi-1.13.1",
+      "engineRelease": "erubi-1.13.1",
+      "hostRelease": "actionview-8.1.4",
+      "selectedWhen": "the package's Gemfile.lock resolves actionview 8.1.4 and erubi 1.13.1, or (without actionview) resolves erubi 1.13.1, or an explicit on names this profile",
+      "tags": [
+        { "open": "<%", "close": "%>", "kind": "code" },
+        { "open": "<%-", "close": "%>", "kind": "code", "note": "the - indicator is handled exactly like <%" },
+        { "open": "<%=", "close": "%>", "kind": "output" },
+        { "open": "<%==", "close": "%>", "kind": "output-raw-actionview", "note": "standalone Erubi escaping is unknown" },
+        { "open": "<%#", "close": "%>", "kind": "comment" },
+        { "open": "<%%", "close": "%>", "kind": "literal", "emits": "the tag text with its first % removed" }
+      ],
+      "closeMarkers": ["%>", "-%>", "=%>"],
+      "trimModes": [
+        {
+          "id": "erubi-trim",
+          "default": true,
+          "actionViewSetting": "erb_trim_mode == \"-\" (default \"-\")",
+          "rule": "a code tag (with or without -) or a comment tag preceded only by spaces or tabs on its line and immediately followed by optional spaces or tabs and a newline drops that leading whitespace and the trailing spaces or tabs and newline; at EOF without that newline, leading whitespace is preserved"
+        },
+        {
+          "id": "erubi-no-trim",
+          "default": false,
+          "actionViewSetting": "erb_trim_mode set to any other value",
+          "rule": "no implicit trimming"
+        }
+      ],
+      "closeRule": "first-%>: the tag body is the shortest run up to the first %>, whatever Ruby string or comment it is inside",
+      "percentPercentClose": "not recognised: %%> ends the tag at its %>, and the extra % stays in the tag body",
+      "percentLines": "not recognised",
+      "escaping": {
+        "actionView": "<%= is HTML-escaped through the output buffer and <%== is raw; templates of type text/plain (escape_ignore_list) make both forms raw",
+        "standaloneErubi": "escape is an application option Verter cannot read: <%= versus <%== escaping is unknown"
+      },
+      "encodingTag": "a leading <%# encoding: ... %> comment is removed by Action View before compilation"
+    },
+    {
+      "id": "erb.erb-6.0.7",
+      "engineRelease": "erb-6.0.7",
+      "hostRelease": null,
+      "hostRelation": "Action View 8.1 does not compile templates with this engine; the profile is selected only when the lockfile resolves erb and neither actionview nor erubi, or an explicit on names it",
+      "selectedWhen": "the package's Gemfile.lock resolves erb 6.0.7 and resolves neither actionview nor erubi, or an explicit on names this profile",
+      "tags": [
+        { "open": "<%", "close": "%>", "kind": "code" },
+        { "open": "<%=", "close": "%>", "kind": "output" },
+        { "open": "<%#", "close": "%>", "kind": "comment" },
+        { "open": "<%%", "kind": "literal", "emits": "<%" },
+        { "open": "<%-", "close": "-%>", "kind": "code", "trimModes": ["-", "%-"] }
+      ],
+      "closeMarkers": ["%>", "%%>", "-%>"],
+      "unrecognised": [
+        "<%== is not a tag: it scans as <%= followed by a code byte =",
+        "<%- and -%> are tag delimiters only under trim modes - and %-"
+      ],
+      "trimModes": [
+        { "id": "none", "rule": "no trimming; % lines not recognised" },
+        { "id": "%", "rule": "a line starting with % is a code line; %% at line start is a literal %" },
+        { "id": "<>", "rule": "omit the newline of each line starting with <% and ending with %>" },
+        { "id": ">", "rule": "omit the newline of each line ending with %>" },
+        { "id": "-", "rule": "<%- and -%> trim; omit each blank line ending with -%>" },
+        { "id": "%<>", "rule": "% lines plus <>" },
+        { "id": "%>", "rule": "% lines plus >" },
+        { "id": "%-", "rule": "% lines plus -" }
+      ],
+      "trimModeSource": "the trim mode is a constructor argument chosen by the calling code; Verter never reads it from Ruby. Without configuration it is unknown, never guessed; how a mode-dependent construct (a leading %, <%-, -%>) scans while the mode is unknown is ERB1's to fix against this profile",
+      "closeRule": "first-%>: the tag body is the shortest run up to the first %> (or the mode's -%>), whatever Ruby string or comment it is inside",
+      "percentPercentClose": "%%> inside a tag is a literal %> and does not close it",
+      "percentLines": "only under a trim mode containing %",
+      "escaping": "<%= is never escaped by the engine"
+    }
+  ],
+  "nextMajor": {
+    "announced": false,
+    "rule": "A next major of actionview, erubi or erb becomes a second profile only after it is announced and ratified in this lock; until then it is unsupported-version."
+  },
+  "excluded": [
+    { "release": "actionview 7.x and older", "disposition": "unsupported-version", "reason": "Rails 7.x is legacy" },
+    { "release": "any prerelease (beta, rc, alpha, pre)", "disposition": "unsupported-version", "reason": "no prerelease is admitted" },
+    { "release": "a floating or latest spelling", "disposition": "rejected", "reason": "a lockfile records exact resolved versions; a range, latest or a Gemfile requirement is never a release" }
+  ],
+  "opaqueHelpers": [
+    { "gem": "turbo-rails", "rule": "its helpers (turbo_frame_tag, turbo_stream, ...) are opaque Ruby calls inside an island" },
+    { "gem": "stimulus-rails", "rule": "its helpers are opaque Ruby calls inside an island" }
+  ],
+  "toolOracle": "none: official sources are the conformance truth; no Ruby, Bundler or gem process runs in CI or at runtime",
+  "notes": "Pins are the starting pins ratified by the ERB0 charter. The executable rejection of floating, latest, prerelease and Rails 7.x rows is ERB1G-ACV (tests/framework-erb/ERB0/cases.md lists every planted row)."
+}
