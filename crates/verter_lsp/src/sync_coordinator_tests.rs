@@ -2005,6 +2005,104 @@ async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface
     );
 }
 
+/// Restarted entries need dependency metadata and a completed provider pass.
+/// A cold activation must allow the metadata writer to progress, but cannot
+/// certify diagnostics before its refreshed bytes are actually applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entry_diagnostics_complete_after_an_overlapping_activation_refresh() {
+    use verter_type_runtime::provider_hub::{
+        EstablishFuture, HubPolicy, ProviderEstablisher, ProviderHub, TracingNotifier,
+    };
+    use verter_type_runtime::{CarrierActivation, CarrierScriptKind};
+
+    struct Establish(Arc<MockTypeProvider>);
+    impl ProviderEstablisher<MockTypeProvider> for Establish {
+        fn log_name(&self) -> &'static str {
+            "diagnostics-test"
+        }
+        fn user_label(&self) -> &'static str {
+            "diagnostics-test"
+        }
+        fn restarting_error(&self) -> &'static str {
+            "restarting"
+        }
+        fn supports_completion_resolve(&self) -> bool {
+            false
+        }
+        fn establish<'a>(
+            &'a self,
+            _: Arc<tokio::sync::Notify>,
+        ) -> EstablishFuture<'a, MockTypeProvider> {
+            Box::pin(async { Ok(Arc::clone(&self.0)) })
+        }
+    }
+    // Assertion failures must also release the engine's outstanding refresh.
+    struct Release(Arc<tokio::sync::Notify>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    let (documents, _, engine, canonical_id, ide_path, mut deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let hub = Arc::new(ProviderHub::new(
+        Establish(Arc::clone(&engine)),
+        Arc::new(TracingNotifier),
+        HubPolicy::explicit(0),
+    ));
+    hub.establish().await.unwrap();
+    let bytes = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .unwrap()
+        .provider_content
+        .clone();
+    hub.register_carrier_metadata(&canonical_id, &ide_path, &bytes, "/workspace/tsconfig.json")
+        .await
+        .unwrap();
+    deps.type_provider = Some(hub.clone());
+    let (arrived, release) = engine.block_next_carrier_refresh();
+    let _release_on_failure = Release(Arc::clone(&release));
+    let members = [CarrierActivation {
+        source_path: canonical_id.clone(),
+        companion_path: ide_path.clone(),
+        project_file_name: "/workspace/tsconfig.json".into(),
+        script_kind: CarrierScriptKind::Tsx,
+    }];
+    let activating_hub = Arc::clone(&hub);
+    let activation =
+        tokio::spawn(async move { activating_hub.activate_carrier_members(&members).await });
+    tokio::time::timeout(Duration::from_secs(5), arrived.notified())
+        .await
+        .expect("the refresh was dispatched");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // The dependency publisher's local write is independent of tsserver's
+        // project build. With the old awaited forward this cannot complete.
+        hub.register_carrier_metadata("/workspace/src/Child.vue", "/workspace/src/Child.vue.tsx", "child", "/workspace/tsconfig.json").await.unwrap();
+        let (query_tx, query_rx) = tokio::sync::oneshot::channel();
+        engine.set_on_query(&ide_path, Box::new(move || { let _ = query_tx.send(()); }));
+        let publish = publish_merged_diagnostics(&deps, &canonical_id, uri.as_str());
+        tokio::pin!(publish);
+        tokio::select! {
+            result = &mut publish => panic!("diagnostics completed before the refresh: {result}"),
+            result = query_rx => { result.unwrap(); }
+        }
+        assert!(!documents.diagnostics_ready(&uri), "dispatch acknowledgement cannot certify version 1");
+        release.notify_one();
+        activation.await.unwrap().unwrap();
+        // Wait for the real hub settlement, not a fabricated applied receipt.
+        while !matches!(hub.applied_content(&ide_path), verter_type_runtime::traits::AppliedContent::Applied(ref applied) if applied.as_ref() == bytes.as_ref()) {
+            tokio::task::yield_now().await;
+        }
+        assert!(publish.await);
+        assert!(documents.diagnostics_ready(&uri), "the restarted entry must certify diagnostics without an editor edit or workspace scan");
+    }).await.expect("entry diagnostics must complete without serializing dependency publication behind the activation refresh");
+    hub.shutdown().await.unwrap();
+}
+
 /// `needs_provider_sync` is a reconciliation work bit, not a document revision:
 /// an interactive IDE sync may reinsert it for deferred API work after the
 /// coordinator has synchronized the current carrier. Valid diagnostics for that

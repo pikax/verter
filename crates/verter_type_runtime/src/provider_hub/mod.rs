@@ -428,6 +428,14 @@ enum Command<P: ?Sized> {
     },
     /// Deliberate teardown of the serving engine.
     Shutdown { ack: oneshot::Sender<()> },
+    /// The engine serving `epoch` finished applying an activation it had
+    /// already acknowledged. Its receipts are re-read from the engine, which
+    /// certifies only bytes the completed application covered.
+    ActivationSettled {
+        epoch: ProviderEpoch,
+        paths: Vec<String>,
+        outcome: Result<(), TypeProviderError>,
+    },
 }
 
 struct HubState<P: ?Sized> {
@@ -544,6 +552,7 @@ where
         let demand_driven = policy.on_demand.is_some();
         tokio::spawn(run_actor(
             command_rx,
+            commands.downgrade(),
             Arc::clone(&shared),
             Arc::clone(&notifier),
             log_name,
@@ -1382,6 +1391,7 @@ where
 /// the sole writer of the serving cell.
 async fn run_actor<P>(
     mut command_rx: mpsc::UnboundedReceiver<Command<P>>,
+    settlements: mpsc::WeakUnboundedSender<Command<P>>,
     shared: Arc<Shared<P>>,
     notifier: Arc<dyn ProviderNotifier>,
     log_name: &'static str,
@@ -1457,7 +1467,16 @@ async fn run_actor<P>(
                                 )
                                 .await
                                 {
-                                    Ok(Ok(())) => {
+                                    Ok(Ok(settlement)) => {
+                                        // Dispatch transfers completion ownership even if
+                                        // the admission raced a content/publication change.
+                                        // Retirement is fenced by the acknowledging epoch.
+                                        observe_settlement(
+                                            &settlements,
+                                            serving.epoch,
+                                            &mutation,
+                                            settlement,
+                                        );
                                         match current() {
                                             Ok(()) => {
                                                 desired.apply(&mutation, lane);
@@ -1490,7 +1509,7 @@ async fn run_actor<P>(
                                                 // so the healthy engine holds nothing the live
                                                 // basis excludes: retiring it would restart a
                                                 // whole project engine on every concurrent edit.
-                                                // Only the settlement is refused — nothing is
+                                                // Only the admission is refused — nothing is
                                                 // recorded as applied or replayable, and the
                                                 // issuer's fresh admission re-applies idempotently.
                                                 Err(AdmissionRefusal::StaleBasis)
@@ -1629,7 +1648,13 @@ async fn run_actor<P>(
                         )
                         .await
                         {
-                            Ok(Ok(())) => {
+                            Ok(Ok(settlement)) => {
+                                observe_settlement(
+                                    &settlements,
+                                    serving.epoch,
+                                    &mutation,
+                                    settlement,
+                                );
                                 if let Err(reason) = requests.iter().try_for_each(|request| {
                                     admission::check_current(&shared, request)
                                 }) {
@@ -1710,6 +1735,33 @@ async fn run_actor<P>(
             Command::Retire { epoch, ack } => {
                 retire(&shared, epoch).await;
                 let _ = ack.send(());
+            }
+            Command::ActivationSettled {
+                epoch,
+                paths,
+                outcome,
+            } => {
+                // A retired epoch's settlement describes an engine that no
+                // longer serves; its replacement certifies through replay.
+                let Some(serving) = shared.serving().filter(|serving| serving.epoch == epoch)
+                else {
+                    continue;
+                };
+                note_path_receipts(&shared, serving.provider.as_ref(), paths);
+                if let Err(error) = outcome {
+                    // The same divergence as a failed forward: the desired state
+                    // records an activation this engine never applied. Its
+                    // submitter was already acknowledged, so the hub reconciles
+                    // on its own — the desired state replays into the next engine.
+                    tracing::warn!(
+                        "{log_name} failed to apply an acknowledged carrier activation: {error}"
+                    );
+                    if demand_driven {
+                        retire(&shared, serving.epoch).await;
+                    } else {
+                        serving.crash_signal.notify_one();
+                    }
+                }
             }
             Command::Shutdown { ack } => {
                 shutdown_serving(&shared).await;
@@ -1843,7 +1895,7 @@ fn note_receipt<P: TypeProvider + ?Sized>(
     provider: &P,
     mutation: &DesiredMutation,
 ) -> crate::traits::FileLoadDisposition {
-    use crate::traits::{AppliedContent, FileLoadDisposition};
+    use crate::traits::FileLoadDisposition;
     if let Some(path) = mutation.closed_path() {
         applied_map(shared).remove(path);
         return FileLoadDisposition::Forwarded;
@@ -1851,8 +1903,20 @@ fn note_receipt<P: TypeProvider + ?Sized>(
     if let Some((path, content)) = mutation.committed_file() {
         return note_file_receipt(shared, provider, path, content);
     }
+    note_path_receipts(shared, provider, mutation.touched_paths());
+    FileLoadDisposition::Forwarded
+}
+
+/// Mirror the engine's own receipt for each path: certified bytes are recorded,
+/// anything else drops the hub's record.
+fn note_path_receipts<P: TypeProvider + ?Sized>(
+    shared: &Shared<P>,
+    provider: &P,
+    paths: Vec<String>,
+) {
+    use crate::traits::AppliedContent;
     let mut applied = applied_map(shared);
-    for path in mutation.touched_paths() {
+    for path in paths {
         match provider.applied_content(&path) {
             AppliedContent::Applied(bytes) => {
                 applied.insert(path, bytes);
@@ -1862,7 +1926,32 @@ fn note_receipt<P: TypeProvider + ?Sized>(
             }
         }
     }
-    FileLoadDisposition::Forwarded
+}
+
+/// Keep ownership of an acknowledged activation's completion without holding
+/// the actor: the engine's application settles on its own task and re-enters
+/// the actor's FIFO, behind every command submitted before it finished.
+fn observe_settlement<P: ?Sized + Send + Sync + 'static>(
+    settlements: &mpsc::WeakUnboundedSender<Command<P>>,
+    epoch: ProviderEpoch,
+    mutation: &DesiredMutation,
+    settlement: crate::traits::CarrierActivationSettlement,
+) {
+    if settlement.is_settled() {
+        return;
+    }
+    let settlements = settlements.clone();
+    let paths = mutation.touched_paths();
+    tokio::spawn(async move {
+        let outcome = settlement.await;
+        if let Some(actor) = settlements.upgrade() {
+            let _ = actor.send(Command::ActivationSettled {
+                epoch,
+                paths,
+                outcome,
+            });
+        }
+    });
 }
 
 /// Shared certification boundary for queued mutations and direct admitted writes.

@@ -132,6 +132,53 @@ impl CarrierScriptKind {
     }
 }
 
+/// The outstanding completion of a carrier activation that a provider has
+/// already acknowledged in its engine's request order.
+///
+/// Acknowledgement and completion are separate facts. The acknowledgement says
+/// the activation's working-set change is ordered ahead of every later engine
+/// request; the settlement resolves once the engine has applied it, carrying
+/// that application's failure. Only a successful settlement may certify content.
+#[must_use = "an unobserved settlement loses the activation's failure"]
+pub struct CarrierActivationSettlement(Option<SettlementCompletion>);
+
+type SettlementCompletion =
+    Pin<Box<dyn Future<Output = Result<(), TypeProviderError>> + Send + 'static>>;
+
+impl CarrierActivationSettlement {
+    /// A settlement the engine still owes.
+    pub fn pending(
+        completion: impl Future<Output = Result<(), TypeProviderError>> + Send + 'static,
+    ) -> Self {
+        Self(Some(Box::pin(completion)))
+    }
+
+    /// An activation that was already complete when it was acknowledged.
+    pub fn settled() -> Self {
+        Self(None)
+    }
+
+    /// Whether the acknowledgement already carried the completion.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl Future for CarrierActivationSettlement {
+    type Output = Result<(), TypeProviderError>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match self.0.as_mut() {
+            Some(completion) => completion.as_mut().poll(cx),
+            None => std::task::Poll::Ready(Ok(())),
+        }
+    }
+}
+
 /// A boxed, Send future — the return type for all TypeProvider methods.
 pub type ProviderFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TypeProviderError>> + Send + 'a>>;
@@ -636,6 +683,25 @@ pub trait TypeProvider: Send + Sync {
                 .await?;
             }
             Ok(())
+        })
+    }
+
+    /// Acknowledge a carrier frontier once its activation is ordered ahead of
+    /// every later engine request, and hand back the engine's application of it
+    /// as a separate [`CarrierActivationSettlement`].
+    ///
+    /// The acknowledgement is not readiness: content the activation covers stays
+    /// uncertified until the settlement succeeds. A caller that owns other work
+    /// (the provider hub's actor) uses this so independent writes are not queued
+    /// behind the engine's project build. The default completes the activation
+    /// before acknowledging it.
+    fn dispatch_carrier_members<'a>(
+        &'a self,
+        members: &'a [CarrierActivation],
+    ) -> ProviderFuture<'a, CarrierActivationSettlement> {
+        Box::pin(async move {
+            self.activate_carrier_members(members).await?;
+            Ok(CarrierActivationSettlement::settled())
         })
     }
 

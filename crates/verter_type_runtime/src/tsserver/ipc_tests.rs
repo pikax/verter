@@ -1465,6 +1465,7 @@ async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_j
             1,
             Vec::new(),
             CarrierRefreshPriority::Background,
+            &|| {},
         )
         .await
     });
@@ -1589,6 +1590,175 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
     assert_eq!(refresh.applied_generation.load(Ordering::Acquire), 7);
 }
 
+/// One interactive carrier activation against a scripted tsserver: the
+/// registered companion bytes, the refresh it scheduled, and the stdin FIFO.
+struct AcknowledgedActivation {
+    transport: Arc<TsserverTransport>,
+    stdin_rx: mpsc::Receiver<TsserverStdinMessage>,
+    accepted: Arc<parking_lot::RwLock<HashMap<String, ContentReceipt>>>,
+    acknowledgement: tokio::task::JoinHandle<
+        Result<crate::traits::CarrierActivationSettlement, TypeProviderError>,
+    >,
+}
+
+const ACTIVATED_COMPANION: &str = "/proj/src/App.vue.tsx";
+
+impl AcknowledgedActivation {
+    fn start(bytes: &str) -> Self {
+        let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+        let transport = Arc::new(test_transport(stdin_tx));
+        let bytes: Arc<str> = Arc::from(bytes);
+        let contents = Arc::new(Mutex::new(HashMap::from([(
+            ACTIVATED_COMPANION.to_string(),
+            Arc::clone(&bytes),
+        )])));
+        let accepted = Arc::new(parking_lot::RwLock::new(HashMap::from([(
+            ACTIVATED_COMPANION.to_string(),
+            ContentReceipt::Registered(Arc::clone(&bytes)),
+        )])));
+        let refresh = Arc::new(TsserverCarrierRefresh::default());
+        schedule_carrier_refresh(
+            Arc::clone(&transport),
+            Arc::new(parking_lot::RwLock::new(BTreeSet::from([
+                "/proj/src/App.vue".to_string(),
+            ]))),
+            Arc::clone(&refresh),
+            1,
+            ACTIVATED_COMPANION.to_string(),
+            CarrierRefreshPriority::Interactive,
+        );
+        let acknowledgement = tokio::spawn(acknowledge_carrier_refresh(
+            refresh,
+            Some(1),
+            contents,
+            Arc::clone(&accepted),
+            vec![(ACTIVATED_COMPANION.to_string(), bytes)],
+        ));
+        Self {
+            transport,
+            stdin_rx,
+            accepted,
+            acknowledgement,
+        }
+    }
+
+    async fn next_command(&mut self) -> String {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), self.stdin_rx.recv())
+            .await
+            .expect("the refresh must enqueue its next frame")
+            .expect("transport remains open");
+        let TsserverStdinMessage::Frame(frame) = frame else {
+            panic!("unexpected transport shutdown");
+        };
+        let request: serde_json::Value = serde_json::from_slice(&frame).expect("request JSON");
+        request["command"]
+            .as_str()
+            .expect("request names its command")
+            .to_string()
+    }
+
+    fn respond(&self, success: bool) {
+        self.transport
+            .pending
+            .table
+            .take_any()
+            .expect("the refresh frame remains pending")
+            .send(serde_json::json!({ "success": success, "body": {}, "message": "rejected" }))
+            .expect("the refresh still awaits its response");
+    }
+
+    async fn acknowledged(&mut self) -> crate::traits::CarrierActivationSettlement {
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut self.acknowledgement)
+            .await
+            .expect("the activation must be acknowledged once its refresh is ordered")
+            .expect("acknowledgement task should not panic")
+            .expect("an ordered refresh acknowledges")
+    }
+
+    fn applied_bytes(&self) -> Option<Arc<str>> {
+        self.accepted
+            .read()
+            .get(ACTIVATED_COMPANION)
+            .and_then(ContentReceipt::applied_bytes)
+            .cloned()
+    }
+}
+
+#[tokio::test]
+async fn carrier_activation_is_acknowledged_in_order_and_certified_only_after_its_refresh() {
+    let mut activation = AcknowledgedActivation::start("export default 1;");
+
+    assert_eq!(activation.next_command().await, "configurePlugin");
+    let settlement = activation.acknowledged().await;
+    assert!(
+        !settlement.is_settled(),
+        "the project build the refresh triggers is still owed"
+    );
+    let settlement = tokio::spawn(settlement);
+    tokio::task::yield_now().await;
+    assert!(!settlement.is_finished());
+    assert_eq!(
+        activation.applied_bytes(),
+        None,
+        "acknowledging the activation must not certify its content"
+    );
+
+    activation.respond(true);
+    assert_eq!(activation.next_command().await, "configure");
+    assert!(
+        !settlement.is_finished(),
+        "content is not applied before the plugin's graph update gets its host turn"
+    );
+    assert_eq!(activation.applied_bytes(), None);
+
+    activation.respond(true);
+    settlement
+        .await
+        .expect("settlement task should not panic")
+        .expect("a completed refresh settles");
+    assert_eq!(
+        activation.applied_bytes().as_deref(),
+        Some("export default 1;")
+    );
+}
+
+#[tokio::test]
+async fn a_failed_activation_refresh_settles_with_its_error_and_certifies_nothing() {
+    let mut activation = AcknowledgedActivation::start("export default 1;");
+
+    assert_eq!(activation.next_command().await, "configurePlugin");
+    let settlement = activation.acknowledged().await;
+    activation.respond(false);
+
+    let error = settlement
+        .await
+        .expect_err("the engine's rejection belongs to the settlement");
+    assert!(error.message.contains("rejected"), "{}", error.message);
+    assert_eq!(activation.applied_bytes(), None);
+}
+
+#[tokio::test]
+async fn a_settlement_never_certifies_bytes_superseded_while_the_refresh_ran() {
+    let mut activation = AcknowledgedActivation::start("export default 1;");
+
+    assert_eq!(activation.next_command().await, "configurePlugin");
+    let settlement = activation.acknowledged().await;
+    activation.accepted.write().insert(
+        ACTIVATED_COMPANION.to_string(),
+        ContentReceipt::Registered(Arc::from("export default 2;")),
+    );
+    activation.respond(true);
+    assert_eq!(activation.next_command().await, "configure");
+    activation.respond(true);
+
+    settlement.await.expect("the refresh itself completed");
+    assert_eq!(
+        activation.applied_bytes(),
+        None,
+        "the activation captured bytes that are no longer registered"
+    );
+}
+
 /// Force `notify_waiters` in the former check-to-await gap.
 ///
 /// What this discriminates is the ORDERING: `notify_waiters` stores no
@@ -1679,6 +1849,7 @@ async fn carrier_refresh_pair_pays_one_background_idle_grace() {
                 1,
                 vec!["/proj/src/App.vue".to_string()],
                 CarrierRefreshPriority::Background,
+                &|| {},
             )
             .await
         })
@@ -3926,6 +4097,7 @@ impl RealReloadHarness {
                 .map(|carrier| carrier.source_path.clone())
                 .collect(),
             CarrierRefreshPriority::Background,
+            &|| {},
         )
         .await
         .expect("the plugin publication refresh must complete");
@@ -4388,6 +4560,7 @@ async fn bound_stdin_reservation_respects_the_ambient_deadline_without_recovery(
                     "quickinfo",
                     WireBinding::Plain(serde_json::json!({})),
                     background_epoch,
+                    None,
                 ),
             )
             .await
@@ -4435,7 +4608,12 @@ async fn bound_stdin_reservation_has_a_backstop_without_an_ambient_deadline() {
     let transport = test_transport(stdin_tx);
     let result = tokio::time::timeout(
         LOADING_WEDGE_SILENCE_CAP * 2,
-        transport.request_bound("quickinfo", WireBinding::Plain(serde_json::json!({})), None),
+        transport.request_bound(
+            "quickinfo",
+            WireBinding::Plain(serde_json::json!({})),
+            None,
+            None,
+        ),
     )
     .await
     .expect("an unscoped transport without recovery must not wait forever");

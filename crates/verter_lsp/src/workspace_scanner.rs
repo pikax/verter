@@ -481,8 +481,15 @@ async fn scanner_loop(
     let mut published_companions = Vec::new();
     let mut idx = 0;
     let mut fairness_burst_remaining = 0;
+    // Both lists were sorted against no priority directory above.
+    let mut carrier_ordered_for = 0;
     while idx < carrier_classified.len() {
-        drain_priority_signals(&mut rx, &mut priority_dirs, &mut carrier_classified[idx..]);
+        drain_priority_signals(
+            &mut rx,
+            &mut priority_dirs,
+            &mut carrier_classified[idx..],
+            &mut carrier_ordered_for,
+        );
 
         let (ref path, _tier) = carrier_classified[idx];
         idx += 1;
@@ -632,8 +639,14 @@ async fn scanner_loop(
     // Also follows node_modules dependencies transitively.
     let mut node_modules_synced: HashSet<String> = HashSet::new();
     let mut idx = 0;
+    let mut source_ordered_for = 0;
     while idx < source_classified.len() {
-        drain_priority_signals(&mut rx, &mut priority_dirs, &mut source_classified[idx..]);
+        drain_priority_signals(
+            &mut rx,
+            &mut priority_dirs,
+            &mut source_classified[idx..],
+            &mut source_ordered_for,
+        );
 
         let (ref path, _tier) = source_classified[idx];
         idx += 1;
@@ -709,11 +722,25 @@ fn background_publish_workspace_carriers(is_tsgo: bool, has_publish_store: bool)
 }
 
 /// Drain priority signals from the channel and re-sort remaining unprocessed files.
+///
+/// `ordered_for` is how many of `priority_dirs` the list holding `remaining`
+/// was last sorted against. A signal re-sorts only when that key changes — a
+/// directory not yet prioritized, or a list last sorted against fewer
+/// directories. Re-sorting an already-sorted list under the same key is a
+/// no-op (`priority_sort` is stable), so the order is exactly that of sorting
+/// after every signal; skipping it is what keeps a drain cheap when a client
+/// re-signals the same documents on every poll. Nothing here awaits, so a
+/// full sort per repeat would stall the scan, and every task waiting on this
+/// runtime thread, for as long as thousands of queued repeats take.
+///
+/// Returns how many sorts the drain performed.
 fn drain_priority_signals(
     rx: &mut mpsc::UnboundedReceiver<ScannerSignal>,
     priority_dirs: &mut Vec<String>,
     remaining: &mut [(String, Tier)],
-) {
+    ordered_for: &mut usize,
+) -> usize {
+    let mut sorts = 0;
     while let Ok(signal) = rx.try_recv() {
         match signal {
             ScannerSignal::PriorityFile(canonical_id) => {
@@ -721,10 +748,15 @@ fn drain_priority_signals(
                 if !priority_dirs.contains(&dir) {
                     priority_dirs.push(dir);
                 }
-                priority_sort(remaining, priority_dirs);
+                if *ordered_for != priority_dirs.len() {
+                    priority_sort(remaining, priority_dirs);
+                    *ordered_for = priority_dirs.len();
+                    sorts += 1;
+                }
             }
         }
     }
+    sorts
 }
 
 /// Re-sync a non-carrier source file that changed on disk (outside the editor).
@@ -1706,6 +1738,109 @@ mod tests {
                 fo > lp,
                 "Other-tier file at index {fo} must come after last ProjectSource at index {lp}"
             );
+        }
+    }
+
+    /// A client may re-signal the same documents on every readiness poll, so the
+    /// scanner can find thousands of repeats queued at once. The drain runs on the
+    /// scanner's runtime thread with no await point, so its cost per repeat bounds
+    /// how long the scan, and every task parked behind that thread, stalls.
+    ///
+    /// Discriminating: re-sorting on every signal performs one sort per repeat
+    /// (2,000 here), which is how a restarted server spent tens of seconds in one
+    /// drain while the document the editor waited on stayed uncertified.
+    #[test]
+    fn repeated_priority_signals_for_known_directories_do_not_resort() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut remaining = vec![
+            (
+                "C:/project/src/views/B.vue".to_string(),
+                Tier::ProjectSource,
+            ),
+            (
+                "C:/project/src/components/A.vue".to_string(),
+                Tier::ProjectSource,
+            ),
+        ];
+        let mut priority_dirs = Vec::new();
+        let mut ordered_for = 0;
+        for _ in 0..2_000 {
+            tx.send(ScannerSignal::PriorityFile(
+                "C:/project/src/components/A.vue".to_string(),
+            ))
+            .unwrap();
+        }
+
+        let sorts = drain_priority_signals(
+            &mut rx,
+            &mut priority_dirs,
+            &mut remaining,
+            &mut ordered_for,
+        );
+
+        assert_eq!(sorts, 1, "only the first signal adds a directory");
+        assert_eq!(remaining[0].0, "C:/project/src/components/A.vue");
+        assert_eq!(ordered_for, 1);
+    }
+
+    /// Skipping a repeat must not change the scan order: the result equals
+    /// re-sorting after every signal, including for a list first drained after
+    /// another list already prioritized directories.
+    #[test]
+    fn priority_drain_order_matches_resorting_after_every_signal() {
+        let files = [
+            ("C:/project/src/a/One.vue", Tier::ProjectSource),
+            ("C:/project/scripts/Tool.vue", Tier::Other),
+            ("C:/project/src/b/Two.vue", Tier::ProjectSource),
+            ("C:/project/src/b/deep/Three.vue", Tier::ProjectSource),
+            ("C:/project/src/c/Four.vue", Tier::ProjectSource),
+            ("C:/project/src/a/Five.vue", Tier::ProjectSource),
+            ("C:/project/src/Six.vue", Tier::ProjectSource),
+        ];
+        let mixed: &[&str] = &[
+            "C:/project/src/b/Two.vue",
+            "C:/project/src/b/Two.vue",
+            "C:/project/src/c/Four.vue",
+            "C:/project/src/b/Other.vue",
+            "C:/project/src/a/One.vue",
+            "C:/project/src/c/Four.vue",
+        ];
+        let prioritized = vec!["C:/project/src/c".to_string()];
+        // The last case adds no directory: the list must still be sorted once
+        // against the directories another list already prioritized.
+        for (already_prioritized, signals) in [
+            (Vec::new(), mixed),
+            (prioritized.clone(), mixed),
+            (prioritized, &["C:/project/src/c/Four.vue"][..]),
+        ] {
+            let mut expected: Vec<(String, Tier)> =
+                files.iter().map(|(p, t)| (p.to_string(), *t)).collect();
+            priority_sort(&mut expected, &[]);
+            let mut actual = expected.clone();
+
+            let mut reference_dirs = already_prioritized.clone();
+            for &signal in signals {
+                let dir = parent_dir(signal);
+                if !reference_dirs.contains(&dir) {
+                    reference_dirs.push(dir);
+                }
+                priority_sort(&mut expected, &reference_dirs);
+            }
+
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            for &signal in signals {
+                tx.send(ScannerSignal::PriorityFile(signal.to_string()))
+                    .unwrap();
+            }
+            let mut priority_dirs = already_prioritized.clone();
+            let mut ordered_for = 0;
+            drain_priority_signals(&mut rx, &mut priority_dirs, &mut actual, &mut ordered_for);
+
+            assert_eq!(
+                actual, expected,
+                "prioritized before: {already_prioritized:?}"
+            );
+            assert_eq!(priority_dirs, reference_dirs);
         }
     }
 

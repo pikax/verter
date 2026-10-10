@@ -311,12 +311,16 @@ travels with detached application; dropping the issuer does not renew it.
 A basis drift observed AFTER a provider write landed splits on what drifted. A
 content-only drift (another document's edit while the engine was awaited) leaves
 the publication that decided membership unchanged, so the healthy engine holds
-nothing the live basis excludes: the settlement is refused `StaleBasis`, nothing
-is recorded, the engine keeps serving, and the issuer's fresh admission
+nothing the live basis excludes: the admission is refused `StaleBasis`, the
+engine keeps serving, and the issuer's fresh admission
 re-applies idempotently (the direct shared write additionally closes its one
 path). Only a replaced publication or project generation — where the engine may
 now hold an excluded unit — retires the epoch or arms its recovery. Restarting a
 project engine on every concurrent edit is the failure this split prevents.
+Every dispatched activation retains its refresh completion observer even when
+the post-dispatch admission check refuses it. Successful completion rechecks the
+engine's applied-byte receipts; failure retires the acknowledging incarnation.
+An old incarnation's completion never certifies or retires its replacement.
 Replay re-admits a content-only drift once at each validation checkpoint against
 the same provider and epoch, without repeating provider writes. Before carrier
 activation and installation, all replay admissions are refreshed in one bounded
@@ -811,6 +815,7 @@ Provider diagnostics are published only when their generated range maps back to 
   Direct overlay withdrawals retain the serving read guard from epoch validation through applied-receipt removal. Their detached task owns physical close and settlement even if the issuer cancels; a retired close returns stale and cannot remove a replacement incarnation's receipt for the same path. The fence covers only synchronous settlement, never transport I/O.
 - **Start announcements** (`ProviderNotifier::provider_started(pid, EngineStart)`): every engine install is announced to the notifier with its kind -- `Initial` (first serve / re-activation) or `Recovery` (crash replacement). The WIRE policy is per route: the tsgo/tsserver routes announce both (`LspNotifier::new`), while the shared route's managed fallback announces recoveries only (`LspNotifier::recovery_only`) -- that route attests "managed TSGO remains cold until an observed attach failure", the editor-neutral contract asserts it over `$/verter/typeProviderStarted`, and the composite still legitimately activates the fallback for carriers whose generated units are not admitted to their owning project.
 - **Actor**: one single-writer actor per hub records desired state then forwards; it stays receptive to retirement/shutdown while a forward or replay is wedged and queues everything else in order. Hubs share nothing, so a held or failed instance never blocks an independent one.
+- **Carrier activation: acknowledgement vs settlement**: a live `ActivateCarriers` forward goes through `TypeProvider::dispatch_carrier_members`, which acknowledges once the activation is ordered on the engine and returns a `CarrierActivationSettlement` for the engine's application of it. tsserver acknowledges when its interactive plugin refresh (`configurePlugin`) is in the stdin FIFO with the interactive lane held, so later requests reach tsserver behind it and background diagnostics wait for its `configure` fence. The configured-project build that refresh triggers (seconds on a cold project) is owned by the settlement. The actor does not wait for it, so the entry's own dependency publication (`RegisterCarrierMetadata`) is not queued behind the build. The settlement re-enters the actor as `ActivationSettled` for the epoch that acknowledged it. Its receipts are then re-read from the engine, which certifies only the captured bytes that are still the registered bytes after a successful refresh. A failed settlement is the same divergence as a failed forward, so the hub retires or crash-signals that epoch itself. A retired epoch's settlement is inert. Acknowledgement is never readiness. Install replay still awaits full activation before it installs.
 - **Deadlines**: the submitter's ambient request deadline is captured once (`deadline::current`) and re-opened around the forward on the actor task (`with_deadline_at`); the submitter's wait for the settlement is bounded by the same instant.
 
 ### Heartbeat Watchdog
@@ -827,7 +832,7 @@ During `initialized()`, the LSP spawns a `WorkspaceScanner` background task inst
 2. **Tier 1**: Project source files covered by `tsconfig.json` -- siblings of open files first, then expanding outward
 3. **Tier 2**: Remaining carrier files not covered by any tsconfig
 
-The scanner receives priority signals from `did_open` to dynamically re-order its queue. Each carrier unit waits for interactive-handler idleness (with a fairness cap under continuous traffic). TSGO wire sync is additionally throttled; tsserver performs one store-refresh notification after the carrier batch and never receives generated-file protocol opens. This keeps `initialized()` independent of the full scan.
+The scanner receives priority signals from `did_open` and from `demand_document` (every diagnostics-status poll re-signals the document and its imported carriers) to dynamically re-order its queue. The drain runs on the scanner task with no await point, so it re-sorts a list only when its key changes — a directory not yet prioritized, or a list last sorted against fewer directories; a repeat signal is free and the order stays exactly that of re-sorting after every signal. Re-sorting per signal let thousands of queued poll repeats stall a restarted server's scan, and the thread it ran on, for tens of seconds. Each carrier unit waits for interactive-handler idleness (with a fairness cap under continuous traffic). TSGO wire sync is additionally throttled; tsserver performs one store-refresh notification after the carrier batch and never receives generated-file protocol opens. This keeps `initialized()` independent of the full scan.
 
 **Configured-project discovery**: `verter_workspace::config::discover_tsconfigs` discovers `tsconfig.json`, `tsconfig.*.json`, AND the JavaScript project config `jsconfig.json` (the configured-project authority for JS-only trees that tsserver/tsgo honor natively). A `jsconfig.json` next to a same-directory `tsconfig.json` is suppressed (TypeScript precedence). `has_configured_ts_project_anywhere` and `is_project_config` treat it identically, and `is_config_file` rebuilds the registry on jsconfig edits. Without the jsconfig arm, carriers under a jsconfig-only directory resolve `NoProject` and the tsgo carrier admission gate fails every feature closed (the js-lax D7 defect family).
 

@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::admission::AdmittedRequest;
 use crate::protocol::TypeProviderError;
-use crate::traits::{CarrierActivation, CarrierScriptKind, TypeProvider};
+use crate::traits::{
+    CarrierActivation, CarrierActivationSettlement, CarrierScriptKind, TypeProvider,
+};
 
 /// The provider priority lane a forwarded file mutation uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,15 +609,19 @@ fn folder_uri(folder: &serde_json::Value) -> Option<&str> {
 }
 
 /// Forward a recorded mutation to the serving engine on the requested lane.
+///
+/// The returned settlement is the engine's outstanding application of an
+/// acknowledged carrier activation; every other mutation is already settled
+/// when it is acknowledged.
 pub(super) async fn forward<P>(
     provider: &P,
     mutation: &DesiredMutation,
     lane: Lane,
-) -> Result<(), TypeProviderError>
+) -> Result<CarrierActivationSettlement, TypeProviderError>
 where
     P: TypeProvider + ?Sized,
 {
-    match mutation {
+    let forwarded = match mutation {
         DesiredMutation::Open { path, content } => match lane {
             Lane::Foreground => provider.open_file(path, content).await,
             Lane::Background => provider.open_file_background(path, content).await,
@@ -695,7 +701,8 @@ where
                 .await
         }
         DesiredMutation::ActivateCarriers { members } => {
-            provider.activate_carrier_members(members).await
+            return provider.dispatch_carrier_members(members).await;
         }
-    }
+    };
+    forwarded.map(|()| CarrierActivationSettlement::settled())
 }

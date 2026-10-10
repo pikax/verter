@@ -161,6 +161,7 @@ mod inner {
     /// Shared state for the mock provider.
     #[derive(Default)]
     struct MockState {
+        carrier_refresh_block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         carrier_batch_observer: Option<std::sync::Arc<tokio::sync::Notify>>,
         carrier_batch_block: Option<(
             std::sync::Arc<tokio::sync::Notify>,
@@ -813,6 +814,19 @@ mod inner {
             let release = std::sync::Arc::new(tokio::sync::Notify::new());
             self.state.lock().unwrap().carrier_batch_block =
                 Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// A dispatched refresh withholds applied bytes and FIFO diagnostics until released.
+        pub fn block_next_carrier_refresh(
+            &self,
+        ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            let arrived = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let mut state = self.state.lock().unwrap();
+            state.diagnostics_gate = Some(gate);
+            state.carrier_refresh_block = Some((arrived.clone(), release.clone()));
             (arrived, release)
         }
 
@@ -1639,6 +1653,11 @@ mod inner {
             &'a self,
             members: &'a [verter_type_runtime::CarrierActivation],
         ) -> ProviderFuture<'a, ()> {
+            if self.state.lock().unwrap().carrier_refresh_block.is_some() {
+                return Box::pin(
+                    async move { self.dispatch_carrier_members(members).await?.await },
+                );
+            }
             let block = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::ActivateCarrierMembers {
@@ -1658,6 +1677,54 @@ mod inner {
                     release.notified().await;
                 }
                 Ok(())
+            })
+        }
+
+        fn dispatch_carrier_members<'a>(
+            &'a self,
+            members: &'a [verter_type_runtime::CarrierActivation],
+        ) -> ProviderFuture<'a, verter_type_runtime::CarrierActivationSettlement> {
+            use verter_type_runtime::CarrierActivationSettlement;
+            let refresh = {
+                let mut state = self.state.lock().unwrap();
+                state.carrier_refresh_block.take().map(|block| {
+                    let bytes: Vec<_> = members
+                        .iter()
+                        .filter_map(|member| {
+                            state
+                                .applied
+                                .remove(&member.companion_path)
+                                .map(|bytes| (member.companion_path.clone(), bytes))
+                        })
+                        .collect();
+                    (
+                        block,
+                        bytes,
+                        state.incarnation.load(std::sync::atomic::Ordering::SeqCst),
+                        state
+                            .diagnostics_gate
+                            .clone()
+                            .expect("refresh owns the FIFO gate"),
+                    )
+                })
+            };
+            let this = self.clone();
+            Box::pin(async move {
+                let Some(((arrived, release), bytes, incarnation, diagnostics_gate)) = refresh
+                else {
+                    this.activate_carrier_members(members).await?;
+                    return Ok(CarrierActivationSettlement::settled());
+                };
+                arrived.notify_one();
+                Ok(CarrierActivationSettlement::pending(async move {
+                    release.notified().await;
+                    for (path, bytes) in bytes {
+                        this.accept_applied(&path, &bytes, incarnation);
+                    }
+                    this.state.lock().unwrap().diagnostics_gate = None;
+                    diagnostics_gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+                    Ok(())
+                }))
             })
         }
 
