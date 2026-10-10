@@ -967,7 +967,19 @@ signature reaching no unclaimed page reserves nothing): the generic
 `cache_runtime` artifact and query-candidate publish paths (a refused claim
 bubbles the signature and returns the value `ReturnOnly`), compile slots,
 binder-identity facts, owner import surfaces, framework surface and resolved
-script-fact stores, and the app-config proof seed. A refused claim stores
+script-fact stores, the raw-template analysis slot's class-fact signature,
+and the app-config proof seed. Workspace and request-overlay lazy-resolution
+candidates reserve their own bytes (including decision edges in the workspace
+lane) together with reachable unclaimed pages through
+`ResolutionRetentionAccount::reserve_retained_with_evidence`; the production
+`ResolutionRetention` adapter performs the one combined reservation. Byte-only
+test accounts refuse signatures requiring an evidence transfer; tests that
+admit wide signatures inject `ResolutionRetention::new(account)`.
+Retention refusal never bypasses the cache runtime's post-compute generation
+and self-root validation or a query node's rejection lowering. Compile companion
+publication uses the session node's actual `SessionPublishOutcome`: a refused
+slot publishes neither scheduler artifacts nor raw-template companions.
+A refused claim stores
 nothing and the complete value is delivered uncached. A later candidate sharing a claimed
 page is not charged for it again; the page's charge drains when its last holder
 drops. Candidate footprints therefore count a page entry once, not its contents.

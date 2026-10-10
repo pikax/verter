@@ -29,7 +29,7 @@
         "@herb-tools/linter",
         "@herb-tools/formatter"
       ],
-      "erbSupport": "HTML+ERB parser; language server with diagnostics, hovers and formatting; linter; formatter (marked experimental by its publisher)",
+      "erbSupport": "HTML+ERB parser; language server with diagnostics, hovers, HTML completions, template code actions and formatting; linter; formatter (marked experimental by its publisher)",
       "source": "https://github.com/marcoroth/herb"
     }
   ],
@@ -49,6 +49,15 @@
       "tool": "ruby-lsp",
       "conflictClass": "competing-hover",
       "basis": "delegated HTML requests"
+    },
+    {
+      "id": "coex.html-features.herb",
+      "operation": "op.html-features",
+      "capability": "completion",
+      "tool": "herb",
+      "conflictClass": "competing-completion",
+      "basis": "Herb language server HTML completions through onCompletion / getCompletions",
+      "source": "https://github.com/marcoroth/herb/blob/v0.11.0/javascript/packages/language-server/src/server.ts"
     },
     {
       "id": "coex.html-hover.herb",
@@ -97,6 +106,15 @@
       "tool": "ruby-lsp",
       "conflictClass": "competing-edits",
       "basis": "Ruby code actions inside islands of the same document"
+    },
+    {
+      "id": "coex.assists.herb",
+      "operation": "assists.structure",
+      "capability": "code-actions",
+      "tool": "herb",
+      "conflictClass": "competing-edits",
+      "basis": "Herb language server template rewrite and extract code actions through onCodeAction",
+      "source": "https://github.com/marcoroth/herb/blob/v0.11.0/javascript/packages/language-server/src/server.ts"
     },
     {
       "id": "coex.structure.herb",

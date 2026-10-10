@@ -151,16 +151,17 @@ Ruby LSP (`Shopify.ruby-lsp`) answers Ruby features inside islands and
 delegates HTML requests to the HTML language service. Herb
 (`marcoroth.herb-lsp`; `@herb-tools/core`, `@herb-tools/linter`,
 `@herb-tools/formatter`) is an HTML+ERB parser, a language server with
-diagnostics, hovers and formatting, a linter and an experimental formatter.
+diagnostics, hovers, HTML completions, template rewrite/extract code actions
+and formatting, a linter and an experimental formatter.
 
 | Operation | Capability | Tool |
 | --------- | ---------- | ---- |
 | `op.html-features` | completion, hover | Ruby LSP (delegated) |
-| `op.html-features` | hover | Herb |
+| `op.html-features` | completion, hover | Herb |
 | `lint.markup`, `lint.percent-close-in-ruby-string` | diagnostics | Herb |
 | `format.document` | formatting | Herb |
 | `op.semantic-tokens` | semantic tokens | Ruby LSP |
-| `assists.structure` | code actions | Ruby LSP |
+| `assists.structure` | code actions | Ruby LSP, Herb |
 | `op.structure` | document structure | Herb (parser) |
 
 Every other operation is listed as having no known competitor. COXD2 resolves
@@ -179,7 +180,7 @@ moves unchanged to ERB1G (`ERB1G-ACV`).
 | `ERB0-AC1` pinned profiles | `erb-version-lock.json` | `P01`–`P17` |
 | `ERB0-AC2` owned matrix | `erb-capability-matrix.json` | `M01`–`M14` |
 | `ERB0-AC3` activation and associations | `erb-activation-policy.json` | `A01`–`A15` |
-| `ERB0-AC4` coexistence declared | `erb-coexistence.json` | `C01`–`C07` |
+| `ERB0-AC4` coexistence declared | `erb-coexistence.json` | `C01`–`C09` |
 
 The abort condition does not apply: FWA1's charter carries a gem-derived
 release from `Gemfile.lock` (`FWA1-AC7`) and an explicit `on` naming an
@@ -191,4 +192,4 @@ admitted release (`FWA1-AC6`).
 - Erubi 1.13.1: `lib/erubi.rb` in `jeremyevans/erubi`.
 - The `erb` gem: `lib/erb.rb` and `lib/erb/compiler.rb` in `ruby/erb`.
 - Ruby LSP features: <https://shopify.github.io/ruby-lsp/#features>.
-- Herb: <https://github.com/marcoroth/herb>.
+- Herb: <https://github.com/marcoroth/herb>. Its [released 0.11.0 server](https://github.com/marcoroth/herb/blob/v0.11.0/javascript/packages/language-server/src/server.ts) advertises completion and code-action providers and dispatches HTML completions plus template rewrite/extract actions.

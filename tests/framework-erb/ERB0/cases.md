@@ -80,6 +80,8 @@ Products: `erb-version-lock.json` (V), `erb-capability-matrix.json` (M),
 | C05 | C | a cell whose `operation` is not a matrix operation | cell on an unknown operation |
 | C06 | C | a matrix operation in neither `cells` nor `noCompetitorKnown` | undeclared coexistence state |
 | C07 | C | an operation in both `noCompetitorKnown` and `cells` | contradictory coexistence state |
+| C08 | C | the `coex.html-features.herb` cell removed while the Ruby LSP completion cell remains | Herb completion lacks its own COXD1 cell; another competitor does not satisfy per-tool completeness |
+| C09 | C | the `coex.assists.herb` cell removed while the Ruby LSP code-action cell remains | Herb template code actions lack their own COXD1 cell; another competitor does not satisfy per-tool completeness |
 
 ## Positive cases
 

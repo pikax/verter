@@ -44,7 +44,7 @@
       "id": "ERB0-coexistence",
       "acceptance": "ERB0-AC4",
       "disposition": "reject",
-      "twins": ["C01", "C02", "C03", "C04", "C05", "C06", "C07"]
+      "twins": ["C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09"]
     },
     {
       "id": "ERB0-clean",
