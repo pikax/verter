@@ -1649,7 +1649,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // final ComponentMeta cache admission gate) observe it without
         // needing a hand-threaded return value. A benign non-cacheable
         // read (`cache_suppress` without partiality — ReturnOnly /
-        // overflow / unrootable self-root) is NOT folded here: it refuses
+        // fenced serve / unrootable self-root) is NOT folded here: it refuses
         // only its own inner-memo admission and MUST NOT suppress a
         // complete component-meta result.
         if read.result_is_partial {

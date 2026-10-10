@@ -111,8 +111,8 @@ where
     /// Strict-admission wrapper: forwards through to
     /// [`ValidatedFactCache::insert_arc_with_kind`] so producers
     /// admit through the fact-completeness guard. Empty signatures
-    /// refuse + emit `FactSignatureAdmissionRefused`; over-cap
-    /// signatures refuse + emit `FactSignatureOverflow`.
+    /// refuse + emit `FactSignatureAdmissionRefused`; wide signatures
+    /// are paged and admitted.
     pub fn insert_arc_with_kind(
         &self,
         key: K,

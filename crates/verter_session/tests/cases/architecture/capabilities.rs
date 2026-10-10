@@ -4402,9 +4402,9 @@ fn session_production_ident_scanner_discriminates() {
     // identifiers from lib.rs AFTER the gated fields (pre-fix the
     // field gate blanked through the struct's closing brace and the
     // brace-unbalanced output failed syn in the route-mutator guard).
-    // `signature_overflow_at_install` is the LAST production field of
-    // `VerterHost`, declared below every gated field.
-    let control = session_production_ident_hits(&["signature_overflow_at_install"]);
+    // `relation_knobs` is a production field of `VerterHost` declared
+    // below the `#[cfg(test)]`-gated seam fields.
+    let control = session_production_ident_hits(&["relation_knobs"]);
     assert!(
         control.iter().any(|(loc, _)| {
             loc.contains("verter_session/src/lib.rs")
