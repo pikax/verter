@@ -702,3 +702,51 @@ fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
     );
     assert_eq!(tight.snapshot().retained_bytes, 0);
 }
+
+#[test]
+fn raw_template_slot_claims_wide_signature_pages() {
+    use crate::types::{DerivedRawState, RawTemplateSlotAdmission};
+    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+    for (limit, admitted) in [(usize::MAX, true), (1, false)] {
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: limit,
+            ..RetentionLimits::defaults()
+        });
+        let signature = wide_signature();
+        let pages = signature_pages(&signature);
+        let mut state = DerivedRawState::default();
+        let template = Arc::new(
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot {
+                css_var_names: vec!["color".into()],
+                ..Default::default()
+            },
+        );
+        state.install_raw_template_analysis(
+            Arc::clone(&template),
+            RawTemplateSlotAdmission {
+                store_published: true,
+                source_version: Some(verter_scheduler::node::SourceVersion {
+                    incarnation: 1,
+                    generation: 1,
+                }),
+                has_src_blocks: false,
+                default_extraction: true,
+                template_class_signature: Some(signature),
+            },
+            &account,
+        );
+        assert_eq!(state.raw_template_analysis().is_some(), admitted);
+        assert_eq!(template.css_var_names, ["color"]);
+        let expected = if admitted {
+            ChargeClass::Retained
+        } else {
+            ChargeClass::Pinned
+        };
+        assert!(!pages.is_empty());
+        assert!(pages
+            .iter()
+            .all(|page| page.retained_charge_class() == Some(expected)));
+        drop((state, pages));
+        assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+}

@@ -588,18 +588,23 @@ pub fn claim_evidence_pages(
     account: &Arc<SemanticRetentionAccount>,
     signature: &[FactVersionRef],
 ) -> Result<(), RetentionRefusal> {
-    let unclaimed = signature.iter().any(|fact| {
-        matches!(fact, FactVersionRef::Receipt(receipt)
-            if receipt.0.reaches_pages
-                && !receipt.0.pages_claimed.load(std::sync::atomic::Ordering::Acquire))
-    });
-    if !unclaimed {
+    if !has_unclaimed_evidence_pages(signature) {
         return Ok(());
     }
     match reserve_retained_with_evidence(account, 0, &[signature]) {
         RetentionAdmission::Admitted(_) => Ok(()),
         RetentionAdmission::Refused(refusal) => Err(refusal),
     }
+}
+
+/// Whether retaining this signature needs an evidence-page reservation.
+#[must_use]
+pub fn has_unclaimed_evidence_pages(signature: &[FactVersionRef]) -> bool {
+    signature.iter().any(|fact| {
+        matches!(fact, FactVersionRef::Receipt(receipt)
+            if receipt.0.reaches_pages
+                && !receipt.0.pages_claimed.load(std::sync::atomic::Ordering::Acquire))
+    })
 }
 
 /// Drop from `facts` every receipt another receipt in `facts` directly

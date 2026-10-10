@@ -2229,10 +2229,6 @@ impl VerterHost {
                     // recompute after a prior successful publish.
                     let admission = compile_admission
                         .expect("Session mode always finalises a SignatureAdmission");
-                    let is_cacheable = matches!(
-                        admission,
-                        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
-                    );
 
                     // The scheduler artifact carries PRODUCTS. A refused
                     // transaction has none, and an artifact holding its empty
@@ -2247,11 +2243,12 @@ impl VerterHost {
                     // Artifact DAG identities, but this crate never submits a
                     // `TaskKind::Artifact`, and the no-publish branch is already
                     // a reachable terminal outcome of this exact site.
-                    let commits_artifact = is_cacheable
-                        && matches!(compiled_products, CompiledProducts::Produced { .. });
-                    if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
+                    let is_cacheable = if let Some(mut cc) =
+                        self.compile_cache().get_mut(&canonical_id)
+                    {
                         let session_node =
-                            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new(
+                            crate::compile_output_node::CompileOutputNodeFactValidatedSession::with_retention_account(
+                                self.project_type_store.retention_store_account(),
                             );
                         session_node.publish(
                             &mut cc,
@@ -2259,8 +2256,12 @@ impl VerterHost {
                             admission,
                             compile_output_value,
                             last_tick,
-                        );
-                    }
+                        ) == crate::compile_output_node::SessionPublishOutcome::Admitted
+                    } else {
+                        false
+                    };
+                    let commits_artifact = is_cacheable
+                        && matches!(compiled_products, CompiledProducts::Produced { .. });
 
                     if is_cacheable {
                         // Persist raw template analysis on DerivedRawState
