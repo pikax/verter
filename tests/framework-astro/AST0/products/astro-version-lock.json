@@ -1,0 +1,204 @@
+{
+  "schema": "AstroVersionLock",
+  "version": 1,
+  "product": "AstroVersionLock",
+  "node": "AST0",
+  "kind": "lock",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "registryObservedOn": "2026-10-09",
+  "pinRule": "every-version-is-an-exact-published-version-with-a-named-official-source",
+  "admissionRule": {
+    "law": "VID0 R04-R08",
+    "statement": "Admission compares the package's resolved installed astro version for exact equality with an admitted release. A declared range is never read (R08). Any other resolved version, including another 7.3 patch, is unsupported-version with its reason and is never coerced (R06). Moving the admitted release to a later patch is an amendment of this lock, never an implicit widening.",
+    "readBy": "FWA1 (FWA1-AC1) as data"
+  },
+  "admittedReleases": [
+    {
+      "profile": "astro-7.3.8",
+      "package": "astro",
+      "version": "7.3.8",
+      "channel": "stable",
+      "registryTag": "latest",
+      "publishedOn": "2026-10-08",
+      "license": "MIT",
+      "source": {
+        "registry": "npm",
+        "repository": "withastro/astro",
+        "directory": "packages/astro",
+        "tag": "astro@7.3.8"
+      },
+      "integrity": "sha512-LHzDHSaV+YzZiR3EFndDYTLLeNeuMtP1qX1FLcCNUUHOCqTTIWPczy2UV3zpA5VqvJe5cWZolqM9Z8JFqR2i9w=="
+    }
+  ],
+  "nextChannel": {
+    "observed": {
+      "package": "astro",
+      "version": "7.4.0-beta.1",
+      "channel": "beta",
+      "registryTag": "beta",
+      "publishedOn": "2026-10-02",
+      "license": "MIT",
+      "source": {
+        "registry": "npm",
+        "repository": "withastro/astro",
+        "directory": "packages/astro"
+      },
+      "integrity": "sha512-mNNRxqKrHMIM4lGqrv3k5yf9QSkpJfchP7+fdlNI2QiuzhGG/8FjTb4UBqiTalU2hF0stsP74imQzuqOswZbkA=="
+    },
+    "disposition": "excluded",
+    "reason": "prerelease-minor-of-the-admitted-major",
+    "rationale": "framework-common admits the current stable major plus the next major once it is announced and ratified at stage 0. 7.4.0-beta.1 is a prerelease of a minor inside the admitted 7 major, not a next major; no Astro 8 prerelease is published (the registry alpha tag still names 7.0.0-alpha.2). A beta is never admitted as a second profile of the same major.",
+    "reratifyWhen": [
+      "astro 7.4.0 stable is published: amend admittedReleases to the exact 7.4 release (one release per manifest, R04)",
+      "an astro 8 prerelease is published and announced: a second profile may be admitted only by a ratified amendment of this lock"
+    ]
+  },
+  "excludedLines": [
+    {
+      "line": "astro 5",
+      "reason": "legacy-major",
+      "note": "not a profile; a resolved 5.x is unsupported-version"
+    },
+    {
+      "line": "astro 6",
+      "reason": "legacy-major",
+      "note": "not a profile; a resolved 6.x is unsupported-version"
+    },
+    {
+      "line": "astro 4 and older, including the legacy dist-tag (4.16.19)",
+      "reason": "legacy-major",
+      "note": "not a profile; a resolved 4.x or older is unsupported-version"
+    },
+    {
+      "line": "astro rc dist-tag (3.0.0-rc.11)",
+      "reason": "legacy-major",
+      "note": "a prerelease of a legacy major; never a profile"
+    },
+    {
+      "line": "astro canary, experimental--*, next--*, alpha and other non-release dist-tags",
+      "reason": "floating-or-canary",
+      "note": "R07: never decodes into a release"
+    }
+  ],
+  "toolingOracles": {
+    "rule": "Test-only oracles, each a single npm devDependency of the conformance harness (framework-common Evidence). Never a product parser, resolver, type owner or projection source. Compared structurally (AST9-AC2); AST6 generates its own projection. The harness pins the transitive and platform package closure hermetically; published dependency ranges below are provenance, not pins or proof of an installed resolution.",
+    "lockedWith": "LAS1",
+    "pins": [
+      {
+        "package": "@astrojs/compiler-rs",
+        "version": "0.5.1",
+        "role": "grammar oracle (test-only)",
+        "publishedOn": "2026-09-25",
+        "license": "MIT",
+        "source": {
+          "registry": "npm",
+          "repository": "withastro/compiler-rs",
+          "manifest": "https://registry.npmjs.org/@astrojs/compiler-rs/0.5.1"
+        },
+        "integrity": "sha512-1k1acnX7DepIiea9U9/Y+d1hdAFfylu1ZQQkkYgRSwBOBAsXInolyZuh/2tax+83vu/A+hOYP6P3+265RvMTvw==",
+        "upstreamDependency": {
+          "package": "astro",
+          "version": "7.3.8",
+          "declaredRange": "^0.5.1",
+          "source": "https://registry.npmjs.org/astro/7.3.8"
+        }
+      },
+      {
+        "package": "@astrojs/astro2tsx",
+        "version": "0.1.2",
+        "role": "projection oracle (test-only)",
+        "publishedOn": "2026-09-25",
+        "license": "MIT",
+        "source": {
+          "registry": "npm",
+          "repository": "withastro/compiler-rs",
+          "directory": "crates/astro2tsx",
+          "manifest": "https://registry.npmjs.org/@astrojs/astro2tsx/0.1.2"
+        },
+        "integrity": "sha512-Uj/M9zbrhu5cIZEvWAGTbQJRKSxXWJ/E59BZwt7F+chrKhbfttW+9rkS/l+1QxoJP1KU3UnpM62M7yszfAI0WA==",
+        "upstreamDependency": {
+          "package": "@astrojs/language-server",
+          "version": "2.17.1",
+          "declaredRange": "^0.1.0",
+          "source": "https://registry.npmjs.org/@astrojs/language-server/2.17.1"
+        }
+      },
+      {
+        "package": "@astrojs/language-server",
+        "version": "2.17.1",
+        "role": "editor-behaviour oracle",
+        "publishedOn": "2026-09-22",
+        "license": "MIT",
+        "source": {
+          "registry": "npm",
+          "repository": "withastro/astro",
+          "directory": "packages/language-tools/language-server"
+        },
+        "integrity": "sha512-gG7bvMVNIXgoSe1pM9dI1HsSDLU1EIc/dSAYQ0DuReLyLkOBjsiqvaRYgQltWaldLxh0bNEqjgreLfjd9OnUxQ=="
+      },
+      {
+        "package": "@astrojs/check",
+        "version": "0.9.10",
+        "role": "diagnostics oracle (AST9-AC2, LAS2-AC1)",
+        "publishedOn": "2026-07-27",
+        "license": "MIT",
+        "source": {
+          "registry": "npm",
+          "repository": "withastro/astro",
+          "directory": "packages/language-tools/astro-check"
+        },
+        "integrity": "sha512-zgx/UQMozdjOa3bOxjgeCFdtpE3c9rRX6xHwa+2QXvy8z8Akifu2AtubHyv/zzC2znO8dl8fFWL4K+Ba9kS8HQ=="
+      }
+    ],
+    "selection": {
+      "basis": "astro 7.3.8 declares @astrojs/compiler-rs ^0.5.1; @astrojs/language-server 2.17.1 declares @astrojs/astro2tsx ^0.1.0. The selected exact oracle versions are 0.5.1 and 0.1.2, respectively. @astrojs/compiler 4.0.0 is not in the admitted release's declared dependencies and is excluded from this oracle set.",
+      "authority": "The dedicated Verter frontend remains the parser authority (PAR0 CL11/PD04); AST6 remains the projection owner. Neither upstream output feeds a production path.",
+      "evidenceLimit": "Published metadata establishes package provenance, not grammar, diagnostic or projection compatibility. AST1 proves lossless grammar and recovery; AST9-AC2 compares the pinned oracles structurally in the hermetic harness."
+    }
+  },
+  "wireTag": {
+    "name": "FRAMEWORK_TAG_ASTRO",
+    "value": 10,
+    "allocation": "class-B 10-14 (ASTRO 10, ANGULAR 11, MARKO 12, EMBER_GLIMMER 13, MDX 14); class-A holds 6-9 (PREACT 6, QWIK 7, STENCIL 8, LIT 9)",
+    "existingValues": {
+      "FRAMEWORK_TAG_NONE": 0,
+      "FRAMEWORK_TAG_VUE": 1,
+      "FRAMEWORK_TAG_SVELTE": 2,
+      "FRAMEWORK_TAG_REACT": 3,
+      "FRAMEWORK_TAG_SOLID": 4,
+      "FRAMEWORK_TAG_OPEN_CANONICAL": 5
+    },
+    "preAllocatedBy": "REG0 (disposition DeferredVertical)",
+    "registeredBy": "AST1 (AST1-AC5): tag_disposition flips to Registered in the family module",
+    "rejected": [
+      {
+        "value": 5,
+        "name": "FRAMEWORK_TAG_OPEN_CANONICAL",
+        "reason": "structural non-tag: tag_disposition returns None for it; it never identifies an adapter"
+      },
+      {
+        "value": 0,
+        "name": "FRAMEWORK_TAG_NONE",
+        "reason": "structural non-tag"
+      }
+    ]
+  },
+  "divergedPins": [
+    {
+      "path": "tests/web-product/WDX1/fixtures/mixed-framework/case.json",
+      "pointer": "/profileIdentity/frameworks/1",
+      "pinned": "astro@5.0.0",
+      "status": "diverged",
+      "reason": "legacy-major: not the admitted release",
+      "reconciledBy": "AST9 (re-pins the WDX1 mixed-framework scenario to the AST0 release)"
+    }
+  ],
+  "exclusions": {
+    "build": "Official astro build and astro dev output and their source maps are never consumed (no BND bridge); AST6 is the TS-host projection.",
+    "maps": "No DBG, TST or WPF map is promised for Astro.",
+    "runtime": "No Astro runtime, renderer, adapter, integration, dev server or config is executed, rendered, hydrated or instrumented. A value that needs evaluation is unknown."
+  }
+}
