@@ -842,6 +842,15 @@ export const CI_INERT_PATHS = Object.freeze([
   "tests/framework-stimulus/STIM0/products/stimulus-version-lock.json",
   "tests/framework-stimulus/STIM0/products/stimulus-vocabulary.json",
   "tests/framework-stimulus/STIM0/products/turbo-vocabulary.json",
+  // Reviewed Astro contract data; no ci.yml lane reads these bytes yet.
+  // Keep executable specs and future products outside these inert entries.
+  "tests/framework-astro/AST0/cases.md",
+  "tests/framework-astro/AST0/corpus/**/*.astro",
+  "tests/framework-astro/AST0/manifest.json",
+  "tests/framework-astro/AST0/products/astro-activation-policy.json",
+  "tests/framework-astro/AST0/products/astro-capability-matrix.json",
+  "tests/framework-astro/AST0/products/astro-version-lock.json",
+  "tests/framework-astro/evidence/AST0/cases.md",
   "tests/framework-liquid/**",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
