@@ -249,7 +249,7 @@
       "kind": "implementation",
       "implementationOwner": "RGX1",
       "successorPath": ["EMB0", "EMB0I", "RGX1"],
-      "receivingAcceptance": "RGX1-AC2",
+      "receivingAcceptance": "RGX1-AC3",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {

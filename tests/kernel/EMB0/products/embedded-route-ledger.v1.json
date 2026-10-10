@@ -401,7 +401,7 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "DATA5",
       "successorPath": ["EMB0", "EMB0I", "DATA5"],
-      "receivingAcceptance": "DATA5-AC2",
+      "receivingAcceptance": "DATA5-AC5",
       "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
     },
     {
@@ -419,7 +419,7 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "DIAL2",
       "successorPath": ["EMB0", "EMB0I", "DIAL2"],
-      "receivingAcceptance": "DIAL2-AC2",
+      "receivingAcceptance": "DIAL2-AC5",
       "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
     },
     {
@@ -428,7 +428,7 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "DIAL7",
       "successorPath": ["EMB0", "EMB0I", "DIAL7"],
-      "receivingAcceptance": "DIAL7-AC2",
+      "receivingAcceptance": "DIAL7-AC5",
       "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
     },
     {
@@ -482,7 +482,7 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "LSO1",
       "successorPath": ["EMB0", "EMB0I", "LSO1"],
-      "receivingAcceptance": "LSO1-AC2",
+      "receivingAcceptance": "LSO1-AC-SOLE",
       "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
     },
     {
