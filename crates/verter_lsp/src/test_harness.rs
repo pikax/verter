@@ -351,6 +351,9 @@ impl TestSessionBuilder {
                         Some(&carrier_store_dir),
                         self.plugin_response_remap,
                         None,
+                        Some(Arc::new(
+                            crate::external_ts::CarrierStorePublications::open(&carrier_store_dir),
+                        )),
                     )
                     .await
                     .map(|p| Arc::new(p) as Arc<dyn TypeProvider>)
@@ -1094,7 +1097,10 @@ impl RealProviderTestSession {
             return Vec::new();
         };
         self.provider
-            .get_definition(&ctx.tsx_path, offset)
+            .get_definition(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(&ctx.tsx_path),
+                offset,
+            )
             .await
             .unwrap_or_default()
     }

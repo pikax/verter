@@ -180,7 +180,7 @@ async fn provider_proves_rename_target(
         return false;
     }
     let Ok(locations) = type_provider
-        .get_rename_locations(&ctx.tsx_path, tsx_offset)
+        .get_rename_locations(&ctx.snapshot.provider_query(), tsx_offset)
         .await
     else {
         tracing::debug!("prepare_rename: provider rename query failed — offering nothing");

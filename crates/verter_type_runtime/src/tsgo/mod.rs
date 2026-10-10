@@ -17,8 +17,8 @@ pub use verter_tsgo_api::toolchain::{discovery, validation};
 
 // Re-export the main types and functions
 pub use ipc::{
-    offset_to_position_with_encoding, position_to_offset_with_encoding, TsgoApiSession,
-    TsgoTypeProvider,
+    offset_to_position_with_encoding, position_to_offset_with_encoding, InjectionOutcome,
+    TsgoApiSession, TsgoTypeProvider,
 };
 pub use owned::{
     javascript_carrier_semantic_diagnostics_enabled, position_carrier_diagnostics,

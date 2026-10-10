@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
+use verter_type_runtime::provider_query::ProviderQuery;
 
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, GeneratedUnitAdmissionFact, ProjectBinding,
@@ -2070,13 +2071,14 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
         // MIXED: a denied carrier serves the empty external default (native completions
         // preserved by the handler merge); a non-carrier path is ungated.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         let trigger_character = trigger_character.map(str::to_string);
         Box::pin(async move {
             if let Some(selection) = self
@@ -2085,11 +2087,11 @@ impl TypeProvider for TsgoCompositeProvider {
             {
                 selection
                     .invoke(|provider| {
-                        let path = path.clone();
+                        let query = query.clone();
                         let trigger_character = trigger_character.clone();
                         async move {
                             provider
-                                .get_completions(&path, offset, trigger_character.as_deref())
+                                .get_completions(&query, offset, trigger_character.as_deref())
                                 .await
                         }
                     })
@@ -2105,12 +2107,13 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
         // MIXED: a denied carrier serves the empty external default.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         let items = items.to_vec();
         Box::pin(async move {
             if let Some(selection) = self
@@ -2119,206 +2122,11 @@ impl TypeProvider for TsgoCompositeProvider {
             {
                 selection
                     .invoke(|provider| {
-                        let path = path.clone();
+                        let query = query.clone();
                         let items = items.clone();
-                        async move { provider.get_completion_details(&path, offset, &items).await }
-                    })
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        })
-    }
-
-    fn resolve_completion(
-        &self,
-        path: &str,
-        data: CompletionResolveData,
-    ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        // EXTERNAL-ONLY: a denied carrier suppresses provider enrichment (None) — no
-        // owned resolve call.
-        let path = path.to_string();
-        Box::pin(async move {
-            if let Some(selection) = self
-                .feature_provider(ProviderFeature::ResolveCompletion, &path)
-                .await
-            {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        let data = data.clone();
-                        async move { provider.resolve_completion(&path, data).await }
-                    })
-                    .await
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        // MIXED: a denied carrier serves the None external default (the handler merge
-        // preserves any native sub-answer); a non-carrier path is ungated.
-        let path = path.to_string();
-        Box::pin(async move {
-            if let Some(selection) = self.feature_provider(ProviderFeature::Hover, &path).await {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_hover(&path, offset).await }
-                    })
-                    .await
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        // MIXED: a denied carrier serves the empty external default (native preserved by
-        // the handler merge).
-        let path = path.to_string();
-        Box::pin(async move {
-            if let Some(selection) = self
-                .feature_provider(ProviderFeature::Definition, &path)
-                .await
-            {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_definition(&path, offset).await }
-                    })
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        })
-    }
-
-    fn get_type_definition(
-        &self,
-        path: &str,
-        offset: u32,
-    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        // EXTERNAL-ONLY: a denied carrier serves the empty external default with NO owned
-        // delegation (never a `--lsp` self-discovery fall-through); a non-carrier path is
-        // ungated.
-        let path = path.to_string();
-        Box::pin(async move {
-            if let Some(selection) = self
-                .feature_provider(ProviderFeature::TypeDefinition, &path)
-                .await
-            {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_type_definition(&path, offset).await }
-                    })
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        })
-    }
-
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        // MIXED: a denied carrier serves the empty external default (native preserved by
-        // the handler merge).
-        let path = path.to_string();
-        Box::pin(async move {
-            if let Some(selection) = self
-                .feature_provider(ProviderFeature::References, &path)
-                .await
-            {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_references(&path, offset).await }
-                    })
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        })
-    }
-
-    fn get_rename_locations(
-        &self,
-        path: &str,
-        offset: u32,
-    ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        // MIXED: a denied carrier serves the empty external default (native rename only);
-        // the LSP handler's existing incomplete-rename safety gates — a SEPARATE layer
-        // this admission does not touch — still block unsafe partial edits. Never a
-        // `--lsp` self-discovery fall-through after admission failure.
-        let path = path.to_string();
-        Box::pin(async move {
-            if let Some(selection) = self
-                .feature_provider(ProviderFeature::RenameLocations, &path)
-                .await
-            {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_rename_locations(&path, offset).await }
-                    })
-                    .await
-            } else {
-                Ok(Vec::new())
-            }
-        })
-    }
-
-    fn get_signature_help(
-        &self,
-        path: &str,
-        offset: u32,
-    ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        // EXTERNAL-ONLY: a denied carrier serves `None` with NO owned delegation.
-        let path = path.to_string();
-        Box::pin(async move {
-            if let Some(selection) = self
-                .feature_provider(ProviderFeature::SignatureHelp, &path)
-                .await
-            {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_signature_help(&path, offset).await }
-                    })
-                    .await
-            } else {
-                Ok(None)
-            }
-        })
-    }
-
-    fn get_code_actions(
-        &self,
-        path: &str,
-        start_offset: u32,
-        end_offset: u32,
-        diagnostics: &[ProviderDiagnosticContext],
-    ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        // MIXED: a denied carrier serves the empty external default (the LSP
-        // `handle_code_action` handler's native Verter carrier code-actions —
-        // organize-imports, extract-component, macro/component/event actions,
-        // action-engine fixes — are preserved by its merge); a non-carrier path is
-        // ungated. Never a `--lsp` self-discovery fall-through after admission failure.
-        let path = path.to_string();
-        let diagnostics = diagnostics.to_vec();
-        Box::pin(async move {
-            if let Some(selection) = self
-                .feature_provider(ProviderFeature::CodeActions, &path)
-                .await
-            {
-                selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        let diagnostics = diagnostics.clone();
                         async move {
                             provider
-                                .get_code_actions(&path, start_offset, end_offset, &diagnostics)
+                                .get_completion_details(&query, offset, &items)
                                 .await
                         }
                     })
@@ -2329,10 +2137,230 @@ impl TypeProvider for TsgoCompositeProvider {
         })
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn resolve_completion(
+        &self,
+        query: &ProviderQuery,
+        data: CompletionResolveData,
+    ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
+        // EXTERNAL-ONLY: a denied carrier suppresses provider enrichment (None) — no
+        // owned resolve call.
+        let path = query.path().to_string();
+        let query = query.clone();
+        Box::pin(async move {
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::ResolveCompletion, &path)
+                .await
+            {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        let data = data.clone();
+                        async move { provider.resolve_completion(&query, data).await }
+                    })
+                    .await
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        // MIXED: a denied carrier serves the None external default (the handler merge
+        // preserves any native sub-answer); a non-carrier path is ungated.
+        let path = query.path().to_string();
+        let query = query.clone();
+        Box::pin(async move {
+            if let Some(selection) = self.feature_provider(ProviderFeature::Hover, &path).await {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        async move { provider.get_hover(&query, offset).await }
+                    })
+                    .await
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        // MIXED: a denied carrier serves the empty external default (native preserved by
+        // the handler merge).
+        let path = query.path().to_string();
+        let query = query.clone();
+        Box::pin(async move {
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::Definition, &path)
+                .await
+            {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        async move { provider.get_definition(&query, offset).await }
+                    })
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        })
+    }
+
+    fn get_type_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        // EXTERNAL-ONLY: a denied carrier serves the empty external default with NO owned
+        // delegation (never a `--lsp` self-discovery fall-through); a non-carrier path is
+        // ungated.
+        let path = query.path().to_string();
+        let query = query.clone();
+        Box::pin(async move {
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::TypeDefinition, &path)
+                .await
+            {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        async move { provider.get_type_definition(&query, offset).await }
+                    })
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        })
+    }
+
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        // MIXED: a denied carrier serves the empty external default (native preserved by
+        // the handler merge).
+        let path = query.path().to_string();
+        let query = query.clone();
+        Box::pin(async move {
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::References, &path)
+                .await
+            {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        async move { provider.get_references(&query, offset).await }
+                    })
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        })
+    }
+
+    fn get_rename_locations(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+        // MIXED: a denied carrier serves the empty external default (native rename only);
+        // the LSP handler's existing incomplete-rename safety gates — a SEPARATE layer
+        // this admission does not touch — still block unsafe partial edits. Never a
+        // `--lsp` self-discovery fall-through after admission failure.
+        let path = query.path().to_string();
+        let query = query.clone();
+        Box::pin(async move {
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::RenameLocations, &path)
+                .await
+            {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        async move { provider.get_rename_locations(&query, offset).await }
+                    })
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        })
+    }
+
+    fn get_signature_help(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+        // EXTERNAL-ONLY: a denied carrier serves `None` with NO owned delegation.
+        let path = query.path().to_string();
+        let query = query.clone();
+        Box::pin(async move {
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::SignatureHelp, &path)
+                .await
+            {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        async move { provider.get_signature_help(&query, offset).await }
+                    })
+                    .await
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn get_code_actions(
+        &self,
+        query: &ProviderQuery,
+        start_offset: u32,
+        end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
+    ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+        // MIXED: a denied carrier serves the empty external default (the LSP
+        // `handle_code_action` handler's native Verter carrier code-actions —
+        // organize-imports, extract-component, macro/component/event actions,
+        // action-engine fixes — are preserved by its merge); a non-carrier path is
+        // ungated. Never a `--lsp` self-discovery fall-through after admission failure.
+        let path = query.path().to_string();
+        let query = query.clone();
+        let diagnostics = diagnostics.to_vec();
+        Box::pin(async move {
+            if let Some(selection) = self
+                .feature_provider(ProviderFeature::CodeActions, &path)
+                .await
+            {
+                selection
+                    .invoke(|provider| {
+                        let query = query.clone();
+                        let diagnostics = diagnostics.clone();
+                        async move {
+                            provider
+                                .get_code_actions(&query, start_offset, end_offset, &diagnostics)
+                                .await
+                        }
+                    })
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        })
+    }
+
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
         // EXTERNAL-ONLY: a denied carrier serves the empty external default with NO owned
         // delegation.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::SemanticTokens, &path)
@@ -2340,8 +2368,8 @@ impl TypeProvider for TsgoCompositeProvider {
             {
                 selection
                     .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_semantic_tokens(&path).await }
+                        let query = query.clone();
+                        async move { provider.get_semantic_tokens(&query).await }
                     })
                     .await
             } else {
@@ -2352,12 +2380,13 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         // MIXED: a denied carrier serves the empty external default (native preserved by
         // the handler merge).
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::DocumentHighlights, &path)
@@ -2365,8 +2394,8 @@ impl TypeProvider for TsgoCompositeProvider {
             {
                 selection
                     .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_document_highlights(&path, offset).await }
+                        let query = query.clone();
+                        async move { provider.get_document_highlights(&query, offset).await }
                     })
                     .await
             } else {
@@ -2377,13 +2406,14 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         // MIXED: a denied carrier serves the empty external default (native preserved by
         // the handler merge).
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::InlayHints, &path)
@@ -2391,10 +2421,10 @@ impl TypeProvider for TsgoCompositeProvider {
             {
                 selection
                     .invoke(|provider| {
-                        let path = path.clone();
+                        let query = query.clone();
                         async move {
                             provider
-                                .get_inlay_hints(&path, start_offset, end_offset)
+                                .get_inlay_hints(&query, start_offset, end_offset)
                                 .await
                         }
                     })

@@ -153,7 +153,10 @@ async fn owned_provider_diagnostics_via_api_and_feature_via_lsp_one_process() {
     //     the same overlay the --api checker did — one shared Program).
     let bad_ref = carrier_src.rfind("bad").expect("bad reference") as u32;
     let defs = provider
-        .get_definition(&carrier_path, bad_ref)
+        .get_definition(
+            &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&carrier_path),
+            bad_ref,
+        )
         .await
         .expect("get_definition");
     assert!(

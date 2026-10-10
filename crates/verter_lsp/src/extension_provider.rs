@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use verter_type_runtime::codec::SourceIndex;
+use verter_type_runtime::provider_query::{ConflictKind, ProviderQueryConflict};
 
 use crate::server::TsQueryParams;
 use crate::tsserver::ipc::{
@@ -22,12 +23,14 @@ use crate::tsserver::ipc::{
     completion_entry_details_to_resolve_result, concat_display_parts, dedup_error_codes,
     enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
     parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
-    parse_tsserver_diagnostic, parse_tsserver_inlay_hint, parse_tsserver_locations,
-    parse_tsserver_rename_spans, quickinfo_wire_pos_to_byte_offset,
+    parse_tsserver_diagnostic, parse_tsserver_highlight_span, parse_tsserver_inlay_hint,
+    parse_tsserver_locations, parse_tsserver_rename_spans, quickinfo_wire_pos_to_byte_offset,
     stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
-use crate::type_provider::traits::{ConfiguredOwnerAuthority, ProviderFuture, TypeProvider};
+use crate::type_provider::traits::{
+    ConfiguredOwnerAuthority, ProviderFuture, ProviderQuery, TypeProvider,
+};
 
 #[path = "extension_provider_binding.rs"]
 mod binding;
@@ -151,6 +154,140 @@ impl DeliveryLedger {
     fn applied(&self, file: &str) -> Option<&Arc<str>> {
         self.files.get(file)?.applied.as_ref()
     }
+
+    /// Every file's receipt now: the newest delivery issued for it and the
+    /// bytes the service acknowledged, for each file that has them.
+    fn receipts(&self) -> HashMap<String, (u64, Arc<str>)> {
+        self.files
+            .iter()
+            .filter_map(|(file, receipt)| {
+                let applied = receipt.applied.as_ref()?;
+                Some((file.clone(), (receipt.newest, Arc::clone(applied))))
+            })
+            .collect()
+    }
+
+    /// Whether `file`'s receipt is still exactly `bytes` under the delivery
+    /// `newest`: no delivery of it was issued, failed or closed since.
+    fn unchanged(&self, file: &str, newest: u64, bytes: &Arc<str>) -> bool {
+        self.files.get(file).is_some_and(|receipt| {
+            receipt.newest == newest
+                && receipt
+                    .applied
+                    .as_ref()
+                    .is_some_and(|applied| Arc::ptr_eq(applied, bytes))
+        })
+    }
+}
+
+/// The application receipts one query was sent under: every file the
+/// extension had acknowledged, with the newest delivery issued for it and the
+/// bytes it acknowledged. The request position converts against these bytes
+/// and every range in the answer decodes through them; the answer stands only
+/// while no file it decoded through has been issued another delivery since.
+/// A file with no receipt — never delivered, mid-delivery, or only loaded into
+/// the local cache — is read by the service itself, so a query on it, or an
+/// answer locating anything in it, is a typed conflict.
+struct ReceiptBinding {
+    query: ProviderQuery,
+    file: String,
+    receipts: HashMap<String, (u64, Arc<str>)>,
+}
+
+impl ReceiptBinding {
+    /// Bind `query` on `file` to the receipts held now; the bytes its request
+    /// position converts against.
+    fn bind(
+        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        query: &ProviderQuery,
+        file: &str,
+    ) -> Result<(Self, Arc<str>), ProviderQueryConflict> {
+        let receipts = ledger.lock().receipts();
+        let Some((_, requested)) = receipts.get(file) else {
+            return Err(ProviderQueryConflict::new(file, ConflictKind::Undelivered));
+        };
+        let requested = Arc::clone(requested);
+        query.check_intended(file, Some(&requested))?;
+        Ok((
+            Self {
+                query: query.clone(),
+                file: file.to_string(),
+                receipts,
+            },
+            requested,
+        ))
+    }
+
+    /// The bytes the request file and each of `targets` decode through, once
+    /// every one of their receipts is confirmed unchanged since the query was
+    /// sent. A target the requester captured a surface for must decode through
+    /// exactly that surface.
+    fn settle(
+        &self,
+        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        targets: impl IntoIterator<Item = String>,
+    ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
+        self.settle_targets(ledger, targets, false)
+    }
+
+    /// [`Self::settle`] for a read-only navigation answer, whose locations are
+    /// independent: a target with no receipt is left out of the map, so its
+    /// locations drop while the rest still decode through their receipts. The
+    /// answer is refused when none of its targets was delivered.
+    fn settle_navigation(
+        &self,
+        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        targets: impl IntoIterator<Item = String>,
+    ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
+        self.settle_targets(ledger, targets, true)
+    }
+
+    fn settle_targets(
+        &self,
+        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        targets: impl IntoIterator<Item = String>,
+        omit_undelivered: bool,
+    ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
+        let mut decoded = HashMap::new();
+        let mut undelivered = None;
+        let mut any_target_decoded = false;
+        for (index, path) in std::iter::once(self.file.clone())
+            .chain(targets)
+            .enumerate()
+        {
+            let is_target = index > 0;
+            if decoded.contains_key(&path) {
+                any_target_decoded |= is_target;
+                continue;
+            }
+            let Some((_, bytes)) = self.receipts.get(&path) else {
+                let conflict = ProviderQueryConflict::new(&path, ConflictKind::Undelivered);
+                if !omit_undelivered {
+                    return Err(conflict);
+                }
+                undelivered.get_or_insert(conflict);
+                continue;
+            };
+            if path != self.file {
+                self.query.check_intended_target(&path, Some(bytes))?;
+            }
+            decoded.insert(path, Arc::clone(bytes));
+            any_target_decoded |= is_target;
+        }
+        if let Some(conflict) = undelivered {
+            if !any_target_decoded {
+                return Err(conflict);
+            }
+        }
+        let ledger = ledger.lock();
+        for path in decoded.keys() {
+            let (newest, bytes) = &self.receipts[path];
+            if !ledger.unchanged(path, *newest, bytes) {
+                return Err(ProviderQueryConflict::new(path, ConflictKind::Moved));
+            }
+        }
+        Ok(decoded)
+    }
 }
 
 /// The `open` / `updateOpen`-`openFiles` entry that sets `file`'s whole
@@ -217,6 +354,15 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
 
     fn normalize_path(path: &str) -> String {
         verter_span::path::canonicalize_path(path)
+    }
+
+    /// Bind `query` on `file` to the extension's receipts now.
+    fn bind(
+        &self,
+        query: &ProviderQuery,
+        file: &str,
+    ) -> Result<(ReceiptBinding, Arc<str>), ProviderQueryConflict> {
+        ReceiptBinding::bind(&self.applied, query, file)
     }
 
     /// Issue one content delivery of `file` to the extension; settle it with
@@ -346,21 +492,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let trigger = trigger_character.map(|s| s.to_string());
-        let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let mut args = serde_json::json!({
                 "file": file,
@@ -391,6 +532,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .collect()
                 })
                 .unwrap_or_default();
+            binding.settle(&self.applied, [])?;
 
             Ok(CompletionResult {
                 items,
@@ -401,23 +543,19 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
             if items.is_empty() {
                 return Ok(Vec::new());
             }
 
-            let (line, col) = {
-                let cache = self.contents.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             // tsserver-family `completionEntryDetails` keys on the entry name plus
             // the `source`/`data` recovered from the entry's resolve handle (an
@@ -444,6 +582,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
             match result {
                 Ok(body) => {
+                    binding.settle(&self.applied, [])?;
                     let detail_map: HashMap<String, &serde_json::Value> = body
                         .as_array()
                         .into_iter()
@@ -480,18 +619,17 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let witness = self.provider_wire_witness();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let result = self
                 .query(
@@ -519,28 +657,18 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
 
+                    binding.settle(&self.applied, [])?;
                     if display.is_empty() {
                         return Ok(None);
                     }
 
                     let contents = format_quickinfo_hover(kind, display, docs);
 
-                    // The quickinfo body's `start`/`end` map onto byte offsets
-                    // through the synced content snapshot; without one the
-                    // range fails closed to `None` (never fabricated).
-                    let (range_start, range_end) = {
-                        let cache = contents_cache.lock().await;
-                        match cache.get(&file) {
-                            Some(content) => {
-                                let index = SourceIndex::new_utf16(content);
-                                (
-                                    quickinfo_wire_pos_to_byte_offset(&index, body.get("start")),
-                                    quickinfo_wire_pos_to_byte_offset(&index, body.get("end")),
-                                )
-                            }
-                            None => (None, None),
-                        }
-                    };
+                    // The quickinfo body's `start`/`end` are lines and columns
+                    // in the bytes the request was converted against.
+                    let index = SourceIndex::new_utf16(&requested);
+                    let range_start = quickinfo_wire_pos_to_byte_offset(&index, body.get("start"));
+                    let range_end = quickinfo_wire_pos_to_byte_offset(&index, body.get("end"));
 
                     Ok(Some(HoverInfo {
                         contents,
@@ -635,17 +763,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let result = self
                 .query(
@@ -658,13 +785,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
-            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
-            // pointer-map clone (`Arc<str>` values).
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                guard.clone()
-            };
+            // Every location decodes through its file's receipt as the query was
+            // sent under it.
+            let targets = result
+                .as_array()
+                .or_else(|| result.get("refs").and_then(|v| v.as_array()))
+                .map(|arr| {
+                    verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
+                })
+                .unwrap_or_default();
+            let cache_snapshot = binding.settle_navigation(&self.applied, targets)?;
             let locs = result
                 .as_array()
                 .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
@@ -676,19 +806,14 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let result = self
                 .query(
@@ -701,13 +826,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
-            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
-            // pointer-map clone (`Arc<str>` values).
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                guard.clone()
-            };
+            // Every location decodes through its file's receipt as the query was
+            // sent under it.
+            let targets = result
+                .as_array()
+                .or_else(|| result.get("refs").and_then(|v| v.as_array()))
+                .map(|arr| {
+                    verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
+                })
+                .unwrap_or_default();
+            let cache_snapshot = binding.settle_navigation(&self.applied, targets)?;
             let locs = result
                 .as_array()
                 .map(|arr| parse_tsserver_locations(arr, &cache_snapshot))
@@ -717,17 +845,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let result = self
                 .query(
@@ -740,13 +867,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot then release before parsing: `parse_tsserver_locations` can fall back to a
-            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
-            // pointer-map clone (`Arc<str>` values).
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                guard.clone()
-            };
+            // Every location decodes through its file's receipt as the query was
+            // sent under it.
+            let targets = result
+                .as_array()
+                .or_else(|| result.get("refs").and_then(|v| v.as_array()))
+                .map(|arr| {
+                    verter_type_runtime::contents_snapshot::tsserver_location_target_paths(arr)
+                })
+                .unwrap_or_default();
+            let cache_snapshot = binding.settle_navigation(&self.applied, targets)?;
             let locs = result
                 .get("refs")
                 .and_then(|v| v.as_array())
@@ -759,19 +889,14 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let result = self
                 .query(
@@ -786,20 +911,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot ONLY this response's target files and release the lock BEFORE parsing: a
-            // rename group resolves its target through `parse_tsserver_rename_spans`, which can fall
-            // back to a blocking disk read on a cache miss. Holding the async mutex across that read
-            // would block every other task contending for the cache. Scanning the response bounds
-            // the snapshot to the files it touches.
+            // Every edit decodes through its target's receipt as the query was sent
+            // under it — only the files the response touches.
             let target_paths =
                 verter_type_runtime::contents_snapshot::tsserver_rename_target_paths(&result);
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(
-                    &guard,
-                    &target_paths,
-                )
-            };
+            let cache_snapshot = binding.settle(&self.applied, target_paths)?;
             let locs = {
                 // Bind a `Copy` `&HashMap` so each per-target closure can capture the cache by
                 // shared reference.
@@ -834,19 +950,14 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let result = self
                 .query(
@@ -861,6 +972,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
             match result {
                 Ok(body) => {
+                    binding.settle(&self.applied, [])?;
                     let items = body.get("items").and_then(|v| v.as_array());
                     let Some(items) = items else {
                         return Ok(None);
@@ -982,13 +1094,13 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         // Mirror the out-of-process tsserver path: key the fixes off the
         // diagnostic error codes, short-circuiting when none are numeric.
         let error_codes = dedup_error_codes(diagnostics);
@@ -996,17 +1108,9 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             if error_codes.is_empty() {
                 return Ok(vec![]);
             }
-            let (sl, sc, el, ec) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => {
-                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
-                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
-                        (sl, sc, el, ec)
-                    }
-                    None => (1, start_offset + 1, 1, end_offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (sl, sc) = byte_offset_to_tsserver_pos(&requested, start_offset);
+            let (el, ec) = byte_offset_to_tsserver_pos(&requested, end_offset);
 
             let result = self
                 .query(
@@ -1032,23 +1136,15 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 Err(e) => return Err(e),
             };
 
-            // Snapshot ONLY the files these single-fix actions target, then release the lock BEFORE
-            // parsing: `parse_tsserver_code_action` can fall back to a blocking disk read on a cache
-            // miss. Holding the async mutex across those reads would block every other task
-            // contending for the cache. Scanning the responses bounds the snapshot to touched files.
+            // Every single-fix edit decodes through its target's receipt as the query was sent
+            // under it — only the files these actions touch.
             let mut single_fix_paths: HashSet<String> = HashSet::new();
             for fix in &raw_fixes {
                 single_fix_paths.extend(
                     verter_type_runtime::contents_snapshot::tsserver_code_action_target_paths(fix),
                 );
             }
-            let single_fix_snapshot = {
-                let guard = contents_cache.lock().await;
-                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(
-                    &guard,
-                    &single_fix_paths,
-                )
-            };
+            let single_fix_snapshot = binding.settle(&self.applied, single_fix_paths)?;
 
             // Single-fix actions first, then their combined "fix all" companions.
             let mut actions: Vec<TypeCodeAction> = raw_fixes
@@ -1072,23 +1168,24 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     .get("fixAllDescription")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                // Each combined request is its own query: its edits name the
+                // bytes held when it is sent, and a follow-up whose files are
+                // not bound to the receipts it was sent under is skipped.
+                let Ok((combined_binding, _)) = self.bind(&query, &file) else {
+                    continue;
+                };
                 if let Ok(body) = self
                     .query("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
                     .await
                 {
-                    // Snapshot ONLY this combined response's target files, taken FRESH after the
-                    // await so it reflects content current as of this response (a concurrent
-                    // `update_file` during the await must not convert offsets against stale text).
                     let target_paths =
                         verter_type_runtime::contents_snapshot::tsserver_combined_code_fix_target_paths(
                             &body,
                         );
-                    let combined_snapshot = {
-                        let guard = contents_cache.lock().await;
-                        verter_type_runtime::contents_snapshot::targeted_contents_snapshot(
-                            &guard,
-                            &target_paths,
-                        )
+                    let Ok(combined_snapshot) =
+                        combined_binding.settle(&self.applied, target_paths)
+                    else {
+                        continue;
                     };
                     if let Some(action) = parse_tsserver_combined_code_fix(
                         &body,
@@ -1105,17 +1202,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         })
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let content = {
-                let cache = contents_cache.lock().await;
-                cache.get(&file).cloned()
-            };
-            let Some(content) = content else {
-                return Ok(vec![]);
-            };
+            let (binding, content) = self.bind(&query, &file)?;
             let end_line = content.lines().count() as u32 + 1;
 
             let result = self
@@ -1132,6 +1223,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
             match result {
                 Ok(body) => {
+                    binding.settle(&self.applied, [])?;
                     let spans = body
                         .get("spans")
                         .and_then(|v| v.as_array())
@@ -1162,19 +1254,14 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let result = self
                 .query(
@@ -1190,49 +1277,23 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
             match result {
                 Ok(body) => {
-                    let highlights = body
+                    // Spans are lines and columns in the bytes the request was
+                    // converted against.
+                    binding.settle(&self.applied, [])?;
+                    let index = SourceIndex::new_utf16(&requested);
+                    Ok(body
                         .as_array()
                         .into_iter()
-                        .flat_map(|groups| {
-                            groups.iter().flat_map(|group| {
-                                group
-                                    .get("highlightSpans")
-                                    .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flat_map(|spans| {
-                                        spans.iter().filter_map(|span| {
-                                            let start = span.get("start")?;
-                                            let end = span.get("end")?;
-                                            let sl = start.get("line")?.as_u64()? as u32;
-                                            let so = start.get("offset")?.as_u64()? as u32;
-                                            let el = end.get("line")?.as_u64()? as u32;
-                                            let eo = end.get("offset")?.as_u64()? as u32;
-                                            let kind = span
-                                                .get("kind")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("none");
-                                            let hl_kind = match kind {
-                                                "writtenReference" => {
-                                                    TypeDocumentHighlightKind::Write
-                                                }
-                                                _ => TypeDocumentHighlightKind::Read,
-                                            };
-                                            let s = ((sl.saturating_sub(1)) << 16)
-                                                | ((so.saturating_sub(1)) & 0xFFFF);
-                                            let e = ((el.saturating_sub(1)) << 16)
-                                                | ((eo.saturating_sub(1)) & 0xFFFF);
-                                            Some(TypeDocumentHighlight {
-                                                start: s,
-                                                end: e,
-                                                kind: hl_kind,
-                                            })
-                                        })
-                                    })
-                            })
+                        .flatten()
+                        .flat_map(|group| {
+                            group
+                                .get("highlightSpans")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
                         })
-                        .collect();
-
-                    Ok(highlights)
+                        .filter_map(|span| parse_tsserver_highlight_span(span, &index))
+                        .collect())
                 }
                 Err(e) => Err(e),
             }
@@ -1241,32 +1302,23 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        let file = Self::normalize_path(path);
-        let contents_cache = Arc::clone(&self.contents);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
-            let (start, length, content_snapshot) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => {
-                        let Some(start) = byte_offset_to_tsserver_absolute_offset(c, start_offset)
-                        else {
-                            return Ok(vec![]);
-                        };
-                        let Some(end) = byte_offset_to_tsserver_absolute_offset(c, end_offset)
-                        else {
-                            return Ok(vec![]);
-                        };
-                        let Some(length) = end.checked_sub(start) else {
-                            return Ok(vec![]);
-                        };
-                        (start, length, Some(Arc::clone(c)))
-                    }
-                    None => return Ok(vec![]),
-                }
+            let (binding, requested) = self.bind(&query, &file)?;
+            let Some(start) = byte_offset_to_tsserver_absolute_offset(&requested, start_offset)
+            else {
+                return Ok(vec![]);
+            };
+            let Some(end) = byte_offset_to_tsserver_absolute_offset(&requested, end_offset) else {
+                return Ok(vec![]);
+            };
+            let Some(length) = end.checked_sub(start) else {
+                return Ok(vec![]);
             };
 
             let result = self
@@ -1281,9 +1333,10 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 .await;
 
             // One index for the whole hint batch.
-            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
+            let index = Some(SourceIndex::new_utf16(&requested));
             match result {
                 Ok(body) => {
+                    binding.settle(&self.applied, [])?;
                     let hints = body
                         .as_array()
                         .map(|arr| {
@@ -1302,10 +1355,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         Box::pin(async move {
             // The extension is a tsserver-family provider — it resolves through
             // `completionEntryDetails`. A non-tsserver resolve key cannot have
@@ -1323,13 +1377,8 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             // Re-issue at the SAME completion-site position the entry came from;
             // tsserver keys the entry's auto-import `codeActions` on
             // (position, name, source/data).
-            let (line, col) = {
-                let cache = self.contents.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
+            let (binding, requested) = self.bind(&query, &file)?;
+            let (line, col) = byte_offset_to_tsserver_pos(&requested, offset);
 
             let entry = build_entry_names_entry(&name, source.as_deref(), data.as_ref());
 
@@ -1346,23 +1395,17 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 .await?;
 
             let Some(detail) = result.as_array().and_then(|arr| arr.first()) else {
+                binding.settle(&self.applied, [])?;
                 return Ok(None);
             };
-            // The entry's auto-import `codeActions` parse into `additionalTextEdits`,
-            // so this is an edit-producing response: snapshot ONLY the files those
-            // code actions target, taken FRESH after the await — never a whole-map
-            // clone of the contents cache.
+            // The entry's auto-import `codeActions` parse into `additionalTextEdits`:
+            // each edit decodes through its target's receipt as the query was sent
+            // under it — only the files those code actions target.
             let target_paths =
                 verter_type_runtime::contents_snapshot::tsserver_completion_entry_details_target_paths(
                     detail,
                 );
-            let cache_snapshot = {
-                let guard = self.contents.lock().await;
-                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(
-                    &guard,
-                    &target_paths,
-                )
-            };
+            let cache_snapshot = binding.settle(&self.applied, target_paths)?;
             Ok(completion_entry_details_to_resolve_result(
                 detail,
                 &file,

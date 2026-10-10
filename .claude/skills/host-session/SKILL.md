@@ -322,21 +322,76 @@ the same provider and epoch, without repeating provider writes. Before carrier
 activation and installation, all replay admissions are refreshed in one bounded
 pass. The final checkpoint requires unchanged membership and the exact replay
 incarnation; a later refresh's content-only edit cannot reject installation.
-Live writes and queries still require a current full-basis witness, so replay
-does not warm an earlier content binding. Changed membership fails installation.
+Live writes still require a current full-basis witness, so replay does not warm
+an earlier content binding. Changed membership fails installation.
 Managed non-close mutations whose caller deadline elapses return the typed
 `DeadlineElapsed` refusal; work still queued before application is discarded.
 Closes and mutations without a generated-unit resolver retain ordered queued
 delivery after the caller stops waiting.
-The tsserver router is the issuer that answers a basis drift with a fresh
-admission, bounded to two re-issues per operation: a query whose route expired
-`StaleBasis` while the engine answered discards that answer and is re-run under
-a fresh binding (`routed_query!`), and a generated-unit admission whose basis
-moved between the publication read and the hub binding is re-admitted before
-anything reaches the engine (`admit_current_unit`). A refusal on an unmoved
-basis, a withdrawn owner, or a spent budget is returned unchanged; a write the
-actor refused AFTER admission is not re-forwarded by the router and stays with
-the carrier sync's own retry.
+Read-only queries bind only what their answer depends on and are never
+re-issued. The router mints a query route through `ProviderHub::bind_query` /
+`admit_query`, which fence the serving incarnation (hub, epoch, provider) and
+the membership inputs (publication identity + project generation) — never the
+workspace content generation and never the warm write-binding memo — and
+`check_query` / `check_query_admission` settle the answer on the same terms.
+An unrelated document's edit while the engine answers is therefore served by
+that one engine call; a replaced engine (`StaleProvider`), moved membership or
+withdrawn owner (`StaleBasis`) refuse with their own reasons. The engine
+adapters bind the answer's coordinates (query-bound provider coordinates below).
+The tsserver router is the issuer that answers a WRITE's basis drift with a
+fresh admission (`WRITE_DRIFT_REISSUES` immediate re-issues, then
+`WRITE_DRIFT_BACKOFF`): a generated-unit admission whose basis moved between
+the publication read and the hub binding is re-admitted before anything
+reaches the engine (`admit_current_unit`), and a carrier write the hub refused
+on a drifted basis is re-applied (`settle_under_fresh_admission`,
+`rearm_admitted_state`) because nothing else re-drives it. A refusal on an
+unmoved basis, a withdrawn owner, or a spent budget is returned unchanged.
+**Query-bound provider coordinates.** Every positional `TypeProvider` query takes one
+`verter_type_runtime::provider_query::ProviderQuery` capability in place of a bare path. The LSP
+mints it from the request's captured provider surface (`ProviderSurfaceSnapshot::provider_query`:
+the provider path, the `DeliveredSurfaceId` and the exact bytes its offset was computed against)
+and, for navigation/rename, the captured `ProviderLifecycleRoot` as its `IntendedTargets` (the
+surface every foreign location is mapped through). Wrappers thread it unchanged; the router stamps
+the project it admitted the query into and the hub stamps the serving incarnation
+(`QueryAdmission`). Callers with no captured surface (component-meta, oracle, tests) mint
+`ProviderQuery::at_engine_surface`. Each engine incarnation's transport owns a `DeliveryLedger`:
+the bytes the engine holds, recorded at the wire position of the frame that delivered them. A
+query binds at its own frame's position — tsserver under the lock that places the frame on its
+single FIFO stdin, tsgo inside the stdin writer that alone orders its priority lanes — and
+converts its request against exactly the bytes held there; it is refused with the typed
+`ProviderQueryConflict` (`TypeProviderError::query_conflict`) only when those bytes are not the
+ones the capability intends (a delivery the requester has not seen, even one that later returns
+to the captured bytes). The binding (`BoundQuery`) retains the requested bytes and an O(1)
+persistent snapshot of every delivered file; every response range — highlights included —
+decodes through it, a foreign target only through bytes equal to the requester's intended surface
+for it. A file the engine was never handed — it reads it itself: a closed workspace file, a library
+declaration, or a cache-only `load_file` on either adapter, which puts no frame on the wire — is
+`ConflictKind::Undelivered`: no disk read, timestamp or local cache identifies the bytes it
+evaluated, so nothing decodes through it. A request file in that state sends nothing. Read-only
+navigation (definition, type definition, references; `BoundQuery::navigation_targets`) omits only
+the locations in Undelivered targets, decodes every surviving location from its own retained
+delivered bytes and settles the request file plus every surviving target; any other conflict or a
+failed settlement refuses the whole answer, and a non-empty answer whose targets are ALL
+Undelivered returns the conflict (the LSP serves its native result). A genuinely empty answer stays
+an empty success. Rename and code actions keep whole-answer refusal — a partial edit is unsafe.
+Bytes an engine reads out of band carry no wire position. On
+tsserver the carrier store the plugin reads is their publisher (`CarrierStorePublications`, every
+writer's commits, installed at spawn): each ready row carries a non-reusable publication epoch
+(`ReadyFile::published_epoch`, kept across identical republication); a query observes the store's
+position before dispatch, refuses if the publisher contradicts the request file's bytes, and at
+settlement requires every out-of-band file it decoded through to be attested with exactly the
+retained bytes at a publication no later than that position; an unpublished out-of-band file is a
+`Publication` conflict. Without a publisher, the local record's stamp settles it. Every route
+settles, including completions, completion details/resolve and signature help. The LSP's bounded
+provider recovery re-binds a conflicted query to the surface it records now (no resync); the hub
+never counts a conflict as crash evidence (it completes neutrally, neither recording an error nor
+erasing crash strikes). No position is ever fabricated. Tsserver reserves its FIFO slot within
+the ambient hop budget, with the 120-second writer-stall backstop when no deadline is installed.
+A reservation failure releases the pending registration without cancelling an unseen sequence;
+only a full, silent backstop wait contributes hang evidence. After frame placement, a closed stdin
+writer releases the registration and returns the transport error immediately: a reserved permit
+cannot report a receiver lost before send. With a live writer, the response wait remains unbounded
+so a healthy cold project can finish.
 Generated state is retained only after an applied receipt. Recovery discards
 the old epoch's generated overlays; the replacement requires fresh admission
 before receiving them, and the install announces exactly what it dropped

@@ -102,7 +102,9 @@ impl QueryWatch {
         *self.in_flight.entry(fp.clone()).or_insert(0) += 1;
     }
 
-    pub(super) fn end(&mut self, fp: &QueryFingerprint, ok: bool) {
+    /// End one in-flight registration of `fp` without judging the request:
+    /// its strikes and the recent-error window are left as they were.
+    pub(super) fn end_neutral(&mut self, fp: &QueryFingerprint) {
         if let Some(count) = self.in_flight.get_mut(fp) {
             if *count > 1 {
                 *count -= 1;
@@ -110,6 +112,10 @@ impl QueryWatch {
                 self.in_flight.remove(fp);
             }
         }
+    }
+
+    pub(super) fn end(&mut self, fp: &QueryFingerprint, ok: bool) {
+        self.end_neutral(fp);
         if ok {
             // A successful completion proves the request does not kill the
             // engine — erase its crash strikes (bystander self-heal).
@@ -197,6 +203,18 @@ impl InFlightGuard {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .end(&fp, ok);
+        }
+    }
+}
+
+impl InFlightGuard {
+    /// Complete without judging the request (see [`QueryWatch::end_neutral`]).
+    pub(super) fn complete_neutral(mut self) {
+        if let Some(fp) = self.fp.take() {
+            self.watch
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .end_neutral(&fp);
         }
     }
 }

@@ -4202,6 +4202,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         // verter_lsp-internal backend: the Rust merge layer maps responses.
         false,
         None,
+        None,
     )
     .await
     {
@@ -4298,7 +4299,11 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
             // the readiness gap this loop exists to absorb, not a hard
             // failure — only exhausting the watchdog below is.
             if let Ok(direct_result) = provider
-                .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
+                .get_completions(
+                    &crate::type_provider::traits::ProviderQuery::at_engine_surface(&ctx.tsx_path),
+                    tsx_offset,
+                    Some("."),
+                )
                 .await
             {
                 let labels: Vec<String> = direct_result
@@ -4387,6 +4392,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
         Some(&carrier_store_dir),
         // verter_lsp-internal backend: the Rust merge layer maps responses.
         false,
+        None,
         None,
     )
     .await
@@ -4517,6 +4523,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
         // verter_lsp-internal backend: the Rust merge layer maps responses.
         false,
         None,
+        None,
     )
     .await
     {
@@ -4645,6 +4652,7 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
         // verter_lsp-internal backend: the Rust merge layer maps responses.
         false,
         None,
+        None,
     )
     .await
     {
@@ -4749,7 +4757,11 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
     let direct_labels = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if let Ok(direct_result) = provider
-                .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
+                .get_completions(
+                    &crate::type_provider::traits::ProviderQuery::at_engine_surface(&ctx.tsx_path),
+                    tsx_offset,
+                    Some("."),
+                )
                 .await
             {
                 let labels: Vec<String> = direct_result
