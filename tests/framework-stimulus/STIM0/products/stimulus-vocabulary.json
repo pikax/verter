@@ -6,6 +6,8 @@
     "tokenizer": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/mutation-observers/token_list_observer.ts",
     "descriptors": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action_descriptor.ts",
     "events": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action.ts",
+    "parameters": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action.ts",
+    "actionEvent": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/binding.ts",
     "keys": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/schema.ts",
     "values": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/value_properties.ts",
     "targets": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/target_properties.ts",
@@ -142,7 +144,7 @@
     },
     {
       "name": "data-{identifier}-{name}-param",
-      "value": "JSON typecast when valid, otherwise string; only the action submitter provides params"
+      "value": "JSON typecast when valid, otherwise string; params come from attributes on the element carrying the action's data-action descriptor, matched to its controller identifier, with camelized parameter names"
     },
     {
       "name": "data-target",

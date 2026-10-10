@@ -55,6 +55,11 @@ key filters, default events and the five value types. Tagged implementation
 sources govern version-specific behavior; the official reference supplies
 examples. Dotted non-keyboard events remain event names. Custom schemas, loader
 names or declarations needing evaluation remain unknown or incomplete.
+Action parameters come from the element carrying the action descriptor, as the
+pinned [parameter getter](https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action.ts)
+and [event preparation](https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/binding.ts)
+establish. A form submit action reads the form's parameters; a button click
+action reads the button's. The case table hands this pair to STIM1.
 
 Turbo contributes frame, stream and stream-source declarations; the eight stream
 actions; frame-id relations; `data-turbo*` attributes and `turbo-*` meta facts.

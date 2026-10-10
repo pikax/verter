@@ -81,12 +81,14 @@ row fails STIM1-ACV; writing this table does not claim those experiments ran.
 
 ## Route inventory and handoff
 
-The pinned tokenizer, frame controller and document frame redirector linked in the vocabulary products own
+The pinned action parameter getter, binding event preparation, tokenizer, frame controller and document frame redirector linked in the vocabulary products own
 these version-specific boundaries. The following are future codec/relation
 verification obligations, not executed tests in this contract:
 
 | Input | Required outcome | Receiving obligation |
 | ----- | ---------------- | -------------------- |
+| `<form data-controller="x" data-action="submit->x#save" data-x-count-param="7"><button data-x-count-param="9">Save</button></form>`, submitted by the button | `event.params.count` is the number `7`, read from the action-bearing form; the submitter's `9` is not used | STIM1 parameter codec/semantic verification |
+| `<form data-controller="x" data-x-count-param="7"><button data-action="click->x#save" data-x-count-param="9">Save</button></form>`, clicked on the button | `event.params.count` is the number `9`, read from the action-bearing button; the ancestor form's `7` is not inherited | STIM1 parameter codec/semantic verification |
 | `click->x#a click->x#b`, with U+0020 between descriptors | Two ordered action tokens with exact source spans | STIM1 descriptor codec verification |
 | The same pair separated by U+00A0 (NBSP) or U+000B (vertical tab), including leading/trailing ECMAScript whitespace | The same two ordered tokens; an HTML ASCII-only splitter fails this boundary | STIM1 descriptor codec verification |
 | `data-turbo-frame="_parent"` inside a frame with no ancestor frame | Reserved target; no missing-frame diagnostic or frame-id rename relation | STIM4T static frame relation verification |
